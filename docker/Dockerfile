@@ -257,5 +257,6 @@ RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/lo
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
 # directly, with no sudo/setuid escalation path available to node at any
-# point afterward. It drops to node itself via gosu before execing nvim.
+# point afterward. It drops to node itself via gosu before execing
+# SANDBOX_CMD (default `claude` - see entrypoint.sh).
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
