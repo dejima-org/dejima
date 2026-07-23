@@ -110,7 +110,7 @@ services:
       - ${SANDBOX_GITCONFIG_DIR:?set by bin/claude-sandbox}:${HOME}/.gitconfig-sandbox
       # ~/.claude/hooks contains symlinks whose targets live outside
       # ~/.claude itself (this repo's hooks/, and potentially others, e.g.
-      # dotfiles' config/claude/hooks/) - those targets are bind-mounted at
+      # another config repo's hooks/) - those targets are bind-mounted at
       # their own real host paths dynamically by bin/claude-sandbox at
       # launch (it inspects the symlinks and appends the exact mounts
       # needed), not listed statically here, since this repo can't assume
