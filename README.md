@@ -7,7 +7,7 @@ from the host. Based on
 same base image, non-root user, and egress-firewall approach, adapted to run
 via `docker compose` directly instead of through a VS Code dev container, and
 extended with a `gitea-pr` helper for opening/iterating on PRs against a
-Gitea (or Forgejo - see "PR workflow" below) instance, and an optional
+Gitea (or Forgejo - see Prerequisites below) instance, and an optional
 editor-driven workflow in place of bare Claude Code (see "Usage" below).
 
 This repository only holds the tooling. It is **not** where any project
