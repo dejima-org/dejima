@@ -127,7 +127,32 @@ mkdir -p "$HOME/specs"
 # Everything else in it (hooks, permissions, plugins) carries over unchanged.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-settings.XXXXXX.json")"
 jq '.sandbox.enabled = false' "$HOME/.claude/settings.json" > "$SANDBOX_SETTINGS_FILE"
-cleanup() { rm -f "$SANDBOX_SETTINGS_FILE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+
+# ~/.claude.json mixes live app state (project registry, usage stats,
+# caches) with config (mcpServers) that can't be split at the mount level -
+# unlike settings.json above, it can't just be made read-only either:
+# Claude Code does an atomic write-temp-then-rename against this exact file
+# during normal startup (before login even completes), and a read-only
+# file makes that hang instead of failing cleanly (confirmed against a
+# real read-only copy of this file - see
+# https://github.com/anthropics/claude-code/issues/29162). Generate a
+# throwaway copy instead, seeded from the real file, and mount *that*
+# read-write in its place - same "generate a sandbox-specific file on the
+# host" pattern as SANDBOX_SETTINGS_FILE above, just solving a different
+# problem: nothing a compromised session writes here (mcpServers or
+# anything else) ever reaches the real file, since the copy is discarded,
+# not merged back, when this session ends. This also means concurrent
+# sandbox sessions never contend over the same file - each gets its own
+# copy. See README "Throwaway ~/.claude.json" for exactly what that means
+# doesn't carry over from a sandboxed session.
+SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-claude-json.XXXXXX.json")"
+if [ -f "$HOME/.claude.json" ]; then
+    cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+else
+    echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
+fi
+
+cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
 trap cleanup EXIT
 
 # Git commits inside the sandbox need a user.name/user.email - carry over a
@@ -159,6 +184,7 @@ export SANDBOX_UID="$(id -u)"
 export SANDBOX_GID="$(id -g)"
 export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
+export SANDBOX_CLAUDE_JSON_FILE
 export SANDBOX_GITCONFIG_DIR
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"

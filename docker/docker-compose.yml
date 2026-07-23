@@ -99,12 +99,15 @@ services:
       # hook the next time Claude Code starts there - the same
       # persistence path the other three overlays exist to close.
       - ${HOME}/.claude/hooks:${HOME}/.claude/hooks:ro
-      # ~/.claude.json is a single file mixing live app state (project
-      # registry, onboarding flags, caches) with config (e.g. mcpServers, if
-      # ever set) that can't be split at the mount level - left read-write
-      # since most of its content must stay writable for normal operation.
-      # See README Security notes for this residual risk.
-      - ${HOME}/.claude.json:${HOME}/.claude.json
+      # A throwaway per-session copy, not the real file - see
+      # bin/claude-sandbox and README "Throwaway ~/.claude.json". A plain
+      # read-only mount hangs Claude Code on startup (it writes to this
+      # file before login completes), so this can't just be layered
+      # read-only the way settings.json/CLAUDE.md/plugins/hooks are above;
+      # a generated, discarded copy is what actually stops a compromised
+      # session's changes (e.g. a malicious mcpServers entry) from ever
+      # reaching the real file.
+      - ${SANDBOX_CLAUDE_JSON_FILE:?set by bin/claude-sandbox}:${HOME}/.claude.json
       # ~/.claude/CLAUDE.md (mounted above) tells agents to write specs to
       # ~/specs/ rather than a project-local path - that instruction is
       # already in effect inside the container (CLAUDE.md carries over), so

@@ -467,20 +467,71 @@ one can't happen.
   is a potential exfiltration path for those credentials if a malicious repo
   manages to manipulate a session. The firewall limits this to
   Anthropic/npm/GitHub/your Gitea host, not the open internet.
-- `settings.json`, `CLAUDE.md`, and `plugins/` under `~/.claude` are
-  layered back read-only on top of the (otherwise read-write) `~/.claude`
-  mount. Hooks execute automatically with no separate approval step, so
-  without this a compromised session could plant a backdoored hook, rewrite
+- `settings.json`, `CLAUDE.md`, `plugins/`, and `hooks/` under `~/.claude`
+  are layered back read-only on top of the (otherwise read-write)
+  `~/.claude` mount. Hooks execute automatically with no separate approval
+  step, so without this a compromised session could plant a backdoored
+  hook - including by unlinking one of `install.sh`'s hook symlinks and
+  dropping a plain file in its place, since the dynamic per-target mounts
+  `bin/claude-sandbox` adds at launch only protect symlink targets that
+  resolve *outside* `~/.claude`, never this directory itself - rewrite
   `CLAUDE.md` with injected instructions, or tamper with plugin code -
   something that would then run **unsandboxed on the host** the next time
   Claude Code starts there, turning a single compromised sandbox session
   into persistent host compromise. Everything else under `~/.claude`
   (session/project history, credentials refresh, caches) stays read-write,
   since it's runtime state Claude Code needs to update.
-  `~/.claude.json` is a single file mixing that same kind of live state with
-  config (e.g. `mcpServers`, if ever set) and can't be split at the mount
-  level, so it's left fully read-write - accepted as a residual risk rather
-  than solved.
+- `~/.claude.json` mixes that same kind of live state (project registry,
+  usage stats, caches) with config (`mcpServers`). Unlike the four above,
+  it can't just be layered read-only: Claude Code does an atomic
+  write-temp-then-rename against it during normal startup, before login
+  even completes, and a read-only file makes that **hang** instead of
+  failing cleanly (confirmed against a real read-only copy of this file -
+  upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
+  Instead, `bin/claude-sandbox` generates a throwaway copy of the file at
+  launch (seeded from the real file, same "generate a sandbox-specific
+  file on the host" pattern as the generated `settings.json` copy above)
+  and mounts *that* read-write in its place; the copy is discarded,
+  unmodified in the real file, when the session ends. A compromised
+  session can add whatever it wants to `mcpServers` (or anything else in
+  the file) - it never reaches the real `~/.claude.json`, so there's
+  nothing to persist. This also means multiple concurrent sandbox sessions
+  never contend over the same file - each gets its own independent copy.
+
+  ### Throwaway ~/.claude.json: what doesn't carry over
+
+  Because nothing writes back, anything a *sandboxed* session would
+  normally have caused Claude Code to record into `~/.claude.json` is lost
+  when that session ends, instead of showing up in a later host-side
+  `claude` run. Concretely, as of the fields this file holds today:
+
+  - **Per-project trust/approval state** - `hasTrustDialogAccepted`,
+    `allowedTools`, `enabledMcpjsonServers`/`disabledMcpjsonServers` - for
+    any project directory opened only inside the sandbox. Opening that same
+    project on the host later re-prompts for whatever it would have
+    prompted for outside the sandbox too. Largely moot today since the
+    sandbox always runs `--dangerously-skip-permissions`, but the trust
+    dialog is a separate gate from tool-permission prompts.
+  - **`mcpServers` additions or edits** - the point of this fix, not an
+    incidental side effect. Nothing added or changed here during a
+    sandboxed session ever reaches the real file.
+  - **Session/usage telemetry** - `lastCost`, `lastDuration`,
+    `lastTotalInputTokens`/`lastTotalOutputTokens`, `lastModelUsage`,
+    `lastSessionId`, `mcpContextUris`, and similar per-project fields.
+    Sandbox activity won't show up in host-side usage totals or in
+    `claude --resume`'s "last session" metadata for that project.
+  - **Global counters and caches** - `numStartups`, `firstStartTime`,
+    `cachedGrowthBookFeatures`, `changelogLastFetched`,
+    `announcementImpressions`, `tipsHistory`, `feedbackSurveyState`, and
+    similar top-level bookkeeping. Purely cosmetic - these get refetched or
+    recomputed as needed; sandbox runs just don't contribute to the host's
+    copies of them.
+  - **`oauthAccount`/`userID`/`machineID`** are read fresh from the real
+    file at the start of every sandbox launch, so authentication carries in
+    normally each time; anything that changes about them *during* a
+    sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
+    re-checking if a future Claude Code version starts relying on that for
+    normal operation.
 - DNS resolution itself is allowlisted (see "DNS is allowlisted too" above),
   not just the IP connections made afterward, closing off exfiltration via
   encoding data into query names to an attacker-controlled domain - verified

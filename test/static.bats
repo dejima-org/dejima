@@ -101,6 +101,16 @@ setup() {
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/hooks:\$\{HOME\}/\.claude/hooks:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
+@test "~/.claude.json is a throwaway per-session copy, not the real file mounted directly" {
+    # A plain read-only mount hangs Claude Code on startup (it does an
+    # atomic write-temp-then-rename against this file even before login) -
+    # the fix is a generated, discarded copy, not read-only. See
+    # bin/claude-sandbox and README "Throwaway ~/.claude.json".
+    grep -qE '^\s*-\s*\$\{SANDBOX_CLAUDE_JSON_FILE.*\}:\$\{HOME\}/\.claude\.json\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -q 'mktemp.*claude-sandbox-claude-json' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'rm -f "\$SANDBOX_SETTINGS_FILE" "\$SANDBOX_CLAUDE_JSON_FILE"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
 @test "gitconfig is a throwaway copy in its own directory, not a single-file mount" {
     # entrypoint.sh's `gh auth setup-git` writes a credential-helper entry
     # via git's write-temp-then-rename pattern, which fails with "Device or
