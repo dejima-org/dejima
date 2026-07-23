@@ -80,6 +80,7 @@ teardown() {
     docker rm -f "claude-sandbox-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -263,6 +264,33 @@ dexec_node() {
 
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "GITEA_SSH_HOST is exempted from stop-dns-rebind, other allowed domains are not" {
+    local test_container="claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GITEA_SSH_HOST=gitea.internal.example \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    run docker exec "$test_container" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+
+    run docker exec "$test_container" grep 'rebind-domain-ok=/gitea.internal.example/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -eq 0 ]
+
+    run docker exec "$test_container" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }

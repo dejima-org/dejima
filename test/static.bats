@@ -275,3 +275,8 @@ setup() {
     # The host-allowlist widening must not touch the separate branch check.
     grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
 }
+
+@test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {
+    grep -qE '^stop-dns-rebind\s*$' "$SANDBOX_DIR/dns-proxy.sh"
+    grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
+}
