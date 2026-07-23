@@ -1,0 +1,212 @@
+#!/bin/bash
+# Launch nvim inside the claude-sandbox container (see docker/claude-sandbox/),
+# with a project directory bind-mounted at its real host path. Any `claude`
+# invocation inside (a shell, or claudecode.nvim's terminal) runs with
+# --dangerously-skip-permissions.
+#
+# Usage: claude-sandbox [path-to-project] [-- nvim args...]
+#   claude-sandbox                      # sandbox the current directory
+#   claude-sandbox ~/repos/myproject
+#   claude-sandbox ~/repos/myproject src/foo.py   # open a specific file
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR/.."
+COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+
+WORKSPACE_DIR="${1:-$(pwd)}"
+if [ ! -d "$WORKSPACE_DIR" ]; then
+    echo "Not a directory: $WORKSPACE_DIR" >&2
+    exit 1
+fi
+shift || true
+
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+
+WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+
+# Source persisted config (currently just ALLOWED_DOMAINS) before it's read
+# below - lets `bin/claude-sandbox-allow --global` persist a domain across
+# sessions without depending on the user's own shell profile chain, which a
+# standalone install of this repo can't assume exists.
+if [ -f "$REPO_ROOT/config/env" ]; then
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/config/env"
+fi
+
+SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
+if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
+    echo "SANDBOX_SSH_KEY is set but not a file: $SANDBOX_SSH_KEY" >&2
+    exit 1
+fi
+if [ -n "$SANDBOX_SSH_KEY" ]; then
+    key_perms=$(stat -c '%a' "$SANDBOX_SSH_KEY")
+    if [ "${key_perms: -2}" != "00" ]; then
+        echo "Warning: $SANDBOX_SSH_KEY is readable by group/other (mode $key_perms)." >&2
+        echo "Recommended: chmod 600 $SANDBOX_SSH_KEY" >&2
+    fi
+    # SANDBOX_SSH_KEY is meant to be a dedicated, low-privilege deploy key
+    # (see README "Headless git push"), not your real identity - it stays
+    # loaded in an in-container agent for the whole session, unattended.
+    # Nothing enforces that convention, so at least catch the common case
+    # of pointing it at a default personal keyfile by mistake.
+    case "$(basename -- "$SANDBOX_SSH_KEY")" in
+        id_rsa|id_ecdsa|id_ed25519|id_dsa|id_ecdsa_sk|id_ed25519_sk)
+            echo "Warning: $SANDBOX_SSH_KEY looks like a default personal SSH key," \
+                 "not a dedicated one." >&2
+            echo "It will be loaded into the sandbox for the whole unattended session -" \
+                 "see README 'Headless git push'." >&2
+            ;;
+    esac
+fi
+
+have_forwarded_agent=1
+if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK}" ]; then
+    have_forwarded_agent=0
+fi
+
+if [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
+    echo "SSH_AUTH_SOCK is not set or not a valid socket, and SANDBOX_SSH_KEY is not set." >&2
+    echo "Either start ssh-agent and run ssh-add, or set SANDBOX_SSH_KEY to a dedicated" >&2
+    echo "key for headless use - see README 'Headless git push' section." >&2
+    exit 1
+fi
+
+# A valid forwarded socket with zero identities loaded forwards fine (the
+# container sees a live, working agent) but is useless for git-over-ssh -
+# warn now rather than have that surface confusingly deep into a session as
+# a failed push. Non-fatal: a task might not need git-over-ssh at all, and
+# SANDBOX_SSH_KEY (if set) provides its own identity independently of this.
+if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
+    echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
+    echo "git-over-ssh (e.g. pushing to Gitea) will fail until you ssh-add a key," >&2
+    echo "unless SANDBOX_SSH_KEY is also set." >&2
+fi
+
+if [ -z "${GITEA_TOKEN:-}" ]; then
+    GITEA_TOKEN_FILE="${GITEA_TOKEN_FILE:-$HOME/.config/gitea/token}"
+    if [ -f "$GITEA_TOKEN_FILE" ]; then
+        GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
+    fi
+fi
+
+if [ -z "${GH_TOKEN:-}" ]; then
+    # Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
+    # auth login` session is write-capable, which would defeat the point.
+    # This should be a dedicated read-only fine-grained PAT (Contents +
+    # Metadata: read-only), generated separately for this sandbox.
+    GH_TOKEN_FILE="${GH_TOKEN_FILE:-$HOME/.config/gh/sandbox-token}"
+    if [ -f "$GH_TOKEN_FILE" ]; then
+        GH_TOKEN="$(<"$GH_TOKEN_FILE")"
+    fi
+fi
+
+# Read-write scratch space, separate from WORKSPACE_DIR, for passing files
+# (screenshots, temp scripts) back and forth with a sandboxed session without
+# touching the actual project checkout. Persists across sessions (it's a
+# real host directory, not a container volume) since the point is sharing
+# things with the host, not just scratch space for one run.
+SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/claude-sandbox/shared}"
+mkdir -p "$SANDBOX_SHARE_DIR"
+
+# ~/.claude/CLAUDE.md (carried into the container) tells agents to write
+# specs to ~/specs/ rather than a project-local path - make sure that
+# actually exists before it's bind-mounted, for a fresh machine that hasn't
+# used the convention yet.
+mkdir -p "$HOME/specs"
+
+# Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
+# "sandbox" block) is redundant here - it can't even function inside this
+# container (bwrap can't create a namespace, and getting it to would need
+# privilege escalation approaching --privileged, undoing this container's own
+# hardening), and this container is already a real, working sandbox on its
+# own. settings.json is mounted read-only precisely so a session can't
+# tamper with it, so it can't be patched from inside - generate a sandbox-
+# specific copy here instead and mount that in place of the real one.
+# Everything else in it (hooks, permissions, plugins) carries over unchanged.
+SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-settings.XXXXXX.json")"
+jq '.sandbox.enabled = false' "$HOME/.claude/settings.json" > "$SANDBOX_SETTINGS_FILE"
+cleanup() { rm -f "$SANDBOX_SETTINGS_FILE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+trap cleanup EXIT
+
+# Git commits inside the sandbox need a user.name/user.email - carry over a
+# copy of the host's global gitconfig, read-write: entrypoint.sh's
+# `gh auth setup-git` (what makes GitHub read-only from in here - see
+# README) needs to *write* a credential-helper entry into it.
+#
+# A whole directory, not a single file bind-mounted at ~/.gitconfig: `git
+# config` writes via the usual write-temp-then-rename-over-original pattern,
+# which fails with "Device or resource busy" on a single-file bind mount -
+# Linux won't let that mount point's backing inode be replaced, only a file
+# *within* a mounted directory can be freely renamed over. Point git at the
+# copy via GIT_CONFIG_GLOBAL instead of relying on it being at ~/.gitconfig.
+# Nothing written in here ever reaches the user's real ~/.gitconfig either
+# way, since it's a copy in its own directory, not the real file/parent.
+SANDBOX_GITCONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-gitconfig.XXXXXX")"
+if [ -f "$HOME/.gitconfig" ]; then
+    cp "$HOME/.gitconfig" "$SANDBOX_GITCONFIG_DIR/.gitconfig"
+else
+    touch "$SANDBOX_GITCONFIG_DIR/.gitconfig"
+fi
+
+export WORKSPACE_DIR
+# The image's user is built to match this uid/gid/username exactly (see
+# Dockerfile) - this is what makes $HOME-based absolute paths (dotfiles,
+# ~/.claude's plugin bookkeeping) resolve identically inside the container.
+export SANDBOX_USER="$(id -un)"
+export SANDBOX_UID="$(id -u)"
+export SANDBOX_GID="$(id -g)"
+export SANDBOX_SHARE_DIR
+export SANDBOX_SETTINGS_FILE
+export SANDBOX_GITCONFIG_DIR
+export SSH_AUTH_SOCK
+export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
+export SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+export GITEA_TOKEN="${GITEA_TOKEN:-}"
+export GITEA_SSH_HOST="${GITEA_SSH_HOST:-}"
+export GITEA_API="${GITEA_API:-}"
+export GH_TOKEN="${GH_TOKEN:-}"
+export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
+export ALLOW_GITHUB_PUSH="${ALLOW_GITHUB_PUSH:-0}"
+export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')}"
+
+# ~/.claude/hooks may contain symlinks whose real targets live outside
+# ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
+# config/claude/hooks/ for deny-dangerous-bash.sh, if that's what a given
+# host has installed). docker-compose.yml no longer hardcodes any one repo's
+# path for this - discover what's actually needed here instead, so it's
+# correct regardless of what's installed or where this repo itself was
+# cloned to.
+extra_mounts=()
+if [ -d "$HOME/.claude/hooks" ]; then
+    mounted_dirs=""
+    for hook in "$HOME/.claude/hooks"/*; do
+        [ -L "$hook" ] || continue
+        real_dir="$(dirname "$(readlink -f "$hook")")"
+        case "$real_dir" in
+            "$HOME/.claude"*) continue ;;
+        esac
+        case " $mounted_dirs " in
+            *" $real_dir "*) continue ;;
+        esac
+        mounted_dirs="$mounted_dirs $real_dir"
+        extra_mounts+=(-v "$real_dir:$real_dir:ro")
+    done
+fi
+
+# Optional: bring in a real nvim config to pair with SANDBOX_CMD=nvim (see
+# entrypoint.sh). Not baked into the image - this repo has no opinion on
+# anyone's personal editor config.
+if [ -n "${SANDBOX_NVIM_CONFIG:-}" ]; then
+    if [ ! -d "$SANDBOX_NVIM_CONFIG" ]; then
+        echo "SANDBOX_NVIM_CONFIG is set but not a directory: $SANDBOX_NVIM_CONFIG" >&2
+        exit 1
+    fi
+    extra_mounts+=(-v "$SANDBOX_NVIM_CONFIG:$HOME/.config/nvim:ro")
+fi
+
+# Not `exec`: the EXIT trap above needs this shell to still be around
+# afterward to actually clean up the generated settings file.
+docker compose -f "$COMPOSE_FILE" run --rm --build "${extra_mounts[@]}" claude "$@"
