@@ -78,6 +78,7 @@ teardown() {
     docker rm -f "claude-sandbox-test-override-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rmi "claude-sandbox-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
