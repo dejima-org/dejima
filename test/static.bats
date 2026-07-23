@@ -90,6 +90,17 @@ setup() {
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
+@test "~/.claude/hooks is layered read-only over the read-write parent mount" {
+    # Same persistence-path rationale as the settings/CLAUDE.md/plugins
+    # overlay above, but for the directory install.sh's hook symlinks live
+    # in - see docker-compose.yml's comment on this mount line. Without
+    # this, a compromised session can unlink a hook symlink and drop a
+    # plain malicious file in its place, which the dynamic-mount logic in
+    # bin/claude-sandbox never sees (it only protects symlink targets that
+    # resolve outside ~/.claude).
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/hooks:\$\{HOME\}/\.claude/hooks:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
 @test "gitconfig is a throwaway copy in its own directory, not a single-file mount" {
     # entrypoint.sh's `gh auth setup-git` writes a credential-helper entry
     # via git's write-temp-then-rename pattern, which fails with "Device or
