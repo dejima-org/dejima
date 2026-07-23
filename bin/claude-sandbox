@@ -1,13 +1,12 @@
 #!/bin/bash
-# Launch nvim inside the claude-sandbox container (see docker/claude-sandbox/),
-# with a project directory bind-mounted at its real host path. Any `claude`
-# invocation inside (a shell, or claudecode.nvim's terminal) runs with
-# --dangerously-skip-permissions.
+# Launch the claude-sandbox container, with a project directory bind-mounted
+# at its real host path. Defaults to running bare `claude` inside (with
+# --dangerously-skip-permissions); set SANDBOX_CMD to run something else
+# instead (see README).
 #
-# Usage: claude-sandbox [path-to-project] [-- nvim args...]
+# Usage: claude-sandbox [path-to-project] [-- extra args...]
 #   claude-sandbox                      # sandbox the current directory
 #   claude-sandbox ~/repos/myproject
-#   claude-sandbox ~/repos/myproject src/foo.py   # open a specific file
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -209,4 +208,4 @@ fi
 
 # Not `exec`: the EXIT trap above needs this shell to still be around
 # afterward to actually clean up the generated settings file.
-docker compose -f "$COMPOSE_FILE" run --rm --build "${extra_mounts[@]}" claude "$@"
+docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@"

@@ -87,12 +87,12 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
-# Test harness hook (docker/claude-sandbox/test/): everything above this
-# point is the real startup sequence - DNS proxy, firewall, IPv6 block,
-# logging, privilege-drop prep. Skip execing nvim (which needs a real tty)
-# so the suite can `docker exec` into a live, fully-initialized container
-# and assert against it, exercising the actual code path instead of a
-# reimplementation of it that could drift out of sync.
+# Test harness hook (test/): everything above this point is the real
+# startup sequence - DNS proxy, firewall, IPv6 block, logging,
+# privilege-drop prep. Skip execing $SANDBOX_CMD so the suite can `docker
+# exec` into a live, fully-initialized container and assert against it,
+# exercising the actual code path instead of a reimplementation of it that
+# could drift out of sync.
 if [ "${SANDBOX_TEST_MODE:-0}" = "1" ]; then
     exec gosu "$SANDBOX_USER" sleep infinity
 fi

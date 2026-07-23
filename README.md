@@ -307,7 +307,7 @@ sandbox — it has no privilege to do this itself):
 
 ```sh
 bin/claude-sandbox-allow crates.io                # this session only
-bin/claude-sandbox-allow crates.io --global       # + persist in config/profile
+bin/claude-sandbox-allow crates.io --global       # + persist in config/env
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -315,8 +315,9 @@ It first adds the domain to the running dnsmasq's allowlist (appends a
 file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
 `docker exec -u root`. `--global` also appends the domain to
-`ALLOWED_DOMAINS` in `config/profile` for future sessions; source your shell
-(or open a new one) for that part to take effect. If more than one
+`ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
+automatically by the next `bin/claude-sandbox` invocation, no sourcing
+needed. If more than one
 claude-sandbox container is running, pass `--container <name>` to
 disambiguate (`docker ps` to find it).
 

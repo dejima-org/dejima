@@ -1,10 +1,10 @@
 #!/bin/bash
 # Add a domain to the egress firewall allowlist of a running claude-sandbox
 # container, from outside it. The sandbox itself has no privilege to do this
-# (node has no sudo/setuid path back to root - see docker/claude-sandbox's
-# security notes); if a sandboxed agent hits a blocked domain it actually
-# needs, it should tell you the exact command to run here rather than try
-# to work around the firewall.
+# (node has no sudo/setuid path back to root - see this repo's README's
+# Security notes section); if a sandboxed agent hits a blocked domain it
+# actually needs, it should tell you the exact command to run here rather
+# than try to work around the firewall.
 #
 # Usage: claude-sandbox-allow <domain> [--global] [--container <name>]
 #   claude-sandbox-allow crates.io                # this running session only
