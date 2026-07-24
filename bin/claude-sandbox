@@ -9,7 +9,12 @@
 #   claude-sandbox ~/repos/myproject
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f resolves through the ~/.local/bin/claude-sandbox symlink
+# install.sh sets up - without it, BASH_SOURCE[0] is the symlink's own path
+# when invoked by name via PATH, so dirname finds ~/.local/bin instead of
+# this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE,
+# config/env) resolves against the wrong directory entirely.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 
