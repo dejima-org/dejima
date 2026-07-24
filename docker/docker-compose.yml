@@ -99,6 +99,19 @@ services:
       # hook the next time Claude Code starts there - the same
       # persistence path the other three overlays exist to close.
       - ${HOME}/.claude/hooks:${HOME}/.claude/hooks:ro
+      # skills/commands/agents carry the same execute-or-load-on-host risk as
+      # hooks/plugins above: a skill can ship an executable script, and a
+      # command/agent is prompt text loaded into a later, unsandboxed host
+      # session. Unlike those, they may not exist on a given host at all -
+      # bin/claude-sandbox pre-creates them (empty is fine; existence is what
+      # lets Docker overlay them) so a compromised session can't create-then-
+      # populate one under the read-write parent mount.
+      - ${HOME}/.claude/skills:${HOME}/.claude/skills:ro
+      - ${HOME}/.claude/commands:${HOME}/.claude/commands:ro
+      - ${HOME}/.claude/agents:${HOME}/.claude/agents:ro
+      # output-styles is prompt text loaded into a later host session's
+      # system prompt, same class as commands/agents above.
+      - ${HOME}/.claude/output-styles:${HOME}/.claude/output-styles:ro
       # A throwaway per-session copy, not the real file - see
       # bin/claude-sandbox and README "Throwaway ~/.claude.json". A plain
       # read-only mount hangs Claude Code on startup (it writes to this

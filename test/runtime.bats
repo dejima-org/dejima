@@ -81,6 +81,7 @@ teardown() {
     docker rm -f "claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -293,6 +294,31 @@ dexec_node() {
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "the code-carrying ~/.claude overlay dirs are read-only inside the container" {
+    local test_container="claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")"
+    local src; src="$(mktemp -d)"
+    mkdir -p "$src/skills" "$src/commands" "$src/agents"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$src/skills:/home/node/.claude/skills:ro" \
+        -v "$src/commands:/home/node/.claude/commands:ro" \
+        -v "$src/agents:/home/node/.claude/agents:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    for d in skills commands agents; do
+        run docker exec -u node "$test_container" bash -c "touch /home/node/.claude/$d/pwned 2>&1"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"Read-only file system"* ]]
+    done
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$src"
 }
 
 @test "node cannot run iptables directly" {

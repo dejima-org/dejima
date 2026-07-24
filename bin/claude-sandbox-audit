@@ -1,0 +1,240 @@
+#!/bin/bash
+# Host-side exit-time audit for bin/claude-sandbox. Snapshots the workspace's
+# host-persistence surfaces before the container runs, and after it exits
+# reports (advisory only - never blocks) anything a session changed that
+# would execute or load OUTSIDE the sandbox: git config keys that run a
+# command on the next `git`, and content under .claude/ / .mcp.json /
+# .envrc / .vscode/ / .git/hooks/. Read the report before running `git` or
+# `claude` in that repo again. See README "Security notes".
+set -uo pipefail
+
+cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
+
+PROJECTS_DIR="${CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+# This script's own repo root - the sandbox's trusted computing base (see
+# tcb_snapshot below) is only monitored when the workspace being audited IS
+# this repo (a self-mounted session). Overridable for tests.
+AUDIT_REPO_ROOT="${CLAUDE_SANDBOX_AUDIT_REPO_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+
+# git config keys whose values run a command on the next git invocation, or
+# (include.path/includeif.*.path) indirect to another config file that could
+# set one - key names are case-insensitive in git, so match on a lowercased
+# copy.
+is_exec_key() {
+    local key; key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$key" in
+        core.hookspath|core.fsmonitor|core.sshcommand|credential.helper) return 0 ;;
+        core.pager|core.editor|sequence.editor|gpg.program|diff.external) return 0 ;;
+        pager.*) return 0 ;;
+        filter.*.smudge|filter.*.clean|filter.*.process) return 0 ;;
+        diff.*.textconv|diff.*.command) return 0 ;;
+        merge.*.driver) return 0 ;;
+        include.path|includeif.*.path) return 0 ;;
+    esac
+    return 1
+}
+
+# Undo git's config-file quoting of a value (git wraps values containing
+# special chars in "..." and backslash-escapes embedded \ and ") so exec
+# detection sees the real value instead of a quoted literal.
+unquote_value() {
+    local v="$1"
+    case "$v" in
+        \"*\")
+            v="${v#\"}"; v="${v%\"}"
+            v="${v//\\\"/\"}"
+            v="${v//\\\\/\\}"
+            ;;
+    esac
+    printf '%s' "$v"
+}
+
+# Hash a regular file's content, or a symlink's target path string (so a
+# repointed symlink is caught even though the link's own inode doesn't
+# change and its target may not exist to read content from).
+hash_entry() {
+    local f="$1"
+    if [ -L "$f" ]; then
+        printf '%s' "$(readlink "$f")" | sha256sum | cut -d' ' -f1
+    else
+        sha256sum "$f" | cut -d' ' -f1
+    fi
+}
+
+hash_paths() {
+    # path<TAB>sha for each existing monitored path, sorted by path
+    local ws="$1" p
+    {
+        for p in .mcp.json .envrc; do
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+        done
+        for dir in .claude .vscode .git/hooks; do
+            if [ -d "$ws/$dir" ]; then
+                while IFS= read -r -d '' f; do
+                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
+            fi
+        done
+    } | sort
+}
+
+tcb_snapshot() {
+    # path<TAB>sha for the sandbox's own trusted computing base, but only
+    # when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
+    # Empty otherwise, so a normal (non-self) workspace is unaffected.
+    local ws="$1" p
+    [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
+    {
+        for p in install.sh config/env; do
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+        done
+        for dir in bin hooks docker test; do
+            if [ -d "$ws/$dir" ]; then
+                while IFS= read -r -d '' f; do
+                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
+            fi
+        done
+    } | sort
+}
+
+git_config_snapshot() {
+    # Parse the raw config file(s) instead of `git config --list`, which
+    # lowercases key names (core.hooksPath -> core.hookspath) and would hide
+    # the exact key a session set.
+    local ws="$1" f pfx
+    for f in "$ws/.git/config" "$ws"/.git/worktrees/*/config.worktree; do
+        [ -f "$f" ] || continue
+        case "$f" in
+            "$ws"/.git/worktrees/*) pfx="worktree:" ;;
+            *) pfx="" ;;
+        esac
+        awk -v pfx="$pfx" '
+            function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+            /^[ \t]*[#;]/ { next }
+            /^[ \t]*\[/ {
+                line = trim($0)
+                sub(/^\[/, "", line); sub(/\][ \t]*$/, "", line)
+                if (match(line, /"/)) {
+                    sect = trim(substr(line, 1, RSTART - 1))
+                    rest = line
+                    sub(/^[^"]*"/, "", rest)
+                    sub(/"[ \t]*$/, "", rest)
+                    section = sect "." rest
+                } else {
+                    section = line
+                }
+                next
+            }
+            /=/ {
+                line = trim($0)
+                eq = index(line, "=")
+                key = trim(substr(line, 1, eq - 1))
+                val = trim(substr(line, eq + 1))
+                print pfx section "." key "=" val
+            }
+        ' "$f"
+    done | sort
+}
+
+projects_snapshot() {
+    # slug<TAB>maxmtime for each immediate subdir of PROJECTS_DIR, sorted by
+    # slug; maxmtime is 0 if the slug dir has no files.
+    local dir="$1" d slug mtime
+    [ -d "$dir" ] || return 0
+    for d in "$dir"/*/; do
+        [ -d "$d" ] || continue
+        slug="$(basename "$d")"
+        mtime="$(find "$d" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+        mtime="${mtime%%.*}"
+        printf '%s\t%s\n' "$slug" "${mtime:-0}"
+    done | sort
+}
+
+case "$cmd" in
+    snapshot)
+        { echo "### gitconfig"; git_config_snapshot "$ws";
+          echo "### paths";     hash_paths "$ws";
+          echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+          echo "### tcb";       tcb_snapshot "$ws"; } > "$state" 2>/dev/null || true
+        exit 0
+        ;;
+    compare)
+        [ -f "$state" ] || { echo "claude-sandbox audit: no snapshot to compare against, skipping." >&2; exit 0; }
+        new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
+                           echo "### paths";     hash_paths "$ws";
+                           echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+                           echo "### tcb";       tcb_snapshot "$ws"; } > "$new" 2>/dev/null || {
+            echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
+
+        findings=()
+        # config diffs: added/changed lines present in new but not old
+        while IFS= read -r line; do
+            key="${line%%=*}"
+            key_nopfx="${key#worktree:}"
+            if is_exec_key "$key_nopfx"; then
+                findings+=("COMMAND-EXECUTION git config: $line")
+            elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
+                # alias.<name>=!cmd runs a shell command
+                case "$(unquote_value "${line#*=}")" in
+                    '!'*) findings+=("COMMAND-EXECUTION git alias: $line") ;;
+                    *)    findings+=("changed git config: $line") ;;
+                esac
+            else
+                findings+=("changed git config: $line")
+            fi
+        done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
+                          <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
+
+        # path diffs: any monitored file added/changed/removed (a content
+        # change emits both an old-hash and new-hash line; dedupe by path
+        # so each changed path is reported once)
+        while IFS= read -r line; do
+            findings+=("changed workspace file: $line")
+        done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
+                 | sed 's/^\t//' | cut -f1 | sort -u )
+
+        # projects diffs: a write to another project's ~/.claude/projects
+        # slug during this session (transcript/memory-poisoning surface).
+        # "self" = current workspace's own slug or a worktree child of it.
+        current_slug="$(printf '%s' "$ws" | sed 's/[^a-zA-Z0-9]/-/g')"
+        while IFS= read -r line; do
+            slug="${line%%$'\t'*}"
+            case "$slug" in
+                "$current_slug"|"$current_slug"-*) continue ;;
+            esac
+            findings+=("CROSS-PROJECT history/memory write: $slug")
+        done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
+                          <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )
+
+        # tcb diffs: any change under the sandbox's own trusted computing
+        # base, only populated when this session's workspace IS the
+        # sandbox's own repo (see tcb_snapshot) - empty/no-op otherwise.
+        while IFS= read -r line; do
+            findings+=("TCB (sandbox self) modified: $line")
+        done < <(comm -3 <(sed -n '/^### tcb/,$p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### tcb/,$p' "$new"   | grep -v '^### ') \
+                 | sed 's/^\t//' | cut -f1 | sort -u )
+
+        rm -f "$new"
+        [ "${#findings[@]}" -eq 0 ] && exit 0
+
+        {
+            echo ""
+            echo "================================================================"
+            echo " claude-sandbox: this session changed host-persistence surfaces"
+            echo " in $ws"
+            echo " Review these BEFORE running 'git' or 'claude' in that repo:"
+            echo "----------------------------------------------------------------"
+            printf '  - %s\n' "${findings[@]}"
+            echo "================================================================"
+        } >&2
+        exit 0
+        ;;
+    *)
+        echo "usage: claude-sandbox-audit {snapshot|compare} <workspace> <state-file>" >&2
+        exit 2
+        ;;
+esac

@@ -155,7 +155,7 @@ setup() {
 }
 
 @test "bin/claude-sandbox dynamically discovers and mounts hook-symlink targets" {
-    grep -q 'readlink -f "\$hook"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'readlink -f "\$entry"' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'extra_mounts+=(-v "\$real_dir:\$real_dir:ro")' "$REPO_ROOT/bin/claude-sandbox"
     grep -q '"\${extra_mounts\[@\]}"' "$REPO_ROOT/bin/claude-sandbox"
 }
@@ -311,4 +311,55 @@ setup() {
     run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
     [ "$status" -ne 0 ]
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "~/.claude skills/commands/agents/output-styles are layered read-only over the read-write parent mount" {
+    # Same persistence-path rationale as the hooks overlay: these carry
+    # executable skill scripts / injectable command, agent, and output-style
+    # prompts that a later unsandboxed host session would run or load.
+    # Without an overlay (and without pre-creation, since they may not
+    # exist) a compromised session can create and populate them.
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/skills:\$\{HOME\}/\.claude/skills:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/commands:\$\{HOME\}/\.claude/commands:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/agents:\$\{HOME\}/\.claude/agents:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/output-styles:\$\{HOME\}/\.claude/output-styles:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "bin/claude-sandbox pre-creates the code-carrying ~/.claude overlay dirs" {
+    grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox overlays the workspace .git/hooks read-only when .git is a real dir" {
+    grep -q 'if \[ -d "$WORKSPACE_DIR/.git/hooks" \]' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox parses config/env instead of sourcing it" {
+    run grep -E 'source "\$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
+    [ "$status" -ne 0 ]
+    grep -q 'parse_allowed_domains_env "$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'source "$SCRIPT_DIR/claude-sandbox-env.sh"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox snapshots before the run and compares after" {
+    grep -q '"$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q '"$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox warns when the workspace is this repo itself (TCB self-mount)" {
+    grep -q 'sandbox.s own repo' "$REPO_ROOT/bin/claude-sandbox" || \
+    grep -q 'TCB' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox's exit-time audit still runs when the container run fails or is interrupted" {
+    local run_line
+    run_line=$(grep -n 'docker compose .* run --rm --build' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    [ -n "$run_line" ]
+    # The compose invocation must not be a bare command under set -e - a
+    # nonzero/interrupted exit there would otherwise abort the script before
+    # the audit compare and exit below ever run.
+    grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/claude-sandbox")
+    sed -n "1,${run_line}p" "$REPO_ROOT/bin/claude-sandbox" | grep -q 'compose_status=0'
+    tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q '"\$SCRIPT_DIR/claude-sandbox-audit" compare "\$WORKSPACE_DIR"'
+    tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q 'exit "\$compose_status"'
 }

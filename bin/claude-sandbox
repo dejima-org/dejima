@@ -31,13 +31,18 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
-# Source persisted config (currently just ALLOWED_DOMAINS) before it's read
+# Load persisted config (currently just ALLOWED_DOMAINS) before it's read
 # below - lets `bin/claude-sandbox-allow --global` persist a domain across
 # sessions without depending on the user's own shell profile chain, which a
 # standalone install of this repo can't assume exists.
-if [ -f "$REPO_ROOT/config/env" ]; then
-    # shellcheck source=/dev/null
-    source "$REPO_ROOT/config/env"
+# config/env is parsed, never sourced: it lives inside this repo, which is
+# itself a mountable/writable workspace, so executing it would be a
+# host-shell persistence path for a self-mounted session. A real env var
+# (exported before invoking this script - e.g. from the user's shell
+# profile) still takes precedence, unchanged.
+source "$SCRIPT_DIR/claude-sandbox-env.sh"
+if [ -z "${ALLOWED_DOMAINS:-}" ]; then
+    ALLOWED_DOMAINS="$(parse_allowed_domains_env "$REPO_ROOT/config/env")"
 fi
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
@@ -121,6 +126,11 @@ mkdir -p "$SANDBOX_SHARE_DIR"
 # used the convention yet.
 mkdir -p "$HOME/specs"
 
+# skills/commands/agents/output-styles overlays (see docker-compose.yml) can
+# only apply if the source dirs exist - pre-create them so a host that has
+# never used one still gets the read-only overlay instead of a writable gap.
+mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"
+
 # Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
 # "sandbox" block) is redundant here - it can't even function inside this
 # container (bwrap can't create a namespace, and getting it to would need
@@ -157,7 +167,9 @@ else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi
 
-cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-audit.XXXXXX")"
+
+cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
 trap cleanup EXIT
 
 # Git commits inside the sandbox need a user.name/user.email - carry over a
@@ -210,11 +222,13 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # correct regardless of what's installed or where this repo itself was
 # cloned to.
 extra_mounts=()
-if [ -d "$HOME/.claude/hooks" ]; then
-    mounted_dirs=""
-    for hook in "$HOME/.claude/hooks"/*; do
-        [ -L "$hook" ] || continue
-        real_dir="$(dirname "$(readlink -f "$hook")")"
+mounted_dirs=""
+for overlay_dir in hooks skills commands agents output-styles; do
+    dir="$HOME/.claude/$overlay_dir"
+    [ -d "$dir" ] || continue
+    for entry in "$dir"/*; do
+        [ -L "$entry" ] || continue
+        real_dir="$(dirname "$(readlink -f "$entry")")"
         case "$real_dir" in
             "$HOME/.claude"*) continue ;;
         esac
@@ -224,7 +238,7 @@ if [ -d "$HOME/.claude/hooks" ]; then
         mounted_dirs="$mounted_dirs $real_dir"
         extra_mounts+=(-v "$real_dir:$real_dir:ro")
     done
-fi
+done
 
 # Optional: bring in a real nvim config to pair with SANDBOX_CMD=nvim (see
 # entrypoint.sh). Not baked into the image - this repo has no opinion on
@@ -269,6 +283,34 @@ if [ -n "${SANDBOX_EXTRA_MOUNTS:-}" ]; then
     done
 fi
 
-# Not `exec`: the EXIT trap above needs this shell to still be around
-# afterward to actually clean up the generated settings file.
-docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@"
+# Block the workspace's own git hooks from being rewritten to run on the
+# host at the next `git` invocation. Only when .git is a real directory - a
+# worktree/submodule .git is a pointer file whose hooks live in the common
+# git dir outside the mount (container-local, discarded with the session),
+# so there's nothing host-persistent to protect there.
+if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
+    extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
+fi
+
+# Snapshot host-persistence surfaces so the post-run audit can report
+# anything this session changed (advisory - see bin/claude-sandbox-audit).
+"$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+
+# When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
+# docker/, install.sh, config/env, test/) is mounted writable - warn, and
+# the audit below will report any change to it.
+if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
+    echo "Warning: sandbox's own repo is the mounted workspace - its trusted" >&2
+    echo "computing base (bin/, hooks/, docker/, install.sh) is writable this" >&2
+    echo "session; the exit audit will report any changes to review." >&2
+fi
+
+# Not exec'd (the EXIT trap cleans up the generated temp files) and not a
+# bare command under set -e (a nonzero/interrupted container run - e.g.
+# Ctrl-C returning 130 - would otherwise abort the script here, skipping the
+# audit entirely). Capture the status explicitly so the advisory audit runs
+# on every exit path, then propagate the real container exit code unchanged.
+compose_status=0
+docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+"$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+exit "$compose_status"
