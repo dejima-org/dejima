@@ -122,9 +122,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             # Stream response body, flushing after each chunk for unbuffered delivery.
             # Use read1() to get partial reads immediately rather than waiting for
-            # a full buffer or EOF, ensuring SSE events stream unbuffered.
+            # a full buffer or EOF, ensuring SSE events stream unbuffered. HTTPResponse.read1()
+            # transparently handles chunked transfer-encoding and content-length termination.
             while True:
-                chunk = resp.fp.read1(4096)
+                chunk = resp.read1(4096)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
