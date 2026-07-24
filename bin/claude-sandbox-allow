@@ -92,7 +92,9 @@ done
 echo "$domain allowed for the running session ($container)."
 
 if [ "$global" -eq 1 ]; then
-    env_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config/env"
+    # readlink -f resolves through the ~/.local/bin symlink install.sh sets
+    # up - see bin/claude-sandbox's SCRIPT_DIR comment for why this matters.
+    env_file="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)/config/env"
     if [ -f "$env_file" ] && grep -q '^export ALLOWED_DOMAINS=' "$env_file"; then
         current=$(sed -nE 's/^export ALLOWED_DOMAINS="(.*)"$/\1/p' "$env_file")
         if [[ " $current " == *" $domain "* ]]; then

@@ -195,6 +195,16 @@ setup() {
     ! grep -qE '^\s*USER\s+node\s*$' <(tail -n 8 "$SANDBOX_DIR/Dockerfile")
 }
 
+@test "bin/claude-sandbox and bin/claude-sandbox-allow resolve their own location through symlinks" {
+    # install.sh symlinks both into ~/.local/bin so they can be run by name
+    # via PATH. A bare `dirname "${BASH_SOURCE[0]}"` (no readlink -f first)
+    # resolves against the symlink's own directory in that case, not this
+    # repo's real bin/ - a real bug hit on first use: claude-sandbox tried
+    # to open ~/.local/docker/docker-compose.yml instead of this repo's.
+    grep -q 'dirname "\$(readlink -f "\${BASH_SOURCE\[0\]}")"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'dirname "\$(readlink -f "\${BASH_SOURCE\[0\]}")"' "$REPO_ROOT/bin/claude-sandbox-allow"
+}
+
 @test "bin/claude-sandbox-allow rejects a domain with shell metacharacters" {
     run "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com;touch /tmp/pwned'
     [ "$status" -ne 0 ]
