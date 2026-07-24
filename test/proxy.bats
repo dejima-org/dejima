@@ -74,3 +74,14 @@ teardown() {
     [ "$output" = "503" ]
     [ "$(cat "$TD/body")" = "upstream-error" ]
 }
+
+@test "merges anthropic-beta sent in non-lowercase casing instead of duplicating it" {
+    start_proxy
+    run pcurl -H "Anthropic-Beta: context-1m-2025-08-07" -d '{}' http://proxy/v1/messages
+    beta="$(jq -r '.headers["anthropic-beta"] // .headers["Anthropic-Beta"] // "MISSING"' <<<"$output")"
+    [[ "$beta" == *"context-1m-2025-08-07"* ]]
+    [[ "$beta" == *"oauth-2025-04-20"* ]]
+    # exactly one beta header reached the fixture, not two
+    count="$(jq '[.headers | keys[] | select(ascii_downcase == "anthropic-beta")] | length' <<<"$output")"
+    [ "$count" -eq 1 ]
+}

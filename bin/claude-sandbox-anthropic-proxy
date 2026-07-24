@@ -81,16 +81,16 @@ class Handler(BaseHTTPRequestHandler):
         cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
         conn = cls(u.netloc, timeout=600)
         headers = {
-            k: v for k, v in self.headers.items()
+            k.lower(): v for k, v in self.headers.items()
             if k.lower() not in HOP_BY_HOP
             and k.lower() not in ("authorization", "x-api-key", "content-length")
         }
-        headers["Authorization"] = "Bearer " + token
+        headers["authorization"] = "Bearer " + token
         betas = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip()]
         if OAUTH_BETA not in betas:
             betas.append(OAUTH_BETA)
         headers["anthropic-beta"] = ",".join(betas)
-        headers["Content-Length"] = str(len(body))
+        headers["content-length"] = str(len(body))
         conn.request(self.command, self.path, body=body, headers=headers)
         return conn, conn.getresponse()
 
