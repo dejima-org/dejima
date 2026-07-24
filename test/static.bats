@@ -349,3 +349,16 @@ setup() {
     grep -q 'sandbox.s own repo' "$REPO_ROOT/bin/claude-sandbox" || \
     grep -q 'TCB' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "bin/claude-sandbox's exit-time audit still runs when the container run fails or is interrupted" {
+    local run_line
+    run_line=$(grep -n 'docker compose .* run --rm --build' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    [ -n "$run_line" ]
+    # The compose invocation must not be a bare command under set -e - a
+    # nonzero/interrupted exit there would otherwise abort the script before
+    # the audit compare and exit below ever run.
+    grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/claude-sandbox")
+    sed -n "1,${run_line}p" "$REPO_ROOT/bin/claude-sandbox" | grep -q 'compose_status=0'
+    tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q '"\$SCRIPT_DIR/claude-sandbox-audit" compare "\$WORKSPACE_DIR"'
+    tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q 'exit "\$compose_status"'
+}

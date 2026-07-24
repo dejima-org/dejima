@@ -305,9 +305,12 @@ if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "session; the exit audit will report any changes to review." >&2
 fi
 
-# Not `exec`: the EXIT trap above needs this shell to still be around
-# afterward to actually clean up the generated settings file.
-docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@"
-compose_status=$?
+# Not exec'd (the EXIT trap cleans up the generated temp files) and not a
+# bare command under set -e (a nonzero/interrupted container run - e.g.
+# Ctrl-C returning 130 - would otherwise abort the script here, skipping the
+# audit entirely). Capture the status explicitly so the advisory audit runs
+# on every exit path, then propagate the real container exit code unchanged.
+compose_status=0
+docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 "$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 exit "$compose_status"
