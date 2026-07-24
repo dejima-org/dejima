@@ -31,13 +31,18 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
-# Source persisted config (currently just ALLOWED_DOMAINS) before it's read
+# Load persisted config (currently just ALLOWED_DOMAINS) before it's read
 # below - lets `bin/claude-sandbox-allow --global` persist a domain across
 # sessions without depending on the user's own shell profile chain, which a
 # standalone install of this repo can't assume exists.
-if [ -f "$REPO_ROOT/config/env" ]; then
-    # shellcheck source=/dev/null
-    source "$REPO_ROOT/config/env"
+# config/env is parsed, never sourced: it lives inside this repo, which is
+# itself a mountable/writable workspace, so executing it would be a
+# host-shell persistence path for a self-mounted session. A real env var
+# (exported before invoking this script - e.g. from the user's shell
+# profile) still takes precedence, unchanged.
+source "$SCRIPT_DIR/claude-sandbox-env.sh"
+if [ -z "${ALLOWED_DOMAINS:-}" ]; then
+    ALLOWED_DOMAINS="$(parse_allowed_domains_env "$REPO_ROOT/config/env")"
 fi
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"

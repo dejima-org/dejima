@@ -332,3 +332,10 @@ setup() {
     grep -q 'if \[ -d "$WORKSPACE_DIR/.git/hooks" \]' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "bin/claude-sandbox parses config/env instead of sourcing it" {
+    run grep -E 'source "\$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
+    [ "$status" -ne 0 ]
+    grep -q 'parse_allowed_domains_env "$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'source "$SCRIPT_DIR/claude-sandbox-env.sh"' "$REPO_ROOT/bin/claude-sandbox"
+}
