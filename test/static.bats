@@ -160,6 +160,22 @@ setup() {
     grep -q '"\${extra_mounts\[@\]}"' "$REPO_ROOT/bin/claude-sandbox"
 }
 
+@test "bin/claude-sandbox layers a writable lazy-lock.json over the read-only nvim config mount" {
+    # SANDBOX_NVIM_CONFIG is mounted :ro, but lazy.nvim writes its lockfile
+    # back into that same directory on every plugin sync - without this
+    # overlay, that write fails with a read-only-filesystem error and the
+    # sync aborts (a real bug: plugins never finish installing, so a
+    # config's colorscheme fallback kicks in instead of the real one).
+    grep -q 'mktemp.*claude-sandbox-nvim-lock' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_NVIM_LOCKFILE:\$HOME/\.config/nvim/lazy-lock\.json")' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'rm -f .*"\${SANDBOX_NVIM_LOCKFILE:-}"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox mounts SANDBOX_EXTRA_MOUNTS entries read-only at their own path" {
+    grep -q 'IFS=.:. read -ra extra_paths <<< "\$SANDBOX_EXTRA_MOUNTS"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$path:\$path:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
 @test "bin/claude-sandbox forces sandbox.enabled to false in the generated settings.json" {
     # Claude Code's own internal per-command sandboxing is redundant on top
     # of this container and can't actually function inside it (bwrap can't
