@@ -351,6 +351,23 @@ setup() {
     grep -q 'TCB' "$REPO_ROOT/bin/claude-sandbox"
 }
 
+@test "compose carries the credential-proxy env plumbing, empty by default" {
+    grep -qE '^\s*ANTHROPIC_BASE_URL:\s*\$\{SANDBOX_ANTHROPIC_BASE_URL:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*ANTHROPIC_AUTH_TOKEN:\s*\$\{SANDBOX_ANTHROPIC_AUTH_TOKEN:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*SANDBOX_ANTHROPIC_PROXY_SOCKET:\s*\$\{SANDBOX_ANTHROPIC_PROXY_SOCKET:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "the forwarder is baked into the image and started by the entrypoint when a socket is set" {
+    grep -q 'COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js' "$SANDBOX_DIR/Dockerfile"
+    grep -q 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'gosu "\$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "entrypoint unsets empty ANTHROPIC_* vars so a disabled proxy changes nothing" {
+    grep -q 'unset ANTHROPIC_BASE_URL' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'unset ANTHROPIC_AUTH_TOKEN' "$SANDBOX_DIR/entrypoint.sh"
+}
+
 @test "bin/claude-sandbox's exit-time audit still runs when the container run fails or is interrupted" {
     local run_line
     run_line=$(grep -n 'docker compose .* run --rm --build' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)

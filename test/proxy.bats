@@ -41,7 +41,7 @@ pcurl() {  # curl through the proxy socket; extra curl args pass through
 }
 
 teardown() {
-    kill "${PROXY_PID:-}" "${FAKE_PID:-}" 2>/dev/null || true
+    kill "${PROXY_PID:-}" "${FAKE_PID:-}" "${FWD_PID:-}" 2>/dev/null || true
     rm -rf "$TD"
 }
 
@@ -161,4 +161,20 @@ teardown() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"log in"* ]]
     [ ! -S "$SOCK" ]
+}
+
+@test "forwarder bridges TCP to the proxy's unix socket" {
+    start_proxy
+    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
+        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" &
+    FWD_PID=$!
+    ok=""
+    for _ in $(seq 1 50); do
+        if curl -s -o /dev/null http://127.0.0.1:18399/echo; then ok=1; break; fi
+        sleep 0.1
+    done
+    [ -n "$ok" ]
+    run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:18399/v1/messages
+    kill "$FWD_PID" 2>/dev/null || true
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
 }

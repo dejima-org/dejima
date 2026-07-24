@@ -87,6 +87,21 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
+# Loopback bridge for the host-side credential proxy (see bin/claude-sandbox
+# and bin/claude-sandbox-anthropic-proxy): Claude Code talks HTTP to
+# 127.0.0.1:18300, the forwarder pipes bytes into the bind-mounted unix
+# socket. Only started when this session actually has a proxy socket.
+if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
+    gosu "$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js &
+fi
+
+# Compose can't conditionally omit an env entry, so these arrive as empty
+# strings when the proxy is disabled - empty must mean "absent" for Claude
+# Code, not "set to empty", or a disabled proxy wouldn't restore today's
+# behavior byte-for-byte.
+[ -n "${ANTHROPIC_BASE_URL:-}" ] || unset ANTHROPIC_BASE_URL
+[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || unset ANTHROPIC_AUTH_TOKEN
+
 # Test harness hook (test/): everything above this point is the real
 # startup sequence - DNS proxy, firewall, IPv6 block, logging,
 # privilege-drop prep. Skip execing $SANDBOX_CMD so the suite can `docker
