@@ -47,6 +47,16 @@ bind-interfaces
 # ip6tables policies) - strip AAAA answers too so nothing wastes a
 # connection attempt on an address that can never actually be reached.
 filter-AAAA
+# Reject (and log) any answer for FIXED_DOMAINS/GITHUB_DNS_SUFFIXES that
+# resolves to a private RFC1918/loopback/link-local address. Without this,
+# a hijacked upstream answer for one of those public domains could resolve
+# to an internal address, and since allowed-domains is matched with no
+# port restriction (see init-firewall.sh), the top-up below would then
+# hand out full TCP-any-port egress to that internal host - turning one
+# attacker-influenced public domain into a general internal-network pivot.
+# Exempted per-domain below for EXTRA_ALLOWED_DOMAINS, which are expected
+# to legitimately be internal hosts (a self-hosted Gitea/Loki instance).
+stop-dns-rebind
 listen-address=127.0.0.1
 port=53
 servers-file=$SERVERS_FILE
@@ -55,6 +65,19 @@ log-facility=$LOG_FILE
 user=dnsmasq
 pid-file=/var/run/dnsmasq-sandbox.pid
 EOF
+
+    # EXTRA_ALLOWED_DOMAINS (GITEA_SSH_HOST/GITEA_API/LOKI_URL's hosts, plus
+    # any operator-supplied ALLOWED_DOMAINS) are expected to potentially be
+    # internal/self-hosted addresses, unlike FIXED_DOMAINS/
+    # GITHUB_DNS_SUFFIXES above, which are always public SaaS domains -
+    # exempt just these from stop-dns-rebind so a legitimately internal
+    # Gitea/Loki host still resolves.
+    for domain in ${EXTRA_ALLOWED_DOMAINS:-}; do
+        if [[ "$domain" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            continue
+        fi
+        echo "rebind-domain-ok=/$domain/"
+    done
 
     # init-firewall.sh's ipset population is a one-time snapshot at
     # container start; a domain that's been allowed can still start failing

@@ -90,6 +90,27 @@ setup() {
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
+@test "~/.claude/hooks is layered read-only over the read-write parent mount" {
+    # Same persistence-path rationale as the settings/CLAUDE.md/plugins
+    # overlay above, but for the directory install.sh's hook symlinks live
+    # in - see docker-compose.yml's comment on this mount line. Without
+    # this, a compromised session can unlink a hook symlink and drop a
+    # plain malicious file in its place, which the dynamic-mount logic in
+    # bin/claude-sandbox never sees (it only protects symlink targets that
+    # resolve outside ~/.claude).
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/hooks:\$\{HOME\}/\.claude/hooks:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "~/.claude.json is a throwaway per-session copy, not the real file mounted directly" {
+    # A plain read-only mount hangs Claude Code on startup (it does an
+    # atomic write-temp-then-rename against this file even before login) -
+    # the fix is a generated, discarded copy, not read-only. See
+    # bin/claude-sandbox and README "Throwaway ~/.claude.json".
+    grep -qE '^\s*-\s*\$\{SANDBOX_CLAUDE_JSON_FILE.*\}:\$\{HOME\}/\.claude\.json\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -q 'mktemp.*claude-sandbox-claude-json' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'rm -f "\$SANDBOX_SETTINGS_FILE" "\$SANDBOX_CLAUDE_JSON_FILE"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
 @test "gitconfig is a throwaway copy in its own directory, not a single-file mount" {
     # entrypoint.sh's `gh auth setup-git` writes a credential-helper entry
     # via git's write-temp-then-rename pattern, which fails with "Device or
@@ -253,4 +274,15 @@ setup() {
 @test "git-push-guard.sh still blocks direct pushes to main/master when ALLOW_GITHUB_PUSH=1" {
     # The host-allowlist widening must not touch the separate branch check.
     grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
+}
+
+@test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {
+    grep -qE '^stop-dns-rebind\s*$' "$SANDBOX_DIR/dns-proxy.sh"
+    grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
+}
+
+@test "IPv6 blocking fails loud instead of silently swallowing errors once ip6tables is confirmed usable" {
+    run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
+    [ "$status" -ne 0 ]
+    grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
 }

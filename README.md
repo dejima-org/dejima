@@ -1,53 +1,52 @@
 # claude-sandbox
 
-Runs Claude Code inside a Docker container with `--dangerously-skip-permissions`
-(no permission prompts, all tool use auto-accepted) against a project mounted
-from the host. Based on
-[Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer):
-same base image, non-root user, and egress-firewall approach, adapted to run
-via `docker compose` directly instead of through a VS Code dev container, and
-extended with a `gitea-pr` helper for opening/iterating on PRs against a
-Gitea (or Forgejo - see Prerequisites below) instance, and an optional
-editor-driven workflow in place of bare Claude Code (see "Usage" below).
+Runs Claude Code inside a firewalled Docker container with
+`--dangerously-skip-permissions` (no permission prompts, all tool use
+auto-accepted), against a project bind-mounted from the host. Based on
+[Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
+adapted to run via `docker compose` directly and extended with a `gitea-pr`
+helper for opening/iterating on PRs against Gitea or Forgejo, plus an
+optional editor-driven workflow in place of bare Claude Code (see "Usage").
 
-This repository only holds the tooling. It is **not** where any project
-lives — the project you point it at is bind-mounted into the container at
-runtime from wherever it actually sits on disk.
+This repo only holds the tooling — it's not where any project lives. Point
+it at a project on disk; that project is bind-mounted into the container at
+runtime.
 
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
-- `ssh-agent` running with the key for your Gitea remote(s) added
-  (`ssh-add -l` should list it). The container never sees your private key,
-  only a forwarded agent socket. `bin/claude-sandbox` warns (non-fatally) at
-  launch if the agent has zero identities loaded - the socket still forwards
-  fine either way, but git-over-ssh will fail until you `ssh-add` a key. That
-  takes effect immediately in an already-running session too (it's a live
-  reference to the same host agent process, not a snapshot) - no need to
-  restart the sandbox after `ssh-add`ing.
-  For a sandbox that needs to keep working unattended after your client
-  disconnects, see "Headless git push without agent forwarding" below —
-  `SANDBOX_SSH_KEY` is an alternative to this forwarded-agent requirement,
-  not just an addition to it.
-- `GITEA_SSH_HOST` and `GITEA_API` exported in your shell (same variables
-  `bin/gitea-pr` already needs — see its `require_config`), and a token
-  available either via `GITEA_TOKEN` in the environment or at
-  `~/.config/gitea/token`. `gitea-pr` and these variable names target Gitea's
-  API specifically, but [Forgejo](https://forgejo.org/) (a fork of Gitea)
-  exposes a compatible `/api/v1` surface - pointing `GITEA_API` at a Forgejo
-  instance works unmodified.
-- Optional: a **read-only** fine-grained GitHub PAT (GitHub → Settings →
-  Developer settings → Fine-grained tokens → generate, with Contents and
-  Metadata set to read-only, no write scopes) for `gh`/private-repo HTTPS
-  access, available via `GH_TOKEN` in the environment or at
-  `~/.config/gh/sandbox-token`. Don't use a normal `gh auth login` session
-  here — that's write-capable, which defeats the point (see "GitHub push:
-  blocked by default, optional opt-in" below). Without it, public GitHub
-  repos still clone/fetch fine anonymously over HTTPS; only private repos and
-  `gh` API calls need it.
-- Optional: `LOKI_URL` (a base URL, e.g. `http://loki.internal:3100`) to ship
-  DNS-query and firewall allow/reject logs to a Loki push endpoint - see
-  "Network request logging" below. Logging is skipped entirely if unset.
+- A git push credential — **at least one** is required:
+  - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
+    container only ever sees a forwarded agent socket, never your private
+    key — but it dies with your client connection, so it's fine for
+    interactive use, not for unattended/headless sessions.
+  - `SANDBOX_SSH_KEY` — a dedicated deploy key for headless/unattended use,
+    independent of any forwarded agent. See "Headless git push without
+    agent forwarding" below.
+
+Everything else is optional, depending on which workflow(s) you want:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GITEA_SSH_HOST`, `GITEA_API` | unset | Gitea/Forgejo PR workflow (`gitea-pr`) — skip both if you only push to GitHub |
+| `GITEA_TOKEN` | env, else `~/.config/gitea/token` | Gitea/Forgejo API token |
+| `GH_TOKEN` | env, else `~/.config/gh/sandbox-token` | read-only PAT for private GitHub repos / `gh` |
+| `ALLOW_GITHUB_PUSH` | `0` | opt-in: allow `git push` to GitHub (blocked by default — see below) |
+| `ALLOWED_DOMAINS` | unset | extra egress-allowed domains, space-separated |
+| `SANDBOX_CMD` | `claude` | container's main process (e.g. `nvim`) |
+| `SANDBOX_NVIM_CONFIG` | unset | nvim config dir, used when `SANDBOX_CMD=nvim` |
+| `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
+| `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
+
+**Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
+target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
+skip `GITEA_*` entirely and set `ALLOW_GITHUB_PUSH=1` instead to push
+straight to GitHub (see "GitHub push: blocked by default, optional opt-in"
+below) — the two aren't both required, pick whichever matches your remote.
+[Forgejo](https://forgejo.org/) works unmodified: it's a Gitea fork exposing
+a compatible `/api/v1` surface, so pointing `GITEA_API` at a Forgejo instance
+just works.
 
 ## Usage
 
@@ -56,248 +55,189 @@ bin/claude-sandbox                        # sandbox the current directory
 bin/claude-sandbox ~/repos/some-project
 ```
 
-By default the container's entry point is bare `claude` (the wrapped binary,
-always running with `--dangerously-skip-permissions` regardless of how it's
-invoked - see `docker/claude-wrapper.sh`), so a fresh clone of this repo works
-with no editor setup at all.
+By default the container's entry point is bare `claude` (always running with
+`--dangerously-skip-permissions`, regardless of how it's invoked — see
+`docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
+editor setup at all.
 
 Typical loop: point it at a project, ask Claude to implement something and
-open a PR (it has `gitea-pr` on `PATH`); from the host, `gitea-pr comments <PR#>`
+open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat.
 
 ### Using a different editor/application
-
-Set `SANDBOX_CMD` to run something else as the container's main process
-instead - for example, an editor with its own Claude Code integration:
 
 ```sh
 SANDBOX_CMD=nvim bin/claude-sandbox ~/repos/some-project
 ```
 
-This repo doesn't ship or assume any particular editor config - `nvim` (or
-whatever `SANDBOX_CMD` names) runs unconfigured unless you also point
-`SANDBOX_NVIM_CONFIG` at a real config directory on the host:
+Runs unconfigured unless you also set `SANDBOX_NVIM_CONFIG` to a real config
+directory on the host (bind-mounted read-only at `~/.config/nvim`):
 
 ```sh
 SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim bin/claude-sandbox ~/repos/some-project
 ```
 
-`SANDBOX_NVIM_CONFIG` is bind-mounted read-only at `~/.config/nvim` inside the
-container. Set both in your own shell profile if you use this mode regularly.
+Set both in your shell profile if you use this mode regularly.
 
 ## Config parity with your host Claude Code setup
 
-`~/.claude` and `~/.claude.json` are bind-mounted read-write from the host
-into the container, so global `CLAUDE.md`, settings, hooks, plugins, MCP
-server config, and your existing login/credentials all carry over
-automatically — the container is a faithful copy of this setup, not a
-separate identity. There's no separate first-run login.
+`~/.claude` is bind-mounted read-write, so global `CLAUDE.md`, settings,
+hooks, plugins, and your existing login/credentials all carry over
+automatically — no separate first-run login. (`~/.claude.json` is handled
+differently — a throwaway per-session copy, not the real file; see "Security
+notes" below for exactly what that means.)
 
 The project directory is mounted at the *same absolute path* inside the
-container as on the host (not a fixed `/workspace`), so Claude Code's
-project/session-history keying lines up between host and container. A
-session started in the sandbox can be resumed on the host afterward with
-`claude --resume <session-id>`.
+container as on the host, so Claude Code's session-history keying lines up
+between host and container: a session's transcript is visible on the host
+afterward, and `claude --resume <session-id>` should find it there. (Whether
+a bare `claude --resume` with no ID picks it as the "most recent" session
+depends on `~/.claude.json`'s own bookkeeping, which — per the throwaway-copy
+design above — doesn't carry over from a sandboxed session.)
 
-The container's own user is built to match yours exactly — same username,
-uid, gid, and home directory (`bin/claude-sandbox` passes these as Docker
-build args; see `Dockerfile`). This is what makes `$HOME`-relative
-assumptions actually work inside the container instead of just superficially
-resembling your setup — your dotfiles, and Claude Code's own plugin
-bookkeeping (which records install locations as literal host-absolute
-paths, not relative to whatever `$HOME` happens to be), resolve to the same
-paths on both sides. The build defaults to `node`/1000/1000/`/home/node` if
-these aren't supplied, so building the image directly (bypassing
-`bin/claude-sandbox`) still works, just without this parity. On a shared
-machine, the built image is tagged per-user (`claude-sandbox:<username>`) so
-two accounts building concurrently don't clobber each other's image.
+The container's own user matches yours exactly — username, uid, gid, and
+home directory (see `Dockerfile`) — so `$HOME`-relative paths (dotfiles,
+Claude Code's plugin bookkeeping) resolve the same on both sides. Defaults to
+`node`/1000/1000/`/home/node` if you build the image directly instead of via
+`bin/claude-sandbox`. Images are tagged per-user (`claude-sandbox:<username>`)
+so concurrent builds on a shared machine don't clobber each other.
 
-Caveat: MCP servers or hooks that shell out to host-specific binaries (e.g. a
-browser for Playwright, a language runtime not installed in this image) may
-not work inside the container unless that tooling is also added to the
-`Dockerfile`.
+Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
+made inside the sandbox get the right identity, but nothing written to it
+during a session reaches your real file). Falls back to an empty config if
+you don't have one.
 
-Your global `~/.gitconfig` (`user.name`/`user.email` and the like) is also
-carried over, so commits made inside the sandbox have the right identity
-without any extra setup - falls back to an empty config if you don't have
-one, it's not a hard requirement. It's a throwaway copy rather than the
-real file, in its own directory rather than mounted directly at
-`~/.gitconfig` (`GIT_CONFIG_GLOBAL` points git at it instead) - `gh auth
-setup-git` needs to write a credential-helper entry into it, and both a
-read-only mount and a single-file bind mount at `~/.gitconfig` break that
-write in different ways. Nothing written to it during a session reaches
-your real `~/.gitconfig`.
+Caveat: MCP servers or hooks that shell out to host-specific binaries (a
+browser, a language runtime not installed here) may not work unless that
+tooling is also added to the `Dockerfile`.
 
 ### Headless git push without agent forwarding
 
-Agent forwarding (the default — see Prerequisites) ties the sandbox's SSH
-access to whichever client's agent is currently forwarded. On a devbox
-reached over SSH+tmux, that agent belongs to whichever client connected —
-when that client disconnects, the forwarded socket dies with it, breaking
-git-over-ssh for anything still running headless in the sandbox.
-
-For sandboxes meant to keep running unattended, generate a dedicated,
-purpose-built keypair instead — not your personal key:
+Agent forwarding (the default) ties SSH access to whichever client is
+currently connected — it dies when that client disconnects, breaking
+git-over-ssh for anything still running headless. For sandboxes meant to run
+unattended, generate a dedicated, purpose-built keypair instead:
 
 ```sh
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude-sandbox_ed25519
 ```
 
-Passphrase-less is deliberate: headless operation has no human to answer a
-prompt, and this is meant to be a low-privilege credential that only ever
-lives inside the container, not your personal identity. Add the public
-half as a Gitea deploy key scoped to only the repos that actually need push
-access, then:
+Passphrase-less is deliberate — this is meant to be a low-privilege
+credential living only inside the container, not your personal identity. Add
+the public half as a Gitea deploy key scoped to just the repos that need
+push access, then:
 
 ```sh
 SANDBOX_SSH_KEY=~/.ssh/claude-sandbox_ed25519 bin/claude-sandbox ~/repos/some-project
 ```
 
-The key is bind-mounted read-only at `/root/.ssh-sandbox-key-src` — under
-`/root`, not `$SANDBOX_HOME` — so only entrypoint.sh's root-run startup code
-can ever read it; the sandbox user (which the session actually runs as) has
-no path to that directory at all. At container start, `entrypoint.sh` loads
-it into a fresh `ssh-agent` running inside the container itself —
-independent of the forwarded socket — copies it out just long enough to do
-that, and deletes the copy immediately afterward. A compromised session can
-use the agent's socket to sign git-over-ssh operations (bounded by whatever
-the deploy key has push access to), but can't read the raw key material
-itself. When `SANDBOX_SSH_KEY` is set, a live forwarded agent is no longer
-required to start the sandbox at all.
+`entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
+deletes the plaintext copy immediately after — the sandbox user itself never
+has a path to the raw key, only the agent socket (see "Security notes" for
+the full mount rationale). Setting `SANDBOX_SSH_KEY` means a live forwarded
+agent is no longer required at all.
 
 ## Shared scratch space
 
-`~/shared` inside the container is a read-write bind mount of a real host
-directory (`$SANDBOX_SHARE_DIR`, default `~/.local/share/claude-sandbox/shared`,
-created automatically) - separate from the project mount, for passing files
-(screenshots, temp scripts) back and forth with a sandboxed session without
-touching the actual project checkout. It persists across sessions since it's
-a real directory, not a container volume. Set `SANDBOX_SHARE_DIR` to point
-it somewhere else.
+`~/shared` is a read-write bind mount of `$SANDBOX_SHARE_DIR` (default
+`~/.local/share/claude-sandbox/shared`, created automatically) — separate
+from the project mount, for passing files (screenshots, temp scripts) in and
+out of a session without touching the actual checkout. Persists across
+sessions since it's a real directory, not a container volume.
 
-`~/specs` is also bind-mounted read-write, at the fixed host path `~/specs`
-(created automatically if it doesn't exist yet) - not configurable like
-`SANDBOX_SHARE_DIR`, since it exists to make the global `CLAUDE.md`
-convention of writing specs to `~/specs/` (also carried into the container)
-actually work there instead of writing into a path that vanishes with the
-session.
+`~/specs` is also bind-mounted read-write at the fixed host path `~/specs`
+(not configurable) — makes the global `CLAUDE.md` convention of writing specs
+there actually persist, instead of vanishing with the container.
 
 ## Testing frontend changes
 
-Playwright (Chromium) is pre-installed, browser included - `require
-("playwright")` works from any script, anywhere in the container, not just
-a project with its own `npm install playwright`. Both the npm package and
-the matching Chromium build are baked in at image build time, so a session
-never needs network access for either.
+Playwright (Chromium) is pre-installed at image build time, browser
+included — `require("playwright")` works from any script, no network access
+or per-project `npm install playwright` needed.
 
-Testing against a project's own local dev server needs no firewall changes
-at all - `localhost`/loopback traffic never goes through the egress
-firewall in the first place. Testing against a real external site works
-the same as any other network use: the domain needs to be on the allowlist
-(`ALLOWED_DOMAINS`, or `bin/claude-sandbox-allow <domain>` for a running
-session) - verified the firewall applies to the browser's own traffic
-exactly like everything else (a non-allowlisted domain gets blocked from
-inside the browser too, not just from `curl`/`git`).
+`localhost`/loopback traffic never goes through the egress firewall, so a
+project's own dev server needs no firewall changes. A real external site
+needs to be on the allowlist like any other network use (`ALLOWED_DOMAINS`,
+or `bin/claude-sandbox-allow <domain>` for a running session) — the firewall
+applies to the browser's traffic exactly like `curl`/`git`.
 
-If a project has its *own* pinned `playwright`/`@playwright/test`
-devDependency at a different version than the one baked in here, its
-`npm install` may still try to download a matching Chromium build from
-Playwright's own CDN, which isn't on the default allowlist - allow it the
-same way as any other one-off domain need if that comes up.
+If a project pins its own `playwright`/`@playwright/test` version, its
+`npm install` may try to download a different Chromium build from
+Playwright's CDN, which isn't allowlisted by default — allow it the same way
+as any other one-off domain need.
 
-Chromium's own internal process sandbox is best-effort here, not something
-to rely on: it launches without erroring, but its setuid sandbox helper
-isn't actually setuid in this image, and this host has the same
-unprivileged-userns restriction that keeps Claude Code's own internal
-sandboxing (see Security notes) from working either - so its namespace-
-based isolation almost certainly isn't active, Chromium just doesn't
-hard-fail the way `bubblewrap` does when it's missing. Not treated as a
-real boundary: this container is already the boundary that matters, and a
-compromised session already has full bash access as the container's own
-user regardless, which a Chromium exploit couldn't exceed.
+Chromium's own process sandbox isn't actually active in this image (its
+setuid helper isn't setuid here) — not a concern, since the container itself
+is already the boundary that matters, and a compromised session already has
+full shell access as the container's own user regardless.
 
 ## Sandbox self-awareness
 
-A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`, registered in
-`~/.claude/settings.json`) checks for the `CLAUDE_SANDBOX` environment
-variable this container sets, and when present, injects a reminder that the
-session is running in a disposable, firewalled container and should stay
-within the task at hand — and that if a task genuinely needs to break out of
-the sandbox (broader network access, host-level changes, GUI/hardware), it
-should stop and tell the user rather than trying to work around the
-firewall, since the same session can be resumed unrestricted on the host via
-`claude --resume`. It's a no-op outside the container. This is on top of the
-existing `deny-dangerous-bash.sh` `PreToolUse` hook, which also applies here
-since `~/.claude` is shared.
+A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
+reminder when `CLAUDE_SANDBOX` is set: the session is running in a
+disposable, firewalled container and should stay within the task at hand —
+if something genuinely needs to break out (broader network, host changes,
+GUI/hardware), stop and ask rather than trying to work around the firewall,
+since the same session can be resumed unrestricted on the host via
+`claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
+(`PreToolUse`) also applies here, since `~/.claude` is shared.
 
-`git-push-guard.sh` (also `PreToolUse`/`Bash`, also `CLAUDE_SANDBOX`-gated)
-blocks any `git push` whose resolved remote isn't the Gitea host, and any
-push to `main`/`master` even there — the sandbox workflow is feature branch
-+ `gitea-pr create`, never a direct push. Like the other hooks, this is a
-fast-fail guard against an overeager agent, not a hard security boundary: a
-sandbox session has full shell access and could in principle edit
-`.git/config` to route around it. GitHub push is blocked by default here too
-(on top of the firewall - see "GitHub push: blocked by default, optional
-opt-in" below), unless `ALLOW_GITHUB_PUSH=1` is set. For "never pushes to
-main/master", the authoritative version of that is branch protection on the
-remote repo itself, which this doesn't set up for you.
+`git-push-guard.sh` (`PreToolUse`/`Bash`, also `CLAUDE_SANDBOX`-gated) blocks
+any `git push` whose resolved remote isn't the Gitea host, and any push to
+`main`/`master` even there. Like the other hooks, this is a fast-fail guard
+against an overeager agent, not a hard security boundary — a session has full
+shell access and could in principle edit `.git/config` to route around it.
+GitHub push is blocked by default too (see "GitHub push" below) unless
+`ALLOW_GITHUB_PUSH=1` is set. For a real guarantee against pushes to
+main/master, use branch protection on the remote itself.
 
-sandbox-context.sh also tells the agent the actual workflow to follow
-proactively, not just what's blocked: do new work in a `git worktree`
-rather than switching branches in the mounted checkout in place (that's the
-user's real working copy), then push the feature branch and run
-`gitea-pr create` from the worktree. The worktree has to live *under* the
-mounted project directory (e.g. `.worktrees/<branch>`, not `../<branch>`) -
-only the exact bind-mounted path is backed by real host storage, so a
-worktree created as a sibling of the project (or anywhere under `$HOME`)
-looks fine but silently disappears with the container, worktree and all.
+`sandbox-context.sh` also tells the agent the actual workflow to follow: do
+new work in a `git worktree` under the mounted project (e.g.
+`.worktrees/<branch>`, never `../<branch>` or elsewhere under `$HOME` — only
+the bind-mounted path is backed by real host storage, so a worktree created
+outside it silently vanishes with the container), then push the feature
+branch and run `gitea-pr create`.
 
 ## Network egress firewall
 
 On start, the container runs an allowlist-only `iptables`/`ipset` firewall
 (`init-firewall.sh`), matching the reference dev container. Allowed by
-default: DNS resolution via a local DNS proxy (see "DNS is allowlisted too"
-below), the Docker host itself (not its whole subnet), GitHub's published IP
-ranges (port 443 only - see "GitHub push: blocked by default, optional
-opt-in" below),
-`release-assets.githubusercontent.com` (GitHub release assets - e.g. mason's
-own registry index - redirect here, a separate CDN from github.com's own
-IPs), `registry.npmjs.org`, `pypi.org` and `files.pythonhosted.org` (mason's
-Python-based LSP tools - `ruff`, `basedpyright`, `debugpy` - install via
-pip), `proxy.golang.org` and `sum.golang.org` (`go build`/`go mod download`'s
-module proxy and checksum database), `api.anthropic.com`, and whatever hosts
-`GITEA_SSH_HOST`/`GITEA_API`
-resolve to — that last group isn't port-restricted, so git-over-ssh to Gitea
-works without a separate blanket "port 22 to anywhere" rule. Set
-`ALLOWED_DOMAINS` (space-separated) in the environment to allow more (e.g.
-`crates.io` for a Rust project needing more than what mason/npm already
-cover). Everything else is rejected. Set `ENABLE_FIREWALL=0` to disable it
-entirely (e.g. for debugging a blocked domain).
+default:
 
-IPv6 is blocked outright (`ip6tables` policy DROP on INPUT/OUTPUT/FORWARD,
-and dnsmasq strips AAAA answers so nothing wastes a connection attempt on an
-address that could never be reached) - there's no IPv6 equivalent of the
-allowlist above, so leaving it open would bypass the entire firewall on any
-host with IPv6 egress enabled.
+- DNS resolution via a local proxy (see "DNS is allowlisted too")
+- the Docker host itself (not its whole subnet)
+- GitHub's published IP ranges, port 443 only (see "GitHub push" below)
+- `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` (npm and
+  mason's Python-based LSP tools), `release-assets.githubusercontent.com`
+  (GitHub release assets, a separate CDN from github.com's own IPs),
+  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums),
+  `api.anthropic.com`
+- whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
+  git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
-If your Gitea host is only resolvable via a LAN-local DNS server, make sure
-the Docker host itself can resolve it — containers inherit the host's
-resolver by default.
+Everything else is rejected. Set `ALLOWED_DOMAINS` (space-separated) to allow
+more (e.g. `crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable
+the firewall entirely (debugging only).
+
+IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
+strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
+leaving it open would bypass the whole firewall on any host with IPv6
+egress.
+
+If your Gitea host only resolves via a LAN-local DNS server, make sure the
+Docker host itself can resolve it — containers inherit the host's resolver.
 
 ### DNS is allowlisted too
 
 Resolution itself is restricted, not just the IP connections made
-afterward: `dns-proxy.sh` runs a local `dnsmasq` bound to 127.0.0.1 with no
-fallback resolver, and `/etc/resolv.conf` is repointed at it. Only names
-matching the same allowlist as above (plus `github.com`/
-`githubusercontent.com`/`githubassets.com`, needed since GitHub is
-allowlisted by IP range rather than by resolving those names - see
-`fixed-domains.sh`) get forwarded to Docker's real resolver; anything else
-gets no upstream configured at all and is refused outright. Without this, a
-compromised session could still exfiltrate data by encoding it into query
-names to an attacker-controlled domain even though it could never open a
-direct connection there - IP-based filtering alone doesn't stop that, since
-the DNS query itself was never restricted.
+afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
+and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
+above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
+since GitHub itself is allowlisted by IP range — see `fixed-domains.sh`) get
+forwarded to Docker's real resolver; anything else gets no upstream
+configured at all and is refused outright. Without this, a compromised
+session could exfiltrate data by encoding it into query names to an
+attacker-controlled domain, even with no direct connection ever possible.
 
 ### Adding a domain to a running session
 
@@ -382,47 +322,38 @@ pretty-printed by default, no extra parsing setup needed.
 ## GitHub push: blocked by default, optional opt-in
 
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
-**default**, it can never push there, enforced at the network layer, not just
-by the `git-push-guard.sh` hook: GitHub's IP ranges are only allowlisted on
-port 443. Port 22 is unreachable, so SSH-based push (which could otherwise
-use the forwarded agent's real key - agent forwarding doesn't distinguish
-"push" from "pull") has no transport to use at all, regardless of what any
-hook does or doesn't catch.
+**default** it can never push there — enforced at the network layer, not
+just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
+443. Port 22 is unreachable, so SSH-based push has no transport at all,
+regardless of what any hook does or doesn't catch.
 
-**This is opt-in, not hardcoded.** Set `ALLOW_GITHUB_PUSH=1` to open port 22
-to GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as
-a push destination (the no-direct-to-main rule still applies there too):
+**Opt-in, not hardcoded** — set `ALLOW_GITHUB_PUSH=1` to open port 22 to
+GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
+push destination (the no-direct-to-main rule still applies):
 
 ```sh
 ALLOW_GITHUB_PUSH=1 bin/claude-sandbox ~/repos/some-project
 ```
 
-**Read this before turning it on.** Whether a push actually succeeds still
-depends entirely on what SSH key material is loaded into the agent - the
-forwarded socket (`SSH_AUTH_SOCK`), or `SANDBOX_SSH_KEY` (see "Headless git
-push without agent forwarding" above). A forwarded personal agent with your
-normal GitHub key loaded would let a compromised session push to **any**
-repo that key has write access to, not just the one you intended - agent
-forwarding doesn't distinguish push from pull, and GitHub deploy keys aren't
-involved unless you specifically set one up. Use a dedicated,
-**repo-scoped GitHub deploy key** via `SANDBOX_SSH_KEY` instead of a
-forwarded personal agent whenever `ALLOW_GITHUB_PUSH=1` - that's what
-actually limits the blast radius, the same pattern already recommended for
-Gitea's `SANDBOX_SSH_KEY` above. `ALLOW_GITHUB_PUSH` only changes the
-firewall/hook's *host* check; it does not add any new credential-loading
-path of its own.
+**Read this before turning it on.** Whether a push actually succeeds depends
+entirely on what SSH key is loaded into the agent. A forwarded personal
+agent with your normal GitHub key would let a compromised session push to
+**any** repo that key can write to, not just the one you intended — agent
+forwarding doesn't distinguish push from pull. Use a dedicated,
+**repo-scoped GitHub deploy key** via `SANDBOX_SSH_KEY` instead whenever
+`ALLOW_GITHUB_PUSH=1` is set — that's what actually limits the blast radius.
+`ALLOW_GITHUB_PUSH` only changes the firewall/hook's *host* check; it adds no
+credential-loading path of its own.
 
-`GH_TOKEN` (see Prerequisites) must stay a **read-only** fine-grained PAT
-regardless of this setting - that guidance was never enforced by this flag
-and isn't changed by it. `gh auth setup-git` (run at container start if
-`GH_TOKEN` is set) points git's github.com HTTPS credential helper at `gh`,
-which only ever holds whatever token `GH_TOKEN` provides; a write-scoped
-token there would make HTTPS push possible independent of `ALLOW_GITHUB_PUSH`,
-so don't use one.
+`GH_TOKEN` must stay a **read-only** fine-grained PAT regardless of this
+setting. `gh auth setup-git` (run at container start if `GH_TOKEN` is set)
+points git's github.com HTTPS credential helper at `gh`, which only ever
+holds whatever token `GH_TOKEN` provides — a write-scoped token there would
+make HTTPS push possible independent of `ALLOW_GITHUB_PUSH`, so don't use
+one.
 
-`ALLOW_GITHUB_PUSH` is a per-launch environment variable, not a persistent
-global toggle - it only affects the one `bin/claude-sandbox` invocation it's
-set for.
+`ALLOW_GITHUB_PUSH` is a per-launch variable, not a persistent toggle — it
+only affects the one `bin/claude-sandbox` invocation it's set for.
 
 ## Security notes
 
@@ -444,6 +375,18 @@ one can't happen.
   encoded command, editing `.git/config` directly all sail right through).
   Nothing here stops a compromised or badly-instructed session from
   modifying or deleting the real working copy it's mounted against.
+- That same read-write access to the mounted project is also a
+  host-code-execution vector, not just a data-destruction one: a
+  compromised session could plant `.git/hooks/post-commit` (or
+  `pre-push`, or set `core.hooksPath`), or write a
+  `.claude/settings.local.json` with a malicious hook command, into the
+  project. Both run unsandboxed on the host the next time you run `git`
+  or open Claude Code in that repo - no network egress required, so the
+  firewall doesn't see it either. Same underlying persistence pattern as
+  the `~/.claude/hooks` and `~/.claude.json` risks above, just through the
+  project mount instead of the config mount. "Only point this at trusted
+  repositories" (above) covers input trust; this is about the sandbox
+  writing a persistence payload into an otherwise-trusted repo.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level
@@ -467,20 +410,71 @@ one can't happen.
   is a potential exfiltration path for those credentials if a malicious repo
   manages to manipulate a session. The firewall limits this to
   Anthropic/npm/GitHub/your Gitea host, not the open internet.
-- `settings.json`, `CLAUDE.md`, and `plugins/` under `~/.claude` are
-  layered back read-only on top of the (otherwise read-write) `~/.claude`
+- `settings.json`, `CLAUDE.md`, `plugins/`, and `hooks/` under `~/.claude`
+  are layered back read-only on top of the (otherwise read-write) `~/.claude`
   mount. Hooks execute automatically with no separate approval step, so
-  without this a compromised session could plant a backdoored hook, rewrite
+  without this a compromised session could plant a backdoored hook -
+  including by unlinking one of `install.sh`'s hook symlinks and dropping a
+  plain file in its place, since the dynamic per-target mounts
+  `bin/claude-sandbox` adds at launch only protect symlink targets that
+  resolve *outside* `~/.claude`, never this directory itself - rewrite
   `CLAUDE.md` with injected instructions, or tamper with plugin code -
   something that would then run **unsandboxed on the host** the next time
   Claude Code starts there, turning a single compromised sandbox session
   into persistent host compromise. Everything else under `~/.claude`
   (session/project history, credentials refresh, caches) stays read-write,
   since it's runtime state Claude Code needs to update.
-  `~/.claude.json` is a single file mixing that same kind of live state with
-  config (e.g. `mcpServers`, if ever set) and can't be split at the mount
-  level, so it's left fully read-write - accepted as a residual risk rather
-  than solved.
+- `~/.claude.json` mixes that same kind of live state (project registry,
+  usage stats, caches) with config (`mcpServers`). Unlike the four above,
+  it can't just be layered read-only: Claude Code does an atomic
+  write-temp-then-rename against it during normal startup, before login
+  even completes, and a read-only file makes that **hang** instead of
+  failing cleanly (confirmed against a real read-only copy of this file -
+  upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
+  Instead, `bin/claude-sandbox` generates a throwaway copy of the file at
+  launch (seeded from the real file, same "generate a sandbox-specific
+  file on the host" pattern as the generated `settings.json` copy above)
+  and mounts *that* read-write in its place; the copy is discarded,
+  unmodified in the real file, when the session ends. A compromised
+  session can add whatever it wants to `mcpServers` (or anything else in
+  the file) - it never reaches the real `~/.claude.json`, so there's
+  nothing to persist. This also means multiple concurrent sandbox sessions
+  never contend over the same file - each gets its own independent copy.
+
+  ### Throwaway ~/.claude.json: what doesn't carry over
+
+  Because nothing writes back, anything a *sandboxed* session would
+  normally have caused Claude Code to record into `~/.claude.json` is lost
+  when that session ends, instead of showing up in a later host-side
+  `claude` run. Concretely, as of the fields this file holds today:
+
+  - **Per-project trust/approval state** - `hasTrustDialogAccepted`,
+    `allowedTools`, `enabledMcpjsonServers`/`disabledMcpjsonServers` - for
+    any project directory opened only inside the sandbox. Opening that same
+    project on the host later re-prompts for whatever it would have
+    prompted for outside the sandbox too. Largely moot today since the
+    sandbox always runs `--dangerously-skip-permissions`, but the trust
+    dialog is a separate gate from tool-permission prompts.
+  - **`mcpServers` additions or edits** - the point of this fix, not an
+    incidental side effect. Nothing added or changed here during a
+    sandboxed session ever reaches the real file.
+  - **Session/usage telemetry** - `lastCost`, `lastDuration`,
+    `lastTotalInputTokens`/`lastTotalOutputTokens`, `lastModelUsage`,
+    `lastSessionId`, `mcpContextUris`, and similar per-project fields.
+    Sandbox activity won't show up in host-side usage totals or in
+    `claude --resume`'s "last session" metadata for that project.
+  - **Global counters and caches** - `numStartups`, `firstStartTime`,
+    `cachedGrowthBookFeatures`, `changelogLastFetched`,
+    `announcementImpressions`, `tipsHistory`, `feedbackSurveyState`, and
+    similar top-level bookkeeping. Purely cosmetic - these get refetched or
+    recomputed as needed; sandbox runs just don't contribute to the host's
+    copies of them.
+  - **`oauthAccount`/`userID`/`machineID`** are read fresh from the real
+    file at the start of every sandbox launch, so authentication carries in
+    normally each time; anything that changes about them *during* a
+    sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
+    re-checking if a future Claude Code version starts relying on that for
+    normal operation.
 - DNS resolution itself is allowlisted (see "DNS is allowlisted too" above),
   not just the IP connections made afterward, closing off exfiltration via
   encoding data into query names to an attacker-controlled domain - verified
@@ -510,6 +504,15 @@ one can't happen.
   at `/root/...`, not under the sandbox user's own home, specifically so
   that user (which the session actually runs as) has no path to read the
   raw key material - only the agent socket it's loaded into.
+- The gitconfig copy `bin/claude-sandbox` generates (see that mount's
+  comment in `docker-compose.yml`) carries over whatever's in your real
+  `~/.gitconfig` verbatim. If yours has inline credentials (a
+  `[credential]` token, a `url.<token@>.insteadOf` rewrite, a
+  `credential.helper store` path), those enter the container along with
+  it - an unadvertised secret-carrying path distinct from the
+  SSH-agent/token story documented above. Keep credentials out of your
+  global gitconfig, or expect them to be reachable from inside the
+  sandbox.
 - The sandbox's own user (matching your host user — see "Config parity"
   above) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to

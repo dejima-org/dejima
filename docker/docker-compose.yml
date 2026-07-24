@@ -85,12 +85,29 @@ services:
       - ${SANDBOX_SETTINGS_FILE:?set by bin/claude-sandbox}:${HOME}/.claude/settings.json:ro
       - ${HOME}/.claude/CLAUDE.md:${HOME}/.claude/CLAUDE.md:ro
       - ${HOME}/.claude/plugins:${HOME}/.claude/plugins:ro
-      # ~/.claude.json is a single file mixing live app state (project
-      # registry, onboarding flags, caches) with config (e.g. mcpServers, if
-      # ever set) that can't be split at the mount level - left read-write
-      # since most of its content must stay writable for normal operation.
-      # See README Security notes for this residual risk.
-      - ${HOME}/.claude.json:${HOME}/.claude.json
+      # ~/.claude/hooks holds hook *code* too (install.sh symlinks this
+      # repo's hooks/ files into it) - same rationale as settings.json/
+      # CLAUDE.md/plugins above, but for a gap those three don't cover:
+      # without this, the directory itself stays part of the read-write
+      # ~/.claude mount, so a compromised session could unlink one of
+      # install.sh's symlinks and drop a plain file in its place. The
+      # dynamic per-symlink-target mounts bin/claude-sandbox adds at
+      # launch (see below) only protect targets that resolve *outside*
+      # ~/.claude - they never cover this directory itself, and a plain
+      # file dropped here wouldn't be a symlink for that logic to even
+      # notice. That file would then run unsandboxed on the host as a
+      # hook the next time Claude Code starts there - the same
+      # persistence path the other three overlays exist to close.
+      - ${HOME}/.claude/hooks:${HOME}/.claude/hooks:ro
+      # A throwaway per-session copy, not the real file - see
+      # bin/claude-sandbox and README "Throwaway ~/.claude.json". A plain
+      # read-only mount hangs Claude Code on startup (it writes to this
+      # file before login completes), so this can't just be layered
+      # read-only the way settings.json/CLAUDE.md/plugins/hooks are above;
+      # a generated, discarded copy is what actually stops a compromised
+      # session's changes (e.g. a malicious mcpServers entry) from ever
+      # reaching the real file.
+      - ${SANDBOX_CLAUDE_JSON_FILE:?set by bin/claude-sandbox}:${HOME}/.claude.json
       # ~/.claude/CLAUDE.md (mounted above) tells agents to write specs to
       # ~/specs/ rather than a project-local path - that instruction is
       # already in effect inside the container (CLAUDE.md carries over), so

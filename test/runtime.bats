@@ -79,6 +79,8 @@ teardown() {
     docker rmi "claude-sandbox-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -170,6 +172,52 @@ dexec_node() {
     [ "$status" -ne 0 ]
 }
 
+@test "~/.claude.json mount is a discarded per-session copy - a write inside the container never reaches the host source it was seeded from" {
+    # In the real bin/claude-sandbox flow, the file mounted at
+    # ~/.claude.json is always a *generated* per-session copy (see
+    # SANDBOX_CLAUDE_JSON_FILE in bin/claude-sandbox), never the real
+    # ~/.claude.json - so nothing written to it in the container, including
+    # Claude Code's own atomic write-temp-then-rename on startup, can ever
+    # reach the real file. host_copy here stands in for that real file: it's
+    # seeded with the same content as the mounted file but never mounted
+    # itself, so it can only change if something actually writes back to the
+    # real source - which must not happen.
+    local test_container="claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")"
+    local mounted_copy="$BATS_TEST_TMPDIR/claude.json"
+    local host_copy="$BATS_TEST_TMPDIR/claude-json-original.json"
+
+    echo '{"marker": "test-value"}' > "$mounted_copy"
+    chmod 666 "$mounted_copy"
+    cp "$mounted_copy" "$host_copy"
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$mounted_copy:/home/node/.claude.json" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    # Simulate the write Claude Code itself does against this path at
+    # startup (before login even completes - see docker-compose.yml's
+    # comment on this mount).
+    run docker exec -u node "$test_container" sh -c 'echo "{\"marker\": \"changed-by-container\"}" > $HOME/.claude.json'
+    [ "$status" -eq 0 ]
+
+    run docker exec -u node "$test_container" cat /home/node/.claude.json
+    [[ "$output" == *"changed-by-container"* ]]
+
+    run cat "$host_copy"
+    [[ "$output" == *"test-value"* ]]
+    [[ "$output" != *"changed-by-container"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
 @test "IPv6 is fully blocked" {
     run dexec ip6tables -L OUTPUT -n
     [[ "$output" == *"policy DROP"* ]]
@@ -216,6 +264,33 @@ dexec_node() {
 
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "GITEA_SSH_HOST is exempted from stop-dns-rebind, other allowed domains are not" {
+    local test_container="claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GITEA_SSH_HOST=gitea.internal.example \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    run docker exec "$test_container" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+
+    run docker exec "$test_container" grep 'rebind-domain-ok=/gitea.internal.example/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -eq 0 ]
+
+    run docker exec "$test_container" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
