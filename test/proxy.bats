@@ -85,3 +85,20 @@ teardown() {
     count="$(jq '[.headers | keys[] | select(ascii_downcase == "anthropic-beta")] | length' <<<"$output")"
     [ "$count" -eq 1 ]
 }
+
+@test "SSE: full stream is delivered" {
+    start_proxy
+    run curl -sN --max-time 5 --unix-socket "$SOCK" http://proxy/sse
+    [[ "$output" == *"data: first"* ]]
+    [[ "$output" == *"data: second"* ]]
+}
+
+@test "SSE: first event arrives before upstream finishes (unbuffered)" {
+    # Fixture sends "first" immediately, then sleeps 2s before "second".
+    # Reading for only 1s must therefore yield "first" - if the proxy
+    # buffered the whole response, we'd get nothing here.
+    start_proxy
+    run bash -c 'curl -sN --max-time 1 --unix-socket "$1" http://proxy/sse || true' _ "$SOCK"
+    [[ "$output" == *"data: first"* ]]
+    [[ "$output" != *"data: second"* ]]
+}

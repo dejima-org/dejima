@@ -119,8 +119,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 self.send_header("Connection", "close")
             self.end_headers()
+            self.wfile.flush()
+            # Stream response body, flushing after each chunk for unbuffered delivery.
+            # Use read1() to get partial reads immediately rather than waiting for
+            # a full buffer or EOF, ensuring SSE events stream unbuffered.
             while True:
-                chunk = resp.read(8192)
+                chunk = resp.fp.read1(4096)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
