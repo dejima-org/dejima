@@ -1,0 +1,137 @@
+#!/bin/bash
+# Host-side exit-time audit for bin/claude-sandbox. Snapshots the workspace's
+# host-persistence surfaces before the container runs, and after it exits
+# reports (advisory only - never blocks) anything a session changed that
+# would execute or load OUTSIDE the sandbox: git config keys that run a
+# command on the next `git`, and content under .claude/ / .mcp.json /
+# .envrc / .vscode/ / .git/hooks/. Read the report before running `git` or
+# `claude` in that repo again. See README "Security notes".
+set -uo pipefail
+
+cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
+
+# git config keys whose values run a command on the next git invocation.
+# Key names are case-insensitive in git, so match on a lowercased copy.
+is_exec_key() {
+    local key; key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$key" in
+        core.hookspath|core.fsmonitor|core.sshcommand|credential.helper) return 0 ;;
+        filter.*.smudge|filter.*.clean|filter.*.process) return 0 ;;
+        diff.*.textconv) return 0 ;;
+    esac
+    return 1
+}
+
+hash_paths() {
+    # path<TAB>sha for each existing monitored path, sorted by path
+    local ws="$1" p
+    {
+        for p in .mcp.json .envrc; do
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(sha256sum "$ws/$p" | cut -d' ' -f1)"
+        done
+        for dir in .claude .vscode .git/hooks; do
+            if [ -d "$ws/$dir" ]; then
+                while IFS= read -r -d '' f; do
+                    printf '%s\t%s\n' "${f#"$ws"/}" "$(sha256sum "$f" | cut -d' ' -f1)"
+                done < <(find "$ws/$dir" -type f -print0)
+            fi
+        done
+    } | sort
+}
+
+git_config_snapshot() {
+    # Parse the raw config file(s) instead of `git config --list`, which
+    # lowercases key names (core.hooksPath -> core.hookspath) and would hide
+    # the exact key a session set.
+    local ws="$1" f pfx
+    for f in "$ws/.git/config" "$ws"/.git/worktrees/*/config.worktree; do
+        [ -f "$f" ] || continue
+        case "$f" in
+            "$ws"/.git/worktrees/*) pfx="worktree:" ;;
+            *) pfx="" ;;
+        esac
+        awk -v pfx="$pfx" '
+            function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+            /^[ \t]*[#;]/ { next }
+            /^[ \t]*\[/ {
+                line = trim($0)
+                sub(/^\[/, "", line); sub(/\][ \t]*$/, "", line)
+                if (match(line, /"/)) {
+                    sect = trim(substr(line, 1, RSTART - 1))
+                    rest = line
+                    sub(/^[^"]*"/, "", rest)
+                    sub(/"[ \t]*$/, "", rest)
+                    section = sect "." rest
+                } else {
+                    section = line
+                }
+                next
+            }
+            /=/ {
+                line = trim($0)
+                eq = index(line, "=")
+                key = trim(substr(line, 1, eq - 1))
+                val = trim(substr(line, eq + 1))
+                print pfx section "." key "=" val
+            }
+        ' "$f"
+    done | sort
+}
+
+case "$cmd" in
+    snapshot)
+        { echo "### gitconfig"; git_config_snapshot "$ws";
+          echo "### paths";     hash_paths "$ws"; } > "$state" 2>/dev/null || true
+        exit 0
+        ;;
+    compare)
+        [ -f "$state" ] || { echo "claude-sandbox audit: no snapshot to compare against, skipping." >&2; exit 0; }
+        new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
+                           echo "### paths";     hash_paths "$ws"; } > "$new" 2>/dev/null || {
+            echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
+
+        findings=()
+        # config diffs: added/changed lines present in new but not old
+        while IFS= read -r line; do
+            key="${line%%=*}"
+            if is_exec_key "$key"; then
+                findings+=("COMMAND-EXECUTION git config: $line")
+            elif [ "$key" = "alias" ] || [[ "$key" == alias.* ]]; then
+                # alias.<name>=!cmd runs a shell command
+                case "${line#*=}" in
+                    '!'*) findings+=("COMMAND-EXECUTION git alias: $line") ;;
+                    *)    findings+=("changed git config: $line") ;;
+                esac
+            else
+                findings+=("changed git config: $line")
+            fi
+        done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
+                          <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
+
+        # path diffs: any monitored file added/changed/removed
+        while IFS= read -r line; do
+            findings+=("changed workspace file: ${line%%$'\t'*}")
+        done < <(comm -3 <(sed -n '/^### paths/,$p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### paths/,$p' "$new"   | grep -v '^### ') \
+                 | sed 's/^\t//' | sort -u )
+
+        rm -f "$new"
+        [ "${#findings[@]}" -eq 0 ] && exit 0
+
+        {
+            echo ""
+            echo "================================================================"
+            echo " claude-sandbox: this session changed host-persistence surfaces"
+            echo " in $ws"
+            echo " Review these BEFORE running 'git' or 'claude' in that repo:"
+            echo "----------------------------------------------------------------"
+            printf '  - %s\n' "${findings[@]}"
+            echo "================================================================"
+        } >&2
+        exit 0
+        ;;
+    *)
+        echo "usage: claude-sandbox-audit {snapshot|compare} <workspace> <state-file>" >&2
+        exit 2
+        ;;
+esac
