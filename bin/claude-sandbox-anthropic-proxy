@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+# Host-side credential-injecting proxy for sandboxed Claude Code sessions.
+# The container only ever holds a placeholder token; this proxy (launched on
+# the host by bin/claude-sandbox, reached via a bind-mounted unix socket and
+# an in-container loopback forwarder) strips the placeholder and injects the
+# real OAuth access token from ~/.claude/.credentials.json, so the credential
+# itself never enters the container. It also owns token refresh: rotated
+# tokens are written back to the real host file atomically, keeping
+# host-side sessions logged in. See README "Security notes" and
+# ~/specs/2026-07-24-claude-sandbox-credential-proxy-design.md.
+import argparse
+import http.client
+import json
+import os
+import socketserver
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlsplit
+
+PLACEHOLDER = "sandbox-credential-proxy-placeholder"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_BETA = "oauth-2025-04-20"
+HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade", "host",
+}
+
+
+class Credentials:
+    def __init__(self, path, oauth_endpoint, margin):
+        self.path = path
+        self.oauth_endpoint = oauth_endpoint
+        self.margin = margin
+        self.lock = threading.Lock()
+
+    def _read(self):
+        with open(self.path) as f:
+            return json.load(f)
+
+    def access_token(self):
+        return self._read()["claudeAiOauth"]["accessToken"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_request(self, *args):
+        pass  # per-request lines would interleave with the session's own UI
+
+    def log_error(self, fmt, *args):
+        sys.stderr.write("claude-sandbox-anthropic-proxy: " + fmt % args + "\n")
+
+    def _read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            chunks = []
+            while True:
+                size = int(self.rfile.readline().split(b";")[0], 16)
+                if size == 0:
+                    self.rfile.readline()
+                    return b"".join(chunks)
+                chunks.append(self.rfile.read(size))
+                self.rfile.read(2)
+        return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+
+    def _fail(self, status, message):
+        self.log_error("%s", message)
+        body = json.dumps(
+            {"type": "error", "error": {"type": "proxy_error", "message": message}}
+        ).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _upstream(self, token, body):
+        u = self.server.upstream
+        cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+        conn = cls(u.netloc, timeout=600)
+        headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower() not in HOP_BY_HOP
+            and k.lower() not in ("authorization", "x-api-key", "content-length")
+        }
+        headers["Authorization"] = "Bearer " + token
+        betas = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip()]
+        if OAUTH_BETA not in betas:
+            betas.append(OAUTH_BETA)
+        headers["anthropic-beta"] = ",".join(betas)
+        headers["Content-Length"] = str(len(body))
+        conn.request(self.command, self.path, body=body, headers=headers)
+        return conn, conn.getresponse()
+
+    def _proxy(self):
+        body = self._read_body()
+        try:
+            token = self.server.creds.access_token()
+        except Exception as e:
+            return self._fail(502, "cannot load credentials: %s" % e)
+        try:
+            conn, resp = self._upstream(token, body)
+        except Exception as e:
+            return self._fail(502, "upstream request failed: %s" % e)
+        try:
+            self.send_response(resp.status)
+            length = resp.getheader("Content-Length")
+            for k, v in resp.getheaders():
+                if k.lower() in HOP_BY_HOP or k.lower() in ("content-length", "date", "server"):
+                    continue
+                self.send_header(k, v)
+            if length is not None:
+                self.send_header("Content-Length", length)
+            else:
+                # Unknown length (chunked SSE): stream until upstream EOF,
+                # delimited by closing our side too.
+                self.close_connection = True
+                self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        finally:
+            conn.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _proxy
+
+
+class ProxyServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, socket_path, upstream, creds):
+        self.upstream = upstream
+        self.creds = creds
+        super().__init__(socket_path, Handler)
+
+    def get_request(self):
+        # BaseHTTPRequestHandler expects a (host, port) client_address;
+        # a unix-socket accept() returns '' - substitute a dummy pair.
+        request, _ = self.socket.accept()
+        return request, ("sandbox", 0)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--socket", required=True)
+    p.add_argument("--credentials", required=True)
+    p.add_argument("--upstream", default="https://api.anthropic.com")
+    p.add_argument("--oauth-endpoint", default="https://platform.claude.com/v1/oauth/token")
+    p.add_argument("--refresh-margin", type=int, default=300)
+    args = p.parse_args()
+
+    creds = Credentials(args.credentials, args.oauth_endpoint, args.refresh_margin)
+    try:
+        creds.access_token()
+    except Exception as e:
+        sys.stderr.write(
+            "claude-sandbox-anthropic-proxy: unusable credentials file %s: %s\n"
+            % (args.credentials, e))
+        return 1
+
+    if os.path.exists(args.socket):
+        os.unlink(args.socket)
+    server = ProxyServer(args.socket, urlsplit(args.upstream), creds)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
