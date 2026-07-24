@@ -327,3 +327,8 @@ setup() {
 @test "bin/claude-sandbox pre-creates the code-carrying ~/.claude overlay dirs" {
     grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents"' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "bin/claude-sandbox overlays the workspace .git/hooks read-only when .git is a real dir" {
+    grep -q 'if \[ -d "$WORKSPACE_DIR/.git/hooks" \]' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
