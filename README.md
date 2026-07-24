@@ -444,6 +444,18 @@ one can't happen.
   encoded command, editing `.git/config` directly all sail right through).
   Nothing here stops a compromised or badly-instructed session from
   modifying or deleting the real working copy it's mounted against.
+- That same read-write access to the mounted project is also a
+  host-code-execution vector, not just a data-destruction one: a
+  compromised session could plant `.git/hooks/post-commit` (or
+  `pre-push`, or set `core.hooksPath`), or write a
+  `.claude/settings.local.json` with a malicious hook command, into the
+  project. Both run unsandboxed on the host the next time you run `git`
+  or open Claude Code in that repo - no network egress required, so the
+  firewall doesn't see it either. Same underlying persistence pattern as
+  the `~/.claude/hooks` and `~/.claude.json` risks above, just through the
+  project mount instead of the config mount. "Only point this at trusted
+  repositories" (above) covers input trust; this is about the sandbox
+  writing a persistence payload into an otherwise-trusted repo.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level
@@ -561,6 +573,15 @@ one can't happen.
   at `/root/...`, not under the sandbox user's own home, specifically so
   that user (which the session actually runs as) has no path to read the
   raw key material - only the agent socket it's loaded into.
+- The gitconfig copy `bin/claude-sandbox` generates (see that mount's
+  comment in `docker-compose.yml`) carries over whatever's in your real
+  `~/.gitconfig` verbatim. If yours has inline credentials (a
+  `[credential]` token, a `url.<token@>.insteadOf` rewrite, a
+  `credential.helper store` path), those enter the container along with
+  it - an unadvertised secret-carrying path distinct from the
+  SSH-agent/token story documented above. Keep credentials out of your
+  global gitconfig, or expect them to be reachable from inside the
+  sandbox.
 - The sandbox's own user (matching your host user — see "Config parity"
   above) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
