@@ -339,3 +339,13 @@ setup() {
     grep -q 'parse_allowed_domains_env "$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'source "$SCRIPT_DIR/claude-sandbox-env.sh"' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "bin/claude-sandbox snapshots before the run and compares after" {
+    grep -q '"$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q '"$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox warns when the workspace is this repo itself (TCB self-mount)" {
+    grep -q 'sandbox.s own repo' "$REPO_ROOT/bin/claude-sandbox" || \
+    grep -q 'TCB' "$REPO_ROOT/bin/claude-sandbox"
+}

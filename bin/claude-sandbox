@@ -167,7 +167,9 @@ else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi
 
-cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-audit.XXXXXX")"
+
+cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
 trap cleanup EXIT
 
 # Git commits inside the sandbox need a user.name/user.email - carry over a
@@ -290,6 +292,22 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
+# Snapshot host-persistence surfaces so the post-run audit can report
+# anything this session changed (advisory - see bin/claude-sandbox-audit).
+"$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+
+# When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
+# docker/, install.sh, config/env, test/) is mounted writable - warn, and
+# the audit below will report any change to it.
+if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
+    echo "Warning: sandbox's own repo is the mounted workspace - its trusted" >&2
+    echo "computing base (bin/, hooks/, docker/, install.sh) is writable this" >&2
+    echo "session; the exit audit will report any changes to review." >&2
+fi
+
 # Not `exec`: the EXIT trap above needs this shell to still be around
 # afterward to actually clean up the generated settings file.
 docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@"
+compose_status=$?
+"$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+exit "$compose_status"
