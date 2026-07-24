@@ -280,3 +280,9 @@ setup() {
     grep -qE '^stop-dns-rebind\s*$' "$SANDBOX_DIR/dns-proxy.sh"
     grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
 }
+
+@test "IPv6 blocking fails loud instead of silently swallowing errors once ip6tables is confirmed usable" {
+    run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
+    [ "$status" -ne 0 ]
+    grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
+}

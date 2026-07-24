@@ -23,14 +23,20 @@ ipset destroy github-domains 2>/dev/null || true
 
 # Block IPv6 outright - there's no IPv6 equivalent of the allowlist below, so
 # without this, any host with IPv6 egress enabled would let a container
-# bypass the entire IPv4-based firewall via an AAAA-resolved address. `||
-# true` throughout since ip6tables may simply be unavailable on hosts with
-# IPv6 fully disabled at the kernel level, which is an equally fine outcome.
-ip6tables -F 2>/dev/null || true
-ip6tables -X 2>/dev/null || true
-ip6tables -P INPUT DROP 2>/dev/null || true
-ip6tables -P OUTPUT DROP 2>/dev/null || true
-ip6tables -P FORWARD DROP 2>/dev/null || true
+# bypass the entire IPv4-based firewall via an AAAA-resolved address. Only
+# tolerate ip6tables being entirely unusable (IPv6 disabled at the kernel
+# level, e.g. no ip6_tables module) - once it's confirmed to work at all, a
+# failure partway through must fail the whole script (set -e, no more
+# blanket `|| true`) rather than silently leaving IPv6 wide open.
+if ip6tables -L >/dev/null 2>&1; then
+    ip6tables -F
+    ip6tables -X
+    ip6tables -P INPUT DROP
+    ip6tables -P OUTPUT DROP
+    ip6tables -P FORWARD DROP
+else
+    echo "ip6tables unusable - assuming IPv6 is unavailable at the kernel level"
+fi
 
 # 2. Selectively restore ONLY internal Docker DNS resolution
 if [ -n "$DOCKER_DNS_RULES" ]; then
