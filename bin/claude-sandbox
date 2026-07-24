@@ -126,10 +126,10 @@ mkdir -p "$SANDBOX_SHARE_DIR"
 # used the convention yet.
 mkdir -p "$HOME/specs"
 
-# skills/commands/agents overlays (see docker-compose.yml) can only apply if
-# the source dirs exist - pre-create them so a host that has never used one
-# still gets the read-only overlay instead of a writable gap.
-mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents"
+# skills/commands/agents/output-styles overlays (see docker-compose.yml) can
+# only apply if the source dirs exist - pre-create them so a host that has
+# never used one still gets the read-only overlay instead of a writable gap.
+mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"
 
 # Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
 # "sandbox" block) is redundant here - it can't even function inside this
@@ -223,7 +223,7 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # cloned to.
 extra_mounts=()
 mounted_dirs=""
-for overlay_dir in hooks skills commands agents; do
+for overlay_dir in hooks skills commands agents output-styles; do
     dir="$HOME/.claude/$overlay_dir"
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do

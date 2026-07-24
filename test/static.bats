@@ -313,19 +313,20 @@ setup() {
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
 }
 
-@test "~/.claude skills/commands/agents are layered read-only over the read-write parent mount" {
+@test "~/.claude skills/commands/agents/output-styles are layered read-only over the read-write parent mount" {
     # Same persistence-path rationale as the hooks overlay: these carry
-    # executable skill scripts / injectable command + agent prompts that a
-    # later unsandboxed host session would run or load. Without an overlay
-    # (and without pre-creation, since they may not exist) a compromised
-    # session can create and populate them.
+    # executable skill scripts / injectable command, agent, and output-style
+    # prompts that a later unsandboxed host session would run or load.
+    # Without an overlay (and without pre-creation, since they may not
+    # exist) a compromised session can create and populate them.
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/skills:\$\{HOME\}/\.claude/skills:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/commands:\$\{HOME\}/\.claude/commands:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/agents:\$\{HOME\}/\.claude/agents:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/output-styles:\$\{HOME\}/\.claude/output-styles:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
 @test "bin/claude-sandbox pre-creates the code-carrying ~/.claude overlay dirs" {
-    grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"' "$REPO_ROOT/bin/claude-sandbox"
 }
 
 @test "bin/claude-sandbox overlays the workspace .git/hooks read-only when .git is a real dir" {

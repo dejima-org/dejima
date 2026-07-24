@@ -12,14 +12,25 @@ cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
 
 PROJECTS_DIR="${CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
 
-# git config keys whose values run a command on the next git invocation.
-# Key names are case-insensitive in git, so match on a lowercased copy.
+# This script's own repo root - the sandbox's trusted computing base (see
+# tcb_snapshot below) is only monitored when the workspace being audited IS
+# this repo (a self-mounted session). Overridable for tests.
+AUDIT_REPO_ROOT="${CLAUDE_SANDBOX_AUDIT_REPO_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+
+# git config keys whose values run a command on the next git invocation, or
+# (include.path/includeif.*.path) indirect to another config file that could
+# set one - key names are case-insensitive in git, so match on a lowercased
+# copy.
 is_exec_key() {
     local key; key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     case "$key" in
         core.hookspath|core.fsmonitor|core.sshcommand|credential.helper) return 0 ;;
+        core.pager|core.editor|sequence.editor|gpg.program|diff.external) return 0 ;;
+        pager.*) return 0 ;;
         filter.*.smudge|filter.*.clean|filter.*.process) return 0 ;;
-        diff.*.textconv) return 0 ;;
+        diff.*.textconv|diff.*.command) return 0 ;;
+        merge.*.driver) return 0 ;;
+        include.path|includeif.*.path) return 0 ;;
     esac
     return 1
 }
@@ -39,18 +50,50 @@ unquote_value() {
     printf '%s' "$v"
 }
 
+# Hash a regular file's content, or a symlink's target path string (so a
+# repointed symlink is caught even though the link's own inode doesn't
+# change and its target may not exist to read content from).
+hash_entry() {
+    local f="$1"
+    if [ -L "$f" ]; then
+        printf '%s' "$(readlink "$f")" | sha256sum | cut -d' ' -f1
+    else
+        sha256sum "$f" | cut -d' ' -f1
+    fi
+}
+
 hash_paths() {
     # path<TAB>sha for each existing monitored path, sorted by path
     local ws="$1" p
     {
         for p in .mcp.json .envrc; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(sha256sum "$ws/$p" | cut -d' ' -f1)"
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
         done
         for dir in .claude .vscode .git/hooks; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
-                    printf '%s\t%s\n' "${f#"$ws"/}" "$(sha256sum "$f" | cut -d' ' -f1)"
-                done < <(find "$ws/$dir" -type f -print0)
+                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
+            fi
+        done
+    } | sort
+}
+
+tcb_snapshot() {
+    # path<TAB>sha for the sandbox's own trusted computing base, but only
+    # when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
+    # Empty otherwise, so a normal (non-self) workspace is unaffected.
+    local ws="$1" p
+    [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
+    {
+        for p in install.sh config/env; do
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+        done
+        for dir in bin hooks docker test; do
+            if [ -d "$ws/$dir" ]; then
+                while IFS= read -r -d '' f; do
+                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
         done
     } | sort
@@ -113,14 +156,16 @@ case "$cmd" in
     snapshot)
         { echo "### gitconfig"; git_config_snapshot "$ws";
           echo "### paths";     hash_paths "$ws";
-          echo "### projects";  projects_snapshot "$PROJECTS_DIR"; } > "$state" 2>/dev/null || true
+          echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+          echo "### tcb";       tcb_snapshot "$ws"; } > "$state" 2>/dev/null || true
         exit 0
         ;;
     compare)
         [ -f "$state" ] || { echo "claude-sandbox audit: no snapshot to compare against, skipping." >&2; exit 0; }
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
-                           echo "### projects";  projects_snapshot "$PROJECTS_DIR"; } > "$new" 2>/dev/null || {
+                           echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+                           echo "### tcb";       tcb_snapshot "$ws"; } > "$new" 2>/dev/null || {
             echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
         findings=()
@@ -161,8 +206,17 @@ case "$cmd" in
                 "$current_slug"|"$current_slug"-*) continue ;;
             esac
             findings+=("CROSS-PROJECT history/memory write: $slug")
-        done < <(comm -13 <(sed -n '/^### projects/,$p' "$state" | grep -v '^### ') \
-                          <(sed -n '/^### projects/,$p' "$new"   | grep -v '^### ') )
+        done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
+                          <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )
+
+        # tcb diffs: any change under the sandbox's own trusted computing
+        # base, only populated when this session's workspace IS the
+        # sandbox's own repo (see tcb_snapshot) - empty/no-op otherwise.
+        while IFS= read -r line; do
+            findings+=("TCB (sandbox self) modified: $line")
+        done < <(comm -3 <(sed -n '/^### tcb/,$p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### tcb/,$p' "$new"   | grep -v '^### ') \
+                 | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"
         [ "${#findings[@]}" -eq 0 ] && exit 0

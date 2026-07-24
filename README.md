@@ -411,20 +411,29 @@ one can't happen.
   run and diffs them after the container exits: `.git/config` (and worktree
   `config.worktree`) keys that run a command on the next `git` -
   `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
-  `credential.helper`, `filter.*.smudge`/`clean`/`process`,
-  `diff.*.textconv`, `!`-shell aliases - plus content changes under the
-  workspace's `.claude/`, `.mcp.json`, `.envrc`, `.vscode/`, and
-  `.git/hooks/`, plus cross-project writes under `~/.claude/projects` (see
-  below). It's **advisory only**: it fires *after* the session has already
-  ended, so a report of a planted `core.hooksPath` or hook file is
-  something to read and clean up *before* the next `git` or `claude` in
-  that repo, not something that was blocked. It's silent when nothing
+  `credential.helper`, `core.pager`, `pager.*`, `core.editor`,
+  `sequence.editor`, `gpg.program`, `diff.external`, `merge.*.driver`,
+  `diff.*.command`, `filter.*.smudge`/`clean`/`process`, `diff.*.textconv`,
+  `include.path`/`includeif.*.path` (config indirection - these can point at
+  a planted file that itself sets an exec key, so the exec key never
+  appears in `.git/config` directly), `!`-shell aliases - plus content
+  changes under the workspace's `.claude/`, `.mcp.json`, `.envrc`,
+  `.vscode/`, and `.git/hooks/` (symlinks included - a repointed symlink is
+  hashed by its target, not just its content), plus cross-project writes
+  under `~/.claude/projects` (see below). When the mounted workspace *is*
+  this repo's own sandbox itself (see the trusted-computing-base note
+  further below), it also diffs content hashes of the sandbox's own trusted
+  computing base - `bin/`, `hooks/`, `docker/`, `install.sh`, `config/env`,
+  `test/` - under that workspace. It's **advisory only**: it fires *after*
+  the session has already ended, so a report of a planted `core.hooksPath`
+  or hook file is something to read and clean up *before* the next `git`
+  or `claude` in that repo, not something that was blocked. It's silent when nothing
   changed, and never affects the session's own exit code even if it can't
-  complete (e.g. `git` not available to read the config). It doesn't cover
-  `$SANDBOX_SHARE_DIR` (see "Shared scratch space") - that hand-off path
-  stays unaudited - and its coverage is a fixed list of known Claude Code
-  config surfaces, not a general integrity check, so a future config
-  surface this list hasn't been taught about yet would go unreported.
+  complete. It doesn't cover `$SANDBOX_SHARE_DIR` (see "Shared scratch
+  space") - that hand-off path stays unaudited - and its coverage is a
+  fixed list of known Claude Code config surfaces, not a general integrity
+  check, so a future config surface this list hasn't been taught about yet
+  would go unreported.
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted read-only, unlike the other `~/.claude` overlays above -
   deliberately. Scoping a read-only overlay to "the current project's slug"
@@ -469,29 +478,30 @@ one can't happen.
   manages to manipulate a session. The firewall limits this to
   Anthropic/npm/GitHub/your Gitea host, not the open internet.
 - `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
-  and `agents/` under `~/.claude` are layered back read-only on top of the
-  (otherwise read-write) `~/.claude` mount. Hooks execute automatically with
-  no separate approval step, skills can ship executable scripts, and
-  commands/agents are prompt text loaded into a later host session, so
-  without this a compromised session could plant a backdoored hook -
-  including by unlinking one of `install.sh`'s hook symlinks and dropping a
-  plain file in its place, since the dynamic per-target mounts
-  `bin/claude-sandbox` adds at launch only protect symlink targets that
-  resolve *outside* `~/.claude`, never this directory itself - rewrite
-  `CLAUDE.md` with injected instructions, tamper with plugin code, or drop a
-  malicious skill/command/agent file - something that would then run or
-  load **unsandboxed on the host** the next time Claude Code starts there,
-  turning a single compromised sandbox session into persistent host
-  compromise. `skills/`, `commands/`, and `agents/` may not exist yet on a
-  given host, so `bin/claude-sandbox` pre-creates them at launch (empty is
-  fine) - a read-only overlay only applies to a directory that already
-  exists, and without pre-creation a compromised session could create the
-  directory itself first, then populate it, before the overlay ever had
-  something to sit on top of. Everything else under `~/.claude`
-  (session/project history, credentials refresh, caches) stays read-write,
-  since it's runtime state Claude Code needs to update - this list is a
-  denylist of known code/config surfaces, not an allowlist, so it has to be
-  kept in step with whatever new config surfaces Claude Code adds.
+  `agents/`, and `output-styles/` under `~/.claude` are layered back
+  read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks
+  execute automatically with no separate approval step, skills can ship
+  executable scripts, and commands/agents/output-styles are prompt text
+  loaded into a later host session, so without this a compromised session
+  could plant a backdoored hook - including by unlinking one of
+  `install.sh`'s hook symlinks and dropping a plain file in its place, since
+  the dynamic per-target mounts `bin/claude-sandbox` adds at launch only
+  protect symlink targets that resolve *outside* `~/.claude`, never this
+  directory itself - rewrite `CLAUDE.md` with injected instructions, tamper
+  with plugin code, or drop a malicious skill/command/agent/output-style
+  file - something that would then run or load **unsandboxed on the host**
+  the next time Claude Code starts there, turning a single compromised
+  sandbox session into persistent host compromise. `skills/`, `commands/`,
+  `agents/`, and `output-styles/` may not exist yet on a given host, so
+  `bin/claude-sandbox` pre-creates them at launch (empty is fine) - a
+  read-only overlay only applies to a directory that already exists, and
+  without pre-creation a compromised session could create the directory
+  itself first, then populate it, before the overlay ever had something to
+  sit on top of. Everything else under `~/.claude` (session/project
+  history, credentials refresh, caches) stays read-write, since it's
+  runtime state Claude Code needs to update - this list is a denylist of
+  known code/config surfaces, not an allowlist, so it has to be kept in
+  step with whatever new config surfaces Claude Code adds.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
@@ -602,12 +612,14 @@ one can't happen.
   edit.
 - When the mounted workspace *is* this repo itself, `bin/claude-sandbox`
   warns at launch that the repo's own trusted computing base - `bin/`,
-  `hooks/`, `docker/`, `install.sh` - is writable for the session (it's
-  inside the project mount, which has no write protection, per above), and
-  that the exit-time audit will report any changes to it. That's a warning
-  and a post-hoc report, not a block: a compromised session can still edit
-  those files during the run, and whatever it changes takes effect the
-  *next* time `bin/claude-sandbox` itself runs, not the current one.
+  `hooks/`, `docker/`, `install.sh` (also `config/env` and `test/`, per the
+  exit-time audit's exact TCB path list above) - is writable for the
+  session (it's inside the project mount, which has no write protection,
+  per above), and that the exit-time audit will report any changes to it.
+  That's a warning and a post-hoc report, not a block: a compromised
+  session can still edit those files during the run, and whatever it
+  changes takes effect the *next* time `bin/claude-sandbox` itself runs,
+  not the current one.
 
 ## Tests
 

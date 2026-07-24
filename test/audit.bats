@@ -128,3 +128,58 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
 }
+
+@test "flags core.pager as command-execution" {
+    snap
+    git -C "$WS" config core.pager 'evil'
+    run cmp_
+    line="$(printf '%s\n' "$output" | grep 'core.pager')"
+    [[ "$line" == *"COMMAND-EXECUTION"* ]]
+}
+
+@test "flags diff.external as command-execution" {
+    snap
+    git -C "$WS" config diff.external 'evil'
+    run cmp_
+    line="$(printf '%s\n' "$output" | grep 'diff.external')"
+    [[ "$line" == *"COMMAND-EXECUTION"* ]]
+}
+
+@test "flags include.path as command-execution (config indirection)" {
+    snap
+    git -C "$WS" config include.path '/tmp/evil.gitconfig'
+    run cmp_
+    line="$(printf '%s\n' "$output" | grep 'include.path')"
+    [[ "$line" == *"COMMAND-EXECUTION"* ]]
+}
+
+@test "flags a planted symlink under .claude/" {
+    mkdir -p "$WS/.claude"
+    snap
+    ln -s /etc/passwd "$WS/.claude/evil"
+    run cmp_
+    [[ "$output" == *".claude/evil"* ]]
+}
+
+@test "TCB: flags a change under bin/ when workspace is the audit's own repo root" {
+    mkdir -p "$WS/bin"
+    echo x > "$WS/bin/x"
+    echo x > "$WS/install.sh"
+    export CLAUDE_SANDBOX_AUDIT_REPO_ROOT="$(readlink -f "$WS")"
+    snap
+    echo changed > "$WS/bin/x"
+    run cmp_
+    [[ "$output" == *"TCB (sandbox self) modified: bin/x"* ]]
+}
+
+@test "TCB: does not flag changes when the workspace is not the audit's own repo root" {
+    mkdir -p "$WS/bin"
+    echo x > "$WS/bin/x"
+    # CLAUDE_SANDBOX_AUDIT_REPO_ROOT is left unset here, so it defaults to
+    # this repo's real root - $WS (a scratch dir) is not that, so the TCB
+    # section stays empty even though a same-named file changes.
+    snap
+    echo changed > "$WS/bin/x"
+    run cmp_
+    [[ "$output" != *"TCB"* ]]
+}
