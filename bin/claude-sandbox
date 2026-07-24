@@ -157,7 +157,7 @@ else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi
 
-cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
 trap cleanup EXIT
 
 # Git commits inside the sandbox need a user.name/user.email - carry over a
@@ -235,6 +235,38 @@ if [ -n "${SANDBOX_NVIM_CONFIG:-}" ]; then
         exit 1
     fi
     extra_mounts+=(-v "$SANDBOX_NVIM_CONFIG:$HOME/.config/nvim:ro")
+    # lazy.nvim (and most other nvim plugin managers) writes its lockfile
+    # back into the config directory on every plugin sync - a throwaway
+    # copy, layered read-write on top of the read-only mount above (same
+    # "more specific mount wins" trick the ~/.claude overlays use, just
+    # inverted), keeps that working without making the rest of a personal
+    # config writable from inside the sandbox. Not synced back: losing a
+    # sandbox session's plugin-version bumps is low-stakes - the nvim-data
+    # volume below already keeps the actual installed plugin files across
+    # sessions - next to what a fully writable config directory would risk:
+    # arbitrary Lua that runs unsandboxed the next time nvim starts for real.
+    SANDBOX_NVIM_LOCKFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-nvim-lock.XXXXXX.json")"
+    if [ -f "$SANDBOX_NVIM_CONFIG/lazy-lock.json" ]; then
+        cp "$SANDBOX_NVIM_CONFIG/lazy-lock.json" "$SANDBOX_NVIM_LOCKFILE"
+    fi
+    extra_mounts+=(-v "$SANDBOX_NVIM_LOCKFILE:$HOME/.config/nvim/lazy-lock.json")
+fi
+
+# Optional: extra host paths a personal setup references by absolute path
+# outside anywhere already mounted above - e.g. a dotfiles bin/ directory
+# an editor config shells out to. Colon-separated, like $PATH. Mounted
+# read-only at their own path, same as everything else here - this repo
+# still has no opinion on what's inside any of them.
+if [ -n "${SANDBOX_EXTRA_MOUNTS:-}" ]; then
+    IFS=':' read -ra extra_paths <<< "$SANDBOX_EXTRA_MOUNTS"
+    for path in "${extra_paths[@]}"; do
+        [ -n "$path" ] || continue
+        if [ ! -e "$path" ]; then
+            echo "SANDBOX_EXTRA_MOUNTS entry does not exist: $path" >&2
+            exit 1
+        fi
+        extra_mounts+=(-v "$path:$path:ro")
+    done
 fi
 
 # Not `exec`: the EXIT trap above needs this shell to still be around

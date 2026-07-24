@@ -35,6 +35,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `ALLOWED_DOMAINS` | unset | extra egress-allowed domains, space-separated |
 | `SANDBOX_CMD` | `claude` | container's main process (e.g. `nvim`) |
 | `SANDBOX_NVIM_CONFIG` | unset | nvim config dir, used when `SANDBOX_CMD=nvim` |
+| `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
@@ -71,13 +72,24 @@ SANDBOX_CMD=nvim bin/claude-sandbox ~/repos/some-project
 ```
 
 Runs unconfigured unless you also set `SANDBOX_NVIM_CONFIG` to a real config
-directory on the host (bind-mounted read-only at `~/.config/nvim`):
+directory on the host (bind-mounted read-only at `~/.config/nvim` — lazy.nvim's
+lockfile is the one exception, layered read-write on top so plugin syncs
+don't fail on a read-only filesystem; nothing else in the config is
+writable):
 
 ```sh
 SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim bin/claude-sandbox ~/repos/some-project
 ```
 
 Set both in your shell profile if you use this mode regularly.
+
+If your config references something outside that directory by absolute host
+path (a helper script in a dotfiles `bin/`, say), bring it in with
+`SANDBOX_EXTRA_MOUNTS` (colon-separated, mounted read-only at the same path):
+
+```sh
+SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/claude-sandbox ~/repos/some-project
+```
 
 ## Config parity with your host Claude Code setup
 
