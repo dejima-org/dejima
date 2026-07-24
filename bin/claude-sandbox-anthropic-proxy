@@ -41,7 +41,59 @@ class Credentials:
             return json.load(f)
 
     def access_token(self):
-        return self._read()["claudeAiOauth"]["accessToken"]
+        oauth = self._read()["claudeAiOauth"]
+        if oauth["expiresAt"] / 1000 - time.time() < self.margin:
+            self.refresh(stale_token=oauth["accessToken"])
+            oauth = self._read()["claudeAiOauth"]
+        return oauth["accessToken"]
+
+    def refresh(self, stale_token):
+        with self.lock:
+            data = self._read()
+            oauth = data["claudeAiOauth"]
+            # A concurrent refresher (host-side Claude Code, another sandbox
+            # session, another thread here) may have replaced the token
+            # already - if the file no longer holds the stale one and isn't
+            # near expiry, use what's there instead of refreshing again.
+            if (oauth["accessToken"] != stale_token
+                    and oauth["expiresAt"] / 1000 - time.time() >= self.margin):
+                return
+            u = urlsplit(self.oauth_endpoint)
+            cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+            conn = cls(u.netloc, timeout=30)
+            req = json.dumps({
+                "grant_type": "refresh_token",
+                "refresh_token": oauth["refreshToken"],
+                "client_id": OAUTH_CLIENT_ID,
+            })
+            conn.request("POST", u.path, body=req,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            payload = resp.read()
+            conn.close()
+            if resp.status != 200:
+                raise RuntimeError("token refresh failed: HTTP %d %.200s"
+                                   % (resp.status, payload))
+            fresh = json.loads(payload)
+            oauth["accessToken"] = fresh["access_token"]
+            if fresh.get("refresh_token"):
+                oauth["refreshToken"] = fresh["refresh_token"]
+            oauth["expiresAt"] = int((time.time() + fresh["expires_in"]) * 1000)
+            self._write(data)
+
+    def _write(self, data):
+        # Atomic and permission-preserving: host-side Claude Code reads this
+        # same file and must never observe a partial write or a looser mode.
+        directory = os.path.dirname(self.path) or "."
+        fd, tmp = tempfile.mkstemp(dir=directory)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -102,6 +154,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail(502, "cannot load credentials: %s" % e)
         try:
             conn, resp = self._upstream(token, body)
+            if resp.status == 401:
+                # Upstream disagrees with expiresAt - refresh once and retry.
+                resp.read()
+                conn.close()
+                self.server.creds.refresh(stale_token=token)
+                token = self.server.creds.access_token()
+                conn, resp = self._upstream(token, body)
         except Exception as e:
             return self._fail(502, "upstream request failed: %s" % e)
         try:
@@ -162,11 +221,22 @@ def main():
 
     creds = Credentials(args.credentials, args.oauth_endpoint, args.refresh_margin)
     try:
-        creds.access_token()
+        # A plain read, not access_token(): this is just a startup sanity
+        # check and must not trigger a refresh (that belongs to the first
+        # real request, so an external refresher gets a chance to win first).
+        creds._read()["claudeAiOauth"]["accessToken"]
     except Exception as e:
         sys.stderr.write(
             "claude-sandbox-anthropic-proxy: unusable credentials file %s: %s\n"
             % (args.credentials, e))
+        return 1
+
+    expires = creds._read()["claudeAiOauth"].get("refreshTokenExpiresAt")
+    if expires is not None and expires / 1000 < time.time():
+        sys.stderr.write(
+            "claude-sandbox-anthropic-proxy: the refresh token in %s has "
+            "expired - run `claude` on the host and log in again first\n"
+            % args.credentials)
         return 1
 
     if os.path.exists(args.socket):

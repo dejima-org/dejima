@@ -102,3 +102,63 @@ teardown() {
     [[ "$output" == *"data: first"* ]]
     [[ "$output" != *"data: second"* ]]
 }
+
+@test "near-expiry access token triggers refresh, write-back, and use of the new token" {
+    write_creds 60   # < default 300s margin
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer refreshed-access-token" ]
+    [ "$(jq -r '.claudeAiOauth.refreshToken' "$CREDS")" = "rotated-refresh-token" ]
+    # sibling keys preserved, perms kept private, expiry advanced
+    [ "$(jq -r '.claudeAiOauth.subscriptionType' "$CREDS")" = "max" ]
+    [ "$(stat -c %a "$CREDS")" = "600" ]
+    [ "$(jq -r '.claudeAiOauth.expiresAt' "$CREDS")" -gt "$((($(date +%s) + 7200) * 1000))" ]
+    [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "1" ]
+}
+
+@test "the refresh request carries the stored refresh token and the pinned client id" {
+    write_creds 60
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer refreshed-access-token" ]
+    last="$(curl -s "http://127.0.0.1:$PORT/oauth-last")"
+    [ "$(jq -r '.grant_type' <<<"$last")" = "refresh_token" ]
+    [ "$(jq -r '.refresh_token' <<<"$last")" = "real-refresh-token" ]
+    [ "$(jq -r '.client_id' <<<"$last")" = "9d1c250a-e61b-44d9-88ed-5944d1962f5e" ]
+}
+
+@test "upstream 401 triggers one refresh-and-retry" {
+    start_proxy   # token far from expiry - only the 401 forces refresh
+    run pcurl -d '{}' http://proxy/echo-401-once
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer refreshed-access-token" ]
+    [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "1" ]
+}
+
+@test "an externally-refreshed credentials file is used without a redundant refresh" {
+    write_creds 60
+    start_proxy
+    # simulate host-side Claude Code refreshing first
+    sed -i 's/real-access-token/externally-refreshed-token/; s/"expiresAt":[0-9]*/"expiresAt":'"$((($(date +%s) + 7200) * 1000))"'/' "$CREDS"
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer externally-refreshed-token" ]
+    [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "0" ]
+}
+
+@test "credentials file going malformed mid-session yields 502 and the proxy survives" {
+    start_proxy
+    echo 'not json' > "$CREDS"
+    run bash -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket "$1" -d "{}" http://proxy/v1/messages' _ "$SOCK"
+    [ "$output" = "502" ]
+    write_creds 7200
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+}
+
+@test "an already-expired refresh token is fatal at startup, before the socket exists" {
+    write_creds 7200
+    sed -i 's/"refreshTokenExpiresAt":[0-9]*/"refreshTokenExpiresAt":1000/' "$CREDS"
+    run "$PROXY" --socket "$SOCK" --credentials "$CREDS" --upstream "http://127.0.0.1:$PORT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"log in"* ]]
+    [ ! -S "$SOCK" ]
+}
