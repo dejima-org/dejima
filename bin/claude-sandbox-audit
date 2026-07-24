@@ -22,6 +22,21 @@ is_exec_key() {
     return 1
 }
 
+# Undo git's config-file quoting of a value (git wraps values containing
+# special chars in "..." and backslash-escapes embedded \ and ") so exec
+# detection sees the real value instead of a quoted literal.
+unquote_value() {
+    local v="$1"
+    case "$v" in
+        \"*\")
+            v="${v#\"}"; v="${v%\"}"
+            v="${v//\\\"/\"}"
+            v="${v//\\\\/\\}"
+            ;;
+    esac
+    printf '%s' "$v"
+}
+
 hash_paths() {
     # path<TAB>sha for each existing monitored path, sorted by path
     local ws="$1" p
@@ -94,11 +109,12 @@ case "$cmd" in
         # config diffs: added/changed lines present in new but not old
         while IFS= read -r line; do
             key="${line%%=*}"
-            if is_exec_key "$key"; then
+            key_nopfx="${key#worktree:}"
+            if is_exec_key "$key_nopfx"; then
                 findings+=("COMMAND-EXECUTION git config: $line")
-            elif [ "$key" = "alias" ] || [[ "$key" == alias.* ]]; then
+            elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
-                case "${line#*=}" in
+                case "$(unquote_value "${line#*=}")" in
                     '!'*) findings+=("COMMAND-EXECUTION git alias: $line") ;;
                     *)    findings+=("changed git config: $line") ;;
                 esac
@@ -108,12 +124,14 @@ case "$cmd" in
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
 
-        # path diffs: any monitored file added/changed/removed
+        # path diffs: any monitored file added/changed/removed (a content
+        # change emits both an old-hash and new-hash line; dedupe by path
+        # so each changed path is reported once)
         while IFS= read -r line; do
-            findings+=("changed workspace file: ${line%%$'\t'*}")
+            findings+=("changed workspace file: $line")
         done < <(comm -3 <(sed -n '/^### paths/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,$p' "$new"   | grep -v '^### ') \
-                 | sed 's/^\t//' | sort -u )
+                 | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"
         [ "${#findings[@]}" -eq 0 ] && exit 0

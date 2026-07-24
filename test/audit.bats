@@ -64,3 +64,28 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [[ "$output" == *"pre-commit"* ]]
 }
+
+@test "flags a quoted !-alias as command-execution" {
+    snap
+    git -C "$WS" config alias.evil '!id;'
+    run cmp_
+    line="$(printf '%s\n' "$output" | grep 'alias.evil')"
+    [[ "$line" == *"COMMAND-EXECUTION"* ]]
+}
+
+@test "flags a worktree config.worktree core.hooksPath as command-execution" {
+    snap
+    mkdir -p "$WS/.git/worktrees/other"
+    printf '[core]\n\thooksPath = /tmp/evil\n' > "$WS/.git/worktrees/other/config.worktree"
+    run cmp_
+    line="$(printf '%s\n' "$output" | grep 'core.hooksPath')"
+    [[ "$line" == *"COMMAND-EXECUTION"* ]]
+}
+
+@test "reports a single modified .mcp.json exactly once" {
+    echo '{}' > "$WS/.mcp.json"; snap
+    echo '{"mcpServers":{}}' > "$WS/.mcp.json"
+    run cmp_
+    count="$(printf '%s\n' "$output" | grep -c 'changed workspace file:.*\.mcp\.json')"
+    [ "$count" -eq 1 ]
+}
