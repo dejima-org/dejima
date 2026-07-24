@@ -155,7 +155,7 @@ setup() {
 }
 
 @test "bin/claude-sandbox dynamically discovers and mounts hook-symlink targets" {
-    grep -q 'readlink -f "\$hook"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'readlink -f "\$entry"' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'extra_mounts+=(-v "\$real_dir:\$real_dir:ro")' "$REPO_ROOT/bin/claude-sandbox"
     grep -q '"\${extra_mounts\[@\]}"' "$REPO_ROOT/bin/claude-sandbox"
 }
@@ -311,4 +311,19 @@ setup() {
     run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
     [ "$status" -ne 0 ]
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "~/.claude skills/commands/agents are layered read-only over the read-write parent mount" {
+    # Same persistence-path rationale as the hooks overlay: these carry
+    # executable skill scripts / injectable command + agent prompts that a
+    # later unsandboxed host session would run or load. Without an overlay
+    # (and without pre-creation, since they may not exist) a compromised
+    # session can create and populate them.
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/skills:\$\{HOME\}/\.claude/skills:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/commands:\$\{HOME\}/\.claude/commands:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/agents:\$\{HOME\}/\.claude/agents:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "bin/claude-sandbox pre-creates the code-carrying ~/.claude overlay dirs" {
+    grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents"' "$REPO_ROOT/bin/claude-sandbox"
 }

@@ -121,6 +121,11 @@ mkdir -p "$SANDBOX_SHARE_DIR"
 # used the convention yet.
 mkdir -p "$HOME/specs"
 
+# skills/commands/agents overlays (see docker-compose.yml) can only apply if
+# the source dirs exist - pre-create them so a host that has never used one
+# still gets the read-only overlay instead of a writable gap.
+mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents"
+
 # Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
 # "sandbox" block) is redundant here - it can't even function inside this
 # container (bwrap can't create a namespace, and getting it to would need
@@ -210,11 +215,13 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # correct regardless of what's installed or where this repo itself was
 # cloned to.
 extra_mounts=()
-if [ -d "$HOME/.claude/hooks" ]; then
-    mounted_dirs=""
-    for hook in "$HOME/.claude/hooks"/*; do
-        [ -L "$hook" ] || continue
-        real_dir="$(dirname "$(readlink -f "$hook")")"
+mounted_dirs=""
+for overlay_dir in hooks skills commands agents; do
+    dir="$HOME/.claude/$overlay_dir"
+    [ -d "$dir" ] || continue
+    for entry in "$dir"/*; do
+        [ -L "$entry" ] || continue
+        real_dir="$(dirname "$(readlink -f "$entry")")"
         case "$real_dir" in
             "$HOME/.claude"*) continue ;;
         esac
@@ -224,7 +231,7 @@ if [ -d "$HOME/.claude/hooks" ]; then
         mounted_dirs="$mounted_dirs $real_dir"
         extra_mounts+=(-v "$real_dir:$real_dir:ro")
     done
-fi
+done
 
 # Optional: bring in a real nvim config to pair with SANDBOX_CMD=nvim (see
 # entrypoint.sh). Not baked into the image - this repo has no opinion on
