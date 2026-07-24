@@ -390,15 +390,61 @@ one can't happen.
 - That same read-write access to the mounted project is also a
   host-code-execution vector, not just a data-destruction one: a
   compromised session could plant `.git/hooks/post-commit` (or
-  `pre-push`, or set `core.hooksPath`), or write a
+  `pre-push`), set `core.hooksPath`, or write a
   `.claude/settings.local.json` with a malicious hook command, into the
-  project. Both run unsandboxed on the host the next time you run `git`
-  or open Claude Code in that repo - no network egress required, so the
-  firewall doesn't see it either. Same underlying persistence pattern as
-  the `~/.claude/hooks` and `~/.claude.json` risks above, just through the
-  project mount instead of the config mount. "Only point this at trusted
-  repositories" (above) covers input trust; this is about the sandbox
-  writing a persistence payload into an otherwise-trusted repo.
+  project. Any of those run unsandboxed on the host the next time you run
+  `git` or open Claude Code in that repo - no network egress required, so
+  the firewall doesn't see it either. Same underlying persistence pattern
+  as the `~/.claude/hooks` and `~/.claude.json` risks above, just through
+  the project mount instead of the config mount. "Only point this at
+  trusted repositories" (above) covers input trust; this is about the
+  sandbox writing a persistence payload into an otherwise-trusted repo.
+  The workspace's own `.git/hooks` directory is now layered read-only
+  (same pattern as the `~/.claude` overlays below), so planting a hook
+  file directly is closed - accepted breakage: installing hooks
+  *in-session* (`husky`, `pre-commit install`) now fails, which is the
+  point. `core.hooksPath` and `.claude/settings.local.json` aren't
+  overlaid (they're config, not fixed paths a static mount can cover) and
+  remain fully writable; the exit-time audit below reports changes to
+  either, but only after the session ends - it doesn't stop them.
+- `bin/claude-sandbox-audit` snapshots host-persistence surfaces before each
+  run and diffs them after the container exits: `.git/config` (and worktree
+  `config.worktree`) keys that run a command on the next `git` -
+  `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
+  `credential.helper`, `filter.*.smudge`/`clean`/`process`,
+  `diff.*.textconv`, `!`-shell aliases - plus content changes under the
+  workspace's `.claude/`, `.mcp.json`, `.envrc`, `.vscode/`, and
+  `.git/hooks/`, plus cross-project writes under `~/.claude/projects` (see
+  below). It's **advisory only**: it fires *after* the session has already
+  ended, so a report of a planted `core.hooksPath` or hook file is
+  something to read and clean up *before* the next `git` or `claude` in
+  that repo, not something that was blocked. It's silent when nothing
+  changed, and never affects the session's own exit code even if it can't
+  complete (e.g. `git` not available to read the config). It doesn't cover
+  `$SANDBOX_SHARE_DIR` (see "Shared scratch space") - that hand-off path
+  stays unaudited - and its coverage is a fixed list of known Claude Code
+  config surfaces, not a general integrity check, so a future config
+  surface this list hasn't been taught about yet would go unreported.
+- `~/.claude/projects` (session transcripts and per-project memory) is
+  **not** mounted read-only, unlike the other `~/.claude` overlays above -
+  deliberately. Scoping a read-only overlay to "the current project's slug"
+  would break the sandbox's own worktree workflow: a session running in
+  `WORKSPACE/.worktrees/<branch>` writes to a *different* projects slug
+  than the parent repo, so a slug-scoped overlay would either block that
+  legitimate write or have to be widened until it stopped protecting
+  anything. Instead, cross-project writes are **detected, not prevented**:
+  the exit-time audit above flags any write during the session to another
+  project's `~/.claude/projects/<slug>` directory, excluding the current
+  project's own slug and its worktree children. That's after-the-fact
+  reporting of transcript/memory poisoning in *other* projects, not a
+  block on it happening. Residual even within that: the current project's
+  own transcripts/memory stay fully writable throughout, since Claude Code
+  needs that for host-side `claude --resume` to work; and detection keys
+  off each slug's max file mtime, so an edit to a file that isn't already
+  that project's newest doesn't advance the max and goes unflagged. A
+  read-only mount for `projects/` remains a possible future option if
+  Claude Code is confirmed to fail cleanly (not hang, as `~/.claude.json`
+  did) when a write to it is blocked.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level
@@ -422,20 +468,30 @@ one can't happen.
   is a potential exfiltration path for those credentials if a malicious repo
   manages to manipulate a session. The firewall limits this to
   Anthropic/npm/GitHub/your Gitea host, not the open internet.
-- `settings.json`, `CLAUDE.md`, `plugins/`, and `hooks/` under `~/.claude`
-  are layered back read-only on top of the (otherwise read-write) `~/.claude`
-  mount. Hooks execute automatically with no separate approval step, so
+- `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
+  and `agents/` under `~/.claude` are layered back read-only on top of the
+  (otherwise read-write) `~/.claude` mount. Hooks execute automatically with
+  no separate approval step, skills can ship executable scripts, and
+  commands/agents are prompt text loaded into a later host session, so
   without this a compromised session could plant a backdoored hook -
   including by unlinking one of `install.sh`'s hook symlinks and dropping a
   plain file in its place, since the dynamic per-target mounts
   `bin/claude-sandbox` adds at launch only protect symlink targets that
   resolve *outside* `~/.claude`, never this directory itself - rewrite
-  `CLAUDE.md` with injected instructions, or tamper with plugin code -
-  something that would then run **unsandboxed on the host** the next time
-  Claude Code starts there, turning a single compromised sandbox session
-  into persistent host compromise. Everything else under `~/.claude`
+  `CLAUDE.md` with injected instructions, tamper with plugin code, or drop a
+  malicious skill/command/agent file - something that would then run or
+  load **unsandboxed on the host** the next time Claude Code starts there,
+  turning a single compromised sandbox session into persistent host
+  compromise. `skills/`, `commands/`, and `agents/` may not exist yet on a
+  given host, so `bin/claude-sandbox` pre-creates them at launch (empty is
+  fine) - a read-only overlay only applies to a directory that already
+  exists, and without pre-creation a compromised session could create the
+  directory itself first, then populate it, before the overlay ever had
+  something to sit on top of. Everything else under `~/.claude`
   (session/project history, credentials refresh, caches) stays read-write,
-  since it's runtime state Claude Code needs to update.
+  since it's runtime state Claude Code needs to update - this list is a
+  denylist of known code/config surfaces, not an allowlist, so it has to be
+  kept in step with whatever new config surfaces Claude Code adds.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
@@ -533,6 +589,25 @@ one can't happen.
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
+- Repo-local `config/env` (which persists `ALLOWED_DOMAINS` across sessions,
+  see "Files" below) used to be `source`d by `bin/claude-sandbox` on the
+  host. Since `config/env` lives inside this repo - itself a mountable,
+  writable-from-inside workspace - that meant a compromised session with
+  this repo mounted on itself could plant arbitrary host shell there for
+  the *next* launch to execute. It's now read by a small string parser
+  (`bin/claude-sandbox-env.sh`) that pulls out only the `ALLOWED_DOMAINS`
+  value and never executes the file's contents. One known edge: it doesn't
+  strip CRLF line endings, but the only writer, `claude-sandbox-allow
+  --global`, never emits CRLF, so that only bites a manual cross-platform
+  edit.
+- When the mounted workspace *is* this repo itself, `bin/claude-sandbox`
+  warns at launch that the repo's own trusted computing base - `bin/`,
+  `hooks/`, `docker/`, `install.sh` - is writable for the session (it's
+  inside the project mount, which has no write protection, per above), and
+  that the exit-time audit will report any changes to it. That's a warning
+  and a post-hoc report, not a block: a compromised session can still edit
+  those files during the run, and whatever it changes takes effect the
+  *next* time `bin/claude-sandbox` itself runs, not the current one.
 
 ## Tests
 
@@ -582,7 +657,9 @@ likely to collide with a real container you have running.
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `config/env` | Persists `ALLOWED_DOMAINS` across sessions (rewritten by `--global`) |
+| `config/env` | Persists `ALLOWED_DOMAINS` across sessions (rewritten by `--global`); parsed, never sourced |
+| `bin/claude-sandbox-env.sh` | Parses `ALLOWED_DOMAINS` out of `config/env` without executing it |
+| `bin/claude-sandbox-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
 
 `bin/claude-sandbox` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
