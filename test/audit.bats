@@ -9,8 +9,11 @@ setup() {
     WS="$(mktemp -d)"; git -C "$WS" init -q
     git -C "$WS" config user.email t@t; git -C "$WS" config user.name t
     STATE="$(mktemp)"
+    PROJDIR="$(mktemp -d)"
+    export CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR="$PROJDIR"
+    CURRENT_SLUG="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
 }
-teardown() { rm -rf "$WS"; rm -f "$STATE"; }
+teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; }
 
 snap() { "$AUDIT" snapshot "$WS" "$STATE"; }
 cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
@@ -88,4 +91,40 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     count="$(printf '%s\n' "$output" | grep -c 'changed workspace file:.*\.mcp\.json')"
     [ "$count" -eq 1 ]
+}
+
+@test "flags a cross-project write under ~/.claude/projects" {
+    mkdir -p "$PROJDIR/-some-other-project"
+    echo x > "$PROJDIR/-some-other-project/file1"
+    snap
+    echo y > "$PROJDIR/-some-other-project/file2"; touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
+    run cmp_
+    [[ "$output" == *"CROSS-PROJECT history/memory write: -some-other-project"* ]]
+}
+
+@test "does not flag the current project's own projects slug" {
+    mkdir -p "$PROJDIR/$CURRENT_SLUG"
+    echo x > "$PROJDIR/$CURRENT_SLUG/file1"
+    snap
+    echo y > "$PROJDIR/$CURRENT_SLUG/file2"; touch -d '+1 hour' "$PROJDIR/$CURRENT_SLUG/file2"
+    run cmp_
+    [[ "$output" != *"CROSS-PROJECT"* ]]
+}
+
+@test "does not flag a worktree child's projects slug" {
+    mkdir -p "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex"
+    echo x > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file1"
+    snap
+    echo y > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"; touch -d '+1 hour' "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"
+    run cmp_
+    [[ "$output" != *"CROSS-PROJECT"* ]]
+}
+
+@test "silent when no projects changed" {
+    mkdir -p "$PROJDIR/-some-other-project"
+    echo x > "$PROJDIR/-some-other-project/file1"
+    snap
+    run bash -c '"$0" compare "$1" "$2" 2>&1' "$AUDIT" "$WS" "$STATE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
 }

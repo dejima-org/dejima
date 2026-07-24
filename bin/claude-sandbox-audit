@@ -10,6 +10,8 @@ set -uo pipefail
 
 cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
 
+PROJECTS_DIR="${CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
+
 # git config keys whose values run a command on the next git invocation.
 # Key names are case-insensitive in git, so match on a lowercased copy.
 is_exec_key() {
@@ -93,16 +95,32 @@ git_config_snapshot() {
     done | sort
 }
 
+projects_snapshot() {
+    # slug<TAB>maxmtime for each immediate subdir of PROJECTS_DIR, sorted by
+    # slug; maxmtime is 0 if the slug dir has no files.
+    local dir="$1" d slug mtime
+    [ -d "$dir" ] || return 0
+    for d in "$dir"/*/; do
+        [ -d "$d" ] || continue
+        slug="$(basename "$d")"
+        mtime="$(find "$d" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+        mtime="${mtime%%.*}"
+        printf '%s\t%s\n' "$slug" "${mtime:-0}"
+    done | sort
+}
+
 case "$cmd" in
     snapshot)
         { echo "### gitconfig"; git_config_snapshot "$ws";
-          echo "### paths";     hash_paths "$ws"; } > "$state" 2>/dev/null || true
+          echo "### paths";     hash_paths "$ws";
+          echo "### projects";  projects_snapshot "$PROJECTS_DIR"; } > "$state" 2>/dev/null || true
         exit 0
         ;;
     compare)
         [ -f "$state" ] || { echo "claude-sandbox audit: no snapshot to compare against, skipping." >&2; exit 0; }
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
-                           echo "### paths";     hash_paths "$ws"; } > "$new" 2>/dev/null || {
+                           echo "### paths";     hash_paths "$ws";
+                           echo "### projects";  projects_snapshot "$PROJECTS_DIR"; } > "$new" 2>/dev/null || {
             echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
         findings=()
@@ -129,9 +147,22 @@ case "$cmd" in
         # so each changed path is reported once)
         while IFS= read -r line; do
             findings+=("changed workspace file: $line")
-        done < <(comm -3 <(sed -n '/^### paths/,$p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### paths/,$p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
+
+        # projects diffs: a write to another project's ~/.claude/projects
+        # slug during this session (transcript/memory-poisoning surface).
+        # "self" = current workspace's own slug or a worktree child of it.
+        current_slug="$(printf '%s' "$ws" | sed 's/[^a-zA-Z0-9]/-/g')"
+        while IFS= read -r line; do
+            slug="${line%%$'\t'*}"
+            case "$slug" in
+                "$current_slug"|"$current_slug"-*) continue ;;
+            esac
+            findings+=("CROSS-PROJECT history/memory write: $slug")
+        done < <(comm -13 <(sed -n '/^### projects/,$p' "$state" | grep -v '^### ') \
+                          <(sed -n '/^### projects/,$p' "$new"   | grep -v '^### ') )
 
         rm -f "$new"
         [ "${#findings[@]}" -eq 0 ] && exit 0
