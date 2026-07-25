@@ -84,6 +84,8 @@ teardown() {
     docker rm -f "claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -469,6 +471,51 @@ EOF
     [[ "$output_chain" == *'"authorization": "Bearer real-access-token"'* ]]
     [[ "$output_chain" != *"sandbox-credential-proxy-placeholder"* ]]
     [ "$env_hits" = "0" ]
+}
+
+@test "credential mask: ~/.claude/.credentials.json in-container is empty, never the real token (the actual bin/claude-sandbox mask mechanism)" {
+    # Unlike the proxy-chain test above (which hand-builds a docker run to
+    # exercise the proxy's HTTP path), this test reuses the exact masking
+    # mechanism bin/claude-sandbox itself uses at launch (see
+    # SANDBOX_CREDENTIALS_MASK_FILE there): a real ~/.claude directory
+    # bind-mounted read-write, with an empty file layered read-write on top
+    # at .credentials.json specifically - the same "more specific mount wins"
+    # trick as the other ~/.claude overlays. This is the check the design
+    # spec asked for: the real credential file's content must never be
+    # visible at that path inside the container.
+    TD="$BATS_TEST_TMPDIR"
+    mkdir -p "$TD/dotclaude"
+    cat > "$TD/dotclaude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"real-refresh-token","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod -R 666 "$TD/dotclaude/.credentials.json"
+    chmod 777 "$TD/dotclaude"
+    mask_file="$TD/mask"
+    : > "$mask_file"
+    chmod 666 "$mask_file"
+
+    container="claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$TD/dotclaude:/home/node/.claude" \
+        -v "$mask_file:/home/node/.claude/.credentials.json" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        docker exec "$container" pgrep -x sleep >/dev/null 2>&1 && break
+        sleep 1
+    done
+
+    run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
+    status_creds=$status; output_creds=$output
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+
+    [ "$status_creds" -eq 0 ]
+    [ -z "$output_creds" ]
+    [[ "$output_creds" != *"real-access-token"* ]]
+    [[ "$output_creds" != *"real-refresh-token"* ]]
 }
 
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
