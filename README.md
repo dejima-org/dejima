@@ -472,11 +472,29 @@ one can't happen.
   already happened once in this file's own history (a missing `ipset`
   dedup flag broke firewall startup entirely, twice, on two different
   ipsets, before being caught).
-- Because `~/.claude` (including `.credentials.json`) is bind-mounted in,
-  anything reachable from inside the container (the allowed domains above)
-  is a potential exfiltration path for those credentials if a malicious repo
-  manages to manipulate a session. The firewall limits this to
-  Anthropic/npm/GitHub/your Gitea host, not the open internet.
+- The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
+  enters the container. `bin/claude-sandbox` starts a host-side proxy
+  (`bin/claude-sandbox-anthropic-proxy`) on a per-session unix socket,
+  mounts an empty file over `.credentials.json` (the parent `~/.claude`
+  mount stays read-write, so a single-file mask is the mechanism), and
+  hands Claude Code a placeholder token plus an `ANTHROPIC_BASE_URL`
+  pointing at a loopback forwarder that pipes into the socket. The proxy
+  strips the placeholder, injects the real access token per request, and
+  owns OAuth refresh - rotated tokens are written back to the real host
+  file atomically, so host-side sessions stay logged in. What remains is
+  session-scoped: a compromised session can still *use* the model API as
+  you while it runs (that's inherent to the sandbox working at all), but
+  it can no longer read a durable credential and exfiltrate it for
+  offline use via the other allowed egress destinations (npm, GitHub,
+  your Gitea host). Caveats: `/login` inside the container doesn't work
+  while the proxy is on; the refresh flow mirrors a Claude Code internal
+  and may break if upstream changes it, in which case the proxy fails
+  loudly (launch abort, 502s on API calls) rather than silently.
+  `SANDBOX_CREDENTIAL_PROXY=0` is the kill switch, restoring the previous
+  behavior - the credential mounted into the container, readable by a
+  compromised session. Setups without a `claudeAiOauth` block (API-key
+  auth) skip the proxy automatically; there's no stored subscription
+  credential to protect.
 - `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
   `agents/`, and `output-styles/` under `~/.claude` are layered back
   read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks
