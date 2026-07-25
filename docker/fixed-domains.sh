@@ -2,6 +2,7 @@
 # dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
 FIXED_DOMAINS=(
     "registry.npmjs.org"
+    "platform.claude.com"
     "api.anthropic.com"
     "gitlab.com"
     "pypi.org"
