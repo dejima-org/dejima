@@ -380,3 +380,33 @@ setup() {
     tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q '"\$SCRIPT_DIR/claude-sandbox-audit" compare "\$WORKSPACE_DIR"'
     tail -n "+$run_line" "$REPO_ROOT/bin/claude-sandbox" | grep -q 'exit "\$compose_status"'
 }
+
+@test "credential proxy is on by default, gated only by SANDBOX_CREDENTIAL_PROXY=0" {
+    grep -q '"\${SANDBOX_CREDENTIAL_PROXY:-1}" != "0"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox masks the credentials file and mounts the proxy socket dir" {
+    # The mask is what keeps the real token out of the (otherwise read-write)
+    # ~/.claude mount; the socket dir is how API traffic gets back out to the
+    # host-side proxy that holds the real credential.
+    grep -q 'mktemp.*claude-sandbox-credentials-mask' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIALS_MASK_FILE:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox refuses to launch when the proxy fails to start" {
+    # Falling back to mounting the real credential would be a silent
+    # security downgrade - the failure must be loud and the launch aborted.
+    grep -q 'Credential proxy failed to start' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'SANDBOX_CREDENTIAL_PROXY=0' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "cleanup reaps the proxy and its socket dir and mask file" {
+    grep -q 'kill "\$SANDBOX_ANTHROPIC_PROXY_PID"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q '"\${SANDBOX_CREDENTIALS_MASK_FILE:-}"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q '"\${SANDBOX_ANTHROPIC_PROXY_DIR:-}"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox warns if the proxy died before the session ended" {
+    grep -q 'credential proxy exited before' "$REPO_ROOT/bin/claude-sandbox"
+}

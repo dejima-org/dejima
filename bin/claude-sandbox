@@ -169,7 +169,13 @@ fi
 
 SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-audit.XXXXXX")"
 
-cleanup() { rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE"; rm -rf "$SANDBOX_GITCONFIG_DIR"; }
+cleanup() {
+    if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
+        kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
+    fi
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}"
+    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}"
+}
 trap cleanup EXIT
 
 # Git commits inside the sandbox need a user.name/user.email - carry over a
@@ -292,6 +298,50 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
+# Keep the real Anthropic OAuth credential out of the container entirely:
+# run a host-side proxy that injects it per-request (see
+# bin/claude-sandbox-anthropic-proxy and README "Security notes"), mount an
+# empty file over ~/.claude/.credentials.json (the parent ~/.claude mount
+# must stay read-write, so a single-file mask is the only mechanism), and
+# hand Claude Code a placeholder token pointed at a loopback forwarder.
+# Skipped when there's no claudeAiOauth block to protect (API-key setups),
+# or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch - both restore the old
+# behavior exactly (credential mounted in with the rest of ~/.claude).
+SANDBOX_ANTHROPIC_BASE_URL=""
+SANDBOX_ANTHROPIC_AUTH_TOKEN=""
+SANDBOX_ANTHROPIC_PROXY_SOCKET=""
+SANDBOX_ANTHROPIC_PROXY_DIR=""
+SANDBOX_CREDENTIALS_MASK_FILE=""
+SANDBOX_ANTHROPIC_PROXY_PID=""
+if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
+    && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
+    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-anthropic-proxy.XXXXXX")"
+    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
+    "$SCRIPT_DIR/claude-sandbox-anthropic-proxy" \
+        --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET" \
+        --credentials "$HOME/.claude/.credentials.json" &
+    SANDBOX_ANTHROPIC_PROXY_PID=$!
+    for _ in $(seq 1 50); do
+        [ -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ] && break
+        kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [ ! -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ]; then
+        # Falling back to a session with the real credential mounted would
+        # be a silent security downgrade - stop loudly instead.
+        echo "Credential proxy failed to start - not launching. Fix the error above," >&2
+        echo "or set SANDBOX_CREDENTIAL_PROXY=0 to launch without it (the real OAuth" >&2
+        echo "credential is then mounted into the container, as before)." >&2
+        exit 1
+    fi
+    SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-credentials-mask.XXXXXX")"
+    extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR")
+    extra_mounts+=(-v "$SANDBOX_CREDENTIALS_MASK_FILE:$HOME/.claude/.credentials.json")
+    SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
+    SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+fi
+export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything this session changed (advisory - see bin/claude-sandbox-audit).
 "$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
@@ -312,5 +362,9 @@ fi
 # on every exit path, then propagate the real container exit code unchanged.
 compose_status=0
 docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
+    echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
+    echo "the session may have been failing. Check for proxy errors in the output above." >&2
+fi
 "$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 exit "$compose_status"
