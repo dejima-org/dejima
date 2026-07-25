@@ -20,7 +20,6 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
-PLACEHOLDER = "sandbox-credential-proxy-placeholder"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_BETA = "oauth-2025-04-20"
 HOP_BY_HOP = {
@@ -84,11 +83,23 @@ class Credentials:
     def _write(self, data):
         # Atomic and permission-preserving: host-side Claude Code reads this
         # same file and must never observe a partial write or a looser mode.
-        directory = os.path.dirname(self.path) or "."
+        # Staged in a dedicated subdirectory, not ~/.claude directly - that
+        # directory is bind-mounted read-write into the sandbox container, and
+        # only the single ~/.claude/.credentials.json path is masked from it
+        # (see bin/claude-sandbox); a sibling temp file created directly in
+        # ~/.claude would be container-readable for the whole write window.
+        # bin/claude-sandbox masks this subdirectory entirely (empty read-only
+        # overlay), and the rename below stays same-filesystem (a subdirectory
+        # of the same parent), so atomicity is unaffected either way - what the
+        # container's own bind mount shows is irrelevant to a host-side rename.
+        directory = os.path.join(os.path.dirname(self.path) or ".", ".credentials-proxy-tmp")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory)
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
         except BaseException:
@@ -117,8 +128,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.rfile.read(2)
         return self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
-    def _fail(self, status, message):
-        self.log_error("%s", message)
+    def _fail(self, status, message, log_message=None):
+        # log_message (host stderr) may contain upstream response bytes or
+        # exception detail; message (sent to the container in the response
+        # body) never should - see README "Security notes".
+        self.log_error("%s", log_message if log_message is not None else message)
         body = json.dumps(
             {"type": "error", "error": {"type": "proxy_error", "message": message}}
         ).encode()
@@ -151,7 +165,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             token = self.server.creds.access_token()
         except Exception as e:
-            return self._fail(502, "cannot load credentials: %s" % e)
+            return self._fail(502, "credential proxy: could not load or refresh the "
+                                    "credential - see host terminal",
+                               log_message="cannot load credentials: %s" % e)
         try:
             conn, resp = self._upstream(token, body)
             if resp.status == 401:
@@ -162,7 +178,9 @@ class Handler(BaseHTTPRequestHandler):
                 token = self.server.creds.access_token()
                 conn, resp = self._upstream(token, body)
         except Exception as e:
-            return self._fail(502, "upstream request failed: %s" % e)
+            return self._fail(502, "credential proxy: upstream request failed - "
+                                    "see host terminal",
+                               log_message="upstream request failed: %s" % e)
         try:
             self.send_response(resp.status)
             length = resp.getheader("Content-Length")

@@ -391,7 +391,18 @@ setup() {
     # host-side proxy that holds the real credential.
     grep -q 'mktemp.*claude-sandbox-credentials-mask' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIALS_MASK_FILE:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/claude-sandbox"
-    grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR")' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox also masks the proxy's write-back staging subdirectory" {
+    # _write() in bin/claude-sandbox-anthropic-proxy stages the rotated
+    # credential in ~/.claude/.credentials-proxy-tmp before the atomic
+    # rename - that subdirectory is inside the otherwise read-write ~/.claude
+    # mount, so without its own mask a sibling temp file would be
+    # container-readable for the whole write window (see proxy.bats).
+    grep -q 'mktemp -d.*claude-sandbox-credentials-tmpdir-mask' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIALS_TMPDIR_MASK:\$HOME/\.claude/\.credentials-proxy-tmp:ro")' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q '"\${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}"' "$REPO_ROOT/bin/claude-sandbox"
 }
 
 @test "bin/claude-sandbox refuses to launch when the proxy fails to start" {

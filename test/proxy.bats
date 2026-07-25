@@ -116,6 +116,19 @@ teardown() {
     [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "1" ]
 }
 
+@test "refresh never leaves a plaintext temp file directly in the credentials directory" {
+    write_creds 60
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer refreshed-access-token" ]
+    # only the real credentials file itself (and the dedicated staging
+    # subdirectory) should exist directly in $TD - no sibling tmpXXXXXX file
+    # from the write-back. Race-free: this runs after pcurl returned, by
+    # which point _write's rename has already completed.
+    leftover="$(find "$TD" -mindepth 1 -maxdepth 1 -name 'tmp*' -not -path "$TD/.credentials-proxy-tmp*")"
+    [ -z "$leftover" ]
+}
+
 @test "the refresh request carries the stored refresh token and the pinned client id" {
     write_creds 60
     start_proxy

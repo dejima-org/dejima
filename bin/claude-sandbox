@@ -174,7 +174,7 @@ cleanup() {
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}"
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}"
+    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}"
 }
 trap cleanup EXIT
 
@@ -301,9 +301,11 @@ fi
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
 # bin/claude-sandbox-anthropic-proxy and README "Security notes"), mount an
-# empty file over ~/.claude/.credentials.json (the parent ~/.claude mount
-# must stay read-write, so a single-file mask is the only mechanism), and
-# hand Claude Code a placeholder token pointed at a loopback forwarder.
+# empty file over ~/.claude/.credentials.json and an empty read-only
+# directory over ~/.claude/.credentials-proxy-tmp (the proxy's write-back
+# staging directory - the parent ~/.claude mount must stay read-write, so
+# masking these two paths individually is the mechanism), and hand Claude
+# Code a placeholder token pointed at a loopback forwarder.
 # Skipped when there's no claudeAiOauth block to protect (API-key setups),
 # or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch - both restore the old
 # behavior exactly (credential mounted in with the rest of ~/.claude).
@@ -312,6 +314,7 @@ SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
 SANDBOX_CREDENTIALS_MASK_FILE=""
+SANDBOX_CREDENTIALS_TMPDIR_MASK=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
@@ -335,8 +338,10 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
         exit 1
     fi
     SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-credentials-mask.XXXXXX")"
-    extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR")
+    SANDBOX_CREDENTIALS_TMPDIR_MASK="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-credentials-tmpdir-mask.XXXXXX")"
+    extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
     extra_mounts+=(-v "$SANDBOX_CREDENTIALS_MASK_FILE:$HOME/.claude/.credentials.json")
+    extra_mounts+=(-v "$SANDBOX_CREDENTIALS_TMPDIR_MASK:$HOME/.claude/.credentials-proxy-tmp:ro")
     SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
 fi
