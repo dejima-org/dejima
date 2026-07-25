@@ -82,7 +82,7 @@ services:
       # there. Layer them back read-only on top of the read-write parent
       # mount above (Docker applies more specific mounts on top of broader
       # ones); everything else under ~/.claude (session/project history,
-      # credentials refresh, caches, etc.) still needs to stay read-write.
+      # caches, etc.) still needs to stay read-write.
       #
       # settings.json specifically comes from $SANDBOX_SETTINGS_FILE (a
       # bin/claude-sandbox-generated copy with sandbox.enabled forced to

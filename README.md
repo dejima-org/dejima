@@ -15,6 +15,8 @@ runtime.
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
+- `python3` (stdlib only — no packages) — runs the host-side credential proxy
+  (see "Security notes").
 - A git push credential — **at least one** is required:
   - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
     container only ever sees a forwarded agent socket, never your private
@@ -39,6 +41,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
+| `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
@@ -94,8 +97,10 @@ SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/claude-sandbox ~/repos/some-project
 ## Config parity with your host Claude Code setup
 
 `~/.claude` is bind-mounted read-write, so global `CLAUDE.md`, settings,
-hooks, plugins, and your existing login/credentials all carry over
-automatically — no separate first-run login. (`~/.claude.json` is handled
+hooks, and plugins all carry over automatically, and your existing login
+stays effective too — no separate first-run login, though the credential
+itself doesn't enter the container directly (see "Security notes" for the
+host-side proxy that makes that work). (`~/.claude.json` is handled
 differently — a throwaway per-session copy, not the real file; see "Security
 notes" below for exactly what that means.)
 
@@ -516,8 +521,8 @@ one can't happen.
   without pre-creation a compromised session could create the directory
   itself first, then populate it, before the overlay ever had something to
   sit on top of. Everything else under `~/.claude` (session/project
-  history, credentials refresh, caches) stays read-write, since it's
-  runtime state Claude Code needs to update - this list is a denylist of
+  history, caches) stays read-write, since it's runtime state Claude Code
+  needs to update - this list is a denylist of
   known code/config surfaces, not an allowlist, so it has to be kept in
   step with whatever new config surfaces Claude Code adds.
 - `~/.claude.json` mixes that same kind of live state (project registry,
