@@ -420,7 +420,13 @@ EOF'
     # Compose always sends the pair (possibly empty); entrypoint.sh must
     # unset empties so a disabled proxy is indistinguishable from today.
     # /proc/1/environ is the post-entrypoint exec'd process's environment.
-    run docker exec "$(container_name)" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
+    # Must read as -u node (matching dexec's convention below): once
+    # entrypoint.sh's gosu drops privilege, the kernel clears that
+    # process's dumpable flag, and root (docker exec's default, lacking
+    # CAP_SYS_PTRACE here) can no longer read another uid's environ at
+    # all - reading as the same uid the process actually runs as is what
+    # every other /proc/1/environ read in this file already does.
+    run docker exec -u node "$(container_name)" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
     [ "$output" = "0" ]
 }
 
@@ -451,6 +457,20 @@ EOF
         docker exec "$container" pgrep -x sleep >/dev/null 2>&1 && break
         sleep 1
     done
+    # pgrep -x sleep (above) is an approximate readiness signal shared with
+    # every other test in this file - it also transiently matches earlier,
+    # short-lived sleeps in the startup sequence (dns-proxy.sh's dig-retry
+    # loop in particular can legitimately take tens of seconds under real
+    # DNS latency, well past a brief follow-up wait), not just the final
+    # `sleep infinity`. That ambiguity is harmless for tests that only need
+    # the container generally up, but this test specifically depends on the
+    # forwarder having already bound port 18300 - wait for that directly,
+    # on the same generous budget as the outer loop above, rather than
+    # assuming the outer loop's "ready" already means it.
+    for _ in $(seq 1 60); do
+        docker exec "$container" bash -c '(exec 3<>/dev/tcp/127.0.0.1/18300) 2>/dev/null && exec 3>&-' && break
+        sleep 1
+    done
 
     run docker exec "$container" node -e '
         fetch("http://127.0.0.1:18300/v1/messages", {method: "POST",
@@ -460,8 +480,10 @@ EOF
           .catch(e => { console.error(e); process.exit(1); })'
     status_chain=$status; output_chain=$output
 
-    # the real token never appears in the container environment
-    run docker exec "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
+    # the real token never appears in the container environment - read as
+    # -u node, matching the test above: root can't see another uid's
+    # environ once gosu has dropped privilege (dumpable flag cleared).
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
     env_hits=$output
 
     docker rm -f "$container" >/dev/null 2>&1 || true

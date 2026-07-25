@@ -93,6 +93,16 @@ fi
 # socket. Only started when this session actually has a proxy socket.
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     gosu "$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js &
+    # Node's own startup (V8 init, module load, then finally binding the
+    # listen socket) isn't instant - without this wait, a request that
+    # arrives right after this script proceeds (an automated test's
+    # immediate check; in principle also a very fast-starting real client)
+    # can race ahead of the bind and see a connection refused. Bash's own
+    # /dev/tcp is enough to probe this without a curl/nc dependency.
+    for _ in $(seq 1 50); do
+        (exec 3<>/dev/tcp/127.0.0.1/18300) 2>/dev/null && exec 3>&- && break
+        sleep 0.1
+    done
 fi
 
 # Compose can't conditionally omit an env entry, so these arrive as empty
