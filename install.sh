@@ -14,7 +14,7 @@ echo "Repo: $SCRIPT_DIR"
 echo
 
 missing=()
-for tool in docker jq; do
+for tool in docker jq python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         missing+=("$tool")
     fi
@@ -27,7 +27,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
     echo "Install them and re-run this script." >&2
     exit 1
 fi
-echo "Found required tools: docker, docker compose v2, jq"
+echo "Found required tools: docker, docker compose v2, jq, python3"
 echo
 
 mkdir -p "$HOME/.claude/hooks"

@@ -15,6 +15,8 @@ runtime.
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
+- `python3` (stdlib only — no packages) — runs the host-side credential proxy
+  (see "Security notes").
 - A git push credential — **at least one** is required:
   - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
     container only ever sees a forwarded agent socket, never your private
@@ -39,6 +41,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
+| `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
@@ -94,8 +97,10 @@ SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/claude-sandbox ~/repos/some-project
 ## Config parity with your host Claude Code setup
 
 `~/.claude` is bind-mounted read-write, so global `CLAUDE.md`, settings,
-hooks, plugins, and your existing login/credentials all carry over
-automatically — no separate first-run login. (`~/.claude.json` is handled
+hooks, and plugins all carry over automatically, and your existing login
+stays effective too — no separate first-run login, though the credential
+itself doesn't enter the container directly (see "Security notes" for the
+host-side proxy that makes that work). (`~/.claude.json` is handled
 differently — a throwaway per-session copy, not the real file; see "Security
 notes" below for exactly what that means.)
 
@@ -472,11 +477,29 @@ one can't happen.
   already happened once in this file's own history (a missing `ipset`
   dedup flag broke firewall startup entirely, twice, on two different
   ipsets, before being caught).
-- Because `~/.claude` (including `.credentials.json`) is bind-mounted in,
-  anything reachable from inside the container (the allowed domains above)
-  is a potential exfiltration path for those credentials if a malicious repo
-  manages to manipulate a session. The firewall limits this to
-  Anthropic/npm/GitHub/your Gitea host, not the open internet.
+- The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
+  enters the container. `bin/claude-sandbox` starts a host-side proxy
+  (`bin/claude-sandbox-anthropic-proxy`) on a per-session unix socket,
+  mounts an empty file over `.credentials.json` (the parent `~/.claude`
+  mount stays read-write, so a single-file mask is the mechanism), and
+  hands Claude Code a placeholder token plus an `ANTHROPIC_BASE_URL`
+  pointing at a loopback forwarder that pipes into the socket. The proxy
+  strips the placeholder, injects the real access token per request, and
+  owns OAuth refresh - rotated tokens are written back to the real host
+  file atomically, so host-side sessions stay logged in. What remains is
+  session-scoped: a compromised session can still *use* the model API as
+  you while it runs (that's inherent to the sandbox working at all), but
+  it can no longer read a durable credential and exfiltrate it for
+  offline use via the other allowed egress destinations (npm, GitHub,
+  your Gitea host). Caveats: `/login` inside the container doesn't work
+  while the proxy is on; the refresh flow mirrors a Claude Code internal
+  and may break if upstream changes it, in which case the proxy fails
+  loudly (launch abort, 502s on API calls) rather than silently.
+  `SANDBOX_CREDENTIAL_PROXY=0` is the kill switch, restoring the previous
+  behavior - the credential mounted into the container, readable by a
+  compromised session. Setups without a `claudeAiOauth` block (API-key
+  auth) skip the proxy automatically; there's no stored subscription
+  credential to protect.
 - `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
   `agents/`, and `output-styles/` under `~/.claude` are layered back
   read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks
@@ -498,8 +521,8 @@ one can't happen.
   without pre-creation a compromised session could create the directory
   itself first, then populate it, before the overlay ever had something to
   sit on top of. Everything else under `~/.claude` (session/project
-  history, credentials refresh, caches) stays read-write, since it's
-  runtime state Claude Code needs to update - this list is a denylist of
+  history, caches) stays read-write, since it's runtime state Claude Code
+  needs to update - this list is a denylist of
   known code/config surfaces, not an allowlist, so it has to be kept in
   step with whatever new config surfaces Claude Code adds.
 - `~/.claude.json` mixes that same kind of live state (project registry,

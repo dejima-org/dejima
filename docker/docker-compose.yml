@@ -59,6 +59,15 @@ services:
       # Ctrl-H/Backspace disambiguation config/tmux.conf sets up) against
       # the terminfo entry the rest of the chain actually expects.
       TERM: ${TERM:-xterm-256color}
+      # Host-side credential proxy (see bin/claude-sandbox and README
+      # "Security notes"): when enabled, Claude Code is pointed at a
+      # loopback forwarder and given a placeholder token - the real OAuth
+      # credential stays on the host, injected per-request by the proxy.
+      # All three are empty (and the ANTHROPIC_* pair unset by
+      # entrypoint.sh) when the proxy is disabled.
+      ANTHROPIC_BASE_URL: ${SANDBOX_ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_AUTH_TOKEN: ${SANDBOX_ANTHROPIC_AUTH_TOKEN:-}
+      SANDBOX_ANTHROPIC_PROXY_SOCKET: ${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}
     volumes:
       # Mounted at the same absolute path as on the host (rather than a
       # fixed /workspace) so Claude Code's project/session-history keying
@@ -73,7 +82,7 @@ services:
       # there. Layer them back read-only on top of the read-write parent
       # mount above (Docker applies more specific mounts on top of broader
       # ones); everything else under ~/.claude (session/project history,
-      # credentials refresh, caches, etc.) still needs to stay read-write.
+      # caches, etc.) still needs to stay read-write.
       #
       # settings.json specifically comes from $SANDBOX_SETTINGS_FILE (a
       # bin/claude-sandbox-generated copy with sandbox.enabled forced to

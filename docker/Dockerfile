@@ -248,6 +248,7 @@ COPY docker/init-firewall.sh /usr/local/bin/
 COPY docker/log-shipper.sh /usr/local/bin/
 COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 COPY docker/entrypoint.sh /usr/local/bin/
+COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
 COPY docker/claude-wrapper.sh /usr/local/bin/claude
 COPY bin/gitea-pr /usr/local/bin/gitea-pr
 
