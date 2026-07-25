@@ -540,6 +540,38 @@ EOF
     [[ "$output_creds" != *"real-refresh-token"* ]]
 }
 
+@test "mid-session allowed domains get ongoing ipset tracking, not a one-time snapshot" {
+    # Simulate the container-side half of bin/claude-sandbox-allow for a
+    # domain that wasn't allowed at startup (SIGHUP also clears dnsmasq's
+    # cache, so subsequent digs are really forwarded, not cached).
+    dexec bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    ip=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$ip" ]
+    # The resolution itself must have populated the ipset (wildcard ipset=).
+    dexec ipset test allowed-domains "$ip"
+    # Simulate a CDN edge rotating away and back: drop the IP, clear the
+    # dnsmasq cache, resolve again - the wildcard must re-add it with no
+    # claude-sandbox-allow involvement. This is exactly the case that used
+    # to break ("allowed but blocked again minutes later").
+    dexec ipset del allowed-domains "$ip"
+    dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    ip2=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$ip2" ]
+    dexec ipset test allowed-domains "$ip2"
+}
+
+@test "github resolutions land only in github-domains, never the port-unrestricted allowed-domains" {
+    # The wildcard ipset=/#/allowed-domains must NOT swallow GitHub names:
+    # dnsmasq picks the longest matching ipset= domain, so the explicit
+    # github-domains lines win, keeping GitHub restricted to port 443
+    # (read-only; SSH push physically unreachable).
+    ip=$(dexec dig +short A github.com | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$ip" ]
+    run dexec ipset test allowed-domains "$ip"
+    [ "$status" -ne 0 ]
+    dexec ipset test github-domains "$ip"
+}
+
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"

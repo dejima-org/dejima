@@ -80,31 +80,21 @@ EOF
     done
 
     # init-firewall.sh's ipset population is a one-time snapshot at
-    # container start; a domain that's been allowed can still start failing
-    # to connect later if its CDN edge rotates to an IP that was never added
+    # container start; without ongoing tracking, a domain can start failing
+    # again when its CDN edge rotates to an IP that was never added
     # (pypi.org/files.pythonhosted.org/GitHub's release-assets CDN all do
-    # this), and a domain like crates.io being allowed doesn't help
-    # index.crates.io/static.crates.io, which real traffic actually hits.
-    # These lines keep the ipsets topped up for the life of the session:
-    # every time dnsmasq actually answers a query for one of these domains,
-    # the resolved IP gets added too, on top of the upfront snapshot -
-    # dnsmasq tolerates the target ipset not existing yet at this point
-    # (verified: it logs the attempt and still answers the query
-    # normally), so this is safe even though it's generated before
-    # init-firewall.sh creates the ipsets moments later.
-    #
-    # This only covers domains known at container start (FIXED_DOMAINS,
-    # GITHUB_DNS_SUFFIXES, EXTRA_ALLOWED_DOMAINS) - a domain added mid-session
-    # via bin/claude-sandbox-allow only gets the one-time add it already
-    # does, not ongoing tracking, since --ipset= can't live in the
-    # SIGHUP-reloadable servers-file (dnsmasq only allows --server/
-    # --rev-server there).
-    for domain in "${FIXED_DOMAINS[@]}" ${EXTRA_ALLOWED_DOMAINS:-}; do
-        if [[ "$domain" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            continue
-        fi
-        echo "ipset=/$domain/allowed-domains"
-    done
+    # this). A single wildcard keeps allowed-domains topped up for every
+    # name dnsmasq ever answers: only allowlisted names have an upstream at
+    # all (no-resolv + servers-file), so "gets answered" and "is
+    # allowlisted" are the same set - including domains added mid-session
+    # by bin/claude-sandbox-allow, which previously only got a one-time
+    # snapshot (ipset= can't live in the SIGHUP-reloadable servers-file).
+    # The explicit github-domains lines below still win for GitHub names -
+    # dnsmasq applies the longest matching ipset= domain - which is what
+    # keeps GitHub IPs out of this port-unrestricted set (github-domains
+    # is restricted to 443 by init-firewall.sh; that's the read-only
+    # guarantee).
+    echo "ipset=/#/allowed-domains"
     for domain in "${GITHUB_DNS_SUFFIXES[@]}"; do
         echo "ipset=/$domain/github-domains"
     done
