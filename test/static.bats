@@ -429,3 +429,11 @@ setup() {
     # directory ("docker"), which varies by checkout and breaks discovery.
     grep -qE '^name: claude-sandbox\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
+
+@test "sandbox-context.sh gives the agent its own container ID for claude-sandbox-allow" {
+    # Agents used to guess their container ID and could hand back another
+    # running sandbox's ID, making claude-sandbox-allow "succeed" against
+    # the wrong container. /etc/hostname inside a container is its real ID.
+    grep -q '/etc/hostname' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q -- '--container' "$REPO_ROOT/hooks/sandbox-context.sh"
+}

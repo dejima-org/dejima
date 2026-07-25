@@ -12,6 +12,14 @@ fi
 session_id=$(jq -r '.session_id // empty')
 resume_id="${session_id:-<unknown-session-id>}"
 
+# /etc/hostname in a docker container is the container's own ID, which
+# docker exec accepts directly - baking it into the suggested command below
+# means the agent states its real container instead of guessing (a wrong
+# guess that matches *another* running sandbox makes claude-sandbox-allow
+# "succeed" against the wrong container).
+container_id=$(cat /etc/hostname 2>/dev/null)
+container_id="${container_id:-<container-id>}"
+
 context=$(cat <<EOF
 You are running inside the claude-sandbox Docker container, not directly on
 the user's machine, with
@@ -30,8 +38,10 @@ What this means:
   via ALLOWED_DOMAINS). Requests to anything else will simply fail to
   connect. If a task needs one more domain and nothing else, that's a quick
   fix, not a reason to stop: tell the user to run
-  \`bin/claude-sandbox-allow <domain>\` (add \`--global\` to persist it past
-  this session) from a terminal outside the sandbox, then continue.
+  \`bin/claude-sandbox-allow <domain> --container $container_id\` (add
+  \`--global\` to persist it past this session) from a terminal outside the
+  sandbox, then continue. Quote that --container value exactly as written
+  here - it is this container's real ID, not something to infer.
 - Stay within the task you were given. Since there are no permission
   prompts here, be more conservative than usual about anything destructive,
   irreversible, or outside the project directory.
