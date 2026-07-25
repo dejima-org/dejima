@@ -50,6 +50,8 @@ setup_file() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$network" \
         -e SANDBOX_TEST_MODE=1 \
+        -e ANTHROPIC_BASE_URL= \
+        -e ANTHROPIC_AUTH_TOKEN= \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
@@ -410,4 +412,80 @@ EOF'
     run dexec_node node /tmp/pw-firewall-test.js
     [[ "$output" == *"BLOCKED_AS_EXPECTED"* ]]
     ! [[ "$output" == *"REACHED_BLOCKED_DOMAIN"* ]]
+}
+
+@test "empty ANTHROPIC_* env vars are unset before the session command runs" {
+    # Compose always sends the pair (possibly empty); entrypoint.sh must
+    # unset empties so a disabled proxy is indistinguishable from today.
+    # /proc/1/environ is the post-entrypoint exec'd process's environment.
+    run docker exec "$(container_name)" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
+    [ "$output" = "0" ]
+}
+
+@test "credential proxy chain: loopback -> forwarder -> unix socket -> host proxy injects the real token" {
+    TD="$BATS_TEST_TMPDIR"
+    python3 "$BATS_TEST_DIRNAME/fixtures/fake-anthropic.py" > "$TD/port" &
+    FAKE_PID=$!
+    for _ in $(seq 1 50); do [ -s "$TD/port" ] && break; sleep 0.1; done
+    cat > "$TD/credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    "$BATS_TEST_DIRNAME/../bin/claude-sandbox-anthropic-proxy" \
+        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
+        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
+    PROXY_PID=$!
+    for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
+
+    container="claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
+        -v "$TD:$TD" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        docker exec "$container" pgrep -x sleep >/dev/null 2>&1 && break
+        sleep 1
+    done
+
+    run docker exec "$container" node -e '
+        fetch("http://127.0.0.1:18300/v1/messages", {method: "POST",
+            headers: {authorization: "Bearer sandbox-credential-proxy-placeholder"},
+            body: "{}"})
+          .then(r => r.text()).then(t => { console.log(t); })
+          .catch(e => { console.error(e); process.exit(1); })'
+    status_chain=$status; output_chain=$output
+
+    # the real token never appears in the container environment
+    run docker exec "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
+    env_hits=$output
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    kill "$PROXY_PID" "$FAKE_PID" 2>/dev/null || true
+
+    [ "$status_chain" -eq 0 ]
+    [[ "$output_chain" == *'"authorization": "Bearer real-access-token"'* ]]
+    [[ "$output_chain" != *"sandbox-credential-proxy-placeholder"* ]]
+    [ "$env_hits" = "0" ]
+}
+
+@test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
+    [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
+    TD="$BATS_TEST_TMPDIR"
+    "$BATS_TEST_DIRNAME/../bin/claude-sandbox-anthropic-proxy" \
+        --socket "$TD/proxy.sock" --credentials "$HOME/.claude/.credentials.json" &
+    PROXY_PID=$!
+    for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
+    SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
+        node "$BATS_TEST_DIRNAME/../docker/anthropic-proxy-forwarder.js" &
+    FWD_PID=$!
+    sleep 0.5
+    run env ANTHROPIC_BASE_URL=http://127.0.0.1:18399 \
+        ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
+        claude -p 'Reply with exactly: proxy-ok'
+    kill "$PROXY_PID" "$FWD_PID" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proxy-ok"* ]]
 }
