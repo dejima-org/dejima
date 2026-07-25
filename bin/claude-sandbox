@@ -227,9 +227,13 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # path for this - discover what's actually needed here instead, so it's
 # correct regardless of what's installed or where this repo itself was
 # cloned to.
+# "." covers top-level symlinked files directly under ~/.claude itself -
+# e.g. ~/.claude/statusline.sh -> dotfiles' statusline script, referenced
+# by settings.json's statusLine.command. Same trust model as hook code:
+# the target executes on the host too, so read-only is the right mount.
 extra_mounts=()
 mounted_dirs=""
-for overlay_dir in hooks skills commands agents output-styles; do
+for overlay_dir in . hooks skills commands agents output-styles; do
     dir="$HOME/.claude/$overlay_dir"
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do

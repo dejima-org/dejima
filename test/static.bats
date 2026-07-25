@@ -450,3 +450,11 @@ setup() {
 @test "bin/claude-sandbox-allow's multi-container error points at the sandbox's own ID" {
     grep -q '/etc/hostname' "$REPO_ROOT/bin/claude-sandbox-allow"
 }
+
+@test "bin/claude-sandbox mounts targets of top-level ~/.claude symlinks (statusline.sh)" {
+    # settings.json's statusLine points at ~/.claude/statusline.sh, which on
+    # this setup is a symlink into dotfiles - previously only the five
+    # overlay subdirectories were scanned for symlinks, so the target dir
+    # never got mounted and the statusline silently died in the sandbox.
+    grep -q 'for overlay_dir in \. hooks skills commands agents output-styles' "$REPO_ROOT/bin/claude-sandbox"
+}
