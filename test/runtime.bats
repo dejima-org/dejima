@@ -544,8 +544,13 @@ EOF
     # Simulate the container-side half of bin/claude-sandbox-allow for a
     # domain that wasn't allowed at startup (SIGHUP also clears dnsmasq's
     # cache, so subsequent digs are really forwarded, not cached).
+    # SIGHUP-to-reload is asynchronous - give dnsmasq a moment to actually
+    # reload servers-file and flush its cache before digging (see the
+    # existing "ipset stays in sync" test above for the same convention).
     dexec bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    sleep 0.5
     ip=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    sleep 0.5
     [ -n "$ip" ]
     # The resolution itself must have populated the ipset (wildcard ipset=).
     dexec ipset test allowed-domains "$ip"
@@ -555,7 +560,9 @@ EOF
     # to break ("allowed but blocked again minutes later").
     dexec ipset del allowed-domains "$ip"
     dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    sleep 0.5
     ip2=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    sleep 0.5
     [ -n "$ip2" ]
     dexec ipset test allowed-domains "$ip2"
 }
