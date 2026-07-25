@@ -127,6 +127,11 @@ teardown() {
     # which point _write's rename has already completed.
     leftover="$(find "$TD" -mindepth 1 -maxdepth 1 -name 'tmp*' -not -path "$TD/.credentials-proxy-tmp*")"
     [ -z "$leftover" ]
+    # and confirm the write actually staged in the dedicated subdirectory
+    # (not just that no tmp file is left directly in $TD - the old, vulnerable
+    # code also cleaned up after itself via os.replace, so that alone passes
+    # even pre-fix).
+    [ -d "$TD/.credentials-proxy-tmp" ]
 }
 
 @test "the refresh request carries the stored refresh token and the pinned client id" {

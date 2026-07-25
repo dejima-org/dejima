@@ -341,6 +341,11 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     SANDBOX_CREDENTIALS_TMPDIR_MASK="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-credentials-tmpdir-mask.XXXXXX")"
     extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
     extra_mounts+=(-v "$SANDBOX_CREDENTIALS_MASK_FILE:$HOME/.claude/.credentials.json")
+    # Mount target must exist first, same as the skills/commands/etc. overlays
+    # above - otherwise Docker auto-creates it root-owned, and the proxy
+    # (running as the unprivileged host user) can't write its staging temp
+    # file there on the next refresh.
+    mkdir -p -m 700 "$HOME/.claude/.credentials-proxy-tmp"
     extra_mounts+=(-v "$SANDBOX_CREDENTIALS_TMPDIR_MASK:$HOME/.claude/.credentials-proxy-tmp:ro")
     SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
