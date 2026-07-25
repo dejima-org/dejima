@@ -437,3 +437,16 @@ setup() {
     grep -q '/etc/hostname' "$REPO_ROOT/hooks/sandbox-context.sh"
     grep -q -- '--container' "$REPO_ROOT/hooks/sandbox-context.sh"
 }
+
+@test "bin/claude-sandbox-allow ends with a real reachability check, not just config changes" {
+    # "It said allowed but the sandbox still can't reach it" was a real
+    # failure mode (wrong container targeted / stale ipset) - the script
+    # must verify from inside the target container and say so definitively.
+    grep -q 'connect-timeout' "$REPO_ROOT/bin/claude-sandbox-allow"
+    grep -q 'Verified:' "$REPO_ROOT/bin/claude-sandbox-allow"
+    grep -q 'NOT reachable' "$REPO_ROOT/bin/claude-sandbox-allow"
+}
+
+@test "bin/claude-sandbox-allow's multi-container error points at the sandbox's own ID" {
+    grep -q '/etc/hostname' "$REPO_ROOT/bin/claude-sandbox-allow"
+}
