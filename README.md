@@ -68,6 +68,12 @@ Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat.
 
+> **Upgrading note:** the compose project name is now pinned to
+> `claude-sandbox`, which re-namespaces the named volumes (bash history,
+> nvim data/state/cache). Pre-existing volumes under the old project name
+> are orphaned — harmless, their contents regenerate — and can be removed
+> with `docker volume ls` / `docker volume rm` if you want them gone.
+
 ### Using a different editor/application
 
 ```sh

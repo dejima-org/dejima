@@ -421,3 +421,11 @@ setup() {
 @test "bin/claude-sandbox warns if the proxy died before the session ended" {
     grep -q 'credential proxy exited before' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "docker-compose.yml pins the compose project name so claude-sandbox-allow's label filter matches" {
+    # bin/claude-sandbox-allow discovers running sandboxes via the
+    # com.docker.compose.project=claude-sandbox label; without an explicit
+    # top-level name, compose derives the project from the compose file's
+    # directory ("docker"), which varies by checkout and breaks discovery.
+    grep -qE '^name: claude-sandbox\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}

@@ -2,6 +2,13 @@
 # SSH_AUTH_SOCK, etc. must point at real host paths for a specific project.
 # Use `bin/claude-sandbox <path-to-project>` instead, which sets these and
 # invokes this file.
+
+# Pinned explicitly: bin/claude-sandbox-allow discovers running sandboxes
+# via the com.docker.compose.project label, which otherwise derives from
+# this file's directory name ("docker") and would never match the
+# "claude-sandbox" value that script filters on.
+name: claude-sandbox
+
 services:
   claude:
     build:
