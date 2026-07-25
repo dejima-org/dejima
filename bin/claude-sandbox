@@ -302,6 +302,24 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
+# ~/.claude/statusline.sh is the same class of file as the compose overlays
+# on settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/output-
+# styles above (see docker-compose.yml's comments on those): settings.json's
+# statusLine.command points at it, and Claude Code executes it on the host.
+# Unlike those, it has no overlay of its own - it's a top-level *file*
+# directly on the read-write ~/.claude mount, so a compromised session can
+# unlink it and drop its own script in its place. The symlink-target scan
+# above (the "." entry in overlay_dir) only protects the case where
+# statusline.sh is a symlink by mounting read-only where it *points* - it
+# doesn't touch the symlink/file itself, which still lives on the writable
+# mount. -e (not -f) so a symlinked statusline.sh is covered the same as a
+# plain file; conditional on existence because not every host has one, and
+# mounting a nonexistent source would make Docker create a root-owned
+# directory at the target instead - worse than the gap this closes.
+if [ -e "$HOME/.claude/statusline.sh" ]; then
+    extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh:ro")
+fi
+
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
 # bin/claude-sandbox-anthropic-proxy and README "Security notes"), mount an

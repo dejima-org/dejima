@@ -458,3 +458,19 @@ setup() {
     # never got mounted and the statusline silently died in the sandbox.
     grep -q 'for overlay_dir in \. hooks skills commands agents output-styles' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "bin/claude-sandbox mounts ~/.claude/statusline.sh itself read-only, when present" {
+    # statusline.sh is a top-level file directly on the read-write ~/.claude
+    # mount (unlike settings.json/CLAUDE.md/plugins/hooks/skills/commands/
+    # agents/output-styles, none of which have this gap) - settings.json's
+    # statusLine.command points at it and Claude Code executes it on the
+    # host. Mounting a symlink's *target* dir read-only (the test above)
+    # doesn't help: the symlink/file at ~/.claude/statusline.sh itself still
+    # lives on the writable mount and a compromised session can unlink it and
+    # drop its own script in its place. Must be conditional on -e (existence,
+    # symlink-or-file) - not every host has a statusline, and mounting a
+    # nonexistent source would make Docker create a root-owned directory at
+    # the target instead.
+    grep -q 'if \[ -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:\$HOME/\.claude/statusline\.sh:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
