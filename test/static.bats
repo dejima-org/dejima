@@ -470,10 +470,20 @@ setup() {
     # drop its own script in its place. Must be conditional on existence
     # (not every host has a statusline, and mounting a nonexistent source
     # would make Docker create a root-owned directory at the target
-    # instead) - but plain -e alone follows symlinks and is false for a
-    # *dangling* one (e.g. a dotfiles checkout that isn't present), which
-    # would silently leave that exact case unprotected - the extra -L arm
-    # covers that.
-    grep -q 'if \[ -e "\$HOME/\.claude/statusline\.sh" \] || \[ -L "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
+    # instead).
     grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:\$HOME/\.claude/statusline\.sh:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox refuses to launch rather than silently skip a dangling statusline.sh symlink" {
+    # Plain -e follows symlinks and is false for a *dangling* one (target
+    # doesn't exist, e.g. a dotfiles checkout that isn't present) - silently
+    # skipping the mount in that case would reopen the exact gap the test
+    # above closes. Docker also can't just attempt the mount anyway: it fails
+    # deep in mount setup with an opaque "mkdir ...: file exists" (the
+    # symlink already occupies that path), unconnected to the statusline for
+    # the user. So this must be a hard, explicit error - same fail-loud
+    # precedent as the credential proxy refusing to launch rather than
+    # silently mounting the real OAuth credential.
+    grep -q 'if \[ -L "\$HOME/\.claude/statusline\.sh" \] && \[ ! -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/claude-sandbox"
 }

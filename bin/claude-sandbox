@@ -312,16 +312,23 @@ fi
 # above (the "." entry in overlay_dir) only protects the case where
 # statusline.sh is a symlink by mounting read-only where it *points* - it
 # doesn't touch the symlink/file itself, which still lives on the writable
-# mount. -e (not -f) so a symlinked statusline.sh is covered the same as a
-# plain file; conditional on existence because not every host has one, and
+# mount. Conditional on existence because not every host has one, and
 # mounting a nonexistent source would make Docker create a root-owned
-# directory at the target instead - worse than the gap this closes. The
-# separate -L check catches a *dangling* symlink (target doesn't exist,
-# e.g. a dotfiles checkout that isn't present) - plain -e follows the link
-# and reports false for those, which would leave this exact path
-# unprotected on the read-write mount; do not simplify this back to a bare
-# -e.
-if [ -e "$HOME/.claude/statusline.sh" ] || [ -L "$HOME/.claude/statusline.sh" ]; then
+# directory at the target instead - worse than the gap this closes. A
+# *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
+# isn't present) is neither "exists" nor safely mountable, so it gets its own
+# branch that refuses to launch rather than either silently skipping the
+# mount (reopens the gap plain -e had) or attempting it anyway (Docker can't
+# bind-mount a dangling symlink - it fails deep in mount setup with an opaque
+# "mkdir ...: file exists", since the symlink already occupies that path,
+# with nothing connecting that error back to the statusline for the user).
+if [ -L "$HOME/.claude/statusline.sh" ] && [ ! -e "$HOME/.claude/statusline.sh" ]; then
+    echo "$HOME/.claude/statusline.sh is a symlink to a target that doesn't" >&2
+    echo "exist. Docker can't bind-mount a dangling symlink, and skipping the" >&2
+    echo "mount would leave it unprotected on the read-write ~/.claude mount." >&2
+    echo "Fix or remove the symlink, then retry." >&2
+    exit 1
+elif [ -e "$HOME/.claude/statusline.sh" ]; then
     extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh:ro")
 fi
 
