@@ -467,10 +467,13 @@ setup() {
     # host. Mounting a symlink's *target* dir read-only (the test above)
     # doesn't help: the symlink/file at ~/.claude/statusline.sh itself still
     # lives on the writable mount and a compromised session can unlink it and
-    # drop its own script in its place. Must be conditional on -e (existence,
-    # symlink-or-file) - not every host has a statusline, and mounting a
-    # nonexistent source would make Docker create a root-owned directory at
-    # the target instead.
-    grep -q 'if \[ -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
+    # drop its own script in its place. Must be conditional on existence
+    # (not every host has a statusline, and mounting a nonexistent source
+    # would make Docker create a root-owned directory at the target
+    # instead) - but plain -e alone follows symlinks and is false for a
+    # *dangling* one (e.g. a dotfiles checkout that isn't present), which
+    # would silently leave that exact case unprotected - the extra -L arm
+    # covers that.
+    grep -q 'if \[ -e "\$HOME/\.claude/statusline\.sh" \] || \[ -L "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
     grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:\$HOME/\.claude/statusline\.sh:ro")' "$REPO_ROOT/bin/claude-sandbox"
 }

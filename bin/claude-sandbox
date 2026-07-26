@@ -315,8 +315,13 @@ fi
 # mount. -e (not -f) so a symlinked statusline.sh is covered the same as a
 # plain file; conditional on existence because not every host has one, and
 # mounting a nonexistent source would make Docker create a root-owned
-# directory at the target instead - worse than the gap this closes.
-if [ -e "$HOME/.claude/statusline.sh" ]; then
+# directory at the target instead - worse than the gap this closes. The
+# separate -L check catches a *dangling* symlink (target doesn't exist,
+# e.g. a dotfiles checkout that isn't present) - plain -e follows the link
+# and reports false for those, which would leave this exact path
+# unprotected on the read-write mount; do not simplify this back to a bare
+# -e.
+if [ -e "$HOME/.claude/statusline.sh" ] || [ -L "$HOME/.claude/statusline.sh" ]; then
     extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh:ro")
 fi
 
