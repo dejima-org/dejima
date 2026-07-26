@@ -40,6 +40,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `SANDBOX_LOG_CONVERSATION` | `0` | opt-in: also ship session transcripts to Loki (needs `LOKI_URL`) — see "Conversation logging (opt-in)" below |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
 | `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
@@ -569,6 +570,18 @@ one can't happen.
   needs to update - this list is a denylist of
   known code/config surfaces, not an allowlist, so it has to be kept in
   step with whatever new config surfaces Claude Code adds.
+- `~/.claude/statusline.sh` (referenced by `settings.json`'s
+  `statusLine.command` and executed on the host) is bind-mounted onto
+  itself read-only by `bin/claude-sandbox`, for the same reason as the
+  list above - intent is to stop a compromised session from unlinking it
+  and dropping its own script in its place. This is reliably true when
+  `statusline.sh` is a plain regular file; when it's a symlink (the common
+  case - typically into a dotfiles checkout), whether the read-only mount
+  actually lands on the symlink dentry itself or gets resolved through to
+  its target first (in which case the symlink entry would remain
+  replaceable) depends on mount/symlink resolution order this repo hasn't
+  independently verified against a live container - see
+  `test/runtime.bats`'s statusline.sh tests.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
@@ -729,7 +742,7 @@ likely to collide with a real container you have running.
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL` |
+| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL`; also ships session transcripts when `SANDBOX_LOG_CONVERSATION=1` |
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/claude-sandbox`, not directly |
@@ -742,8 +755,10 @@ likely to collide with a real container you have running.
 
 `bin/claude-sandbox` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
-set, discovers which host directories need mounting for `~/.claude/hooks`
-symlinks to resolve, and runs `docker compose run`. `bin/claude-sandbox-allow`
+set, discovers which host directories need mounting for symlinks under
+`~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
+top-level entries like `statusline.sh`) to resolve, and runs
+`docker compose run`. `bin/claude-sandbox-allow`
 adds a domain to a running session's firewall from the host - see "Adding a
 domain to a running session" above. `install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.
