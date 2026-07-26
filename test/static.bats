@@ -487,3 +487,10 @@ setup() {
     grep -q 'if \[ -L "\$HOME/\.claude/statusline\.sh" \] && \[ ! -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
+    # $VIMRUNTIME/plugin, NOT /etc/xdg/nvim: lazy.nvim's performance.rtp
+    # reset strips /etc/xdg from the runtimepath, but always keeps
+    # $VIMRUNTIME - this must load for lazy-managed configs too.
+    grep -q 'COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua' "$SANDBOX_DIR/Dockerfile"
+}

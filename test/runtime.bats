@@ -579,6 +579,26 @@ EOF
     dexec ipset test github-domains "$ip"
 }
 
+@test "nvim falls back to the sandbox OSC 52 clipboard provider" {
+    # nvim 0.11+'s OSC 52 auto-detection needs a DA1/XTGETTCAP terminal
+    # handshake that never completes through the docker tty, leaving
+    # "clipboard: No provider" for any config without its own provider.
+    run dexec_node nvim --headless "+lua io.stdout:write(vim.g.clipboard and vim.g.clipboard.name or 'unset')" "+q"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sandbox-osc52"* ]]
+}
+
+@test "a user-configured clipboard provider beats the sandbox fallback" {
+    # --cmd runs before plugins, standing in for a user config that sets
+    # g:clipboard (e.g. dotfiles' clipboard-copy via SANDBOX_EXTRA_MOUNTS).
+    run dexec_node nvim --headless \
+        --cmd "lua vim.g.clipboard = {name = 'user-provider', copy = {}, paste = {}}" \
+        "+lua io.stdout:write(vim.g.clipboard.name)" "+q"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"user-provider"* ]]
+    [[ "$output" != *"sandbox-osc52"* ]]
+}
+
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"
