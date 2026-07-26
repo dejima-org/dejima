@@ -86,6 +86,8 @@ teardown() {
     docker rm -f "claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -323,6 +325,100 @@ dexec_node() {
     done
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$src"
+}
+
+@test "statusline.sh read-only mount blocks replacement when it's a plain regular file" {
+    # Companion to the overlay-dirs test above, but for bin/claude-sandbox's
+    # narrower statusline.sh-onto-itself mount (see its comment there) rather
+    # than a whole subdirectory. This test does NOT use bin/claude-sandbox or
+    # docker-compose.yml directly - it builds the same mount shape by hand: a
+    # whole ~/.claude directory bind-mounted read-write (docker-compose.yml's
+    # own ~/.claude mount), with statusline.sh itself bind-mounted read-only
+    # back onto its own path on top, source and destination the same literal
+    # path exactly as bin/claude-sandbox constructs it (container HOME
+    # matches host HOME - see Dockerfile). This shared container isn't reused
+    # for this (it has no ~/.claude mount at all - see setup_file).
+    local test_container="claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
+    local dotclaude; dotclaude="$(mktemp -d)"
+    printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
+    chmod +x "$dotclaude/statusline.sh"
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$dotclaude:/home/node/.claude" \
+        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    run docker exec -u node "$test_container" sh -c \
+        'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -ne 0 ]
+
+    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    [[ "$output" == *"original"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$dotclaude"
+}
+
+@test "statusline.sh read-only mount when it's a symlink into a separately-mounted dir (Finding 1 - the open question)" {
+    # Same mount shape as the plain-regular-file test above, except
+    # statusline.sh on the host is a symlink into a separately-mounted
+    # directory - the common real setup
+    # (~/.claude/statusline.sh -> ~/dotfiles/statusline.sh). The parent
+    # ~/.claude mount is established first (same order docker-compose.yml
+    # uses), so by the time the more-specific statusline.sh mount below is
+    # processed, the destination path already has that symlink sitting on
+    # it - and bind-mount destination resolution (runc's SecureJoin) follows
+    # symlinks within the rootfs. Whether this :ro mount ends up bound to the
+    # symlink dentry itself (protecting it, matching the plain-file case
+    # above) or gets resolved through to the target directory first (already
+    # read-only via the separate target_dir mount below, mirroring
+    # bin/claude-sandbox's own symlink-target scan - making this specific
+    # mount a no-op there and leaving the symlink dentry itself on the
+    # writable ~/.claude mount, still replaceable) is exactly the open
+    # question the code review raised and reasoning about mount/runc
+    # internals alone couldn't settle. This test asserts the intended,
+    # protected outcome (matching the comment in bin/claude-sandbox) - if it
+    # actually fails against a real Docker/runc, that failure is the answer,
+    # not a bug in the test: don't "fix" this test to match a failure without
+    # first fixing the mount itself (or re-confirming this comment's
+    # ordering/SecureJoin premise is wrong).
+    local test_container="claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
+    local target_dir dotclaude
+    target_dir="$(mktemp -d)"
+    printf '#!/bin/sh\necho original\n' > "$target_dir/statusline.sh"
+    chmod +x "$target_dir/statusline.sh"
+    dotclaude="$(mktemp -d)"
+    ln -s "$target_dir/statusline.sh" "$dotclaude/statusline.sh"
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$dotclaude:/home/node/.claude" \
+        -v "$target_dir:$target_dir:ro" \
+        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    run docker exec -u node "$test_container" sh -c \
+        'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -ne 0 ]
+
+    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    [[ "$output" == *"original"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$target_dir" "$dotclaude"
 }
 
 @test "node cannot run iptables directly" {

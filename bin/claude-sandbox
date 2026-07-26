@@ -238,7 +238,13 @@ for overlay_dir in . hooks skills commands agents output-styles; do
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do
         [ -L "$entry" ] || continue
-        real_dir="$(dirname "$(readlink -f "$entry")")"
+        # readlink -f fails (empty stdout) when an intermediate directory of
+        # the symlink's target is itself missing, not just the final
+        # component - skip rather than let `dirname ""` silently resolve to
+        # "." and append a nonsensical (or worse, cwd-mounting) -v .:.:ro.
+        target="$(readlink -f "$entry")" || continue
+        [ -n "$target" ] || continue
+        real_dir="$(dirname "$target")"
         case "$real_dir" in
             "$HOME/.claude"*) continue ;;
         esac
@@ -314,8 +320,24 @@ fi
 # doesn't touch the symlink/file itself, which still lives on the writable
 # mount. Conditional on existence because not every host has one, and
 # mounting a nonexistent source would make Docker create a root-owned
-# directory at the target instead - worse than the gap this closes. A
-# *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
+# directory at the target instead - worse than the gap this closes.
+#
+# Intent, not a verified guarantee, when statusline.sh itself is a symlink
+# (the common case - typically into a dotfiles checkout): the parent
+# ~/.claude mount above is established first, so by the time this mount is
+# processed the destination already has that symlink sitting on it, and
+# bind-mount destination resolution (runc's SecureJoin) follows symlinks
+# within the container's rootfs. Whether this :ro mount ends up bound to the
+# symlink dentry itself (protecting it, as intended) or gets resolved
+# through it to the target directory first (already read-only from the
+# symlink-target scan above, making this mount a no-op there and leaving the
+# symlink entry itself on the writable ~/.claude mount, still replaceable)
+# is not something reasoning about mount semantics alone can settle -
+# test/runtime.bats has a live-container test for exactly this, covering
+# both the plain-regular-file and symlink shapes; that test is the source of
+# truth here, not this comment.
+#
+# A *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
 # isn't present) is neither "exists" nor safely mountable, so it gets its own
 # branch that refuses to launch rather than either silently skipping the
 # mount (reopens the gap plain -e had) or attempting it anyway (Docker can't
