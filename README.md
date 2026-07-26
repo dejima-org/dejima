@@ -277,12 +277,36 @@ It first adds the domain to the running dnsmasq's allowlist (appends a
 `server=` line to its servers-file and sends `SIGHUP` to reload just that
 file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
-`docker exec -u root`. `--global` also appends the domain to
-`ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
+`docker exec -u root`. It finishes by checking the domain is actually
+reachable from inside that same container and prints a definitive verdict
+— exit code 2 if it isn't, before `--global` persistence runs, so a domain
+that demonstrably doesn't work never makes it into `config/env` on the
+strength of that run. (This check is an HTTPS connection attempt, so a
+service that doesn't listen on port 443 will fail it spuriously even
+though DNS and the firewall are both fine.) `--global` also appends the
+domain to `ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
 automatically by the next `bin/claude-sandbox` invocation, no sourcing
-needed. If more than one
-claude-sandbox container is running, pass `--container <name>` to
-disambiguate (`docker ps` to find it).
+needed. If more than one claude-sandbox container is running, pass
+`--container <name>` to disambiguate - `docker ps` finds it, or use the
+container's own ID, which `sandbox-context.sh` already hands the agent in
+its startup context (and which is always available inside the sandbox as
+`cat /etc/hostname`), so there's no need for it to guess one and risk
+"successfully" updating someone else's session instead.
+
+A domain allowed this way stays allowed for the rest of the session even
+if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
+`ipset` from every DNS answer it serves, not just the one resolved at
+allow-time, since only allowlisted names get an upstream to answer from in
+the first place. GitHub's own domains sit outside this - their existing
+port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
+so that restriction is unaffected.
+
+One gap remains: allowing an *internal* hostname (one that resolves to an
+RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
+rejects private answers for any domain not exempted at startup, and that
+exemption list can only be extended by restarting dnsmasq. Internal hosts
+named before the container starts (`GITEA_SSH_HOST`, `GITEA_API`,
+`LOKI_URL`, `ALLOWED_DOMAINS`) are already exempted and unaffected by this.
 
 The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
