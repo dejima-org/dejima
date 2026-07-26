@@ -308,6 +308,20 @@ This is visibility on top of the firewall/DNS-proxy enforcement above, not a
 substitute for it - nothing about logging changes what's actually allowed to
 resolve or connect.
 
+### Conversation logging (opt-in)
+
+Set `SANDBOX_LOG_CONVERSATION=1` (with `LOKI_URL` configured) to also ship
+session content to Loki as the `claude-sandbox-conversation` job: your
+prompts, the agent's text responses, and tool invocations (tool name +
+input - never tool outputs). Lines are JSON with the session ID inside
+(`{session, role, text}` / `{session, role: "tool", tool, input}`).
+
+Off by default - conversation content is a different sensitivity class
+than DNS names and firewall verdicts, so it never leaves the container
+unless you opt in. Transcripts of every session under the mounted
+workspace (including worktrees and subagent sessions) are shipped while
+the sandbox runs.
+
 ### Viewing logs in Grafana
 
 Nothing sandbox-specific needed on the Grafana side beyond a Loki data

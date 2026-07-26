@@ -57,6 +57,11 @@ services:
       # automatically firewall-allowlisted (see entrypoint.sh). Optional -
       # logging is skipped entirely if unset.
       LOKI_URL: ${LOKI_URL:-}
+      # Opt-in (default off): also ship session prompts, assistant
+      # responses, and tool invocations to Loki as the
+      # claude-sandbox-conversation job. Content only leaves the container
+      # if LOKI_URL is also set. See README "Network request logging".
+      SANDBOX_LOG_CONVERSATION: ${SANDBOX_LOG_CONVERSATION:-0}
       SSH_AUTH_SOCK: /ssh-agent
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-1}
       # Docker's own tty allocation defaults to a generic TERM (e.g. plain

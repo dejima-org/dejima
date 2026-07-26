@@ -494,3 +494,28 @@ setup() {
     # $VIMRUNTIME - this must load for lazy-managed configs too.
     grep -q 'COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua' "$SANDBOX_DIR/Dockerfile"
 }
+
+@test "log-shipper conversation shipping is opt-in and off by default" {
+    grep -q 'SANDBOX_LOG_CONVERSATION' "$SANDBOX_DIR/log-shipper.sh"
+    grep -qE 'SANDBOX_LOG_CONVERSATION: \$\{SANDBOX_LOG_CONVERSATION:-0\}' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "log-shipper transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
+    fixtures='{"type":"user","sessionId":"s1","isMeta":null,"message":{"role":"user","content":"fix the login bug"}}
+{"type":"user","sessionId":"s1","isMeta":true,"message":{"role":"user","content":"meta noise"}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","content":"tool output secret"}]}}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"done, deployed the fix"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
+this line is not json'
+    run bash -c "LOG_SHIPPER_LIB_ONLY=1 source '$SANDBOX_DIR/log-shipper.sh'; transform_transcript_line <<< \"\$1\"" _ "$fixtures"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"role":"user"'* ]]
+    [[ "$output" == *"fix the login bug"* ]]
+    [[ "$output" == *'"role":"assistant"'* ]]
+    [[ "$output" == *"done, deployed the fix"* ]]
+    [[ "$output" == *'"role":"tool"'* ]]
+    [[ "$output" == *'ls -la'* ]]
+    [[ "$output" != *"meta noise"* ]]
+    [[ "$output" != *"tool output secret"* ]]
+    [[ "$output" != *"hidden reasoning"* ]]
+    [[ "$output" != *"not json"* ]]
+}
