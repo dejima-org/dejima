@@ -355,8 +355,19 @@ dexec_node() {
         sleep 1
     done
 
+    # A `rm` on a bind-mounted file fails from ordinary mount-point-busy
+    # semantics regardless of the :ro flag, so `rm -f X && echo pwned > X`
+    # alone doesn't prove anything about read-only enforcement - the `&&`
+    # short-circuits before the write it was meant to test ever runs, so
+    # this would pass identically even without `:ro`. The write that
+    # actually depends on the read-only flag is an in-place overwrite that
+    # never unlinks the file first.
     run docker exec -u node "$test_container" sh -c \
-        'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
+        'echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -ne 0 ]
+
+    run docker exec -u node "$test_container" sh -c \
+        'truncate -s 0 /home/node/.claude/statusline.sh'
     [ "$status" -ne 0 ]
 
     run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
@@ -366,7 +377,7 @@ dexec_node() {
     rm -rf "$dotclaude"
 }
 
-@test "statusline.sh read-only mount when it's a symlink into a separately-mounted dir (Finding 1 - the open question)" {
+@test "statusline.sh read-only mount does NOT protect it when it's a symlink (Finding 1 - confirmed gap, see bin/claude-sandbox-audit)" {
     # Same mount shape as the plain-regular-file test above, except
     # statusline.sh on the host is a symlink into a separately-mounted
     # directory - the common real setup
@@ -375,20 +386,24 @@ dexec_node() {
     # uses), so by the time the more-specific statusline.sh mount below is
     # processed, the destination path already has that symlink sitting on
     # it - and bind-mount destination resolution (runc's SecureJoin) follows
-    # symlinks within the rootfs. Whether this :ro mount ends up bound to the
-    # symlink dentry itself (protecting it, matching the plain-file case
-    # above) or gets resolved through to the target directory first (already
-    # read-only via the separate target_dir mount below, mirroring
-    # bin/claude-sandbox's own symlink-target scan - making this specific
-    # mount a no-op there and leaving the symlink dentry itself on the
-    # writable ~/.claude mount, still replaceable) is exactly the open
-    # question the code review raised and reasoning about mount/runc
-    # internals alone couldn't settle. This test asserts the intended,
-    # protected outcome (matching the comment in bin/claude-sandbox) - if it
-    # actually fails against a real Docker/runc, that failure is the answer,
-    # not a bug in the test: don't "fix" this test to match a failure without
-    # first fixing the mount itself (or re-confirming this comment's
-    # ordering/SecureJoin premise is wrong).
+    # symlinks within the rootfs. This CONFIRMS the mount resolves through
+    # the symlink to the target directory (already read-only via the
+    # separate target_dir mount below, mirroring bin/claude-sandbox's own
+    # symlink-target scan) instead of binding to the symlink dentry itself -
+    # so the symlink dentry stays a perfectly ordinary, writable entry on
+    # the read-write ~/.claude mount, with no mountpoint-busy protection
+    # either. This test is a characterization test of that CONFIRMED,
+    # known, deliberately-documented limitation (see bin/claude-sandbox and
+    # README "Security notes"), not an aspiration: it asserts the
+    # replacement SUCCEEDS. The compensating control is detection, not
+    # prevention - bin/claude-sandbox-audit hashes the symlink's target
+    # string and reports a changed/repointed statusline.sh as a
+    # host-code-execution finding after the session exits (see
+    # test/audit.bats). If this test ever starts FAILING, that means
+    # Docker/runc changed destination-symlink resolution and this gap may
+    # have closed - that would be good news worth investigating and acting
+    # on (tightening the comments/audit accordingly), not a regression to
+    # "fix" back to the old behavior.
     local test_container="claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
     local target_dir dotclaude
     target_dir="$(mktemp -d)"
@@ -412,10 +427,10 @@ dexec_node() {
 
     run docker exec -u node "$test_container" sh -c \
         'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 0 ]
 
     run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
-    [[ "$output" == *"original"* ]]
+    [[ "$output" == *"pwned"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$target_dir" "$dotclaude"

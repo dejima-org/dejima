@@ -573,15 +573,24 @@ one can't happen.
 - `~/.claude/statusline.sh` (referenced by `settings.json`'s
   `statusLine.command` and executed on the host) is bind-mounted onto
   itself read-only by `bin/claude-sandbox`, for the same reason as the
-  list above - intent is to stop a compromised session from unlinking it
-  and dropping its own script in its place. This is reliably true when
-  `statusline.sh` is a plain regular file; when it's a symlink (the common
-  case - typically into a dotfiles checkout), whether the read-only mount
-  actually lands on the symlink dentry itself or gets resolved through to
-  its target first (in which case the symlink entry would remain
-  replaceable) depends on mount/symlink resolution order this repo hasn't
-  independently verified against a live container - see
-  `test/runtime.bats`'s statusline.sh tests.
+  list above - to stop a compromised session from unlinking it and dropping
+  its own script in its place. **Confirmed against a live container**
+  (`test/runtime.bats`'s statusline.sh tests): this reliably blocks
+  replacement when `statusline.sh` is a plain regular file. It does
+  **not** when `statusline.sh` is a symlink (the common case - typically
+  into a dotfiles checkout): Docker/runc resolves the bind-mount
+  destination through the symlink to its target directory rather than
+  binding to the symlink dentry itself, so the symlink entry stays on the
+  writable `~/.claude` mount, still replaceable. There is no mount-based
+  fix for this (`~/.claude` can't be made read-only - session history has
+  to stay writable). The compensating control is detection, not
+  prevention: `bin/claude-sandbox-audit` hashes `statusline.sh` (following
+  a symlink to its target *path string*, so a repointed or replaced
+  symlink is caught even though its own inode doesn't change) and reports
+  it as a host-code-execution finding when the session exits. This is a
+  defense-in-depth gap, not an open one: exploiting it requires a sandbox
+  session that's already compromised, and that compromise is caught on
+  exit either way.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
