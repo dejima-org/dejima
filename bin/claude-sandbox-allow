@@ -56,6 +56,8 @@ if [ -z "$container" ]; then
     elif [ "$count" -gt 1 ]; then
         echo "Multiple running claude-sandbox containers found; specify one with --container:" >&2
         echo "$containers" >&2
+        echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
+        echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
         exit 1
     fi
     container="$containers"
@@ -90,6 +92,33 @@ for ip in $ips; do
 done
 
 echo "$domain allowed for the running session ($container)."
+
+# TCP-level truth check from inside the very container that was just
+# updated - this script's job is the firewall, so "TCP connect succeeded"
+# is the claim to verify. curl exit 6 (resolve failed), 7 (connect
+# refused/blocked) and 28 (connect or overall timeout) mean still
+# unreachable; anything else (0, or a TLS/HTTP-layer code like 35/52) means
+# the connection itself went through the firewall fine. --max-time bounds
+# the whole request, not just the connect phase - without it, a server that
+# accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
+# would hang this script indefinitely; curl maps that case to the same
+# exit 28 the case below already handles, so no new branch is needed. Runs
+# before --global persistence so a domain that demonstrably doesn't work
+# isn't persisted for future sessions on the strength of this run.
+echo "Verifying $domain is reachable from $container..."
+rc=0
+docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
+case "$rc" in
+    6|7|28)
+        echo "WARNING: $domain is still NOT reachable from $container (curl exit $rc)." >&2
+        echo "If the service doesn't listen on 443 this check can fail spuriously;" >&2
+        echo "otherwise the allow did not take effect - re-check the container ID." >&2
+        exit 2
+        ;;
+    *)
+        echo "Verified: $domain is reachable from $container."
+        ;;
+esac
 
 if [ "$global" -eq 1 ]; then
     # readlink -f resolves through the ~/.local/bin symlink install.sh sets

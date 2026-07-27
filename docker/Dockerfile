@@ -248,6 +248,8 @@ COPY docker/dns-proxy.sh /usr/local/bin/
 COPY docker/init-firewall.sh /usr/local/bin/
 COPY docker/log-shipper.sh /usr/local/bin/
 COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
+# Into $VIMRUNTIME/plugin, not /etc/xdg/nvim - see the file's own comment.
+COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua
 COPY docker/entrypoint.sh /usr/local/bin/
 COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
 COPY docker/claude-wrapper.sh /usr/local/bin/claude

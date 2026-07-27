@@ -421,3 +421,113 @@ setup() {
 @test "bin/claude-sandbox warns if the proxy died before the session ended" {
     grep -q 'credential proxy exited before' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "docker-compose.yml pins the compose project name so claude-sandbox-allow's label filter matches" {
+    # bin/claude-sandbox-allow discovers running sandboxes via the
+    # com.docker.compose.project=claude-sandbox label; without an explicit
+    # top-level name, compose derives the project from the compose file's
+    # directory ("docker"), which varies by checkout and breaks discovery.
+    grep -qE '^name: claude-sandbox\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "sandbox-context.sh gives the agent its own container ID for claude-sandbox-allow" {
+    # Agents used to guess their container ID and could hand back another
+    # running sandbox's ID, making claude-sandbox-allow "succeed" against
+    # the wrong container. /etc/hostname inside a container is its real ID.
+    grep -q '/etc/hostname' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q -- '--container' "$REPO_ROOT/hooks/sandbox-context.sh"
+}
+
+@test "bin/claude-sandbox-allow ends with a real reachability check, not just config changes" {
+    # "It said allowed but the sandbox still can't reach it" was a real
+    # failure mode (wrong container targeted / stale ipset) - the script
+    # must verify from inside the target container and say so definitively.
+    grep -q 'connect-timeout' "$REPO_ROOT/bin/claude-sandbox-allow"
+    grep -q 'Verified:' "$REPO_ROOT/bin/claude-sandbox-allow"
+    grep -q 'NOT reachable' "$REPO_ROOT/bin/claude-sandbox-allow"
+}
+
+@test "bin/claude-sandbox-allow's multi-container error points at the sandbox's own ID" {
+    grep -q '/etc/hostname' "$REPO_ROOT/bin/claude-sandbox-allow"
+}
+
+@test "bin/claude-sandbox mounts targets of top-level ~/.claude symlinks (statusline.sh)" {
+    # settings.json's statusLine points at ~/.claude/statusline.sh, which on
+    # this setup is a symlink into dotfiles - previously only the five
+    # overlay subdirectories were scanned for symlinks, so the target dir
+    # never got mounted and the statusline silently died in the sandbox.
+    grep -q 'for overlay_dir in \. hooks skills commands agents output-styles' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox mounts ~/.claude/statusline.sh itself read-only, when present" {
+    # statusline.sh is a top-level file directly on the read-write ~/.claude
+    # mount (unlike settings.json/CLAUDE.md/plugins/hooks/skills/commands/
+    # agents/output-styles, none of which have this gap) - settings.json's
+    # statusLine.command points at it and Claude Code executes it on the
+    # host. Mounting a symlink's *target* dir read-only (the test above)
+    # doesn't help: the symlink/file at ~/.claude/statusline.sh itself still
+    # lives on the writable mount and a compromised session can unlink it and
+    # drop its own script in its place. Must be conditional on existence
+    # (not every host has a statusline, and mounting a nonexistent source
+    # would make Docker create a root-owned directory at the target
+    # instead).
+    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:\$HOME/\.claude/statusline\.sh:ro")' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox refuses to launch rather than silently skip a dangling statusline.sh symlink" {
+    # Plain -e follows symlinks and is false for a *dangling* one (target
+    # doesn't exist, e.g. a dotfiles checkout that isn't present) - silently
+    # skipping the mount in that case would reopen the exact gap the test
+    # above closes. Docker also can't just attempt the mount anyway: it fails
+    # deep in mount setup with an opaque "mkdir ...: file exists" (the
+    # symlink already occupies that path), unconnected to the statusline for
+    # the user. So this must be a hard, explicit error - same fail-loud
+    # precedent as the credential proxy refusing to launch rather than
+    # silently mounting the real OAuth credential.
+    grep -q 'if \[ -L "\$HOME/\.claude/statusline\.sh" \] && \[ ! -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
+    # The read-only mount above does not reliably protect statusline.sh when
+    # it's a symlink (confirmed live-container gap - see test/runtime.bats
+    # and bin/claude-sandbox's comment on the mount) - detection is the
+    # compensating control. Full behavioral coverage (snapshot/compare
+    # against real fixtures, including the symlink-swap exploit) lives in
+    # test/audit.bats; this just confirms the wiring exists.
+    grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/claude-sandbox-audit"
+    grep -q 'statusline_snapshot' "$REPO_ROOT/bin/claude-sandbox-audit"
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/claude-sandbox-audit"
+}
+
+@test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
+    # $VIMRUNTIME/plugin, NOT /etc/xdg/nvim: lazy.nvim's performance.rtp
+    # reset strips /etc/xdg from the runtimepath, but always keeps
+    # $VIMRUNTIME - this must load for lazy-managed configs too.
+    grep -q 'COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "log-shipper conversation shipping is opt-in and off by default" {
+    grep -q 'SANDBOX_LOG_CONVERSATION' "$SANDBOX_DIR/log-shipper.sh"
+    grep -qE 'SANDBOX_LOG_CONVERSATION: \$\{SANDBOX_LOG_CONVERSATION:-0\}' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "log-shipper transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
+    fixtures='{"type":"user","sessionId":"s1","isMeta":null,"message":{"role":"user","content":"fix the login bug"}}
+{"type":"user","sessionId":"s1","isMeta":true,"message":{"role":"user","content":"meta noise"}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","content":"tool output secret"}]}}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"done, deployed the fix"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
+this line is not json'
+    run bash -c "LOG_SHIPPER_LIB_ONLY=1 source '$SANDBOX_DIR/log-shipper.sh'; transform_transcript_line <<< \"\$1\"" _ "$fixtures"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"role":"user"'* ]]
+    [[ "$output" == *"fix the login bug"* ]]
+    [[ "$output" == *'"role":"assistant"'* ]]
+    [[ "$output" == *"done, deployed the fix"* ]]
+    [[ "$output" == *'"role":"tool"'* ]]
+    [[ "$output" == *'ls -la'* ]]
+    [[ "$output" != *"meta noise"* ]]
+    [[ "$output" != *"tool output secret"* ]]
+    [[ "$output" != *"hidden reasoning"* ]]
+    [[ "$output" != *"not json"* ]]
+}

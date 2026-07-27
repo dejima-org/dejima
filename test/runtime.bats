@@ -86,6 +86,8 @@ teardown() {
     docker rm -f "claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -325,6 +327,115 @@ dexec_node() {
     rm -rf "$src"
 }
 
+@test "statusline.sh read-only mount blocks replacement when it's a plain regular file" {
+    # Companion to the overlay-dirs test above, but for bin/claude-sandbox's
+    # narrower statusline.sh-onto-itself mount (see its comment there) rather
+    # than a whole subdirectory. This test does NOT use bin/claude-sandbox or
+    # docker-compose.yml directly - it builds the same mount shape by hand: a
+    # whole ~/.claude directory bind-mounted read-write (docker-compose.yml's
+    # own ~/.claude mount), with statusline.sh itself bind-mounted read-only
+    # back onto its own path on top, source and destination the same literal
+    # path exactly as bin/claude-sandbox constructs it (container HOME
+    # matches host HOME - see Dockerfile). This shared container isn't reused
+    # for this (it has no ~/.claude mount at all - see setup_file).
+    local test_container="claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
+    local dotclaude; dotclaude="$(mktemp -d)"
+    printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
+    chmod +x "$dotclaude/statusline.sh"
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$dotclaude:/home/node/.claude" \
+        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    # A `rm` on a bind-mounted file fails from ordinary mount-point-busy
+    # semantics regardless of the :ro flag, so `rm -f X && echo pwned > X`
+    # alone doesn't prove anything about read-only enforcement - the `&&`
+    # short-circuits before the write it was meant to test ever runs, so
+    # this would pass identically even without `:ro`. The write that
+    # actually depends on the read-only flag is an in-place overwrite that
+    # never unlinks the file first.
+    run docker exec -u node "$test_container" sh -c \
+        'echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -ne 0 ]
+
+    run docker exec -u node "$test_container" sh -c \
+        'truncate -s 0 /home/node/.claude/statusline.sh'
+    [ "$status" -ne 0 ]
+
+    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    [[ "$output" == *"original"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$dotclaude"
+}
+
+@test "statusline.sh read-only mount does NOT protect it when it's a symlink (Finding 1 - confirmed gap, see bin/claude-sandbox-audit)" {
+    # Same mount shape as the plain-regular-file test above, except
+    # statusline.sh on the host is a symlink into a separately-mounted
+    # directory - the common real setup
+    # (~/.claude/statusline.sh -> ~/dotfiles/statusline.sh). The parent
+    # ~/.claude mount is established first (same order docker-compose.yml
+    # uses), so by the time the more-specific statusline.sh mount below is
+    # processed, the destination path already has that symlink sitting on
+    # it - and bind-mount destination resolution (runc's SecureJoin) follows
+    # symlinks within the rootfs. This CONFIRMS the mount resolves through
+    # the symlink to the target directory (already read-only via the
+    # separate target_dir mount below, mirroring bin/claude-sandbox's own
+    # symlink-target scan) instead of binding to the symlink dentry itself -
+    # so the symlink dentry stays a perfectly ordinary, writable entry on
+    # the read-write ~/.claude mount, with no mountpoint-busy protection
+    # either. This test is a characterization test of that CONFIRMED,
+    # known, deliberately-documented limitation (see bin/claude-sandbox and
+    # README "Security notes"), not an aspiration: it asserts the
+    # replacement SUCCEEDS. The compensating control is detection, not
+    # prevention - bin/claude-sandbox-audit hashes the symlink's target
+    # string and reports a changed/repointed statusline.sh as a
+    # host-code-execution finding after the session exits (see
+    # test/audit.bats). If this test ever starts FAILING, that means
+    # Docker/runc changed destination-symlink resolution and this gap may
+    # have closed - that would be good news worth investigating and acting
+    # on (tightening the comments/audit accordingly), not a regression to
+    # "fix" back to the old behavior.
+    local test_container="claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
+    local target_dir dotclaude
+    target_dir="$(mktemp -d)"
+    printf '#!/bin/sh\necho original\n' > "$target_dir/statusline.sh"
+    chmod +x "$target_dir/statusline.sh"
+    dotclaude="$(mktemp -d)"
+    ln -s "$target_dir/statusline.sh" "$dotclaude/statusline.sh"
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$dotclaude:/home/node/.claude" \
+        -v "$target_dir:$target_dir:ro" \
+        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+
+    run docker exec -u node "$test_container" sh -c \
+        'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -eq 0 ]
+
+    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    [[ "$output" == *"pwned"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$target_dir" "$dotclaude"
+}
+
 @test "node cannot run iptables directly" {
     run dexec_node iptables -L
     [ "$status" -ne 0 ]
@@ -538,6 +649,65 @@ EOF
     [ -z "$output_creds" ]
     [[ "$output_creds" != *"real-access-token"* ]]
     [[ "$output_creds" != *"real-refresh-token"* ]]
+}
+
+@test "mid-session allowed domains get ongoing ipset tracking, not a one-time snapshot" {
+    # Simulate the container-side half of bin/claude-sandbox-allow for a
+    # domain that wasn't allowed at startup (SIGHUP also clears dnsmasq's
+    # cache, so subsequent digs are really forwarded, not cached).
+    # SIGHUP-to-reload is asynchronous - give dnsmasq a moment to actually
+    # reload servers-file and flush its cache before digging (see the
+    # existing "ipset stays in sync" test above for the same convention).
+    dexec bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    sleep 0.5
+    ip=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    sleep 0.5
+    [ -n "$ip" ]
+    # The resolution itself must have populated the ipset (wildcard ipset=).
+    dexec ipset test allowed-domains "$ip"
+    # Simulate a CDN edge rotating away and back: drop the IP, clear the
+    # dnsmasq cache, resolve again - the wildcard must re-add it with no
+    # claude-sandbox-allow involvement. This is exactly the case that used
+    # to break ("allowed but blocked again minutes later").
+    dexec ipset del allowed-domains "$ip"
+    dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    sleep 0.5
+    ip2=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    sleep 0.5
+    [ -n "$ip2" ]
+    dexec ipset test allowed-domains "$ip2"
+}
+
+@test "github resolutions land only in github-domains, never the port-unrestricted allowed-domains" {
+    # The wildcard ipset=/#/allowed-domains must NOT swallow GitHub names:
+    # dnsmasq picks the longest matching ipset= domain, so the explicit
+    # github-domains lines win, keeping GitHub restricted to port 443
+    # (read-only; SSH push physically unreachable).
+    ip=$(dexec dig +short A github.com | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$ip" ]
+    run dexec ipset test allowed-domains "$ip"
+    [ "$status" -ne 0 ]
+    dexec ipset test github-domains "$ip"
+}
+
+@test "nvim falls back to the sandbox OSC 52 clipboard provider" {
+    # nvim 0.11+'s OSC 52 auto-detection needs a DA1/XTGETTCAP terminal
+    # handshake that never completes through the docker tty, leaving
+    # "clipboard: No provider" for any config without its own provider.
+    run dexec_node nvim --headless "+lua io.stdout:write(vim.g.clipboard and vim.g.clipboard.name or 'unset')" "+q"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sandbox-osc52"* ]]
+}
+
+@test "a user-configured clipboard provider beats the sandbox fallback" {
+    # --cmd runs before plugins, standing in for a user config that sets
+    # g:clipboard (e.g. dotfiles' clipboard-copy via SANDBOX_EXTRA_MOUNTS).
+    run dexec_node nvim --headless \
+        --cmd "lua vim.g.clipboard = {name = 'user-provider', copy = {}, paste = {}}" \
+        "+lua io.stdout:write(vim.g.clipboard.name)" "+q"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"user-provider"* ]]
+    [[ "$output" != *"sandbox-osc52"* ]]
 }
 
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {

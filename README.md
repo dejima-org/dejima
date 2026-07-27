@@ -40,6 +40,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `SANDBOX_LOG_CONVERSATION` | `0` | opt-in: also ship session transcripts to Loki (needs `LOKI_URL`) — see "Conversation logging (opt-in)" below |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
 | `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
@@ -67,6 +68,12 @@ editor setup at all.
 Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat.
+
+> **Upgrading note:** the compose project name is now pinned to
+> `claude-sandbox`, which re-namespaces the named volumes (bash history,
+> nvim data/state/cache). Pre-existing volumes under the old project name
+> are orphaned — harmless, their contents regenerate — and can be removed
+> with `docker volume ls` / `docker volume rm` if you want them gone.
 
 ### Using a different editor/application
 
@@ -271,12 +278,36 @@ It first adds the domain to the running dnsmasq's allowlist (appends a
 `server=` line to its servers-file and sends `SIGHUP` to reload just that
 file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
-`docker exec -u root`. `--global` also appends the domain to
-`ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
+`docker exec -u root`. It finishes by checking the domain is actually
+reachable from inside that same container and prints a definitive verdict
+— exit code 2 if it isn't, before `--global` persistence runs, so a domain
+that demonstrably doesn't work never makes it into `config/env` on the
+strength of that run. (This check is an HTTPS connection attempt, so a
+service that doesn't listen on port 443 will fail it spuriously even
+though DNS and the firewall are both fine.) `--global` also appends the
+domain to `ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
 automatically by the next `bin/claude-sandbox` invocation, no sourcing
-needed. If more than one
-claude-sandbox container is running, pass `--container <name>` to
-disambiguate (`docker ps` to find it).
+needed. If more than one claude-sandbox container is running, pass
+`--container <name>` to disambiguate - `docker ps` finds it, or use the
+container's own ID, which `sandbox-context.sh` already hands the agent in
+its startup context (and which is always available inside the sandbox as
+`cat /etc/hostname`), so there's no need for it to guess one and risk
+"successfully" updating someone else's session instead.
+
+A domain allowed this way stays allowed for the rest of the session even
+if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
+`ipset` from every DNS answer it serves, not just the one resolved at
+allow-time, since only allowlisted names get an upstream to answer from in
+the first place. GitHub's own domains sit outside this - their existing
+port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
+so that restriction is unaffected.
+
+One gap remains: allowing an *internal* hostname (one that resolves to an
+RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
+rejects private answers for any domain not exempted at startup, and that
+exemption list can only be extended by restarting dnsmasq. Internal hosts
+named before the container starts (`GITEA_SSH_HOST`, `GITEA_API`,
+`LOKI_URL`, `ALLOWED_DOMAINS`) are already exempted and unaffected by this.
 
 The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
@@ -301,6 +332,20 @@ endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
 This is visibility on top of the firewall/DNS-proxy enforcement above, not a
 substitute for it - nothing about logging changes what's actually allowed to
 resolve or connect.
+
+### Conversation logging (opt-in)
+
+Set `SANDBOX_LOG_CONVERSATION=1` (with `LOKI_URL` configured) to also ship
+session content to Loki as the `claude-sandbox-conversation` job: your
+prompts, the agent's text responses, and tool invocations (tool name +
+input - never tool outputs). Lines are JSON with the session ID inside
+(`{session, role, text}` / `{session, role: "tool", tool, input}`).
+
+Off by default - conversation content is a different sensitivity class
+than DNS names and firewall verdicts, so it never leaves the container
+unless you opt in. Transcripts of every session under the mounted
+workspace (including worktrees and subagent sessions) are shipped while
+the sandbox runs.
 
 ### Viewing logs in Grafana
 
@@ -525,6 +570,27 @@ one can't happen.
   needs to update - this list is a denylist of
   known code/config surfaces, not an allowlist, so it has to be kept in
   step with whatever new config surfaces Claude Code adds.
+- `~/.claude/statusline.sh` (referenced by `settings.json`'s
+  `statusLine.command` and executed on the host) is bind-mounted onto
+  itself read-only by `bin/claude-sandbox`, for the same reason as the
+  list above - to stop a compromised session from unlinking it and dropping
+  its own script in its place. **Confirmed against a live container**
+  (`test/runtime.bats`'s statusline.sh tests): this reliably blocks
+  replacement when `statusline.sh` is a plain regular file. It does
+  **not** when `statusline.sh` is a symlink (the common case - typically
+  into a dotfiles checkout): Docker/runc resolves the bind-mount
+  destination through the symlink to its target directory rather than
+  binding to the symlink dentry itself, so the symlink entry stays on the
+  writable `~/.claude` mount, still replaceable. There is no mount-based
+  fix for this (`~/.claude` can't be made read-only - session history has
+  to stay writable). The compensating control is detection, not
+  prevention: `bin/claude-sandbox-audit` hashes `statusline.sh` (following
+  a symlink to its target *path string*, so a repointed or replaced
+  symlink is caught even though its own inode doesn't change) and reports
+  it as a host-code-execution finding when the session exits. This is a
+  defense-in-depth gap, not an open one: exploiting it requires a sandbox
+  session that's already compromised, and that compromise is caught on
+  exit either way.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
@@ -685,7 +751,7 @@ likely to collide with a real container you have running.
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL` |
+| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL`; also ships session transcripts when `SANDBOX_LOG_CONVERSATION=1` |
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/claude-sandbox`, not directly |
@@ -698,8 +764,10 @@ likely to collide with a real container you have running.
 
 `bin/claude-sandbox` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
-set, discovers which host directories need mounting for `~/.claude/hooks`
-symlinks to resolve, and runs `docker compose run`. `bin/claude-sandbox-allow`
+set, discovers which host directories need mounting for symlinks under
+`~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
+top-level entries like `statusline.sh`) to resolve, and runs
+`docker compose run`. `bin/claude-sandbox-allow`
 adds a domain to a running session's firewall from the host - see "Adding a
 domain to a running session" above. `install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.

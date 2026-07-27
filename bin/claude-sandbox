@@ -227,14 +227,24 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # path for this - discover what's actually needed here instead, so it's
 # correct regardless of what's installed or where this repo itself was
 # cloned to.
+# "." covers top-level symlinked files directly under ~/.claude itself -
+# e.g. ~/.claude/statusline.sh -> dotfiles' statusline script, referenced
+# by settings.json's statusLine.command. Same trust model as hook code:
+# the target executes on the host too, so read-only is the right mount.
 extra_mounts=()
 mounted_dirs=""
-for overlay_dir in hooks skills commands agents output-styles; do
+for overlay_dir in . hooks skills commands agents output-styles; do
     dir="$HOME/.claude/$overlay_dir"
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do
         [ -L "$entry" ] || continue
-        real_dir="$(dirname "$(readlink -f "$entry")")"
+        # readlink -f fails (empty stdout) when an intermediate directory of
+        # the symlink's target is itself missing, not just the final
+        # component - skip rather than let `dirname ""` silently resolve to
+        # "." and append a nonsensical (or worse, cwd-mounting) -v .:.:ro.
+        target="$(readlink -f "$entry")" || continue
+        [ -n "$target" ] || continue
+        real_dir="$(dirname "$target")"
         case "$real_dir" in
             "$HOME/.claude"*) continue ;;
         esac
@@ -296,6 +306,59 @@ fi
 # so there's nothing host-persistent to protect there.
 if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
+fi
+
+# ~/.claude/statusline.sh is the same class of file as the compose overlays
+# on settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/output-
+# styles above (see docker-compose.yml's comments on those): settings.json's
+# statusLine.command points at it, and Claude Code executes it on the host.
+# Unlike those, it has no overlay of its own - it's a top-level *file*
+# directly on the read-write ~/.claude mount, so a compromised session can
+# unlink it and drop its own script in its place. The symlink-target scan
+# above (the "." entry in overlay_dir) only protects the case where
+# statusline.sh is a symlink by mounting read-only where it *points* - it
+# doesn't touch the symlink/file itself, which still lives on the writable
+# mount. Conditional on existence because not every host has one, and
+# mounting a nonexistent source would make Docker create a root-owned
+# directory at the target instead - worse than the gap this closes.
+#
+# Confirmed against a live container (test/runtime.bats), not just reasoned
+# about: this mount reliably protects only the plain-regular-file case. When
+# statusline.sh itself is a symlink (the common case - typically into a
+# dotfiles checkout), it does NOT protect it. The parent ~/.claude mount
+# above is established first, so by the time this mount is processed the
+# destination already has that symlink sitting on it, and bind-mount
+# destination resolution (runc's SecureJoin) follows symlinks within the
+# container's rootfs - so this :ro mount resolves through the symlink to the
+# target directory (already read-only from the symlink-target scan above,
+# making this mount a no-op there) instead of binding to the symlink dentry
+# itself, which stays on the writable ~/.claude mount and remains
+# replaceable. There is no mount-based fix for this: ~/.claude can't be made
+# read-only (session history has to stay writable), and mounting over the
+# resolved target instead of the symlink path isn't an option either, since
+# bin/claude-sandbox has no way to force the *destination* resolution to stop
+# at the symlink. The compensating control is detection, not prevention:
+# bin/claude-sandbox-audit hashes the symlink's target string (so a
+# repointed or replaced statusline.sh is caught) and reports it as a
+# host-code-execution finding after the session exits. Keep this mount
+# anyway - it's a real, verified fix for the regular-file case, and a no-op
+# rather than a regression for the symlink case.
+#
+# A *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
+# isn't present) is neither "exists" nor safely mountable, so it gets its own
+# branch that refuses to launch rather than either silently skipping the
+# mount (reopens the gap plain -e had) or attempting it anyway (Docker can't
+# bind-mount a dangling symlink - it fails deep in mount setup with an opaque
+# "mkdir ...: file exists", since the symlink already occupies that path,
+# with nothing connecting that error back to the statusline for the user).
+if [ -L "$HOME/.claude/statusline.sh" ] && [ ! -e "$HOME/.claude/statusline.sh" ]; then
+    echo "$HOME/.claude/statusline.sh is a symlink to a target that doesn't" >&2
+    echo "exist. Docker can't bind-mount a dangling symlink, and skipping the" >&2
+    echo "mount would leave it unprotected on the read-write ~/.claude mount." >&2
+    echo "Fix or remove the symlink, then retry." >&2
+    exit 1
+elif [ -e "$HOME/.claude/statusline.sh" ]; then
+    extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh:ro")
 fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:

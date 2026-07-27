@@ -44,6 +44,18 @@ if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     if ! pgrep -x ulogd >/dev/null; then
         echo "WARNING: ulogd2 failed to start - connection logging will be unavailable (see /var/log/ulogd.log)" >&2
     fi
+    # Unlike ulogd2 above, this one stays root - deliberately, not an
+    # oversight. It now also tails session transcripts (see
+    # SANDBOX_LOG_CONVERSATION) that the sandboxed session itself writes, so
+    # it is parsing attacker-influenceable content the same way ulogd2 parses
+    # attacker-influenceable packets. But what it produces here is itself an
+    # oversight/audit log of that same session - letting the sandbox user
+    # (the thing being surveilled) also own the shipper would let a
+    # compromised session tamper with or kill its own logging; root buys
+    # tamper-resistance that a security log needs and a best-effort netflow
+    # counter doesn't. The variables it handles are quoted and no `eval` is
+    # used, so a crafted transcript can influence what gets shipped, not
+    # execute anything here.
     /usr/local/bin/log-shipper.sh &
 fi
 
