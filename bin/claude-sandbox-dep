@@ -88,7 +88,13 @@ case "$action" in
     remove)
         [ -n "$spec" ] || usage
         if [ "$global" -eq 1 ]; then
-            unapprove_entry "$(config_root)" dependencies "$spec"
+            # Same rule as the project path below: with no store there is
+            # nothing to remove from, and confirming a removal that never
+            # happened is how a typo'd or premature remove looks like it
+            # worked.
+            store="$(config_root)"
+            [ -d "$store" ] || { echo "No global approved config." >&2; exit 1; }
+            unapprove_entry "$store" dependencies "$spec"
             echo "Removed $spec from the global dependencies (takes effect on the next launch)."
         else
             store="$(resolve_project_store "$project")"
