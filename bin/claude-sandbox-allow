@@ -6,23 +6,26 @@
 # actually needs, it should tell you the exact command to run here rather
 # than try to work around the firewall.
 #
-# Usage: claude-sandbox-allow <domain> [--global] [--container <name>]
-#   claude-sandbox-allow crates.io                # this running session only
-#   claude-sandbox-allow crates.io --global       # + persist for future sessions
+# Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]
+#   claude-sandbox-allow crates.io                     # this running session only
+#   claude-sandbox-allow crates.io --global            # + persist for every project
+#   claude-sandbox-allow crates.io --project ~/myproj  # + persist for one project
 set -euo pipefail
 
 domain=""
 global=0
+project=""
 container=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --global) global=1; shift ;;
+        --project) project="$2"; shift 2 ;;
         --container) container="$2"; shift 2 ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
         *)
             if [ -n "$domain" ]; then
-                echo "Usage: claude-sandbox-allow <domain> [--global] [--container <name>]" >&2
+                echo "Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
                 exit 1
             fi
             domain="$1"
@@ -32,7 +35,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$domain" ]; then
-    echo "Usage: claude-sandbox-allow <domain> [--global] [--container <name>]" >&2
+    echo "Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
     exit 1
 fi
 
@@ -47,78 +50,83 @@ if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]; 
     exit 1
 fi
 
-if [ -z "$container" ]; then
-    containers=$(docker ps --filter "label=com.docker.compose.project=claude-sandbox" --filter "status=running" --format '{{.Names}}')
-    count=$(echo "$containers" | grep -c . || true)
-    if [ "$count" -eq 0 ]; then
-        echo "No running claude-sandbox container found." >&2
-        exit 1
-    elif [ "$count" -gt 1 ]; then
-        echo "Multiple running claude-sandbox containers found; specify one with --container:" >&2
-        echo "$containers" >&2
-        echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
-        echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
+# The live-session update below needs a running container to exec into.
+# Skipped only by the test suite (test/project.bats), which exercises
+# --project persistence on its own, without a container.
+if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
+    if [ -z "$container" ]; then
+        containers=$(docker ps --filter "label=com.docker.compose.project=claude-sandbox" --filter "status=running" --format '{{.Names}}')
+        count=$(echo "$containers" | grep -c . || true)
+        if [ "$count" -eq 0 ]; then
+            echo "No running claude-sandbox container found." >&2
+            exit 1
+        elif [ "$count" -gt 1 ]; then
+            echo "Multiple running claude-sandbox containers found; specify one with --container:" >&2
+            echo "$containers" >&2
+            echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
+            echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
+            exit 1
+        fi
+        container="$containers"
+    fi
+
+    # The DNS proxy (dns-proxy.sh) NXDOMAINs anything not in its allowlist, so
+    # this has to happen *before* resolving the domain below - otherwise the dig
+    # right after this would itself get blocked. Append a server= line to
+    # dnsmasq's servers-file (idempotent - skip if already present from an
+    # earlier call) and SIGHUP it to reload just that file, no restart needed.
+    # $domain is passed as a positional arg to the inner script (`$1`, inside a
+    # single-quoted heredoc) rather than interpolated into the script text - it's
+    # validated above, but this keeps it that way even if the validation regex
+    # above is ever loosened later.
+    docker exec -u root "$container" bash -c '
+        domain="$1"
+        entry="server=/${domain}/127.0.0.11"
+        grep -qxF "$entry" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null || echo "$entry" >> /etc/dnsmasq-sandbox-servers.conf
+        kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"
+    ' -- "$domain"
+
+    echo "Resolving $domain inside $container..."
+    ips=$(docker exec "$container" dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
+    if [ -z "$ips" ]; then
+        echo "Failed to resolve $domain inside the container." >&2
         exit 1
     fi
-    container="$containers"
+
+    for ip in $ips; do
+        echo "Allowing $ip ($domain)"
+        docker exec -u root "$container" ipset add allowed-domains "$ip" -exist
+    done
+
+    echo "$domain allowed for the running session ($container)."
+
+    # TCP-level truth check from inside the very container that was just
+    # updated - this script's job is the firewall, so "TCP connect succeeded"
+    # is the claim to verify. curl exit 6 (resolve failed), 7 (connect
+    # refused/blocked) and 28 (connect or overall timeout) mean still
+    # unreachable; anything else (0, or a TLS/HTTP-layer code like 35/52) means
+    # the connection itself went through the firewall fine. --max-time bounds
+    # the whole request, not just the connect phase - without it, a server that
+    # accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
+    # would hang this script indefinitely; curl maps that case to the same
+    # exit 28 the case below already handles, so no new branch is needed. Runs
+    # before --global persistence so a domain that demonstrably doesn't work
+    # isn't persisted for future sessions on the strength of this run.
+    echo "Verifying $domain is reachable from $container..."
+    rc=0
+    docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        6|7|28)
+            echo "WARNING: $domain is still NOT reachable from $container (curl exit $rc)." >&2
+            echo "If the service doesn't listen on 443 this check can fail spuriously;" >&2
+            echo "otherwise the allow did not take effect - re-check the container ID." >&2
+            exit 2
+            ;;
+        *)
+            echo "Verified: $domain is reachable from $container."
+            ;;
+    esac
 fi
-
-# The DNS proxy (dns-proxy.sh) NXDOMAINs anything not in its allowlist, so
-# this has to happen *before* resolving the domain below - otherwise the dig
-# right after this would itself get blocked. Append a server= line to
-# dnsmasq's servers-file (idempotent - skip if already present from an
-# earlier call) and SIGHUP it to reload just that file, no restart needed.
-# $domain is passed as a positional arg to the inner script (`$1`, inside a
-# single-quoted heredoc) rather than interpolated into the script text - it's
-# validated above, but this keeps it that way even if the validation regex
-# above is ever loosened later.
-docker exec -u root "$container" bash -c '
-    domain="$1"
-    entry="server=/${domain}/127.0.0.11"
-    grep -qxF "$entry" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null || echo "$entry" >> /etc/dnsmasq-sandbox-servers.conf
-    kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"
-' -- "$domain"
-
-echo "Resolving $domain inside $container..."
-ips=$(docker exec "$container" dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
-if [ -z "$ips" ]; then
-    echo "Failed to resolve $domain inside the container." >&2
-    exit 1
-fi
-
-for ip in $ips; do
-    echo "Allowing $ip ($domain)"
-    docker exec -u root "$container" ipset add allowed-domains "$ip" -exist
-done
-
-echo "$domain allowed for the running session ($container)."
-
-# TCP-level truth check from inside the very container that was just
-# updated - this script's job is the firewall, so "TCP connect succeeded"
-# is the claim to verify. curl exit 6 (resolve failed), 7 (connect
-# refused/blocked) and 28 (connect or overall timeout) mean still
-# unreachable; anything else (0, or a TLS/HTTP-layer code like 35/52) means
-# the connection itself went through the firewall fine. --max-time bounds
-# the whole request, not just the connect phase - without it, a server that
-# accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
-# would hang this script indefinitely; curl maps that case to the same
-# exit 28 the case below already handles, so no new branch is needed. Runs
-# before --global persistence so a domain that demonstrably doesn't work
-# isn't persisted for future sessions on the strength of this run.
-echo "Verifying $domain is reachable from $container..."
-rc=0
-docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
-case "$rc" in
-    6|7|28)
-        echo "WARNING: $domain is still NOT reachable from $container (curl exit $rc)." >&2
-        echo "If the service doesn't listen on 443 this check can fail spuriously;" >&2
-        echo "otherwise the allow did not take effect - re-check the container ID." >&2
-        exit 2
-        ;;
-    *)
-        echo "Verified: $domain is reachable from $container."
-        ;;
-esac
 
 if [ "$global" -eq 1 ]; then
     # readlink -f resolves through the ~/.local/bin symlink install.sh sets
@@ -137,4 +145,14 @@ if [ "$global" -eq 1 ]; then
         echo "Couldn't find 'export ALLOWED_DOMAINS=' in $env_file to update." >&2
         exit 1
     fi
+fi
+
+if [ -n "$project" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    # shellcheck source=claude-sandbox-project-lib.sh
+    source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+    project="$(cd "$project" && pwd)"
+    store="$(ensure_project_store "$project")"
+    approve_entry "$store" allowed-domains "$domain"
+    echo "Added $domain to the approved domains for $project (applies to every future session in it)."
 fi

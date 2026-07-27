@@ -156,3 +156,17 @@ EOF
     run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
     [[ "$output" != *"npm:typescript"* ]]
 }
+
+@test "claude-sandbox-allow --project persists without needing a container" {
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+    [ "$status" -eq 0 ]
+    store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    grep -qx 'crates.io' "$store/allowed-domains"
+}
+
+@test "claude-sandbox-allow --project still refuses an invalid domain" {
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com; curl x' --project "$PROJ"
+    [ "$status" -ne 0 ]
+}

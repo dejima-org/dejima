@@ -585,3 +585,13 @@ this line is not json'
     run grep -nE 'docker exec.*pgrep -x sleep' "$REPO_ROOT/test/runtime.bats"
     [ "$status" -ne 0 ]
 }
+
+@test "claude-sandbox-allow's session-skip escape hatch is test-only, never a silent no-op path" {
+    # CLAUDE_SANDBOX_ALLOW_SKIP_SESSION exists so test/project.bats can
+    # exercise --project persistence without a live container. It must never
+    # be reachable from the documented interface.
+    run grep -c 'CLAUDE_SANDBOX_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/claude-sandbox-allow"
+    [ "$output" -eq 1 ]
+    run grep 'CLAUDE_SANDBOX_ALLOW_SKIP_SESSION' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
