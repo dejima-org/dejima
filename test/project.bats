@@ -309,6 +309,43 @@ EOF
     [[ "$output" != *"npm:typescript"* ]]
 }
 
+@test "claude-sandbox-dep add --global writes the global store, not a project entry" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global
+    [ "$status" -eq 0 ]
+    grep -qx 'cargo:cargo-nextest' "$CONFIG_DIR/dependencies"
+    [ ! -d "$CONFIG_DIR/projects" ]
+}
+
+@test "claude-sandbox-dep list --global shows global deps, plain list in an unrelated project does not" {
+    "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global >/dev/null
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --global
+    [[ "$output" == *"cargo:cargo-nextest"* ]]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"cargo:cargo-nextest"* ]]
+}
+
+@test "claude-sandbox-dep remove --global removes a globally approved spec" {
+    "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global >/dev/null
+    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --global
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --global
+    [[ "$output" != *"cargo:cargo-nextest"* ]]
+}
+
+@test "claude-sandbox-dep rejects --global combined with --project and writes nothing" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:foo --global --project /tmp/x
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mutually exclusive"* ]]
+    [ ! -f "$CONFIG_DIR/dependencies" ]
+    [ ! -d "$CONFIG_DIR/projects" ]
+}
+
+@test "claude-sandbox-dep add --global rejects an invalid spec before writing anything" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add 'apt:a;b' --global
+    [ "$status" -ne 0 ]
+    [ ! -f "$CONFIG_DIR/dependencies" ]
+}
+
 @test "claude-sandbox-allow --project persists without needing a container" {
     run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
         "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
