@@ -567,6 +567,10 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 }
 
 @test "an ALLOWED_DOMAINS exported before invocation is ignored, not merged in" {
+    # The approved domain is what keeps this test honest: without it, the
+    # absence of evil.example would also be satisfied by the launcher setting
+    # no domains at all, or by the env prefix below never reaching the child.
+    printf 'good.example.com\n' > "$CONFIG_DIR/allowed-domains"
     launch_setup
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
@@ -576,6 +580,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
         run "$REPO_ROOT/bin/claude-sandbox" "$PROJ"
     [ "$status" -eq 0 ]
     [ -f "$LAUNCH_ENV" ]
+    [[ " $(launched_env ALLOWED_DOMAINS) " == *" good.example.com "* ]]
     [[ " $(launched_env ALLOWED_DOMAINS) " != *"evil.example"* ]]
 }
 
