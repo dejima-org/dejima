@@ -104,6 +104,7 @@ teardown() {
     docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-projdom-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -692,6 +693,29 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"user-provider"* ]]
     [[ "$output" != *"sandbox-osc52"* ]]
+}
+
+@test "an approved project domain is reachable, a declared-but-unapproved one is not" {
+    local test_container="claude-sandbox-test-projdom-$(basename "$BATS_FILE_TMPDIR")"
+    # example.com stands in for the approved domain (reachable, stable);
+    # example.net stands in for one the project merely declared.
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e ALLOWED_DOMAINS=example.com \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    run docker exec "$test_container" dig +short A example.com
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+
+    run docker exec "$test_container" dig +short A example.net
+    [ "$output" = "" ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {

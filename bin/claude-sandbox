@@ -45,6 +45,31 @@ if [ -z "${ALLOWED_DOMAINS:-}" ]; then
     ALLOWED_DOMAINS="$(parse_allowed_domains_env "$REPO_ROOT/config/env")"
 fi
 
+# Per-project approved domains, from the host-side approval store (see
+# bin/claude-sandbox-project-lib.sh). Deliberately NOT read from the
+# project's own in-repo declaration directory: that lives on the read-write
+# workspace mount, so treating it as a grant would let a session widen its
+# own firewall for the next run. The declaration is only ever reported (see
+# hooks/sandbox-context.sh) and approved by hand.
+# shellcheck source=claude-sandbox-project-lib.sh
+source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+if [ -n "$PROJECT_STORE" ]; then
+    project_domains="$(approved_entries "$PROJECT_STORE" allowed-domains | tr '\n' ' ')"
+    ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}${project_domains:+ $project_domains}"
+fi
+
+# The approval store is only out of the container's reach while it isn't
+# inside the mounted workspace - same class of warning as the self-mounted
+# repo TCB warning below.
+case "$(config_root)/" in
+    "$WORKSPACE_DIR"/*)
+        echo "Warning: the per-project approval store ($(config_root)) is inside the" >&2
+        echo "mounted workspace this session - it is writable from inside the sandbox," >&2
+        echo "so approvals are no longer out of reach. Review them after this session." >&2
+        ;;
+esac
+
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
     echo "SANDBOX_SSH_KEY is set but not a file: $SANDBOX_SSH_KEY" >&2

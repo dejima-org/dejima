@@ -595,3 +595,16 @@ this line is not json'
     run grep 'CLAUDE_SANDBOX_ALLOW_SKIP_SESSION' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
 }
+
+@test "bin/claude-sandbox merges approved project domains into ALLOWED_DOMAINS" {
+    grep -q 'claude-sandbox-project-lib.sh' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'resolve_project_store "$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "bin/claude-sandbox never reads a declaration file as a grant" {
+    # .claude-sandbox/ in the workspace is session-writable. It may only be
+    # read by the reporting/approval path, never by the launcher deciding
+    # what to allow.
+    run grep -n '\.claude-sandbox/' "$REPO_ROOT/bin/claude-sandbox"
+    [ "$status" -ne 0 ]
+}
