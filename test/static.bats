@@ -678,3 +678,14 @@ this line is not json'
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-installed-noeol"* ]]
 }
+
+@test "install.sh links the per-project CLIs alongside the existing ones" {
+    grep -q 'claude-sandbox-dep' "$REPO_ROOT/install.sh"
+    grep -q 'claude-sandbox-project' "$REPO_ROOT/install.sh"
+}
+
+@test "README documents the declaration/approval split" {
+    grep -q '\.claude-sandbox/' "$REPO_ROOT/README.md"
+    grep -q 'claude-sandbox-project approve' "$REPO_ROOT/README.md"
+    grep -q 'claude-sandbox-dep' "$REPO_ROOT/README.md"
+}

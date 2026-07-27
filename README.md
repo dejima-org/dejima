@@ -313,6 +313,37 @@ The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
 stopping the whole session over it.
 
+## Per-project domains and dependencies
+
+A project can declare what it needs in two committed files:
+
+```
+.claude-sandbox/allowed-domains    # one domain per line
+.claude-sandbox/dependencies       # <apt|npm|pip|cargo>:<name> per line
+```
+
+**Declaring grants nothing.** The project directory is bind-mounted
+read-write, so a compromised session could write these files - they are only
+ever read to compare against reality and suggest a command. Approvals live
+outside the container, under `~/.config/claude-sandbox/projects/<slug>/`, and
+are written only by tools you run on the host:
+
+```sh
+claude-sandbox-project status ~/myproject   # declared vs approved vs missing
+claude-sandbox-project approve ~/myproject  # review and approve the declared set
+claude-sandbox-allow crates.io --project ~/myproject
+claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
+```
+
+Approved domains join the allowlist at the next launch (or immediately, for
+`claude-sandbox-allow`, which also updates the running session). Approved
+dependencies are baked into a per-project image built `FROM` the shared base,
+so they need an image rebuild: they take effect on the **next** launch.
+
+A session whose project declares something it doesn't have is told so in its
+startup context, with the exact command to hand you. Approvals are inherited
+by subdirectories, so a git worktree under the project gets its parent's.
+
 ## Network request logging
 
 If `LOKI_URL` is set (see Prerequisites), every DNS query and every new
@@ -761,6 +792,9 @@ likely to collide with a real container you have running.
 | `config/env` | Persists `ALLOWED_DOMAINS` across sessions (rewritten by `--global`); parsed, never sourced |
 | `bin/claude-sandbox-env.sh` | Parses `ALLOWED_DOMAINS` out of `config/env` without executing it |
 | `bin/claude-sandbox-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
+| `bin/claude-sandbox-dep` | Review and approve project dependencies declared in `.claude-sandbox/dependencies` |
+| `bin/claude-sandbox-project` | Review and approve project domains and dependencies from the host |
+| `bin/claude-sandbox-project-lib.sh` | Shared library sourced by `bin/claude-sandbox-dep`, `bin/claude-sandbox-project`, and `bin/claude-sandbox`; not on PATH |
 
 `bin/claude-sandbox` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
