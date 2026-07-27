@@ -712,9 +712,12 @@ EOF
     [ "$status" -eq 0 ]
     [ -n "$output" ]
 
-    # Full (non-+short) output so a REFUSED response is distinguishable from
-    # an exec failure or a name with no A record - same convention as "a
-    # non-allowlisted domain is refused by the DNS proxy" above.
+    # Full (non-+short) output, checked two ways: status 0 means dig actually
+    # got a reply (dig only exits non-zero, e.g. 9, when no reply arrives at
+    # all), and the REFUSED rcode in that reply means the DNS proxy is the
+    # one that answered and refused it. Together these rule out an exec
+    # failure, a missing dig, or a name with no A record - not just an empty
+    # +short result, which can't tell those apart from a real refusal.
     run docker exec "$test_container" dig A example.net
     [ "$status" -eq 0 ]
     [[ "$output" == *"status: REFUSED"* ]]
