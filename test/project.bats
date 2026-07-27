@@ -56,6 +56,21 @@ launch_setup() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# For a real `docker build` (never `docker compose ... build`, whose $1 is
+# "compose"), also log the generated Dockerfile's own content, tagged by -t -
+# argv alone can't tell whether the Dockerfile's FROM line actually points at
+# the previous layer.
+if [ "$1" = build ] && [ -n "${SANDBOX_TEST_DOCKERFILE_LOG:-}" ]; then
+    tag="" dockerfile=""
+    args=("$@")
+    for i in "${!args[@]}"; do
+        case "${args[$i]}" in
+            -t) tag="${args[$((i + 1))]}" ;;
+            -f) dockerfile="${args[$((i + 1))]}" ;;
+        esac
+    done
+    { echo "=== $tag ==="; cat "$dockerfile"; } >> "$SANDBOX_TEST_DOCKERFILE_LOG"
+fi
 for arg in "$@"; do
     [ "$arg" = run ] || continue
     env > "$SANDBOX_TEST_RUN_ENV"
@@ -72,6 +87,7 @@ launch() {
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
+        SANDBOX_TEST_DOCKERFILE_LOG="$LAUNCH_DIR/dockerfile-log" \
         SANDBOX_CREDENTIAL_PROXY=0 \
         SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
@@ -80,6 +96,13 @@ launch() {
 
 launched_env() { sed -n "s/^$1=//p" "$LAUNCH_ENV"; }
 docker_log() { cat "$LAUNCH_DIR/docker-log" 2>/dev/null; }
+# Prints just the lines generate_derived_dockerfile wrote for the build
+# tagged $1, so callers can assert its FROM line without the other layer's
+# Dockerfile (also in the same log) satisfying a plain grep.
+dockerfile_for() {
+    awk -v want="=== $1 ===" '$0 == want { on=1; next } /^=== / { on=0 } on' \
+        "$LAUNCH_DIR/dockerfile-log" 2>/dev/null
+}
 
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
@@ -622,6 +645,22 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ -n "$project_line" ]
     [ "$global_line" -lt "$project_line" ]
     [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+}
+
+@test "the project layer's Dockerfile is generated FROM the global layer, not the base image" {
+    # The ordering test above only shows the two builds happen in order - it
+    # can't tell whether the second one's Dockerfile actually names the first
+    # one as its base, versus both independently FROM-ing the base image
+    # (which would silently drop the global packages from every project that
+    # also has its own deps).
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    dockerfile_for "claude-sandbox:$(id -un)-global" | grep -qxF "FROM claude-sandbox:$(id -un)"
+    dockerfile_for "claude-sandbox:$(id -un)-$slug" | grep -qxF "FROM claude-sandbox:$(id -un)-global"
 }
 
 @test "the launcher builds no dependency layer when neither global nor project deps are approved" {
