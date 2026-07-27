@@ -8,12 +8,17 @@
 #   DECLARATION. The project directory is bind-mounted read-write, so a
 #   compromised session can write these. They grant nothing; they are read
 #   only to compare against reality and suggest a command for the user to
-#   run. Parsed, never sourced - same reason bin/claude-sandbox-env.sh
-#   refuses to source config/env.
+#   run. Parsed, never sourced - executing a file on a session-writable
+#   mount is a host-shell persistence path.
 #
-#   ~/.config/claude-sandbox/projects/<slug>/* - an APPROVAL. Written only
-#   by the CLIs, which only the user runs, and never mounted into the
-#   container. This is the only thing that actually grants anything.
+#   ~/.config/claude-sandbox/{allowed-domains,dependencies} - a GLOBAL
+#   APPROVAL, applying to every project.
+#
+#   ~/.config/claude-sandbox/projects/<slug>/* - a PROJECT APPROVAL.
+#
+#   Both are written only by the CLIs, which only the user runs, and neither
+#   is ever mounted into the container. They are the only things that
+#   actually grant anything.
 
 CLAUDE_SANDBOX_MAX_DECLARED=200
 
@@ -65,6 +70,16 @@ read_declared() {
 
 config_root() {
     printf '%s' "${CLAUDE_SANDBOX_CONFIG_DIR:-$HOME/.config/claude-sandbox}"
+}
+
+# The global store is config_root() itself, not a subdirectory of it - the
+# two filenames below can never collide with projects/<slug>, since a slug
+# is a sanitized absolute path and always begins with "-".
+ensure_global_store() {
+    local dir
+    dir="$(config_root)"
+    mkdir -p "$dir"
+    printf '%s' "$dir"
 }
 
 # Same sanitization docker/log-shipper.sh uses for its Loki project key, so

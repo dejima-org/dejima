@@ -147,6 +147,41 @@ EOF
     [ "$(cat "$output/path")" = "$PROJ" ]
 }
 
+@test "ensure_global_store creates config_root and prints it" {
+    run bash -c 'source "$1"; ensure_global_store' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$CONFIG_DIR" ]
+    [ -d "$CONFIG_DIR" ]
+}
+
+@test "ensure_global_store is idempotent and does not disturb an existing project store" {
+    bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ" >/dev/null
+    run bash -c 'source "$1"; ensure_global_store' _ "$LIB"
+    [ "$status" -eq 0 ]
+    run bash -c 'source "$1"; ensure_global_store' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$CONFIG_DIR" ]
+    [ "$(cat "$(store_of "$PROJ")/path")" = "$PROJ" ]
+}
+
+@test "approve_entry on the global store round-trips through approved_entries on config_root" {
+    bash -c 'source "$1"; approve_entry "$(ensure_global_store)" allowed-domains example.com' _ "$LIB"
+    run bash -c 'source "$1"; approved_entries "$(config_root)" allowed-domains' _ "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "example.com" ]
+}
+
+@test "the global store and a project store hold independent entries" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    bash -c 'source "$1"; approve_entry "$(ensure_global_store)" allowed-domains global.example' _ "$LIB"
+    bash -c 'source "$1"; approve_entry "$2" allowed-domains project.example' _ "$LIB" "$store"
+
+    run bash -c 'source "$1"; approved_entries "$(config_root)" allowed-domains' _ "$LIB"
+    [ "$output" = "global.example" ]
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$store"
+    [ "$output" = "project.example" ]
+}
+
 @test "resolve_project_store finds nothing before anything is approved" {
     run bash -c 'source "$1"; resolve_project_store "$2"' _ "$LIB" "$PROJ"
     [ "$status" -eq 0 ]
