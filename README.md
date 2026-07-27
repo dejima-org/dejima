@@ -43,6 +43,10 @@ Everything else is optional, depending on which workflow(s) you want:
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
 | `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
+An `ALLOWED_DOMAINS` exported in your shell profile is no longer read as
+input and is silently ignored — run `bin/claude-sandbox-allow <domain>
+--global` instead to persist an allowed domain across sessions.
+
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
 skip `GITEA_*` entirely and set `ALLOW_GITHUB_PUSH=1` instead to push
@@ -283,8 +287,8 @@ resolver and adds the IP(s) to the running firewall's `ipset`, all via
 reachable from inside that same container and prints a definitive verdict
 — exit code 2 if it isn't. That check is a report on the live session only,
 not a gate on approval: `--global`/`--project` persistence is recorded
-first and unconditionally, since a declared host may legitimately not
-answer on 443 (an internal service, an SSH-only host) and the natural
+first and unconditionally, since the domain being approved may legitimately
+not answer on 443 (an internal service, an SSH-only host) and the natural
 moment to add a global approval is precisely when nothing is running to
 probe in the first place. (`--project` persistence likewise does not need a
 running container at all — see below.) `--global` writes the domain to the
@@ -341,9 +345,9 @@ A project can declare what it needs in two committed files:
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a compromised session could write these files - they are only
 ever read to compare against reality and suggest a command. Approvals live
-outside the container - globally at `~/.config/claude-sandbox/` (or
-`$CLAUDE_SANDBOX_CONFIG_DIR`), per project under
-`~/.config/claude-sandbox/projects/<slug>/` - and are written only by tools
+outside the container, under `~/.config/claude-sandbox/` by default
+(`$CLAUDE_SANDBOX_CONFIG_DIR` relocates the whole tree) - global at its
+root, per project under `projects/<slug>/` - and are written only by tools
 you run on the host:
 
 ```sh
@@ -364,10 +368,10 @@ an entry belongs to exactly one scope.
 Approved domains join the allowlist at the next launch (or immediately, for
 `claude-sandbox-allow`, which also updates the running session). Approved
 dependencies are baked into a derived image built `FROM` the shared base -
-first `claude-sandbox:$USER-global`, if the global store has any dependency
-approved, then `claude-sandbox:$USER-<slug>` on top of that, if the project
-store does - so they need an image rebuild: they take effect on the **next**
-launch.
+first `claude-sandbox:<username>-global`, if the global store has any
+dependency approved, then `claude-sandbox:<username>-<slug>` on top of that,
+if the project store does - so they need an image rebuild: they take effect
+on the **next** launch.
 
 Because of that rebuild, the usual moment to approve is *after* leaving the
 sandbox — so persistence (`--global` or `--project`) never requires a running
@@ -773,8 +777,9 @@ one can't happen.
   `bin/claude-sandbox-project-lib.sh`), never sourced or executed, and are
   written only by the CLIs (`claude-sandbox-allow`, `claude-sandbox-dep`,
   `claude-sandbox-project`) a human runs on the host. `bin/claude-sandbox`
-  warns at launch if `CLAUDE_SANDBOX_CONFIG_DIR` has been pointed somewhere
-  under the mounted workspace instead, rather than silently trusting it.
+  warns at launch whenever the resolved store path — default or overridden
+  via `CLAUDE_SANDBOX_CONFIG_DIR` — lands under the mounted workspace,
+  rather than silently trusting it.
 - When the mounted workspace *is* this repo itself, `bin/claude-sandbox`
   warns at launch that the repo's own trusted computing base - `bin/`,
   `hooks/`, `docker/`, `install.sh` (also `test/`, per the
