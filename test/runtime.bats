@@ -770,6 +770,46 @@ EOF
     rm -rf "$ctx" "$store" "$df"
 }
 
+@test "a global dependency layer is shared: the project layer builds FROM it and the container gets both packages" {
+    local global_tag="claude-sandbox-test-global:$(basename "$BATS_FILE_TMPDIR")"
+    local derived="claude-sandbox-test-derived-global:$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="claude-sandbox-test-derived-global-$(basename "$BATS_FILE_TMPDIR")"
+    local ctx; ctx="$(mktemp -d)"
+    local global_store; global_store="$(mktemp -d)"
+    local project_store; project_store="$(mktemp -d)"
+    local global_df; global_df="$(mktemp)"
+    local project_df; project_df="$(mktemp)"
+    printf 'apt:cowsay\n' > "$global_store/dependencies"
+    printf 'apt:sl\n' > "$project_store/dependencies"
+
+    bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+        _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$IMAGE" "$global_store" > "$global_df"
+    docker build -q -t "$global_tag" -f "$global_df" "$ctx" >&2
+
+    # The project layer builds FROM the global tag, not $IMAGE - this is the
+    # layering bin/claude-sandbox does when both scopes have approved deps.
+    bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+        _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$global_tag" "$project_store" > "$project_df"
+    docker build -q -t "$derived" -f "$project_df" "$ctx" >&2
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$derived" >/dev/null
+    wait_ready "$test_container"
+
+    run docker exec "$test_container" dpkg-query -W -f='${Status}' cowsay
+    [[ "$output" == *"install ok installed"* ]]
+    run docker exec "$test_container" dpkg-query -W -f='${Status}' sl
+    [[ "$output" == *"install ok installed"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    docker rmi "$derived" "$global_tag" >/dev/null 2>&1 || true
+    rm -rf "$ctx" "$global_store" "$project_store" "$global_df" "$project_df"
+}
+
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"

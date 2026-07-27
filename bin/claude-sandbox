@@ -453,24 +453,36 @@ SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}" \
     docker compose -f "$COMPOSE_FILE" build claude
 
 SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}"
-if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
-    derived="claude-sandbox:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")"
-    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-derived.XXXXXX")"
-    # An empty context, never $WORKSPACE_DIR: the project directory is
-    # session-writable, and a root-context build with it as context would
-    # let a compromised session feed files into the image it then runs in.
-    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-derived-ctx.XXXXXX")"
-    generate_derived_dockerfile "$SANDBOX_IMAGE" "$PROJECT_STORE" \
-        > "$SANDBOX_DERIVED_DOCKERFILE"
-    echo "Building project image $derived (approved dependencies)..."
-    if ! docker build -t "$derived" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
-        # No fallback to the base image: that would hand the session an
+
+# Each layer builds FROM whatever the previous one left in $SANDBOX_IMAGE, so
+# global packages are shared by every project instead of being rebuilt into
+# each one's image.
+build_dep_layer() {
+    local tag="$1" store="$2"
+    generate_derived_dockerfile "$SANDBOX_IMAGE" "$store" > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building $tag (approved dependencies)..."
+    if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback to a less-equipped image: that would hand the session an
         # environment missing the dependencies it was told it has.
-        echo "Failed to build the project image for $WORKSPACE_DIR." >&2
+        echo "Failed to build $tag." >&2
         echo "Fix the approved dependencies (claude-sandbox-dep list) and retry." >&2
         exit 1
     fi
-    SANDBOX_IMAGE="$derived"
+    SANDBOX_IMAGE="$tag"
+}
+
+if [ -s "$(config_root)/dependencies" ] || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
+    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-derived.XXXXXX")"
+    # An empty context, never $WORKSPACE_DIR: the project directory is
+    # session-writable, and a root-context build with it as context would let a
+    # compromised session feed files into the image it then runs in.
+    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-derived-ctx.XXXXXX")"
+fi
+if [ -s "$(config_root)/dependencies" ]; then
+    build_dep_layer "claude-sandbox:${SANDBOX_USER}-global" "$(config_root)"
+fi
+if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
+    build_dep_layer "claude-sandbox:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
 fi
 export SANDBOX_IMAGE
 

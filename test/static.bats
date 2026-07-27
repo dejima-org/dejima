@@ -650,6 +650,30 @@ this line is not json'
     grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/claude-sandbox"
 }
 
+@test "the global dependency layer is built under the -global tag, guarded by the global store" {
+    # Anchored to the line immediately before the call: a file-wide grep for
+    # the guard or the tag alone would pass even if they'd drifted apart.
+    local call_line
+    call_line=$(grep -n 'build_dep_layer "claude-sandbox:\${SANDBOX_USER}-global"' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    [ -n "$call_line" ]
+    run sed -n "$((call_line - 1))p" "$REPO_ROOT/bin/claude-sandbox"
+    [[ "$output" == 'if [ -s "$(config_root)/dependencies" ]; then' ]]
+}
+
+@test "build_dep_layer advances SANDBOX_IMAGE to the tag it just built" {
+    # Without this, the second call in a global+project build would build the
+    # project layer FROM the base image instead of FROM the global layer.
+    grep -q 'SANDBOX_IMAGE="\$tag"' "$REPO_ROOT/bin/claude-sandbox"
+}
+
+@test "the project dependency layer is still guarded by a non-empty PROJECT_STORE" {
+    local call_line
+    call_line=$(grep -n 'build_dep_layer "claude-sandbox:\${SANDBOX_USER}-\$(project_slug' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    [ -n "$call_line" ]
+    run sed -n "$((call_line - 1))p" "$REPO_ROOT/bin/claude-sandbox"
+    [[ "$output" == 'if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then' ]]
+}
+
 @test "the approval store is never mounted into the container" {
     # The store is the only thing that actually grants anything, and the
     # container runs an agent with no tool-use confirmations - mounting it

@@ -55,6 +55,7 @@ launch_setup() {
     echo '{}' > "$LAUNCH_DIR/home/.claude/settings.json"
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
+echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
 for arg in "$@"; do
     [ "$arg" = run ] || continue
     env > "$SANDBOX_TEST_RUN_ENV"
@@ -70,6 +71,7 @@ EOF
 launch() {
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
+        SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_CREDENTIAL_PROXY=0 \
         SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
@@ -77,6 +79,7 @@ launch() {
 }
 
 launched_env() { sed -n "s/^$1=//p" "$LAUNCH_ENV"; }
+docker_log() { cat "$LAUNCH_DIR/docker-log" 2>/dev/null; }
 
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
@@ -595,6 +598,39 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+}
+
+@test "the launcher builds and runs the global layer when only global deps are approved" {
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -q -- "-t claude-sandbox:$(id -un)-global -f" <(docker_log)
+    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-global" ]
+}
+
+@test "the launcher builds the global layer then the project layer on top of it" {
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    global_line=$(grep -n -- "-t claude-sandbox:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
+    project_line=$(grep -n -- "-t claude-sandbox:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
+    [ -n "$global_line" ]
+    [ -n "$project_line" ]
+    [ "$global_line" -lt "$project_line" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+}
+
+@test "the launcher builds no dependency layer when neither global nor project deps are approved" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    run grep -- "-t claude-sandbox:" <(docker_log)
+    [ "$status" -ne 0 ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)" ]
 }
 
 @test "the launcher warns when the approval store sits inside the mounted workspace" {
