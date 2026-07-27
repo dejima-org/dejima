@@ -302,6 +302,15 @@ setup() {
     grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
 }
 
+@test "gitea-pr never passes the token as a command-line argument" {
+    # /proc makes argv world-readable, so a token in a curl invocation is
+    # visible to every other process for the life of the request - and this
+    # runs alongside agents that read process listings.
+    run grep -n 'curl.*Authorization: token' "$REPO_ROOT/bin/gitea-pr"
+    [ "$status" -ne 0 ]
+    grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/bin/gitea-pr"
+}
+
 @test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {
     grep -qE '^stop-dns-rebind\s*$' "$SANDBOX_DIR/dns-proxy.sh"
     grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
