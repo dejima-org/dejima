@@ -17,7 +17,7 @@ ARG CLAUDE_CODE_VERSION=latest
 # redundant on top of this container - it can't even function inside it
 # anyway (bwrap can't create a namespace here, and fixing that would need
 # privilege escalation approaching --privileged, undoing this container's
-# own hardening). bin/claude-sandbox mounts a settings.json copy with
+# own hardening). bin/dejima mounts a settings.json copy with
 # sandbox.enabled forced to false, so there's nothing here to satisfy.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
@@ -64,14 +64,14 @@ ENV PATH=/usr/games:$PATH
 
 # Replace the base image's built-in `node` user (uid/gid 1000,
 # $HOME=/home/node) with one matching the host user who runs
-# bin/claude-sandbox - so absolute paths under $HOME (dotfiles, and
+# bin/dejima - so absolute paths under $HOME (dotfiles, and
 # ~/.claude/plugins/installed_plugins.json's own installPath bookkeeping,
 # which Claude Code resolves as a literal host-absolute string rather than
 # relative to whatever $HOME happens to be) resolve identically inside and
 # outside the container, instead of needing a one-off dual-mount for every
 # individual thing that assumes the real host path. Defaults below
 # reproduce today's node/1000/1000//home/node exactly, so a build that
-# never overrides them (bin/claude-sandbox always does; the test suite
+# never overrides them (bin/dejima always does; the test suite
 # never does) exercises this same rename path rather than a separate,
 # untested one.
 ARG SANDBOX_USER=node
@@ -104,7 +104,7 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # Lets Claude Code (and the SessionStart hook in ~/.claude/hooks) know it's
 # running inside this container rather than directly on the host.
-ENV CLAUDE_SANDBOX=1
+ENV DEJIMA=1
 
 # Dedicated unprivileged user for ulogd2 (see entrypoint.sh) - unlike
 # dnsmasq, the ulogd2 Debian package doesn't create one of its own. ulogd2

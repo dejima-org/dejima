@@ -5,11 +5,11 @@
 
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
-    LIB="$REPO_ROOT/bin/claude-sandbox-project-lib.sh"
+    LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
-    export CLAUDE_SANDBOX_CONFIG_DIR="$CONFIG_DIR"
+    export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
     PROJ="$(mktemp -d)"
-    mkdir -p "$PROJ/.claude-sandbox"
+    mkdir -p "$PROJ/.dejima"
 }
 teardown() { rm -rf "$CONFIG_DIR" "$PROJ" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"}; }
 
@@ -19,7 +19,7 @@ store_of() {
 }
 
 # A fake `docker` on PATH, so the container-facing half of
-# claude-sandbox-allow can be exercised without a daemon. $1 is how many
+# dejima-allow can be exercised without a daemon. $1 is how many
 # running sandboxes to report, $2 the exit status the in-container curl
 # reachability check should return.
 stub_docker() {
@@ -27,7 +27,7 @@ stub_docker() {
     cat > "$STUB_DIR/docker" <<EOF
 #!/bin/bash
 if [ "\$1" = ps ]; then
-    [ "$1" -eq 0 ] || echo claude-sandbox-test-container
+    [ "$1" -eq 0 ] || echo dejima-test-container
     exit 0
 fi
 case "\$*" in
@@ -40,7 +40,7 @@ EOF
     PATH="$STUB_DIR:$PATH"
 }
 
-# bin/claude-sandbox is where an approval finally becomes a grant (a firewall
+# bin/dejima is where an approval finally becomes a grant (a firewall
 # entry, an installed package), and nothing else in this suite exercises that
 # translation - the checks on it are greps over its source, which a deleted
 # line can satisfy just as well as a working one. These two helpers run the
@@ -91,7 +91,7 @@ launch() {
         SANDBOX_CREDENTIAL_PROXY=0 \
         SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
-        "$REPO_ROOT/bin/claude-sandbox" "$@"
+        "$REPO_ROOT/bin/dejima" "$@"
 }
 
 launched_env() { sed -n "s/^$1=//p" "$LAUNCH_ENV"; }
@@ -130,14 +130,14 @@ dockerfile_for() {
 }
 
 @test "read_declared skips comments/blanks and marks invalid entries rejected" {
-    cat > "$PROJ/.claude-sandbox/dependencies" <<'EOF'
+    cat > "$PROJ/.dejima/dependencies" <<'EOF'
 # project deps
 apt:libpq-dev
 
 cargo:cargo-nextest
 gem:rails
 EOF
-    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.claude-sandbox/dependencies"
+    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.dejima/dependencies"
     [ "$status" -eq 0 ]
     [[ "$output" == *"ok apt:libpq-dev"* ]]
     [[ "$output" == *"ok cargo:cargo-nextest"* ]]
@@ -147,14 +147,14 @@ EOF
 }
 
 @test "read_declared prints nothing for a missing file" {
-    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.claude-sandbox/nope"
+    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.dejima/nope"
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
 }
 
 @test "read_declared caps at 200 entries and says so" {
-    for i in $(seq 1 250); do echo "apt:pkg$i"; done > "$PROJ/.claude-sandbox/dependencies"
-    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.claude-sandbox/dependencies"
+    for i in $(seq 1 250); do echo "apt:pkg$i"; done > "$PROJ/.dejima/dependencies"
+    run bash -c 'source "$1"; read_declared "$2" valid_dep_spec' _ "$LIB" "$PROJ/.dejima/dependencies"
     [ "$status" -eq 0 ]
     [ "$(grep -c '^ok ' <<< "$output")" -eq 200 ]
     [[ "$output" == *"truncated 250"* ]]
@@ -190,12 +190,12 @@ EOF
     # projects/<slug>; only the global scope depends on ensure_global_store
     # for it. Without that mkdir this is the one command that fails, and it
     # fails on the first --global anyone ever runs.
-    export CLAUDE_SANDBOX_CONFIG_DIR="$CONFIG_DIR/fresh/claude-sandbox"
-    [ ! -d "$CLAUDE_SANDBOX_CONFIG_DIR" ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global
+    export DEJIMA_CONFIG_DIR="$CONFIG_DIR/fresh/dejima"
+    [ ! -d "$DEJIMA_CONFIG_DIR" ]
+    run "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global
     [ "$status" -eq 0 ]
-    [ -d "$CLAUDE_SANDBOX_CONFIG_DIR" ]
-    grep -qx 'cargo:cargo-nextest' "$CLAUDE_SANDBOX_CONFIG_DIR/dependencies"
+    [ -d "$DEJIMA_CONFIG_DIR" ]
+    grep -qx 'cargo:cargo-nextest' "$DEJIMA_CONFIG_DIR/dependencies"
 }
 
 @test "ensure_global_store is idempotent and does not disturb an existing project store" {
@@ -249,20 +249,20 @@ EOF
     local parent wt
     parent="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     wt="$PROJ/.worktrees/feat"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:parentpkg --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:parentpkg --project "$PROJ" >/dev/null
     mkdir -p "$wt"
 
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:branchpkg --project "$wt"
+    run "$REPO_ROOT/bin/dejima-dep" add apt:branchpkg --project "$wt"
     [ "$status" -eq 0 ]
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" branch.example --project "$wt"
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" branch.example --project "$wt"
     [ "$status" -eq 0 ]
 
     [ ! -d "$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$wt")" ]
     grep -qx 'apt:branchpkg' "$parent/dependencies"
     grep -qx 'branch.example' "$parent/allowed-domains"
     # and the inherited approval is still in force from the worktree
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$wt"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$wt"
     [[ "$output" == *"apt:parentpkg"* ]]
 }
 
@@ -324,168 +324,168 @@ EOF
     [[ "$output" == *"absolute"* ]]
 }
 
-@test "claude-sandbox-dep add approves a spec and list shows it" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ"
+@test "dejima-dep add approves a spec and list shows it" {
+    run "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ"
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"apt:libpq-dev"* ]]
 }
 
-@test "claude-sandbox-dep add says the change needs a relaunch" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ"
+@test "dejima-dep add says the change needs a relaunch" {
+    run "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"next launch"* ]]
 }
 
-@test "claude-sandbox-dep rejects a malformed spec without writing anything" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add 'apt:a;b' --project "$PROJ"
+@test "dejima-dep rejects a malformed spec without writing anything" {
+    run "$REPO_ROOT/bin/dejima-dep" add 'apt:a;b' --project "$PROJ"
     [ "$status" -ne 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"a;b"* ]]
 }
 
-@test "claude-sandbox-dep remove takes a spec back out" {
-    "$REPO_ROOT/bin/claude-sandbox-dep" add npm:typescript --project "$PROJ" >/dev/null
-    run "$REPO_ROOT/bin/claude-sandbox-dep" remove npm:typescript --project "$PROJ"
+@test "dejima-dep remove takes a spec back out" {
+    "$REPO_ROOT/bin/dejima-dep" add npm:typescript --project "$PROJ" >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove npm:typescript --project "$PROJ"
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"npm:typescript"* ]]
 }
 
-@test "claude-sandbox-dep add --global writes the global store, not a project entry" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global
+@test "dejima-dep add --global writes the global store, not a project entry" {
+    run "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global
     [ "$status" -eq 0 ]
     grep -qx 'cargo:cargo-nextest' "$CONFIG_DIR/dependencies"
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
-@test "claude-sandbox-dep list --global shows global deps, plain list in an unrelated project does not" {
-    "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global >/dev/null
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --global
+@test "dejima-dep list --global shows global deps, plain list in an unrelated project does not" {
+    "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" list --global
     [[ "$output" == *"cargo:cargo-nextest"* ]]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"cargo:cargo-nextest"* ]]
 }
 
-@test "claude-sandbox-dep remove --global removes a globally approved spec" {
-    "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global >/dev/null
-    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --global
+@test "dejima-dep remove --global removes a globally approved spec" {
+    "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --global
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --global
+    run "$REPO_ROOT/bin/dejima-dep" list --global
     [[ "$output" != *"cargo:cargo-nextest"* ]]
 }
 
-@test "claude-sandbox-dep remove fails the same way in both scopes when no store exists" {
-    export CLAUDE_SANDBOX_CONFIG_DIR="$CONFIG_DIR/fresh/claude-sandbox"
-    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --global
+@test "dejima-dep remove fails the same way in both scopes when no store exists" {
+    export DEJIMA_CONFIG_DIR="$CONFIG_DIR/fresh/dejima"
+    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --global
     [ "$status" -eq 1 ]
     [[ "$output" != *"Removed"* ]]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --project "$PROJ"
     [ "$status" -eq 1 ]
     [[ "$output" != *"Removed"* ]]
 }
 
-@test "claude-sandbox-dep rejects --global combined with --project and writes nothing" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:foo --global --project /tmp/x
+@test "dejima-dep rejects --global combined with --project and writes nothing" {
+    run "$REPO_ROOT/bin/dejima-dep" add apt:foo --global --project /tmp/x
     [ "$status" -ne 0 ]
     [[ "$output" == *"mutually exclusive"* ]]
     [ ! -f "$CONFIG_DIR/dependencies" ]
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
-@test "claude-sandbox-dep add --global rejects an invalid spec before writing anything" {
-    run "$REPO_ROOT/bin/claude-sandbox-dep" add 'apt:a;b' --global
+@test "dejima-dep add --global rejects an invalid spec before writing anything" {
+    run "$REPO_ROOT/bin/dejima-dep" add 'apt:a;b' --global
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/dependencies" ]
 }
 
-@test "claude-sandbox-allow --project persists without needing a container" {
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+@test "dejima-allow --project persists without needing a container" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
     [ "$status" -eq 0 ]
     store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     grep -qx 'crates.io' "$store/allowed-domains"
 }
 
-@test "claude-sandbox-allow --project records the approval with no sandbox running" {
+@test "dejima-allow --project records the approval with no sandbox running" {
     # The documented moment to approve is right after leaving the sandbox -
     # dependency approvals need a relaunch - so requiring a live container
     # broke the main path: the domain was never persisted at all.
     stub_docker 0 0
-    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
     [ "$status" -eq 0 ]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
-@test "claude-sandbox-allow --project records a domain the reachability probe rejects" {
+@test "dejima-allow --project records a domain the reachability probe rejects" {
     # A declared host may legitimately not answer on 443 - an internal
     # service, an SSH-only host, an apex that only serves a subdomain. The
     # probe's verdict is worth reporting, but it is not the user's approval
     # decision, and it used to discard it.
     stub_docker 1 7
-    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
     [ "$status" -eq 2 ]
     [[ "$output" == *"still NOT reachable"* ]]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
-@test "claude-sandbox-allow --global persists without needing a container" {
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global
+@test "dejima-allow --global persists without needing a container" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" example.com --global
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
-@test "claude-sandbox-allow --global records the approval with no sandbox running" {
+@test "dejima-allow --global records the approval with no sandbox running" {
     # --global used to require a live container to exit 0 at all. It no
     # longer does, deliberately: the natural moment to approve a domain for
     # every future session is when no session is running to patch, and the
     # store write above is already done by the time this is reached.
     stub_docker 0 0
-    run "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global
+    run "$REPO_ROOT/bin/dejima-allow" example.com --global
     [ "$status" -eq 0 ]
     [[ "$output" == *"applies from the next launch"* ]]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
 }
 
-@test "claude-sandbox-allow --global and --project together persist to both stores" {
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global --project "$PROJ"
+@test "dejima-allow --global and --project together persist to both stores" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" example.com --global --project "$PROJ"
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
 }
 
-@test "claude-sandbox-allow rejects an invalid domain before persisting to either store" {
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com; curl x' --global --project "$PROJ"
+@test "dejima-allow rejects an invalid domain before persisting to either store" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" 'evil.com; curl x' --global --project "$PROJ"
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/allowed-domains" ]
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
-@test "claude-sandbox-allow --global records a domain the reachability probe rejects" {
+@test "dejima-allow --global records a domain the reachability probe rejects" {
     # --global used to be gated on this probe, refusing any global approval
     # for a host that legitimately doesn't answer on 443 (an SSH-only host,
     # an internal service). It now persists exactly like --project: the
     # probe's verdict is worth reporting, but it is not the approval decision.
     stub_docker 1 7
-    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --global
+    run "$REPO_ROOT/bin/dejima-allow" crates.io --global
     [ "$status" -eq 2 ]
     [[ "$output" == *"still NOT reachable"* ]]
     grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
 }
 
-@test "claude-sandbox-project approve persists every domain when one fails to apply" {
-    # Under set -e the first claude-sandbox-allow to exit nonzero used to
+@test "dejima-project approve persists every domain when one fails to apply" {
+    # Under set -e the first dejima-allow to exit nonzero used to
     # abort the loop, silently skipping every domain after it - and, before
     # persistence moved ahead of the container work, persisting none at all.
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    printf 'crates.io\nstatic.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    printf 'crates.io\nstatic.crates.io\n' > "$PROJ/.dejima/allowed-domains"
     stub_docker 1 7
-    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
     grep -qx 'static.crates.io' "$(store_of "$PROJ")/allowed-domains"
@@ -493,119 +493,119 @@ EOF
     [[ "$output" == *"not applied to a running session"* ]]
 }
 
-@test "claude-sandbox-allow --project still refuses an invalid domain" {
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com; curl x' --project "$PROJ"
+@test "dejima-allow --project still refuses an invalid domain" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" 'evil.com; curl x' --project "$PROJ"
     [ "$status" -ne 0 ]
 }
 
-@test "claude-sandbox-project status shows declared, approved and rejected" {
-    printf 'apt:libpq-dev\ngem:rails\n' > "$PROJ/.claude-sandbox/dependencies"
-    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
-    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+@test "dejima-project status shows declared, approved and rejected" {
+    printf 'apt:libpq-dev\ngem:rails\n' > "$PROJ/.dejima/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
     [[ "$output" == *"rejected"*"gem:rails"* ]]
     [[ "$output" == *"static.crates.io"* ]]
 }
 
-@test "claude-sandbox-project status shows a dep approved only globally as approved" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
-    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+@test "dejima-project status shows a dep approved only globally as approved" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
 }
 
-@test "claude-sandbox-project status shows a dep approved in neither store as pending" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+@test "dejima-project status shows a dep approved in neither store as pending" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"pending"*"apt:libpq-dev"* ]]
 }
 
-@test "claude-sandbox-project status prints the global store path" {
-    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+@test "dejima-project status prints the global store path" {
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Global approvals: $CONFIG_DIR"* ]]
 }
 
-@test "claude-sandbox-project status and approve refuse a corrupt global store rather than treating it as empty" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+@test "dejima-project status and approve refuse a corrupt global store rather than treating it as empty" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
     mkdir -p "$CONFIG_DIR"
     echo 'apt:evil; curl x' > "$CONFIG_DIR/dependencies"
-    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -ne 0 ]
     [[ "$output" != *"approved apt:libpq-dev"* ]]
     [[ "$output" != *"pending apt:libpq-dev"* ]]
-    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -ne 0 ]
     [[ "$output" != *"Declared but not approved"* ]]
     [[ "$output" != *"Nothing pending approval"* ]]
 }
 
-@test "claude-sandbox-project approve reports nothing pending when declared entries are approved globally" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
-    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/claude-sandbox-allow" static.crates.io --global
+@test "dejima-project approve reports nothing pending when declared entries are approved globally" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" static.crates.io --global
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == *"Nothing pending approval"* ]]
 }
 
-@test "claude-sandbox-project approve declines without confirmation" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+@test "dejima-project approve declines without confirmation" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"apt:libpq-dev"* ]]
 }
 
-@test "claude-sandbox-project approve approves the declared set on confirmation" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
-    run bash -c 'echo y | CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 "$1" approve "$2"' \
-        _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+@test "dejima-project approve approves the declared set on confirmation" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
+    run bash -c 'echo y | DEJIMA_ALLOW_SKIP_SESSION=1 "$1" approve "$2"' \
+        _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" == *"apt:libpq-dev"* ]]
     store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     grep -qx 'static.crates.io' "$store/allowed-domains"
 }
 
-@test "claude-sandbox-project approve never approves a rejected entry" {
-    printf 'gem:rails\n' > "$PROJ/.claude-sandbox/dependencies"
-    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+@test "dejima-project approve never approves a rejected entry" {
+    printf 'gem:rails\n' > "$PROJ/.dejima/dependencies"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"gem:rails"* ]]
 }
 
-@test "claude-sandbox-project approve reports a rejected entry's literal text, unsplit and unglobbed" {
-    printf 'npm:has space\n' > "$PROJ/.claude-sandbox/dependencies"
-    printf 'a*evil\n' > "$PROJ/.claude-sandbox/allowed-domains"
-    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+@test "dejima-project approve reports a rejected entry's literal text, unsplit and unglobbed" {
+    printf 'npm:has space\n' > "$PROJ/.dejima/dependencies"
+    printf 'a*evil\n' > "$PROJ/.dejima/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == *"npm:has space"* ]]
     [[ "$output" == *"a*evil"* ]]
 }
 
-@test "claude-sandbox-project approve warns about entries beyond the 200-entry cap" {
-    for i in $(seq 1 250); do echo "apt:pkg$i"; done > "$PROJ/.claude-sandbox/dependencies"
-    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+@test "dejima-project approve warns about entries beyond the 200-entry cap" {
+    for i in $(seq 1 250); do echo "apt:pkg$i"; done > "$PROJ/.dejima/dependencies"
+    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"250"* ]]
 }
 
-@test "claude-sandbox-project approve exits 0 and approves nothing when stdin is already at EOF" {
-    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
-    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+@test "dejima-project approve exits 0 and approves nothing when stdin is already at EOF" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
+    run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == *"Nothing approved."* ]]
-    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"apt:libpq-dev"* ]]
 }
 
@@ -647,8 +647,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 }
 
 @test "the launcher passes approved project domains to the container, and declared ones never" {
-    printf 'declared.example.com\n' > "$PROJ/.claude-sandbox/allowed-domains"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    printf 'declared.example.com\n' > "$PROJ/.dejima/allowed-domains"
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     printf 'approved.example.com\n' > "$(store_of "$PROJ")/allowed-domains"
     launch_setup
     run launch "$PROJ"
@@ -690,7 +690,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
         SANDBOX_CREDENTIAL_PROXY=0 \
         SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \
-        run "$REPO_ROOT/bin/claude-sandbox" "$PROJ"
+        run "$REPO_ROOT/bin/dejima" "$PROJ"
     [ "$status" -eq 0 ]
     [ -f "$LAUNCH_ENV" ]
     [[ " $(launched_env ALLOWED_DOMAINS) " == *" good.example.com "* ]]
@@ -722,37 +722,37 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)" ]
 
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
 }
 
 @test "the launcher builds and runs the global layer when only global deps are approved" {
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    grep -q -- "-t claude-sandbox:$(id -un)-global -f" <(docker_log)
-    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-global" ]
+    grep -q -- "-t dejima:$(id -un)-global -f" <(docker_log)
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-global" ]
 }
 
 @test "the launcher builds the global layer then the project layer on top of it" {
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    global_line=$(grep -n -- "-t claude-sandbox:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
-    project_line=$(grep -n -- "-t claude-sandbox:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
+    global_line=$(grep -n -- "-t dejima:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
+    project_line=$(grep -n -- "-t dejima:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
     [ -n "$global_line" ]
     [ -n "$project_line" ]
     [ "$global_line" -lt "$project_line" ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
 }
 
 @test "the project layer's Dockerfile is generated FROM the global layer, not the base image" {
@@ -761,23 +761,23 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # one as its base, versus both independently FROM-ing the base image
     # (which would silently drop the global packages from every project that
     # also has its own deps).
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    dockerfile_for "claude-sandbox:$(id -un)-global" | grep -qxF "FROM claude-sandbox:$(id -un)"
-    dockerfile_for "claude-sandbox:$(id -un)-$slug" | grep -qxF "FROM claude-sandbox:$(id -un)-global"
+    dockerfile_for "dejima:$(id -un)-global" | grep -qxF "FROM dejima:$(id -un)"
+    dockerfile_for "dejima:$(id -un)-$slug" | grep -qxF "FROM dejima:$(id -un)-global"
 }
 
 @test "the launcher builds no dependency layer when neither global nor project deps are approved" {
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    run grep -- "-t claude-sandbox:" <(docker_log)
+    run grep -- "-t dejima:" <(docker_log)
     [ "$status" -ne 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)" ]
 }
 
 @test "the launcher warns when the approval store sits inside the mounted workspace" {
@@ -787,8 +787,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [[ "$output" != *"no longer out of reach"* ]]
 
     # Same project, but with the store somewhere the session can rewrite it.
-    export CLAUDE_SANDBOX_CONFIG_DIR="$PROJ/.config/claude-sandbox"
-    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    export DEJIMA_CONFIG_DIR="$PROJ/.config/dejima"
+    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"no longer out of reach"* ]]

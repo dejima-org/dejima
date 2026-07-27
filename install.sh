@@ -1,16 +1,16 @@
 #!/bin/bash
-# Idempotent installer for claude-sandbox. Symlinks this repo's hooks into
+# Idempotent installer for dejima. Symlinks this repo's hooks into
 # ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
-# bin/claude-sandbox, bin/claude-sandbox-allow, bin/claude-sandbox-dep and
-# bin/claude-sandbox-project on PATH. Safe to re-run -
+# bin/dejima, bin/dejima-allow, bin/dejima-dep and
+# bin/dejima-project on PATH. Safe to re-run -
 # every step is a no-op if already done, and every change is printed as it
 # happens.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="$HOME/.claude-sandbox-backup"
+BACKUP_DIR="$HOME/.dejima-backup"
 
-echo "claude-sandbox install.sh"
+echo "dejima install.sh"
 echo "Repo: $SCRIPT_DIR"
 echo
 
@@ -96,7 +96,7 @@ echo
 
 BIN_DIR="$HOME/.local/bin"
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    echo "Warning: $BIN_DIR is not on PATH - add it to your shell profile to run 'claude-sandbox' by name instead of the full path." >&2
+    echo "Warning: $BIN_DIR is not on PATH - add it to your shell profile to run 'dejima' by name instead of the full path." >&2
 fi
 mkdir -p "$BIN_DIR"
 
@@ -115,11 +115,22 @@ link_bin() {
     ln -s "$src" "$dest"
 }
 
-link_bin claude-sandbox
-link_bin claude-sandbox-allow
-link_bin claude-sandbox-dep
-link_bin claude-sandbox-project
+# Symlinks from before the claude-sandbox -> dejima rename point at bin/
+# paths that no longer exist. Only remove ones that are actually dangling -
+# anything still resolving belongs to some other install, not to us.
+for old in claude-sandbox claude-sandbox-allow claude-sandbox-dep claude-sandbox-project; do
+    old_dest="$BIN_DIR/$old"
+    if [ -L "$old_dest" ] && [ ! -e "$old_dest" ]; then
+        echo "Removing: dangling pre-rename symlink $old_dest"
+        rm -f "$old_dest"
+    fi
+done
+
+link_bin dejima
+link_bin dejima-allow
+link_bin dejima-dep
+link_bin dejima-project
 echo
 
-echo "Done. Try: $BIN_DIR/claude-sandbox ~/some/project"
-echo "(or just 'claude-sandbox ~/some/project' once $BIN_DIR is on PATH)"
+echo "Done. Try: $BIN_DIR/dejima ~/some/project"
+echo "(or just 'dejima ~/some/project' once $BIN_DIR is on PATH)"

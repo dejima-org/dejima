@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# SessionStart hook: when running inside the claude-sandbox Docker container
+# SessionStart hook: when running inside the dejima Docker container
 # (see https://github.com/anthropics/claude-code/tree/main/.devcontainer for
 # the reference this is based on, and this repo's own README for the actual
 # setup), inject a reminder of the sandbox's constraints and how to escape
 # it. No-op outside the container.
 
-if [ -z "${CLAUDE_SANDBOX:-}" ]; then
+if [ -z "${DEJIMA:-}" ]; then
     exit 0
 fi
 
@@ -20,25 +20,25 @@ project_dir="${project_dir:-$PWD}"
 # /etc/hostname in a docker container is the container's own ID, which
 # docker exec accepts directly - baking it into the suggested command below
 # means the agent states its real container instead of guessing (a wrong
-# guess that matches *another* running sandbox makes claude-sandbox-allow
+# guess that matches *another* running sandbox makes dejima-allow
 # "succeed" against the wrong container).
 container_id=$(cat /etc/hostname 2>/dev/null)
 container_id="${container_id:-<container-id>}"
 
 # What the project says it needs, checked against what this container
-# actually has. .claude-sandbox/ is on the read-write workspace mount, so it
+# actually has. .dejima/ is on the read-write workspace mount, so it
 # grants nothing - it's a declaration the user approves by hand on the host
-# (see bin/claude-sandbox-project). Reporting the gap here is what turns
+# (see bin/dejima-project). Reporting the gap here is what turns
 # "this fails mysteriously" into "tell the user to run one command".
 requirements=""
-decl_dir="$project_dir/.claude-sandbox"
+decl_dir="$project_dir/.dejima"
 
 # Everything below reads attacker-controllable text on its way into an
 # agent's context window, so all three costs it can impose are bounded:
 #
 #   MAX_DECLARED  entries considered - the same cap read_declared() applies
 #                 host-side, so this reports on the same window
-#                 `claude-sandbox-project approve` will act on.
+#                 `dejima-project approve` will act on.
 #   MAX_ENTRY_LEN characters per entry.
 #
 # Within that window the report is a strict subset of what `approve` accepts,
@@ -96,7 +96,7 @@ if [ -f "$decl_dir/dependencies" ]; then
     missing_deps_n=0
     declare -A installed_cache=()
     while IFS= read -r spec; do
-        # Same shape as valid_dep_spec() in claude-sandbox-project-lib.sh -
+        # Same shape as valid_dep_spec() in dejima-project-lib.sh -
         # a leading dash (e.g. "--allow-unauthenticated") must not validate
         # as a name, or this hook would echo into the agent's context an
         # entry the project's own approve/status commands treat as rejected.
@@ -119,7 +119,7 @@ if [ -f "$decl_dir/dependencies" ]; then
 - Declared dependencies missing from this image:$missing_deps
   These need an image rebuild, so they cannot be added to this session. Tell
   the user to run, outside the sandbox:
-    claude-sandbox-project approve \"$project_dir\"
+    dejima-project approve \"$project_dir\"
   then restart the sandbox. Do not try to install them yourself."
     fi
 fi
@@ -147,9 +147,9 @@ if [ -f "$decl_dir/allowed-domains" ]; then
         requirements="$requirements
 - Declared domains not allowed in this session:$missing_domains
   Tell the user to run, outside the sandbox:
-    claude-sandbox-project approve \"$project_dir\"
+    dejima-project approve \"$project_dir\"
   (or, for one domain right now:
-    bin/claude-sandbox-allow <domain> --container $container_id)"
+    bin/dejima-allow <domain> --container $container_id)"
     fi
 fi
 
@@ -160,7 +160,7 @@ This project declares requirements this session does not satisfy:$requirements"
 fi
 
 context=$(cat <<EOF
-You are running inside the claude-sandbox Docker container, not directly on
+You are running inside the dejima Docker container, not directly on
 the user's machine, with
 --dangerously-skip-permissions active (no tool-use confirmations).
 
@@ -174,10 +174,10 @@ What this means:
   mounted paths, and the container itself go away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, GitHub read-only, the configured Gitea host, plus anything
-  approved via claude-sandbox-allow). Requests to anything else will simply
+  approved via dejima-allow). Requests to anything else will simply
   fail to connect. If a task needs one more domain and nothing else, that's
   a quick fix, not a reason to stop: tell the user to run
-  \`bin/claude-sandbox-allow <domain> --container $container_id\` (add
+  \`bin/dejima-allow <domain> --container $container_id\` (add
   \`--global\` to persist it past this session) from a terminal outside the
   sandbox, then continue. Quote that --container value exactly as written
   here - it is this container's real ID, not something to infer.

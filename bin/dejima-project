@@ -1,23 +1,23 @@
 #!/bin/bash
 # Review and approve what a project declares it needs.
 #
-# A project declares its requirements in .claude-sandbox/{dependencies,
+# A project declares its requirements in .dejima/{dependencies,
 # allowed-domains}, which are committed and shared - but declaring grants
 # nothing. This is where a human turns a declaration into an approval.
 #
-# Usage: claude-sandbox-project <status|approve> [<path>]
+# Usage: dejima-project <status|approve> [<path>]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-# shellcheck source=claude-sandbox-project-lib.sh
-source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
 
 action="${1:-}"
 project="${2:-$PWD}"
-[ -n "$action" ] || { echo "Usage: claude-sandbox-project <status|approve> [<path>]" >&2; exit 1; }
+[ -n "$action" ] || { echo "Usage: dejima-project <status|approve> [<path>]" >&2; exit 1; }
 project="$(cd "$project" && pwd)"
 
-decl_dir="$project/.claude-sandbox"
+decl_dir="$project/.dejima"
 store="$(resolve_project_store "$project")"
 
 approved_of() {
@@ -65,10 +65,10 @@ case "$action" in
         trunc_deps=$(classify dependencies valid_dep_spec | sed -n 's/^truncated //p')
         trunc_doms=$(classify allowed-domains valid_domain | sed -n 's/^truncated //p')
         if [ -n "$trunc_deps" ]; then
-            echo "Warning: dependencies declares $trunc_deps entries; only the first $CLAUDE_SANDBOX_MAX_DECLARED were considered." >&2
+            echo "Warning: dependencies declares $trunc_deps entries; only the first $DEJIMA_MAX_DECLARED were considered." >&2
         fi
         if [ -n "$trunc_doms" ]; then
-            echo "Warning: allowed-domains declares $trunc_doms entries; only the first $CLAUDE_SANDBOX_MAX_DECLARED were considered." >&2
+            echo "Warning: allowed-domains declares $trunc_doms entries; only the first $DEJIMA_MAX_DECLARED were considered." >&2
         fi
         if [ -n "$rejected" ]; then
             echo "Refusing to approve these malformed entries (fix the declaration):" >&2
@@ -90,9 +90,9 @@ case "$action" in
             *) echo "Nothing approved."; exit 0 ;;
         esac
         for spec in $pending_deps; do
-            "$SCRIPT_DIR/claude-sandbox-dep" add "$spec" --project "$project"
+            "$SCRIPT_DIR/dejima-dep" add "$spec" --project "$project"
         done
-        # claude-sandbox-allow records the approval before it touches a
+        # dejima-allow records the approval before it touches a
         # running session, so a nonzero exit here means only that the live
         # patch or its reachability probe didn't succeed - a declared host
         # that doesn't serve HTTPS on 443, say. Under set -e that used to
@@ -100,7 +100,7 @@ case "$action" in
         # and report instead.
         unapplied=""
         for dom in $pending_doms; do
-            "$SCRIPT_DIR/claude-sandbox-allow" "$dom" --project "$project" || unapplied="$unapplied $dom"
+            "$SCRIPT_DIR/dejima-allow" "$dom" --project "$project" || unapplied="$unapplied $dom"
         done
         if [ -n "$unapplied" ]; then
             echo
@@ -109,7 +109,7 @@ case "$action" in
         fi
         ;;
     *)
-        echo "Usage: claude-sandbox-project <status|approve> [<path>]" >&2
+        echo "Usage: dejima-project <status|approve> [<path>]" >&2
         exit 1
         ;;
 esac

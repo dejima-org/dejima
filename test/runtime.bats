@@ -8,7 +8,7 @@ bats_require_minimum_version 1.5.0
 # file (setup_file/teardown_file, not setup/teardown) since spinning up a
 # fresh one per test would make this suite too slow to actually get run.
 #
-# Needs Docker. Set SKIP_BUILD=1 to reuse whatever claude-sandbox:latest is
+# Needs Docker. Set SKIP_BUILD=1 to reuse whatever dejima:latest is
 # already built, for fast iteration - the default is to always rebuild, so a
 # stale image can't produce a false pass.
 #
@@ -24,10 +24,10 @@ bats_require_minimum_version 1.5.0
 # BATS_FILE_TMPDIR) is a *different* value in every test, setup_file, and
 # teardown_file, silently pointing them at containers that don't match.
 
-IMAGE=claude-sandbox:latest
+IMAGE=dejima:latest
 
-container_name() { echo "claude-sandbox-test-$(basename "$BATS_FILE_TMPDIR")"; }
-network_name() { echo "claude-sandbox-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
+container_name() { echo "dejima-test-$(basename "$BATS_FILE_TMPDIR")"; }
+network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 
 # Every container this file starts must go on network_name(), never the
 # default bridge: dns-proxy.sh forwards allowlisted names to Docker's
@@ -93,20 +93,20 @@ teardown_file() {
 }
 
 teardown() {
-    docker rm -f "claude-sandbox-test-override-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rmi "claude-sandbox-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rmi "claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-override-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rmi "dejima-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rmi "dejima-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -118,8 +118,8 @@ dexec_node() {
 }
 
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
-    local test_image="claude-sandbox-test-override:$(basename "$BATS_FILE_TMPDIR")"
-    local test_container="claude-sandbox-test-override-$(basename "$BATS_FILE_TMPDIR")"
+    local test_image="dejima-test-override:$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-override-$(basename "$BATS_FILE_TMPDIR")"
     local sandbox_dir="$BATS_TEST_DIRNAME/../docker"
     local repo_root="$BATS_TEST_DIRNAME/.."
 
@@ -156,7 +156,7 @@ dexec_node() {
     key_dir="$BATS_TEST_TMPDIR"
     ssh-keygen -t ed25519 -N '' -f "$key_dir/testkey" >/dev/null
 
-    test_container="claude-sandbox-test-sshkey-$(basename "$BATS_FILE_TMPDIR")"
+    test_container="dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -194,16 +194,16 @@ dexec_node() {
 }
 
 @test "~/.claude.json mount is a discarded per-session copy - a write inside the container never reaches the host source it was seeded from" {
-    # In the real bin/claude-sandbox flow, the file mounted at
+    # In the real bin/dejima flow, the file mounted at
     # ~/.claude.json is always a *generated* per-session copy (see
-    # SANDBOX_CLAUDE_JSON_FILE in bin/claude-sandbox), never the real
+    # SANDBOX_CLAUDE_JSON_FILE in bin/dejima), never the real
     # ~/.claude.json - so nothing written to it in the container, including
     # Claude Code's own atomic write-temp-then-rename on startup, can ever
     # reach the real file. host_copy here stands in for that real file: it's
     # seeded with the same content as the mounted file but never mounted
     # itself, so it can only change if something actually writes back to the
     # real source - which must not happen.
-    local test_container="claude-sandbox-test-claudejson-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")"
     local mounted_copy="$BATS_TEST_TMPDIR/claude.json"
     local host_copy="$BATS_TEST_TMPDIR/claude-json-original.json"
 
@@ -268,7 +268,7 @@ dexec_node() {
 }
 
 @test "ALLOW_GITHUB_PUSH=1 opens port 22 to GitHub" {
-    local test_container="claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -286,7 +286,7 @@ dexec_node() {
 }
 
 @test "GITEA_SSH_HOST is exempted from stop-dns-rebind, other allowed domains are not" {
-    local test_container="claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -311,7 +311,7 @@ dexec_node() {
 }
 
 @test "the code-carrying ~/.claude overlay dirs are read-only inside the container" {
-    local test_container="claude-sandbox-test-overlays-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")"
     local src; src="$(mktemp -d)"
     mkdir -p "$src/skills" "$src/commands" "$src/agents"
     docker run -d --name "$test_container" \
@@ -334,17 +334,17 @@ dexec_node() {
 }
 
 @test "statusline.sh read-only mount blocks replacement when it's a plain regular file" {
-    # Companion to the overlay-dirs test above, but for bin/claude-sandbox's
+    # Companion to the overlay-dirs test above, but for bin/dejima's
     # narrower statusline.sh-onto-itself mount (see its comment there) rather
-    # than a whole subdirectory. This test does NOT use bin/claude-sandbox or
+    # than a whole subdirectory. This test does NOT use bin/dejima or
     # docker-compose.yml directly - it builds the same mount shape by hand: a
     # whole ~/.claude directory bind-mounted read-write (docker-compose.yml's
     # own ~/.claude mount), with statusline.sh itself bind-mounted read-only
     # back onto its own path on top, source and destination the same literal
-    # path exactly as bin/claude-sandbox constructs it (container HOME
+    # path exactly as bin/dejima constructs it (container HOME
     # matches host HOME - see Dockerfile). This shared container isn't reused
     # for this (it has no ~/.claude mount at all - see setup_file).
-    local test_container="claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
     local dotclaude; dotclaude="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
     chmod +x "$dotclaude/statusline.sh"
@@ -381,7 +381,7 @@ dexec_node() {
     rm -rf "$dotclaude"
 }
 
-@test "statusline.sh read-only mount does NOT protect it when it's a symlink (Finding 1 - confirmed gap, see bin/claude-sandbox-audit)" {
+@test "statusline.sh read-only mount does NOT protect it when it's a symlink (Finding 1 - confirmed gap, see bin/dejima-audit)" {
     # Same mount shape as the plain-regular-file test above, except
     # statusline.sh on the host is a symlink into a separately-mounted
     # directory - the common real setup
@@ -392,15 +392,15 @@ dexec_node() {
     # it - and bind-mount destination resolution (runc's SecureJoin) follows
     # symlinks within the rootfs. This CONFIRMS the mount resolves through
     # the symlink to the target directory (already read-only via the
-    # separate target_dir mount below, mirroring bin/claude-sandbox's own
+    # separate target_dir mount below, mirroring bin/dejima's own
     # symlink-target scan) instead of binding to the symlink dentry itself -
     # so the symlink dentry stays a perfectly ordinary, writable entry on
     # the read-write ~/.claude mount, with no mountpoint-busy protection
     # either. This test is a characterization test of that CONFIRMED,
-    # known, deliberately-documented limitation (see bin/claude-sandbox and
+    # known, deliberately-documented limitation (see bin/dejima and
     # README "Security notes"), not an aspiration: it asserts the
     # replacement SUCCEEDS. The compensating control is detection, not
-    # prevention - bin/claude-sandbox-audit hashes the symlink's target
+    # prevention - bin/dejima-audit hashes the symlink's target
     # string and reports a changed/repointed statusline.sh as a
     # host-code-execution finding after the session exits (see
     # test/audit.bats). If this test ever starts FAILING, that means
@@ -408,7 +408,7 @@ dexec_node() {
     # have closed - that would be good news worth investigating and acting
     # on (tightening the comments/audit accordingly), not a regression to
     # "fix" back to the old behavior.
-    local test_container="claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
     local target_dir dotclaude
     target_dir="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$target_dir/statusline.sh"
@@ -551,13 +551,13 @@ EOF'
     cat > "$TD/credentials.json" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    "$BATS_TEST_DIRNAME/../bin/claude-sandbox-anthropic-proxy" \
+    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
         --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
         --upstream "http://127.0.0.1:$(cat "$TD/port")" &
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
 
-    container="claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
+    container="dejima-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -595,10 +595,10 @@ EOF
     [ "$env_hits" = "0" ]
 }
 
-@test "credential mask: ~/.claude/.credentials.json in-container is empty, never the real token (the actual bin/claude-sandbox mask mechanism)" {
+@test "credential mask: ~/.claude/.credentials.json in-container is empty, never the real token (the actual bin/dejima mask mechanism)" {
     # Unlike the proxy-chain test above (which hand-builds a docker run to
     # exercise the proxy's HTTP path), this test reuses the exact masking
-    # mechanism bin/claude-sandbox itself uses at launch (see
+    # mechanism bin/dejima itself uses at launch (see
     # SANDBOX_CREDENTIALS_MASK_FILE there): a real ~/.claude directory
     # bind-mounted read-write, with an empty file layered read-write on top
     # at .credentials.json specifically - the same "more specific mount wins"
@@ -616,7 +616,7 @@ EOF
     : > "$mask_file"
     chmod 666 "$mask_file"
 
-    container="claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
+    container="dejima-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -639,7 +639,7 @@ EOF
 }
 
 @test "mid-session allowed domains get ongoing ipset tracking, not a one-time snapshot" {
-    # Simulate the container-side half of bin/claude-sandbox-allow for a
+    # Simulate the container-side half of bin/dejima-allow for a
     # domain that wasn't allowed at startup (SIGHUP also clears dnsmasq's
     # cache, so subsequent digs are really forwarded, not cached).
     # SIGHUP-to-reload is asynchronous - give dnsmasq a moment to actually
@@ -654,7 +654,7 @@ EOF
     dexec ipset test allowed-domains "$ip"
     # Simulate a CDN edge rotating away and back: drop the IP, clear the
     # dnsmasq cache, resolve again - the wildcard must re-add it with no
-    # claude-sandbox-allow involvement. This is exactly the case that used
+    # dejima-allow involvement. This is exactly the case that used
     # to break ("allowed but blocked again minutes later").
     dexec ipset del allowed-domains "$ip"
     dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
@@ -699,12 +699,12 @@ EOF
 
 @test "session context reports declared-but-missing project requirements" {
     local ws; ws="$(mktemp -d)"
-    mkdir -p "$ws/.claude-sandbox"
-    printf 'apt:definitely-not-installed\n' > "$ws/.claude-sandbox/dependencies"
-    printf 'declared-not-allowed.example\n' > "$ws/.claude-sandbox/allowed-domains"
+    mkdir -p "$ws/.dejima"
+    printf 'apt:definitely-not-installed\n' > "$ws/.dejima/dependencies"
+    printf 'declared-not-allowed.example\n' > "$ws/.dejima/allowed-domains"
     chmod -R 755 "$ws"
 
-    local test_container="claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -719,25 +719,25 @@ EOF
     # from the payload broke and silently fell back to $PWD, running with
     # -w "$ws" would still find the declarations and pass regardless.
     run docker exec -u node -w /tmp "$test_container" \
-        bash -c 'printf "{\"session_id\":\"s1\",\"cwd\":\"'"$ws"'\"}" | CLAUDE_SANDBOX=1 /usr/local/bin/sandbox-context.sh'
+        bash -c 'printf "{\"session_id\":\"s1\",\"cwd\":\"'"$ws"'\"}" | DEJIMA=1 /usr/local/bin/sandbox-context.sh'
     [ "$status" -eq 0 ]
     [[ "$output" == *"definitely-not-installed"* ]]
     [[ "$output" == *"declared-not-allowed.example"* ]]
-    [[ "$output" == *"claude-sandbox-project approve"* ]]
+    [[ "$output" == *"dejima-project approve"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$ws"
 }
 
 @test "a derived project image gets the package and keeps the base privilege posture" {
-    local derived="claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")"
-    local test_container="claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")"
+    local derived="dejima-test-derived:$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="dejima-test-derived-$(basename "$BATS_FILE_TMPDIR")"
     local ctx; ctx="$(mktemp -d)"
     local store; store="$(mktemp -d)"
     local df; df="$(mktemp)"
     printf 'apt:cowsay\n' > "$store/dependencies"
     bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
-        _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$IMAGE" "$store" > "$df"
+        _ "$BATS_TEST_DIRNAME/../bin/dejima-project-lib.sh" "$IMAGE" "$store" > "$df"
     docker build -q -t "$derived" -f "$df" "$ctx" >&2
 
     # The image's own config, not the running container: `docker run` below
@@ -774,7 +774,7 @@ EOF
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"
-    "$BATS_TEST_DIRNAME/../bin/claude-sandbox-anthropic-proxy" \
+    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
         --socket "$TD/proxy.sock" --credentials "$HOME/.claude/.credentials.json" &
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done

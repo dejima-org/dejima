@@ -2,21 +2,21 @@
 # Manage the approved dev-dependency list for a project or, with --global,
 # every project. Approvals live host-side (never mounted into the
 # container), so a sandboxed session can ask for a package but can never
-# grant itself one - the same split bin/claude-sandbox-allow uses for
+# grant itself one - the same split bin/dejima-allow uses for
 # domains.
 #
-# Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--global | --project <path>]
-#   claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
-#   claude-sandbox-dep add cargo:cargo-nextest --global
-#   claude-sandbox-dep list
+# Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]
+#   dejima-dep add cargo:cargo-nextest --project ~/myproject
+#   dejima-dep add cargo:cargo-nextest --global
+#   dejima-dep list
 #
 # A spec is <apt|npm|pip|cargo>:<name>. The dependencies actually installed
 # for a project are the union of its global and project approvals.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-# shellcheck source=claude-sandbox-project-lib.sh
-source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
 
 action=""
 spec=""
@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 usage() {
-    echo "Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--global | --project <path>]" >&2
+    echo "Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]" >&2
     exit 1
 }
 
@@ -80,10 +80,10 @@ case "$action" in
             approve_entry "$store" dependencies "$spec"
             echo "Approved $spec for $project."
         fi
-        # Unlike claude-sandbox-allow, this cannot touch a running session:
+        # Unlike dejima-allow, this cannot touch a running session:
         # it needs an image rebuild. Say so, or an agent will keep insisting
         # the dependency is missing right after the user added it.
-        echo "Takes effect on the next launch (bin/claude-sandbox rebuilds the project image)."
+        echo "Takes effect on the next launch (bin/dejima rebuilds the project image)."
         ;;
     remove)
         [ -n "$spec" ] || usage

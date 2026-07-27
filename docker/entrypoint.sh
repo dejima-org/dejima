@@ -79,7 +79,7 @@ if [ -n "${GH_TOKEN:-}" ]; then
     gosu "$SANDBOX_USER" gh auth setup-git
 fi
 
-# Dedicated headless SSH identity (optional - see bin/claude-sandbox's
+# Dedicated headless SSH identity (optional - see bin/dejima's
 # SANDBOX_SSH_KEY and README "Headless git push"): a purpose-built key
 # mounted read-only, independent of whatever forwarded agent socket the
 # SSH_AUTH_SOCK mount above provides. Loaded into a fresh agent owned by
@@ -99,8 +99,8 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
-# Loopback bridge for the host-side credential proxy (see bin/claude-sandbox
-# and bin/claude-sandbox-anthropic-proxy): Claude Code talks HTTP to
+# Loopback bridge for the host-side credential proxy (see bin/dejima
+# and bin/dejima-anthropic-proxy): Claude Code talks HTTP to
 # 127.0.0.1:18300, the forwarder pipes bytes into the bind-mounted unix
 # socket. Only started when this session actually has a proxy socket.
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
@@ -142,6 +142,6 @@ fi
 # (the wrapped binary on PATH, see claude-wrapper.sh) so a fresh clone of
 # this repo works with no editor setup at all. Override it (e.g. to `nvim`)
 # for a custom editor-driven workflow; pair with SANDBOX_NVIM_CONFIG (see
-# bin/claude-sandbox) to bring in a real config for it instead of running
+# bin/dejima) to bring in a real config for it instead of running
 # unconfigured.
 exec gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"

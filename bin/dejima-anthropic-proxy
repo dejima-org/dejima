@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Host-side credential-injecting proxy for sandboxed Claude Code sessions.
 # The container only ever holds a placeholder token; this proxy (launched on
-# the host by bin/claude-sandbox, reached via a bind-mounted unix socket and
+# the host by bin/dejima, reached via a bind-mounted unix socket and
 # an in-container loopback forwarder) strips the placeholder and injects the
 # real OAuth access token from ~/.claude/.credentials.json, so the credential
 # itself never enters the container. It also owns token refresh: rotated
 # tokens are written back to the real host file atomically, keeping
 # host-side sessions logged in. See README "Security notes" and
-# ~/specs/2026-07-24-claude-sandbox-credential-proxy-design.md.
+# ~/specs/2026-07-24-dejima-credential-proxy-design.md.
 import argparse
 import http.client
 import json
@@ -86,9 +86,9 @@ class Credentials:
         # Staged in a dedicated subdirectory, not ~/.claude directly - that
         # directory is bind-mounted read-write into the sandbox container, and
         # only the single ~/.claude/.credentials.json path is masked from it
-        # (see bin/claude-sandbox); a sibling temp file created directly in
+        # (see bin/dejima); a sibling temp file created directly in
         # ~/.claude would be container-readable for the whole write window.
-        # bin/claude-sandbox masks this subdirectory entirely (empty read-only
+        # bin/dejima masks this subdirectory entirely (empty read-only
         # overlay), and the rename below stays same-filesystem (a subdirectory
         # of the same parent), so atomicity is unaffected either way - what the
         # container's own bind mount shows is irrelevant to a host-side rename.
@@ -114,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
         pass  # per-request lines would interleave with the session's own UI
 
     def log_error(self, fmt, *args):
-        sys.stderr.write("claude-sandbox-anthropic-proxy: " + fmt % args + "\n")
+        sys.stderr.write("dejima-anthropic-proxy: " + fmt % args + "\n")
 
     def _read_body(self):
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -264,14 +264,14 @@ def main():
         creds._read()["claudeAiOauth"]["accessToken"]
     except Exception as e:
         sys.stderr.write(
-            "claude-sandbox-anthropic-proxy: unusable credentials file %s: %s\n"
+            "dejima-anthropic-proxy: unusable credentials file %s: %s\n"
             % (args.credentials, e))
         return 1
 
     expires = creds._read()["claudeAiOauth"].get("refreshTokenExpiresAt")
     if expires is not None and expires / 1000 < time.time():
         sys.stderr.write(
-            "claude-sandbox-anthropic-proxy: the refresh token in %s has "
+            "dejima-anthropic-proxy: the refresh token in %s has "
             "expired - run `claude` on the host and log in again first\n"
             % args.credentials)
         return 1

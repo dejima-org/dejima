@@ -12,7 +12,7 @@
 -- plain write; paste is deliberately a no-op (OSC 52 *reads* are
 -- inconsistently supported and can hang waiting for a reply - paste into
 -- the sandbox via the terminal's own native paste instead).
-if vim.env.CLAUDE_SANDBOX == nil or vim.g.clipboard ~= nil then
+if vim.env.DEJIMA == nil or vim.g.clipboard ~= nil then
   return
 end
 

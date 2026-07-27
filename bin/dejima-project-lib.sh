@@ -1,28 +1,28 @@
 #!/bin/bash
-# Sourceable helper for the per-project config tooling (bin/claude-sandbox,
-# claude-sandbox-allow, claude-sandbox-dep, claude-sandbox-project).
+# Sourceable helper for the per-project config tooling (bin/dejima,
+# dejima-allow, dejima-dep, dejima-project).
 #
 # Two kinds of file are involved and they are NOT equally trusted:
 #
-#   .claude-sandbox/{allowed-domains,dependencies} in the project - a
+#   .dejima/{allowed-domains,dependencies} in the project - a
 #   DECLARATION. The project directory is bind-mounted read-write, so a
 #   compromised session can write these. They grant nothing; they are read
 #   only to compare against reality and suggest a command for the user to
 #   run. Parsed, never sourced - executing a file on a session-writable
 #   mount is a host-shell persistence path.
 #
-#   ~/.config/claude-sandbox/{allowed-domains,dependencies} - a GLOBAL
+#   ~/.config/dejima/{allowed-domains,dependencies} - a GLOBAL
 #   APPROVAL, applying to every project.
 #
-#   ~/.config/claude-sandbox/projects/<slug>/* - a PROJECT APPROVAL.
+#   ~/.config/dejima/projects/<slug>/* - a PROJECT APPROVAL.
 #
 #   Both are written only by the CLIs, which only the user runs, and neither
 #   is ever mounted into the container. They are the only things that
 #   actually grant anything.
 
-CLAUDE_SANDBOX_MAX_DECLARED=200
+DEJIMA_MAX_DECLARED=200
 
-# Same expression bin/claude-sandbox-allow validates with - a declared
+# Same expression bin/dejima-allow validates with - a declared
 # domain has to survive being written into a dnsmasq server=/domain/ line.
 valid_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
@@ -54,7 +54,7 @@ read_declared() {
             ''|'#'*) continue ;;
         esac
         total=$((total + 1))
-        [ "$count" -ge "$CLAUDE_SANDBOX_MAX_DECLARED" ] && continue
+        [ "$count" -ge "$DEJIMA_MAX_DECLARED" ] && continue
         count=$((count + 1))
         if "$validator" "$line"; then
             printf 'ok %s\n' "$line"
@@ -62,14 +62,14 @@ read_declared() {
             printf 'rejected %s\n' "$line"
         fi
     done < "$file"
-    if [ "$total" -gt "$CLAUDE_SANDBOX_MAX_DECLARED" ]; then
+    if [ "$total" -gt "$DEJIMA_MAX_DECLARED" ]; then
         printf 'truncated %s\n' "$total"
     fi
     return 0
 }
 
 config_root() {
-    printf '%s' "${CLAUDE_SANDBOX_CONFIG_DIR:-$HOME/.config/claude-sandbox}"
+    printf '%s' "${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}"
 }
 
 # The global store is config_root() itself, not a subdirectory of it - the

@@ -1,4 +1,4 @@
-# claude-sandbox
+# dejima
 
 Runs Claude Code inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
@@ -11,6 +11,19 @@ optional editor-driven workflow in place of bare Claude Code (see "Usage").
 This repo only holds the tooling — it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
+
+## The name
+
+Dejima was a small artificial island in Nagasaki harbour — for over two
+centuries, the only Japanese territory open to Westerners. A single guarded
+bridge connected it to the mainland, and nothing crossed in either direction
+without permission. The containment was real in both directions, and so was
+the trade: most of what Japan learned of Western medicine and science in that
+period arrived across that one bridge.
+
+That's roughly the arrangement here. The agent gets a bounded island and one
+controlled crossing; in exchange it gets to work without stopping to ask
+permission for every step. The walls are what make the latitude affordable.
 
 ## Prerequisites
 
@@ -37,7 +50,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_CMD` | `claude` | container's main process (e.g. `nvim`) |
 | `SANDBOX_NVIM_CONFIG` | unset | nvim config dir, used when `SANDBOX_CMD=nvim` |
 | `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `SANDBOX_SHARE_DIR` | `~/.local/share/claude-sandbox/shared` | host-visible read/write scratch dir |
+| `SANDBOX_SHARE_DIR` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir |
 | `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
 | `SANDBOX_LOG_CONVERSATION` | `0` | opt-in: also ship session transcripts to Loki (needs `LOKI_URL`) — see "Conversation logging (opt-in)" below |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
@@ -55,8 +68,8 @@ just works.
 ## Usage
 
 ```sh
-bin/claude-sandbox                        # sandbox the current directory
-bin/claude-sandbox ~/repos/some-project
+bin/dejima                        # sandbox the current directory
+bin/dejima ~/repos/some-project
 ```
 
 By default the container's entry point is bare `claude` (always running with
@@ -68,16 +81,37 @@ Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat.
 
-> **Upgrading note:** the compose project name is now pinned to
-> `claude-sandbox`, which re-namespaces the named volumes (bash history,
-> nvim data/state/cache). Pre-existing volumes under the old project name
-> are orphaned — harmless, their contents regenerate — and can be removed
-> with `docker volume ls` / `docker volume rm` if you want them gone.
+> **Upgrading from `claude-sandbox`:** this project was previously called
+> `claude-sandbox`. Nothing migrates automatically — the old and new names
+> simply don't see each other. To carry an existing install over:
+>
+> ```sh
+> mv ~/.config/claude-sandbox      ~/.config/dejima        # approval store
+> mv ~/.local/share/claude-sandbox ~/.local/share/dejima   # shared scratch dir
+> ./install.sh                                             # relink under the new names
+> ```
+>
+> `install.sh` removes the now-dangling `~/.local/bin/claude-sandbox*`
+> symlinks itself. Skipping the two `mv`s isn't dangerous — you'll just start
+> from an empty approval store and re-approve domains and dependencies as
+> they come up.
+>
+> Two things are deliberately left behind. The compose project name is now
+> `dejima`, which re-namespaces the named volumes (bash history, nvim
+> data/state/cache); pre-existing volumes under the old project name are
+> orphaned — harmless, their contents regenerate — and can be removed with
+> `docker volume ls` / `docker volume rm`. And if you ship conversation logs
+> to Loki, the job label changed from `claude-sandbox-conversation` to
+> `dejima-conversation`, so update any saved queries or dashboards.
+>
+> If you also rename the repo checkout on disk, re-run `install.sh`
+> afterwards — the hook symlinks in `~/.claude/hooks` point at the old path
+> and will dangle otherwise.
 
 ### Using a different editor/application
 
 ```sh
-SANDBOX_CMD=nvim bin/claude-sandbox ~/repos/some-project
+SANDBOX_CMD=nvim bin/dejima ~/repos/some-project
 ```
 
 Runs unconfigured unless you also set `SANDBOX_NVIM_CONFIG` to a real config
@@ -87,7 +121,7 @@ don't fail on a read-only filesystem; nothing else in the config is
 writable):
 
 ```sh
-SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim bin/claude-sandbox ~/repos/some-project
+SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim bin/dejima ~/repos/some-project
 ```
 
 Set both in your shell profile if you use this mode regularly.
@@ -97,7 +131,7 @@ path (a helper script in a dotfiles `bin/`, say), bring it in with
 `SANDBOX_EXTRA_MOUNTS` (colon-separated, mounted read-only at the same path):
 
 ```sh
-SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/claude-sandbox ~/repos/some-project
+SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/dejima ~/repos/some-project
 ```
 
 ## Config parity with your host Claude Code setup
@@ -122,7 +156,7 @@ The container's own user matches yours exactly — username, uid, gid, and
 home directory (see `Dockerfile`) — so `$HOME`-relative paths (dotfiles,
 Claude Code's plugin bookkeeping) resolve the same on both sides. Defaults to
 `node`/1000/1000/`/home/node` if you build the image directly instead of via
-`bin/claude-sandbox`. Images are tagged per-user (`claude-sandbox:<username>`)
+`bin/dejima`. Images are tagged per-user (`dejima:<username>`)
 so concurrent builds on a shared machine don't clobber each other.
 
 Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
@@ -142,7 +176,7 @@ git-over-ssh for anything still running headless. For sandboxes meant to run
 unattended, generate a dedicated, purpose-built keypair instead:
 
 ```sh
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude-sandbox_ed25519
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/dejima_ed25519
 ```
 
 Passphrase-less is deliberate — this is meant to be a low-privilege
@@ -151,7 +185,7 @@ the public half as a Gitea deploy key scoped to just the repos that need
 push access, then:
 
 ```sh
-SANDBOX_SSH_KEY=~/.ssh/claude-sandbox_ed25519 bin/claude-sandbox ~/repos/some-project
+SANDBOX_SSH_KEY=~/.ssh/dejima_ed25519 bin/dejima ~/repos/some-project
 ```
 
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
@@ -163,7 +197,7 @@ agent is no longer required at all.
 ## Shared scratch space
 
 `~/shared` is a read-write bind mount of `$SANDBOX_SHARE_DIR` (default
-`~/.local/share/claude-sandbox/shared`, created automatically) — separate
+`~/.local/share/dejima/shared`, created automatically) — separate
 from the project mount, for passing files (screenshots, temp scripts) in and
 out of a session without touching the actual checkout. Persists across
 sessions since it's a real directory, not a container volume.
@@ -181,7 +215,7 @@ or per-project `npm install playwright` needed.
 `localhost`/loopback traffic never goes through the egress firewall, so a
 project's own dev server needs no firewall changes. A real external site
 needs to be on the allowlist like any other network use
-(`bin/claude-sandbox-allow <domain>` for a running session, add
+(`bin/dejima-allow <domain>` for a running session, add
 `--global`/`--project <path>` to persist it) — the firewall applies to the
 browser's traffic exactly like `curl`/`git`.
 
@@ -198,7 +232,7 @@ full shell access as the container's own user regardless.
 ## Sandbox self-awareness
 
 A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
-reminder when `CLAUDE_SANDBOX` is set: the session is running in a
+reminder when `DEJIMA` is set: the session is running in a
 disposable, firewalled container and should stay within the task at hand —
 if something genuinely needs to break out (broader network, host changes,
 GUI/hardware), stop and ask rather than trying to work around the firewall,
@@ -206,7 +240,7 @@ since the same session can be resumed unrestricted on the host via
 `claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
 (`PreToolUse`) also applies here, since `~/.claude` is shared.
 
-`git-push-guard.sh` (`PreToolUse`/`Bash`, also `CLAUDE_SANDBOX`-gated) blocks
+`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
 any `git push` whose resolved remote isn't the Gitea host, and any push to
 `main`/`master` even there. Like the other hooks, this is a fast-fail guard
 against an overeager agent, not a hard security boundary — a session has full
@@ -239,7 +273,7 @@ default:
 - whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
-Everything else is rejected. Run `bin/claude-sandbox-allow <domain> --global`
+Everything else is rejected. Run `bin/dejima-allow <domain> --global`
 (or `--project <path>` for one project) to allow more permanently (e.g.
 `crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable the
 firewall entirely (debugging only).
@@ -271,8 +305,8 @@ Approved domains only take effect at container start. For a domain a
 sandbox — it has no privilege to do this itself):
 
 ```sh
-bin/claude-sandbox-allow crates.io                # this session only
-bin/claude-sandbox-allow crates.io --global       # + persist for every project
+bin/dejima-allow crates.io                # this session only
+bin/dejima-allow crates.io --global       # + persist for every project
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -290,7 +324,7 @@ probe in the first place. (`--project` persistence likewise does not need a
 running container at all — see below.) `--global` writes the domain to the
 global approval store for every future session; `--global` and `--project`
 are not mutually exclusive here - give both together and each persists to
-its own store. If more than one claude-sandbox container is running, pass
+its own store. If more than one dejima container is running, pass
 `--container <name>` to disambiguate - `docker ps` finds it, or use the
 container's own ID, which `sandbox-context.sh` already hands the agent in
 its startup context (and which is always available inside the sandbox as
@@ -328,53 +362,53 @@ specific first:
 | Dependencies | base image → global → project |
 
 Dependencies have no container-only scope: installing one always needs an
-image rebuild, so there's no `claude-sandbox-allow`-style live-session patch
+image rebuild, so there's no `dejima-allow`-style live-session patch
 for them.
 
 A project can declare what it needs in two committed files:
 
 ```
-.claude-sandbox/allowed-domains    # one domain per line
-.claude-sandbox/dependencies       # <apt|npm|pip|cargo>:<name> per line
+.dejima/allowed-domains    # one domain per line
+.dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line
 ```
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a compromised session could write these files - they are only
 ever read to compare against reality and suggest a command. Approvals live
-outside the container, under `~/.config/claude-sandbox/` by default
-(`$CLAUDE_SANDBOX_CONFIG_DIR` relocates the whole tree) - global at its
+outside the container, under `~/.config/dejima/` by default
+(`$DEJIMA_CONFIG_DIR` relocates the whole tree) - global at its
 root, per project under `projects/<slug>/` - and are written only by tools
 you run on the host:
 
 ```sh
-claude-sandbox-project status ~/myproject     # declared vs approved vs missing
-claude-sandbox-project approve ~/myproject    # review and approve the declared set
-claude-sandbox-allow crates.io --project ~/myproject
-claude-sandbox-allow crates.io --global       # applies to every project
-claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
-claude-sandbox-dep add cargo:cargo-nextest --global
+dejima-project status ~/myproject     # declared vs approved vs missing
+dejima-project approve ~/myproject    # review and approve the declared set
+dejima-allow crates.io --project ~/myproject
+dejima-allow crates.io --global       # applies to every project
+dejima-dep add cargo:cargo-nextest --project ~/myproject
+dejima-dep add cargo:cargo-nextest --global
 ```
 
-`claude-sandbox-project status`/`approve` classify a declared entry against
+`dejima-project status`/`approve` classify a declared entry against
 the union of global and project approvals, so something already approved
-globally shows as approved, not pending. Unlike `claude-sandbox-allow`,
-`claude-sandbox-dep`'s `--global` and `--project` are mutually exclusive -
+globally shows as approved, not pending. Unlike `dejima-allow`,
+`dejima-dep`'s `--global` and `--project` are mutually exclusive -
 an entry belongs to exactly one scope.
 
 Approved domains join the allowlist at the next launch (or immediately, for
-`claude-sandbox-allow`, which also updates the running session). Approved
+`dejima-allow`, which also updates the running session). Approved
 dependencies are baked into a derived image built `FROM` the shared base -
-first `claude-sandbox:<username>-global`, if the global store has any
-dependency approved, then `claude-sandbox:<username>-<slug>` on top of that,
+first `dejima:<username>-global`, if the global store has any
+dependency approved, then `dejima:<username>-<slug>` on top of that,
 if the project store does - so they need an image rebuild: they take effect
 on the **next** launch.
 
 Because of that rebuild, the usual moment to approve is *after* leaving the
 sandbox — so persistence (`--global` or `--project`) never requires a running
-container, and is never gated on the reachability probe `claude-sandbox-allow`
+container, and is never gated on the reachability probe `dejima-allow`
 runs against a live session. Recording the approval is your decision;
 patching a live session and verifying the domain answers on 443 are
-best-effort on top of it, and `claude-sandbox-project approve` reports at the
+best-effort on top of it, and `dejima-project approve` reports at the
 end which domains it could not apply to a running session rather than
 stopping at the first one.
 
@@ -390,11 +424,11 @@ outbound connection attempt - allowed or rejected - is shipped to that Loki
 endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
 
 - `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
-  (allowed) or refused (not on the allowlist) - labeled `job=claude-sandbox-dns`.
+  (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
 - `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
   (group 1 for allowed, group 2 for rejected), which `ulogd2`
   (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
-  `action` field - labeled `job=claude-sandbox-net`. Only new connection
+  `action` field - labeled `job=dejima-net`. Only new connection
   attempts are logged, not every packet: the firewall's existing
   ESTABLISHED,RELATED rule short-circuits the rest of a connection before it
   ever reaches the tagged rules.
@@ -406,7 +440,7 @@ resolve or connect.
 ### Conversation logging (opt-in)
 
 Set `SANDBOX_LOG_CONVERSATION=1` (with `LOKI_URL` configured) to also ship
-session content to Loki as the `claude-sandbox-conversation` job: your
+session content to Loki as the `dejima-conversation` job: your
 prompts, the agent's text responses, and tool invocations (tool name +
 input - never tool outputs). Lines are JSON with the session ID inside
 (`{session, role, text}` / `{session, role: "tool", tool, input}`).
@@ -429,24 +463,24 @@ In Grafana's Explore view (or a dashboard panel with a Loki query), both
 streams are selectable by their `job` label:
 
 ```logql
-{job="claude-sandbox-dns"}                          # every DNS query + verdict
-{job="claude-sandbox-net"}                          # every connection attempt, as JSON
+{job="dejima-dns"}                          # every DNS query + verdict
+{job="dejima-net"}                          # every connection attempt, as JSON
 ```
 
 Useful filters on top of those:
 
 ```logql
 # DNS lookups that got refused (not on the allowlist)
-{job="claude-sandbox-dns"} |= "REFUSED"
+{job="dejima-dns"} |= "REFUSED"
 
 # Rejected connections only (parses ulogd2's JSON, filters on its action field)
-{job="claude-sandbox-net"} | json | action="blocked"
+{job="dejima-net"} | json | action="blocked"
 
 # Both streams together, e.g. to watch a live session across sources
-{source="claude-sandbox"}
+{source="dejima"}
 ```
 
-`{job="claude-sandbox-net"}` lines are one full ulogd2 JSON object per
+`{job="dejima-net"}` lines are one full ulogd2 JSON object per
 connection attempt (`| json` in a query unpacks fields like `dest_ip`,
 `dest_port`, `action`) - Loki's Explore view shows these expandable/
 pretty-printed by default, no extra parsing setup needed.
@@ -464,7 +498,7 @@ GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
 push destination (the no-direct-to-main rule still applies):
 
 ```sh
-ALLOW_GITHUB_PUSH=1 bin/claude-sandbox ~/repos/some-project
+ALLOW_GITHUB_PUSH=1 bin/dejima ~/repos/some-project
 ```
 
 **Read this before turning it on.** Whether a push actually succeeds depends
@@ -485,7 +519,7 @@ make HTTPS push possible independent of `ALLOW_GITHUB_PUSH`, so don't use
 one.
 
 `ALLOW_GITHUB_PUSH` is a per-launch variable, not a persistent toggle — it
-only affects the one `bin/claude-sandbox` invocation it's set for.
+only affects the one `bin/dejima` invocation it's set for.
 
 ## Security notes
 
@@ -527,7 +561,7 @@ one can't happen.
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
-- `bin/claude-sandbox-audit` snapshots host-persistence surfaces before each
+- `bin/dejima-audit` snapshots host-persistence surfaces before each
   run and diffs them after the container exits: `.git/config` (and worktree
   `config.worktree`) keys that run a command on the next `git` -
   `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
@@ -593,8 +627,8 @@ one can't happen.
   dedup flag broke firewall startup entirely, twice, on two different
   ipsets, before being caught).
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
-  enters the container. `bin/claude-sandbox` starts a host-side proxy
-  (`bin/claude-sandbox-anthropic-proxy`) on a per-session unix socket,
+  enters the container. `bin/dejima` starts a host-side proxy
+  (`bin/dejima-anthropic-proxy`) on a per-session unix socket,
   mounts an empty file over `.credentials.json` (the parent `~/.claude`
   mount stays read-write, so a single-file mask is the mechanism), and
   hands Claude Code a placeholder token plus an `ANTHROPIC_BASE_URL`
@@ -623,7 +657,7 @@ one can't happen.
   loaded into a later host session, so without this a compromised session
   could plant a backdoored hook - including by unlinking one of
   `install.sh`'s hook symlinks and dropping a plain file in its place, since
-  the dynamic per-target mounts `bin/claude-sandbox` adds at launch only
+  the dynamic per-target mounts `bin/dejima` adds at launch only
   protect symlink targets that resolve *outside* `~/.claude`, never this
   directory itself - rewrite `CLAUDE.md` with injected instructions, tamper
   with plugin code, or drop a malicious skill/command/agent/output-style
@@ -631,7 +665,7 @@ one can't happen.
   the next time Claude Code starts there, turning a single compromised
   sandbox session into persistent host compromise. `skills/`, `commands/`,
   `agents/`, and `output-styles/` may not exist yet on a given host, so
-  `bin/claude-sandbox` pre-creates them at launch (empty is fine) - a
+  `bin/dejima` pre-creates them at launch (empty is fine) - a
   read-only overlay only applies to a directory that already exists, and
   without pre-creation a compromised session could create the directory
   itself first, then populate it, before the overlay ever had something to
@@ -642,7 +676,7 @@ one can't happen.
   step with whatever new config surfaces Claude Code adds.
 - `~/.claude/statusline.sh` (referenced by `settings.json`'s
   `statusLine.command` and executed on the host) is bind-mounted onto
-  itself read-only by `bin/claude-sandbox`, for the same reason as the
+  itself read-only by `bin/dejima`, for the same reason as the
   list above - to stop a compromised session from unlinking it and dropping
   its own script in its place. **Confirmed against a live container**
   (`test/runtime.bats`'s statusline.sh tests): this reliably blocks
@@ -654,7 +688,7 @@ one can't happen.
   writable `~/.claude` mount, still replaceable. There is no mount-based
   fix for this (`~/.claude` can't be made read-only - session history has
   to stay writable). The compensating control is detection, not
-  prevention: `bin/claude-sandbox-audit` hashes `statusline.sh` (following
+  prevention: `bin/dejima-audit` hashes `statusline.sh` (following
   a symlink to its target *path string*, so a repointed or replaced
   symlink is caught even though its own inode doesn't change) and reports
   it as a host-code-execution finding when the session exits. This is a
@@ -668,7 +702,7 @@ one can't happen.
   even completes, and a read-only file makes that **hang** instead of
   failing cleanly (confirmed against a real read-only copy of this file -
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
-  Instead, `bin/claude-sandbox` generates a throwaway copy of the file at
+  Instead, `bin/dejima` generates a throwaway copy of the file at
   launch (seeded from the real file, same "generate a sandbox-specific
   file on the host" pattern as the generated `settings.json` copy above)
   and mounts *that* read-write in its place; the copy is discarded,
@@ -736,12 +770,12 @@ one can't happen.
   what `SANDBOX_SSH_KEY` actually points at, so pointing it at your real
   `~/.ssh/id_ed25519`/`id_rsa` instead of a dedicated key would load your
   full personal identity into the container for the whole session (`bin/
-  claude-sandbox` warns if this looks like it might be happening - see
+  dejima` warns if this looks like it might be happening - see
   below - but doesn't block it). The key source itself is mounted read-only
   at `/root/...`, not under the sandbox user's own home, specifically so
   that user (which the session actually runs as) has no path to read the
   raw key material - only the agent socket it's loaded into.
-- The gitconfig copy `bin/claude-sandbox` generates (see that mount's
+- The gitconfig copy `bin/dejima` generates (see that mount's
   comment in `docker-compose.yml`) carries over whatever's in your real
   `~/.gitconfig` verbatim. If yours has inline credentials (a
   `[credential]` token, a `url.<token@>.insteadOf` rewrite, a
@@ -758,21 +792,21 @@ one can't happen.
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
-- The approval store (`${CLAUDE_SANDBOX_CONFIG_DIR:-$HOME/.config/claude-sandbox}`,
+- The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see "Global and per-project domains and dependencies" above) lives outside
   this repo, and outside every project mount, by default - unlike a
-  project's own `.claude-sandbox/` declaration files, it's never
+  project's own `.dejima/` declaration files, it's never
   bind-mounted into the container, so a compromised
   session has no path to write to it at all, let alone plant something for
   the *next* launch to pick up. Its files are read by a small
   line-oriented parser (`approved_entries` in
-  `bin/claude-sandbox-project-lib.sh`), never sourced or executed, and are
-  written only by the CLIs (`claude-sandbox-allow`, `claude-sandbox-dep`,
-  `claude-sandbox-project`) a human runs on the host. `bin/claude-sandbox`
+  `bin/dejima-project-lib.sh`), never sourced or executed, and are
+  written only by the CLIs (`dejima-allow`, `dejima-dep`,
+  `dejima-project`) a human runs on the host. `bin/dejima`
   warns at launch whenever the resolved store path — default or overridden
-  via `CLAUDE_SANDBOX_CONFIG_DIR` — lands under the mounted workspace,
+  via `DEJIMA_CONFIG_DIR` — lands under the mounted workspace,
   rather than silently trusting it.
-- When the mounted workspace *is* this repo itself, `bin/claude-sandbox`
+- When the mounted workspace *is* this repo itself, `bin/dejima`
   warns at launch that the repo's own trusted computing base - `bin/`,
   `hooks/`, `docker/`, `install.sh` (also `test/`, per the
   exit-time audit's exact TCB path list above) - is writable for the
@@ -780,7 +814,7 @@ one can't happen.
   per above), and that the exit-time audit will report any changes to it.
   That's a warning and a post-hoc report, not a block: a compromised
   session can still edit those files during the run, and whatever it
-  changes takes effect the *next* time `bin/claude-sandbox` itself runs,
+  changes takes effect the *next* time `bin/dejima` itself runs,
   not the current one.
 
 ## Tests
@@ -798,7 +832,7 @@ SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
 
 `static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
 `ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
-`~/.claude` read-only overlay lines are present, `bin/claude-sandbox-allow`
+`~/.claude` read-only overlay lines are present, `bin/dejima-allow`
 rejects a malicious domain argument. `runtime.bats` builds the image, boots
 a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
 env var makes it stop just short of execing `$SANDBOX_CMD`, so the suite can attach
@@ -827,21 +861,21 @@ likely to collide with a real container you have running.
 | `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL`; also ships session transcripts when `SANDBOX_LOG_CONVERSATION=1` |
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
-| `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/claude-sandbox`, not directly |
+| `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `bin/claude-sandbox-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
-| `bin/claude-sandbox-dep` | Review and approve project dependencies declared in `.claude-sandbox/dependencies` |
-| `bin/claude-sandbox-project` | Review and approve project domains and dependencies from the host |
-| `bin/claude-sandbox-project-lib.sh` | Shared library sourced by `bin/claude-sandbox-dep`, `bin/claude-sandbox-project`, and `bin/claude-sandbox`; not on PATH |
+| `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
+| `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
+| `bin/dejima-project` | Review and approve project domains and dependencies from the host |
+| `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, and `bin/dejima`; not on PATH |
 
-`bin/claude-sandbox` is the entry point — it resolves the project path,
+`bin/dejima` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
 set, discovers which host directories need mounting for symlinks under
 `~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
 top-level entries like `statusline.sh`) to resolve, and runs
-`docker compose run`. `bin/claude-sandbox-allow`
+`docker compose run`. `bin/dejima-allow`
 adds a domain to a running session's firewall from the host - see "Adding a
 domain to a running session" above. `install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.

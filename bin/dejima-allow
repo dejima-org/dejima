@@ -1,15 +1,15 @@
 #!/bin/bash
-# Add a domain to the egress firewall allowlist of a running claude-sandbox
+# Add a domain to the egress firewall allowlist of a running dejima
 # container, from outside it. The sandbox itself has no privilege to do this
 # (node has no sudo/setuid path back to root - see this repo's README's
 # Security notes section); if a sandboxed agent hits a blocked domain it
 # actually needs, it should tell you the exact command to run here rather
 # than try to work around the firewall.
 #
-# Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]
-#   claude-sandbox-allow crates.io                     # this running session only
-#   claude-sandbox-allow crates.io --global            # + persist for every project
-#   claude-sandbox-allow crates.io --project ~/myproj  # + persist for one project
+# Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]
+#   dejima-allow crates.io                     # this running session only
+#   dejima-allow crates.io --global            # + persist for every project
+#   dejima-allow crates.io --project ~/myproj  # + persist for one project
 set -euo pipefail
 
 domain=""
@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
         *)
             if [ -n "$domain" ]; then
-                echo "Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
+                echo "Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
                 exit 1
             fi
             domain="$1"
@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$domain" ]; then
-    echo "Usage: claude-sandbox-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
+    echo "Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
     exit 1
 fi
 
@@ -60,8 +60,8 @@ fi
 # given together, and each persists to its own store.
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-    # shellcheck source=claude-sandbox-project-lib.sh
-    source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+    # shellcheck source=dejima-project-lib.sh
+    source "$SCRIPT_DIR/dejima-project-lib.sh"
 fi
 if [ -n "$project" ]; then
     project="$(cd "$project" && pwd)"
@@ -78,12 +78,12 @@ fi
 # The live-session update below needs a running container to exec into.
 # Skipped only by the test suite (test/project.bats), which exercises
 # --project persistence on its own, without a container.
-if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
+if [ "${DEJIMA_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
     if [ -z "$container" ]; then
-        containers=$(docker ps --filter "label=com.docker.compose.project=claude-sandbox" --filter "status=running" --format '{{.Names}}')
+        containers=$(docker ps --filter "label=com.docker.compose.project=dejima" --filter "status=running" --format '{{.Names}}')
         count=$(echo "$containers" | grep -c . || true)
         if [ "$count" -eq 0 ]; then
-            echo "No running claude-sandbox container found." >&2
+            echo "No running dejima container found." >&2
             # With --project or --global (or both) there is nothing left to
             # do and nothing went wrong: the approval is already recorded and
             # applies from the next launch.
@@ -93,7 +93,7 @@ if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
             fi
             exit 1
         elif [ "$count" -gt 1 ]; then
-            echo "Multiple running claude-sandbox containers found; specify one with --container:" >&2
+            echo "Multiple running dejima containers found; specify one with --container:" >&2
             echo "$containers" >&2
             echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
             echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
