@@ -279,6 +279,13 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "init-firewall.sh sends GH_TOKEN on its GitHub API fetch when one is set" {
+    # Unauthenticated /meta is capped at 60 requests/hour per source IP,
+    # shared across every container start; exhausting it fails the launch.
+    grep -q 'gh_auth=(-H "Authorization: Bearer \$GH_TOKEN")' "$SANDBOX_DIR/init-firewall.sh"
+    grep -q 'curl -s \${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
+}
+
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
     grep -qE '^\s*ALLOW_GITHUB_PUSH:\s*\$\{ALLOW_GITHUB_PUSH:-0\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$SANDBOX_DIR/init-firewall.sh"

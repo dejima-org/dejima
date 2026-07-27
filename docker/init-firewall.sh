@@ -67,14 +67,31 @@ ipset create github-domains hash:net
 
 # Fetch GitHub meta information and aggregate + add their IP ranges
 echo "Fetching GitHub IP ranges..."
-gh_ranges=$(curl -s https://api.github.com/meta)
+# Authenticated whenever GH_TOKEN is set: unauthenticated /meta is capped at
+# 60 requests per hour per source IP, shared across every container start and
+# everything else on the host, so a session that starts sandboxes in a loop
+# exhausts it and every subsequent launch fails here. Same read-only token
+# `gh` already gets (see docker-compose.yml), sent to the API it belongs to.
+gh_auth=()
+if [ -n "${GH_TOKEN:-}" ]; then
+    gh_auth=(-H "Authorization: Bearer $GH_TOKEN")
+fi
+gh_ranges=$(curl -s ${gh_auth[@]+"${gh_auth[@]}"} https://api.github.com/meta)
 if [ -z "$gh_ranges" ]; then
     echo "ERROR: Failed to fetch GitHub IP ranges"
     exit 1
 fi
 
 if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
-    echo "ERROR: GitHub API response missing required fields"
+    # An API error (rate limiting, a bad token) returns a JSON body with a
+    # `message` and no ranges - non-empty, so it reaches here rather than the
+    # emptiness check above. Surface it instead of reporting the response as
+    # malformed, which points at the wrong thing entirely.
+    if gh_error=$(echo "$gh_ranges" | jq -re '.message' 2>/dev/null); then
+        echo "ERROR: GitHub API request failed: $gh_error"
+    else
+        echo "ERROR: GitHub API response missing required fields"
+    fi
     exit 1
 fi
 
