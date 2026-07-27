@@ -12,6 +12,16 @@ cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
 
 PROJECTS_DIR="${CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
 
+# The one top-level ~/.claude entry docker-compose.yml's read-only overlays
+# don't cover (settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/
+# output-styles all are) - settings.json's statusLine.command runs it on the
+# HOST, unsandboxed, and bin/claude-sandbox's own read-only mount onto it
+# doesn't reliably protect it when it's a symlink (the common case - runc
+# resolves the mount destination through the symlink; confirmed against a
+# live container, see test/runtime.bats). Detection here is the compensating
+# control for that gap. Overridable for tests.
+STATUSLINE_PATH="${CLAUDE_SANDBOX_AUDIT_STATUSLINE:-$HOME/.claude/statusline.sh}"
+
 # This script's own repo root - the sandbox's trusted computing base (see
 # tcb_snapshot below) is only monitored when the workspace being audited IS
 # this repo (a self-mounted session). Overridable for tests.
@@ -152,12 +162,22 @@ projects_snapshot() {
     done | sort
 }
 
+statusline_snapshot() {
+    # path<TAB>sha for $HOME/.claude/statusline.sh, or nothing if this host
+    # has none - see STATUSLINE_PATH above for why this one path is
+    # monitored on its own rather than as part of hash_paths.
+    local f="$1"
+    [ -e "$f" ] || return 0
+    printf 'statusline.sh\t%s\n' "$(hash_entry "$f")"
+}
+
 case "$cmd" in
     snapshot)
         { echo "### gitconfig"; git_config_snapshot "$ws";
           echo "### paths";     hash_paths "$ws";
           echo "### projects";  projects_snapshot "$PROJECTS_DIR";
-          echo "### tcb";       tcb_snapshot "$ws"; } > "$state" 2>/dev/null || true
+          echo "### tcb";       tcb_snapshot "$ws";
+          echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$state" 2>/dev/null || true
         exit 0
         ;;
     compare)
@@ -165,7 +185,8 @@ case "$cmd" in
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
                            echo "### projects";  projects_snapshot "$PROJECTS_DIR";
-                           echo "### tcb";       tcb_snapshot "$ws"; } > "$new" 2>/dev/null || {
+                           echo "### tcb";       tcb_snapshot "$ws";
+                           echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
             echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
         findings=()
@@ -212,10 +233,23 @@ case "$cmd" in
         # tcb diffs: any change under the sandbox's own trusted computing
         # base, only populated when this session's workspace IS the
         # sandbox's own repo (see tcb_snapshot) - empty/no-op otherwise.
+        # Bounded at ### statusline (not $p, the last section now) so this
+        # doesn't also swallow that section's lines.
         while IFS= read -r line; do
             findings+=("TCB (sandbox self) modified: $line")
-        done < <(comm -3 <(sed -n '/^### tcb/,$p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### tcb/,$p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
+                 | sed 's/^\t//' | cut -f1 | sort -u )
+
+        # statusline diff: ~/.claude/statusline.sh added/changed/removed/
+        # repointed - see STATUSLINE_PATH above for why this gets its own
+        # section instead of folding into hash_paths. Worded at least as
+        # strongly as COMMAND-EXECUTION/TCB above: this is unsandboxed host
+        # code execution, not just a config change.
+        while IFS= read -r line; do
+            findings+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $line")
+        done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
+                         <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"

@@ -488,6 +488,18 @@ setup() {
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/claude-sandbox"
 }
 
+@test "bin/claude-sandbox-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
+    # The read-only mount above does not reliably protect statusline.sh when
+    # it's a symlink (confirmed live-container gap - see test/runtime.bats
+    # and bin/claude-sandbox's comment on the mount) - detection is the
+    # compensating control. Full behavioral coverage (snapshot/compare
+    # against real fixtures, including the symlink-swap exploit) lives in
+    # test/audit.bats; this just confirms the wiring exists.
+    grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/claude-sandbox-audit"
+    grep -q 'statusline_snapshot' "$REPO_ROOT/bin/claude-sandbox-audit"
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/claude-sandbox-audit"
+}
+
 @test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
     # $VIMRUNTIME/plugin, NOT /etc/xdg/nvim: lazy.nvim's performance.rtp
     # reset strips /etc/xdg from the runtimepath, but always keeps
