@@ -640,6 +640,33 @@ this line is not json'
     grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/claude-sandbox"
 }
 
+@test "the approval store is never mounted into the container" {
+    # The store is the only thing that actually grants anything, and the
+    # container runs an agent with no tool-use confirmations - mounting it
+    # anywhere, at any mode, would let a session widen its own next launch
+    # (a read-only mount still leaks every other project's approvals).
+    run grep -nE 'config/claude-sandbox|CLAUDE_SANDBOX_CONFIG_DIR|PROJECT_STORE' \
+        "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*extra_mounts\+=.*(PROJECT_STORE|config_root)' "$REPO_ROOT/bin/claude-sandbox"
+    [ "$status" -ne 0 ]
+}
+
+@test "sandbox-context escapes a declared domain's dots before matching the servers file" {
+    # $dom comes straight off a session-writable declaration and lands in a
+    # grep BRE, where an unescaped "." matches any character: a project could
+    # declare "aexample.com" and have the hook match the server= line for an
+    # already-approved "a.example.com", reporting an unapproved domain as
+    # allowed. Anchored to the matching line itself - the servers file is an
+    # absolute path only the container has, so this can't be driven from a
+    # host-side test, and a file-wide grep would be satisfied by the same
+    # expression appearing anywhere else.
+    run grep -n 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'grep -q "^server=/${dom//./\\.}/"'* ]]
+}
+
 @test "sandbox-context reads its stdin payload once" {
     # jq is called more than once now (session_id and cwd); reading stdin
     # twice would silently give the second call nothing.
