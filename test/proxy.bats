@@ -30,7 +30,7 @@ EOF
 start_proxy() {
     "$PROXY" --socket "$SOCK" --credentials "$CREDS" \
         --upstream "http://127.0.0.1:$PORT" \
-        --oauth-endpoint "http://127.0.0.1:$PORT/v1/oauth/token" "$@" &
+        --oauth-endpoint "http://127.0.0.1:$PORT/v1/oauth/token" "$@" 2>"$TD/stderr" &
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
     [ -S "$SOCK" ]
@@ -195,4 +195,50 @@ teardown() {
     run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:18399/v1/messages
     kill "$FWD_PID" 2>/dev/null || true
     [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+}
+
+@test "a client that disappears mid-stream is not reported as a crash" {
+    # Interrupting a streaming reply, or exiting with requests in flight,
+    # closes the container side mid-response; the proxy then takes an EPIPE
+    # writing the rest. socketserver's default handler dumps a full traceback
+    # for that, onto the same terminal the session is using. Expected
+    # condition, nothing to deliver, nothing to fix - so it must stay quiet.
+    start_proxy
+    timeout 0.7 curl -s --unix-socket "$SOCK" http://proxy/sse >/dev/null 2>&1 || true
+    sleep 3
+    run cat "$TD/stderr"
+    [[ "$output" != *"Traceback"* ]]
+    [[ "$output" != *"BrokenPipeError"* ]]
+    [ -z "$output" ]
+}
+
+@test "a genuine handler failure is still reported with its traceback" {
+    # The suppression has to be specific to the client going away. A real
+    # fault - here a chunk length that isn't hex, which blows up _read_body -
+    # must still surface in full, or this trades noise for blindness.
+    start_proxy
+    python3 - "$SOCK" <<'PYEOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: proxy\r\n"
+          b"Transfer-Encoding: chunked\r\n\r\nNOTHEX\r\n")
+s.close()
+PYEOF
+    sleep 1
+    run cat "$TD/stderr"
+    [[ "$output" == *"Traceback"* ]]
+    [[ "$output" == *"ValueError"* ]]
+}
+
+@test "HEAD and OPTIONS are proxied upstream, not rejected with a 501" {
+    # The proxy stands in for api.anthropic.com, so the method set it accepts
+    # has to be the API's, not whichever do_* handlers happen to be defined.
+    start_proxy
+    run bash -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket "$1" -X OPTIONS http://proxy/v1/messages' _ "$SOCK"
+    [ "$output" = "200" ]
+    run bash -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket "$1" -I http://proxy/v1/messages' _ "$SOCK"
+    [ "$output" = "200" ]
+    run cat "$TD/stderr"
+    [[ "$output" != *"501"* ]]
 }

@@ -210,7 +210,12 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
-    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _proxy
+    # HEAD and OPTIONS included: the method set this accepts should be the
+    # upstream API's, not whichever handlers happen to be defined here. A
+    # method with no do_* lands in BaseHTTPRequestHandler's 501, which the
+    # container sees as the API rejecting it and the host sees as a logged
+    # error - both misattributed to a request the proxy simply didn't route.
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _proxy
 
 
 class ProxyServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -226,6 +231,20 @@ class ProxyServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         # a unix-socket accept() returns '' - substitute a dummy pair.
         request, _ = self.socket.accept()
         return request, ("sandbox", 0)
+
+    def handle_error(self, request, client_address):
+        # The container side going away mid-response - the session
+        # interrupting a streaming reply, exiting with requests still in
+        # flight, or abandoning a request it no longer wants - reaches us as a
+        # broken pipe or a reset while writing the rest of the body. Nothing
+        # is left to deliver and nothing is wrong, but socketserver's default
+        # dumps a full traceback for it, onto the same terminal the session is
+        # drawing its UI on: this proxy runs on the host, sharing that
+        # terminal. Stay silent for exactly that case. Every other exception
+        # is a real fault and still gets its traceback.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def main():
