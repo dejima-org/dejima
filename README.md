@@ -81,33 +81,6 @@ Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat.
 
-> **Upgrading from `claude-sandbox`:** this project was previously called
-> `claude-sandbox`. Nothing migrates automatically — the old and new names
-> simply don't see each other. To carry an existing install over:
->
-> ```sh
-> mv ~/.config/claude-sandbox      ~/.config/dejima        # approval store
-> mv ~/.local/share/claude-sandbox ~/.local/share/dejima   # shared scratch dir
-> ./install.sh                                             # relink under the new names
-> ```
->
-> `install.sh` removes the now-dangling `~/.local/bin/claude-sandbox*`
-> symlinks itself. Skipping the two `mv`s isn't dangerous — you'll just start
-> from an empty approval store and re-approve domains and dependencies as
-> they come up.
->
-> Two things are deliberately left behind. The compose project name is now
-> `dejima`, which re-namespaces the named volumes (bash history, nvim
-> data/state/cache); pre-existing volumes under the old project name are
-> orphaned — harmless, their contents regenerate — and can be removed with
-> `docker volume ls` / `docker volume rm`. And if you ship conversation logs
-> to Loki, the job label changed from `claude-sandbox-conversation` to
-> `dejima-conversation`, so update any saved queries or dashboards.
->
-> If you also rename the repo checkout on disk, re-run `install.sh`
-> afterwards — the hook symlinks in `~/.claude/hooks` point at the old path
-> and will dangle otherwise.
-
 ### Using a different editor/application
 
 ```sh
