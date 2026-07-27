@@ -90,6 +90,10 @@ ensure_project_store() {
 # approvals instead of silently getting none.
 resolve_project_store() {
     local path="$1" dir
+    if [[ "$path" != /* ]]; then
+        echo "resolve_project_store: path must be absolute, got: $path" >&2
+        return 1
+    fi
     while [ -n "$path" ] && [ "$path" != "/" ]; do
         dir="$(config_root)/projects/$(project_slug "$path")"
         if [ -d "$dir" ]; then

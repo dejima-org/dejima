@@ -121,3 +121,9 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"corrupt"* ]]
 }
+
+@test "resolve_project_store rejects relative paths without hanging" {
+    run timeout 2 bash -c 'source "$1"; resolve_project_store "foo/bar"' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"absolute"* ]]
+}
