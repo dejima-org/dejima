@@ -712,8 +712,12 @@ EOF
     [ "$status" -eq 0 ]
     [ -n "$output" ]
 
-    run docker exec "$test_container" dig +short A example.net
-    [ "$output" = "" ]
+    # Full (non-+short) output so a REFUSED response is distinguishable from
+    # an exec failure or a name with no A record - same convention as "a
+    # non-allowlisted domain is refused by the DNS proxy" above.
+    run docker exec "$test_container" dig A example.net
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"status: REFUSED"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
