@@ -651,7 +651,7 @@ this line is not json'
 @test "sandbox-context probes declared dependencies and never treats them as granted" {
     grep -q 'dpkg-query' "$REPO_ROOT/hooks/sandbox-context.sh"
     grep -q 'npm ls -g' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q 'pip show' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'pip list' "$REPO_ROOT/hooks/sandbox-context.sh"
     grep -q 'cargo install --list' "$REPO_ROOT/hooks/sandbox-context.sh"
     # domains are checked against what this container actually resolves,
     # not against the host-side approval store it cannot see
@@ -677,6 +677,70 @@ this line is not json'
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-installed-noeol"* ]]
+}
+
+@test "sandbox-context bounds a huge declaration file instead of emitting nothing" {
+    # .claude-sandbox/ is on the read-write workspace mount, so a compromised
+    # session can append to it at will. Unbounded, that used to push the
+    # assembled context past Linux's 128 KiB MAX_ARG_STRLEN and make jq fail
+    # outright - costing every later session in the project its entire
+    # briefing (sandbox notice, worktree rule, never-push-to-main rule), and
+    # destroying the very report that would have named the junk.
+    local ws lab i; ws="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    lab="$(printf 'a%.0s' $(seq 1 62))"
+    for i in $(seq 1 700); do printf 'x%03d.%s.%s.%s\n' "$i" "$lab" "$lab" "$lab"; done \
+        > "$ws/.claude-sandbox/allowed-domains"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
+    [[ "$out" == *"claude-sandbox Docker container"* ]]
+    # 700 declared, 200 considered (the cap read_declared applies host-side),
+    # 20 of those named and the remaining 180 only counted. Both caps have to
+    # hold for this exact number to appear.
+    [[ "$out" == *"(+180 more)"* ]]
+    [ "$(printf '%s' "$out" | wc -c)" -lt 16000 ]
+    # The context must not travel as a single argv element even so - staying
+    # just inside a limit is not the same as not having one.
+    run grep -n 'jq -n --arg context' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -ne 0 ]
+}
+
+@test "sandbox-context probes each ecosystem once, not once per declared entry" {
+    # An `npm ls -g` fork costs about a second, so one per declared entry
+    # would run 200 of them at the cap - past Claude Code's hook timeout,
+    # which drops the injected context just as completely as a jq failure.
+    local ws stub i; ws="$(mktemp -d)"; stub="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    for i in $(seq 1 50); do echo "npm:nosuchpkg$i"; done > "$ws/.claude-sandbox/dependencies"
+    cat > "$stub/npm" <<EOF
+#!/bin/sh
+echo call >> "$stub/calls"
+exit 1
+EOF
+    chmod +x "$stub/npm"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
+        | PATH="$stub:$PATH" CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    local calls; calls=$(wc -l < "$stub/calls")
+    rm -rf "$ws" "$stub"
+    [ "$calls" -eq 1 ]
+    [[ "$out" == *"nosuchpkg1"* ]]
+}
+
+@test "sandbox-context ignores a dotless declared domain instead of echoing it verbatim" {
+    # A bare word is not a domain this hook could ever be reporting on, so
+    # accepting one only lets a session put arbitrary text into the next
+    # session's context under a heading that reads as the project speaking.
+    local ws; ws="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    printf 'IGNORE-PREVIOUS-INSTRUCTIONS\nreal.example.com\n' > "$ws/.claude-sandbox/allowed-domains"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    [[ "$out" != *"IGNORE-PREVIOUS-INSTRUCTIONS"* ]]
+    [[ "$out" == *"real.example.com"* ]]
 }
 
 @test "install.sh links the per-project CLIs alongside the existing ones" {

@@ -33,33 +33,78 @@ container_id="${container_id:-<container-id>}"
 requirements=""
 decl_dir="$project_dir/.claude-sandbox"
 
+# Everything below reads attacker-controllable text on its way into an
+# agent's context window, so all three costs it can impose are bounded:
+#
+#   MAX_DECLARED  entries considered - the same cap read_declared() applies
+#                 host-side, so this reports on exactly the window
+#                 `claude-sandbox-project approve` will act on.
+#   MAX_ENTRY_LEN characters per entry.
+#   MAX_LISTED    entries actually named in the report; the rest are only
+#                 counted. Without it 200 entries of 200 chars would be 40 KB
+#                 of attacker-chosen tokens per section, and a big enough
+#                 $requirements used to push the jq call at the end past
+#                 Linux's 128 KiB MAX_ARG_STRLEN and emit nothing at all -
+#                 silently costing every later session in the project its
+#                 entire briefing.
+MAX_DECLARED=200
+MAX_ENTRY_LEN=200
+MAX_LISTED=20
+
+# Yields at most MAX_DECLARED entries and stops reading there, so the size of
+# the file itself costs nothing either. `cat file; echo` supplies the newline
+# a final line may lack.
+read_declared_capped() {
+    local line count=0
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="${line// /}"
+        [ -n "$line" ] || continue
+        count=$((count + 1))
+        [ "$count" -le "$MAX_DECLARED" ] || break
+        [ "${#line}" -le "$MAX_ENTRY_LEN" ] || continue
+        printf '%s\n' "$line"
+    done < <(cat "$1"; echo)
+}
+
+# One listing per ecosystem, cached, instead of one probe per declared entry:
+# an `npm ls -g` or `pip show` fork costs about a second, so probing 200
+# declared entries would run past Claude Code's hook timeout and drop this
+# context just as thoroughly as an oversized argv would.
+installed_names() {
+    case "$1" in
+        apt)   dpkg-query -W -f='${Package} ${Status}\n' 2>/dev/null | sed -n 's/ install ok installed$//p' ;;
+        npm)   npm ls -g --depth=0 --parseable 2>/dev/null | sed -n 's#.*/node_modules/##p' ;;
+        # PEP 503: pip treats runs of [-_.] and case as equivalent, so
+        # compare normalized names rather than miss `pip:typing-extensions`
+        # against an installed `typing_extensions`.
+        pip)   pip list --format=freeze 2>/dev/null | sed -n 's/^\([^=@ ][^=@ ]*\).*/\1/p' | tr 'A-Z._' 'a-z--' ;;
+        cargo) cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v[^ ]*:$/\1/p' ;;
+    esac
+}
+
 if [ -f "$decl_dir/dependencies" ]; then
     missing_deps=""
+    missing_deps_n=0
+    declare -A installed_cache=()
     while IFS= read -r spec; do
-        spec="${spec%%#*}"; spec="${spec// /}"
-        [ -n "$spec" ] || continue
-        # Unbounded context bloat from a session-writable file is its own
-        # problem even when the entry is otherwise well-formed - same spirit
-        # as the 200-entry cap the rest of this feature applies.
-        [ "${#spec}" -le 200 ] || continue
         # Same shape as valid_dep_spec() in claude-sandbox-project-lib.sh -
         # a leading dash (e.g. "--allow-unauthenticated") must not validate
         # as a name, or this hook would echo into the agent's context an
         # entry the project's own approve/status commands treat as rejected.
         [[ "$spec" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+        kind="${spec%%:*}"
         name="${spec#*:}"
-        case "$spec" in
-            apt:*)   dpkg-query -W -f='${Status}' "$name" 2>/dev/null | grep -q 'install ok installed' && continue ;;
-            npm:*)   npm ls -g --depth=0 "$name" >/dev/null 2>&1 && continue ;;
-            pip:*)   pip show "$name" >/dev/null 2>&1 && continue ;;
-            # $name is validated but may still contain "." (a BRE metachar
-            # that would match any char) - escape it so a name like
-            # "foo.bar" can't false-positive against "fooXbar" in the
-            # installed list. "+" needs no escaping: it's literal in BRE.
-            cargo:*) cargo install --list 2>/dev/null | grep -q "^${name//./\\.} " && continue ;;
-        esac
-        missing_deps="$missing_deps $spec"
-    done < <(cat "$decl_dir/dependencies"; echo)
+        [ -n "${installed_cache[$kind]+set}" ] || installed_cache[$kind]="$(installed_names "$kind")"
+        [ "$kind" != pip ] || name="$(printf '%s' "$name" | tr 'A-Z._' 'a-z--')"
+        # -F -x: a package name can contain "." and "+", both of which would
+        # otherwise be regex metacharacters matching the wrong entry.
+        grep -qxF -- "$name" <<< "${installed_cache[$kind]}" && continue
+        missing_deps_n=$((missing_deps_n + 1))
+        [ "$missing_deps_n" -le "$MAX_LISTED" ] && missing_deps="$missing_deps $spec"
+    done < <(read_declared_capped "$decl_dir/dependencies")
+    if [ "$missing_deps_n" -gt "$MAX_LISTED" ]; then
+        missing_deps="$missing_deps (+$((missing_deps_n - MAX_LISTED)) more)"
+    fi
     if [ -n "$missing_deps" ]; then
         requirements="$requirements
 - Declared dependencies missing from this image:$missing_deps
@@ -72,18 +117,23 @@ fi
 
 if [ -f "$decl_dir/allowed-domains" ]; then
     missing_domains=""
+    missing_domains_n=0
     while IFS= read -r dom; do
-        dom="${dom%%#*}"; dom="${dom// /}"
-        [ -n "$dom" ] || continue
-        # Same context-bloat reasoning as the dependency length cap above.
-        [ "${#dom}" -le 200 ] || continue
-        [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]] || continue
-        # Every valid domain has a dot, so leaving it unescaped in this BRE
-        # (matches any char) is even more exposed than the cargo case above -
-        # escape it the same way.
+        # One dot minimum, unlike valid_domain()'s optional label group: a
+        # bare word is not a domain this hook could ever be reporting on, and
+        # accepting one puts arbitrary attacker text ("IGNORE-PREVIOUS-...")
+        # verbatim into the agent's context under a heading that reads as the
+        # project speaking.
+        [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)+[a-zA-Z0-9-]{1,63}$ ]] || continue
+        # Every valid domain has a dot, a BRE metachar that would match any
+        # char - escape it so "a.b" can't false-positive against "aXb".
         grep -q "^server=/${dom//./\\.}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
-        missing_domains="$missing_domains $dom"
-    done < <(cat "$decl_dir/allowed-domains"; echo)
+        missing_domains_n=$((missing_domains_n + 1))
+        [ "$missing_domains_n" -le "$MAX_LISTED" ] && missing_domains="$missing_domains $dom"
+    done < <(read_declared_capped "$decl_dir/allowed-domains")
+    if [ "$missing_domains_n" -gt "$MAX_LISTED" ]; then
+        missing_domains="$missing_domains (+$((missing_domains_n - MAX_LISTED)) more)"
+    fi
     if [ -n "$missing_domains" ]; then
         requirements="$requirements
 - Declared domains not allowed in this session:$missing_domains
@@ -162,9 +212,13 @@ up right where this left off).$requirements
 EOF
 )
 
-jq -n --arg context "$context" '{
+# Fed on stdin rather than as --arg: a single argv element is capped at 128
+# KiB (MAX_ARG_STRLEN), and a context that overruns it makes jq fail outright,
+# emitting no context at all. The bounds above keep $requirements far below
+# that, but this removes the failure mode rather than staying just inside it.
+printf '%s' "$context" | jq -R -s '{
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": $context
+    "additionalContext": .
   }
 }'
