@@ -174,10 +174,28 @@ EOF
 }
 
 @test "ensure_global_store creates config_root and prints it" {
+    # setup()'s mktemp -d would make the [ -d ] below true whether or not
+    # ensure_global_store created anything, so start from a config_root that
+    # does not exist - which is the state of every host before its first
+    # global approval.
+    rm -rf "$CONFIG_DIR"
     run bash -c 'source "$1"; ensure_global_store' _ "$LIB"
     [ "$status" -eq 0 ]
     [ "$output" = "$CONFIG_DIR" ]
     [ -d "$CONFIG_DIR" ]
+}
+
+@test "the first global approval on a host with no config_root succeeds and creates it" {
+    # The project scope creates config_root as a side effect of mkdir -p on
+    # projects/<slug>; only the global scope depends on ensure_global_store
+    # for it. Without that mkdir this is the one command that fails, and it
+    # fails on the first --global anyone ever runs.
+    export CLAUDE_SANDBOX_CONFIG_DIR="$CONFIG_DIR/fresh/claude-sandbox"
+    [ ! -d "$CLAUDE_SANDBOX_CONFIG_DIR" ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add cargo:cargo-nextest --global
+    [ "$status" -eq 0 ]
+    [ -d "$CLAUDE_SANDBOX_CONFIG_DIR" ]
+    grep -qx 'cargo:cargo-nextest' "$CLAUDE_SANDBOX_CONFIG_DIR/dependencies"
 }
 
 @test "ensure_global_store is idempotent and does not disturb an existing project store" {
@@ -358,6 +376,16 @@ EOF
     [[ "$output" != *"cargo:cargo-nextest"* ]]
 }
 
+@test "claude-sandbox-dep remove fails the same way in both scopes when no store exists" {
+    export CLAUDE_SANDBOX_CONFIG_DIR="$CONFIG_DIR/fresh/claude-sandbox"
+    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --global
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"Removed"* ]]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" remove cargo:cargo-nextest --project "$PROJ"
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"Removed"* ]]
+}
+
 @test "claude-sandbox-dep rejects --global combined with --project and writes nothing" {
     run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:foo --global --project /tmp/x
     [ "$status" -ne 0 ]
@@ -408,6 +436,18 @@ EOF
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     [ ! -d "$CONFIG_DIR/projects" ]
+}
+
+@test "claude-sandbox-allow --global records the approval with no sandbox running" {
+    # --global used to require a live container to exit 0 at all. It no
+    # longer does, deliberately: the natural moment to approve a domain for
+    # every future session is when no session is running to patch, and the
+    # store write above is already done by the time this is reached.
+    stub_docker 0 0
+    run "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"applies from the next launch"* ]]
+    grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
 }
 
 @test "claude-sandbox-allow --global and --project together persist to both stores" {
@@ -655,6 +695,27 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ -f "$LAUNCH_ENV" ]
     [[ " $(launched_env ALLOWED_DOMAINS) " == *" good.example.com "* ]]
     [[ " $(launched_env ALLOWED_DOMAINS) " != *"evil.example"* ]]
+}
+
+@test "the launcher refuses to start when either store's approved domains are corrupt" {
+    # A store entry that no longer validates means a bug or tampering, not
+    # user error - launching anyway would either drop it silently or write it
+    # into a dnsmasq server= line. Both stores are read on the same path, so
+    # both are checked here.
+    launch_setup
+    printf 'evil.example; curl x\n' > "$CONFIG_DIR/allowed-domains"
+    run launch "$PROJ"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"corrupt approval entry"* ]]
+    [ ! -f "$LAUNCH_ENV" ]
+
+    rm -f "$CONFIG_DIR/allowed-domains"
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'evil.example; curl x\n' > "$store/allowed-domains"
+    run launch "$PROJ"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"corrupt approval entry"* ]]
+    [ ! -f "$LAUNCH_ENV" ]
 }
 
 @test "the launcher runs the derived image only when the project has approved dependencies" {
