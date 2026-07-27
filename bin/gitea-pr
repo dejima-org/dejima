@@ -39,6 +39,17 @@ function require_token() {
     fi
 }
 
+# Feeds the auth header to curl as a config on stdin rather than as an
+# argument. Command lines are world-readable through /proc, so `-H
+# "Authorization: token $GITEA_TOKEN"` exposes the token to every other
+# process on the host for as long as the request runs - and to anything that
+# scrapes `ps` output, including the agents this repo exists to sandbox.
+# printf is a bash builtin, so the token never lands in another argv.
+function gitea_api() {
+    printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" |
+        curl -sS -w '\n%{http_code}' -K - "$@"
+}
+
 function gitea_owner_repo() {
     local remote_url host owner_repo
     remote_url=$(git remote get-url origin 2>/dev/null) || {
@@ -104,8 +115,7 @@ ${body}"
             base="${base:-main}"
         fi
 
-        response=$(curl -sS -w '\n%{http_code}' "${GITEA_API}/repos/${owner}/${repo}/pulls?state=open" \
-            -H "Authorization: token ${GITEA_TOKEN}")
+        response=$(gitea_api "${GITEA_API}/repos/${owner}/${repo}/pulls?state=open")
         http_code=$(echo "$response" | tail -1)
         json=$(echo "$response" | sed '$d')
         if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -123,8 +133,7 @@ ${body}"
             title="$current_branch"
         fi
 
-        response=$(curl -sS -w '\n%{http_code}' -X POST "${GITEA_API}/repos/${owner}/${repo}/pulls" \
-            -H "Authorization: token ${GITEA_TOKEN}" \
+        response=$(gitea_api -X POST "${GITEA_API}/repos/${owner}/${repo}/pulls" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg head "$current_branch" --arg base "$base" --arg title "$title" --arg body "$body" \
                 '{head: $head, base: $base, title: $title, body: $body}')")
@@ -146,8 +155,7 @@ ${body}"
         fi
 
         echo "=== Issue comments ==="
-        response=$(curl -sS -w '\n%{http_code}' "${GITEA_API}/repos/${owner}/${repo}/issues/${pr_number}/comments" \
-            -H "Authorization: token ${GITEA_TOKEN}")
+        response=$(gitea_api "${GITEA_API}/repos/${owner}/${repo}/issues/${pr_number}/comments")
         http_code=$(echo "$response" | tail -1)
         json=$(echo "$response" | sed '$d')
         if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -158,8 +166,7 @@ ${body}"
         echo "$json" | jq -r '.[] | "[\(.user.login) @ \(.created_at)]\n\(.body)\n"'
 
         echo "=== Reviews ==="
-        response=$(curl -sS -w '\n%{http_code}' "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews" \
-            -H "Authorization: token ${GITEA_TOKEN}")
+        response=$(gitea_api "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews")
         http_code=$(echo "$response" | tail -1)
         reviews_json=$(echo "$response" | sed '$d')
         if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -172,9 +179,8 @@ ${body}"
         echo "=== Inline review comments ==="
         review_ids=$(echo "$reviews_json" | jq -r '.[] | select(.comments_count > 0) | .id')
         for review_id in $review_ids; do
-            response=$(curl -sS -w '\n%{http_code}' \
-                "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews/${review_id}/comments" \
-                -H "Authorization: token ${GITEA_TOKEN}")
+            response=$(gitea_api \
+                "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews/${review_id}/comments")
             http_code=$(echo "$response" | tail -1)
             json=$(echo "$response" | sed '$d')
             if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -192,8 +198,7 @@ ${body}"
             exit 1
         fi
 
-        response=$(curl -sS -w '\n%{http_code}' -X POST "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/merge" \
-            -H "Authorization: token ${GITEA_TOKEN}" \
+        response=$(gitea_api -X POST "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/merge" \
             -H "Content-Type: application/json" \
             -d '{"Do": "merge"}')
         http_code=$(echo "$response" | tail -1)
