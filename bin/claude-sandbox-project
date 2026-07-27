@@ -22,7 +22,7 @@ store="$(resolve_project_store "$project")"
 
 approved_of() {
     local kind="$1"
-    approved_entries "$(config_root)" "$kind"
+    approved_entries "$(config_root)" "$kind" || return 1
     [ -n "$store" ] || return 0
     approved_entries "$store" "$kind"
 }
@@ -30,7 +30,7 @@ approved_of() {
 # Prints "<state> <entry>" per declared entry: approved / pending / rejected.
 classify() {
     local kind="$1" validator="$2" approved state entry
-    approved="$(approved_of "$kind")"
+    approved="$(approved_of "$kind")" || return 1
     while read -r state entry; do
         case "$state" in
             rejected)  printf 'rejected %s\n' "$entry" ;;

@@ -491,6 +491,20 @@ EOF
     [[ "$output" == *"Global approvals: $CONFIG_DIR"* ]]
 }
 
+@test "claude-sandbox-project status and approve refuse a corrupt global store rather than treating it as empty" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    mkdir -p "$CONFIG_DIR"
+    echo 'apt:evil; curl x' > "$CONFIG_DIR/dependencies"
+    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"approved apt:libpq-dev"* ]]
+    [[ "$output" != *"pending apt:libpq-dev"* ]]
+    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Declared but not approved"* ]]
+    [[ "$output" != *"Nothing pending approval"* ]]
+}
+
 @test "claude-sandbox-project approve reports nothing pending when declared entries are approved globally" {
     printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
     printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
