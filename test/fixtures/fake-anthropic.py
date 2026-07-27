@@ -30,7 +30,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _echo(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -79,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._echo()
 
-    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _handle
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _handle
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
