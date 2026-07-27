@@ -43,10 +43,6 @@ Everything else is optional, depending on which workflow(s) you want:
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
 | `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
 
-An `ALLOWED_DOMAINS` exported in your shell profile is no longer read as
-input and is silently ignored — run `bin/claude-sandbox-allow <domain>
---global` instead to persist an allowed domain across sessions.
-
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
 skip `GITEA_*` entirely and set `ALLOW_GITHUB_PUSH=1` instead to push
@@ -386,10 +382,6 @@ A session whose project declares something it doesn't have is told so in its
 startup context, with the exact command to hand you. Project approvals are
 inherited by subdirectories, so a git worktree under the project gets its
 parent's; global approvals apply everywhere regardless.
-
-**There is no migration from the old repo-local file `ALLOWED_DOMAINS` used
-to persist to:** domains that persisted there previously must be re-added by
-hand with `claude-sandbox-allow <domain> --global`.
 
 ## Network request logging
 
