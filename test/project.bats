@@ -470,6 +470,39 @@ EOF
     [[ "$output" == *"static.crates.io"* ]]
 }
 
+@test "claude-sandbox-project status shows a dep approved only globally as approved" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
+}
+
+@test "claude-sandbox-project status shows a dep approved in neither store as pending" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pending"*"apt:libpq-dev"* ]]
+}
+
+@test "claude-sandbox-project status prints the global store path" {
+    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Global approvals: $CONFIG_DIR"* ]]
+}
+
+@test "claude-sandbox-project approve reports nothing pending when declared entries are approved globally" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --global >/dev/null
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" static.crates.io --global
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Nothing pending approval"* ]]
+}
+
 @test "claude-sandbox-project approve declines without confirmation" {
     printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
     run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"

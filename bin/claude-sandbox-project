@@ -22,6 +22,7 @@ store="$(resolve_project_store "$project")"
 
 approved_of() {
     local kind="$1"
+    approved_entries "$(config_root)" "$kind"
     [ -n "$store" ] || return 0
     approved_entries "$store" "$kind"
 }
@@ -50,6 +51,7 @@ case "$action" in
     status)
         echo "Project: $project"
         echo "Approvals: ${store:-<none yet>}"
+        echo "Global approvals: $(config_root)"
         echo
         echo "dependencies:"
         classify dependencies valid_dep_spec | sed 's/^/  /'
