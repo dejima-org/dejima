@@ -29,6 +29,13 @@ services:
     # building from their own checkouts would otherwise silently overwrite
     # each other's image under the same tag.
     image: claude-sandbox:${SANDBOX_USER:-node}
+    # Run tini as PID 1 so orphaned processes get reaped. Without it PID 1 is
+    # the session's own command (claude, or nvim under SANDBOX_NVIM_CONFIG),
+    # which never reaps: every process-substitution child the test suite and
+    # bin/ scripts leave behind - `claude-sandbox-audit compare` alone leaks
+    # ten per run - becomes a permanent zombie, and a long session eventually
+    # exhausts the cgroup pids limit and can no longer fork at all.
+    init: true
     cap_add:
       - NET_ADMIN
       - NET_RAW

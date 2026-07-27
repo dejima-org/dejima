@@ -66,6 +66,13 @@ setup() {
     done < <(grep "ipset add" "$SANDBOX_DIR/init-firewall.sh")
 }
 
+@test "docker-compose.yml runs an init so orphaned processes get reaped" {
+    # Without this the session's own command is PID 1 and never reaps, so
+    # leaked children accumulate as zombies until the pids cgroup is full
+    # and the container cannot fork - see the comment on the init: line.
+    grep -qE '^\s*init:\s*true\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
 @test "docker-compose.yml never mounts the Docker socket" {
     run grep -i "docker.sock" "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
