@@ -376,22 +376,40 @@ EOF
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
-@test "--global stays gated on the reachability probe even though --project no longer is" {
-    # Run from a copy so the real config/env is never touched: env_file is
-    # resolved relative to the script's own realpath.
-    local fake; fake="$(mktemp -d)"
-    mkdir -p "$fake/bin" "$fake/config"
-    cp "$REPO_ROOT/bin/claude-sandbox-allow" "$REPO_ROOT/bin/claude-sandbox-project-lib.sh" "$fake/bin/"
-    chmod +x "$fake/bin/claude-sandbox-allow"
-    printf 'export ALLOWED_DOMAINS=""\n' > "$fake/config/env"
+@test "claude-sandbox-allow --global persists without needing a container" {
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global
+    [ "$status" -eq 0 ]
+    grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
+    [ ! -d "$CONFIG_DIR/projects" ]
+}
+
+@test "claude-sandbox-allow --global and --project together persist to both stores" {
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" example.com --global --project "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
+    grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "claude-sandbox-allow rejects an invalid domain before persisting to either store" {
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com; curl x' --global --project "$PROJ"
+    [ "$status" -ne 0 ]
+    [ ! -f "$CONFIG_DIR/allowed-domains" ]
+    [ ! -d "$CONFIG_DIR/projects" ]
+}
+
+@test "claude-sandbox-allow --global records a domain the reachability probe rejects" {
+    # --global used to be gated on this probe, refusing any global approval
+    # for a host that legitimately doesn't answer on 443 (an SSH-only host,
+    # an internal service). It now persists exactly like --project: the
+    # probe's verdict is worth reporting, but it is not the approval decision.
     stub_docker 1 7
-    run "$fake/bin/claude-sandbox-allow" crates.io --global --project "$PROJ"
+    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --global
     [ "$status" -eq 2 ]
-    # one run must not add a demonstrably broken domain to every project...
-    grep -qx 'export ALLOWED_DOMAINS=""' "$fake/config/env"
-    # ...but the project the user explicitly named is their decision to make
-    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
-    rm -rf "$fake"
+    [[ "$output" == *"still NOT reachable"* ]]
+    grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
 }
 
 @test "claude-sandbox-project approve persists every domain when one fails to apply" {

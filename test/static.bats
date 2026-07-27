@@ -483,6 +483,15 @@ setup() {
     grep -q '/etc/hostname' "$REPO_ROOT/bin/claude-sandbox-allow"
 }
 
+@test "bin/claude-sandbox-allow --global no longer rewrites config/env" {
+    # --global persists to the host-side approval store now (Task 3); the old
+    # sed -i rewrite of config/env's ALLOWED_DOMAINS is gone for good.
+    run grep -F 'config/env' "$REPO_ROOT/bin/claude-sandbox-allow"
+    [ "$status" -ne 0 ]
+    run grep -F 'sed -i' "$REPO_ROOT/bin/claude-sandbox-allow"
+    [ "$status" -ne 0 ]
+}
+
 @test "bin/claude-sandbox mounts targets of top-level ~/.claude symlinks (statusline.sh)" {
     # settings.json's statusLine points at ~/.claude/statusline.sh, which on
     # this setup is a symlink into dotfiles - previously only the five

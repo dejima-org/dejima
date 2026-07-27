@@ -50,21 +50,29 @@ if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]; 
     exit 1
 fi
 
-# Recorded first, and unconditionally: --project is the user's approval
-# decision for future sessions in that project, not a claim about this one.
-# Gating it on a live container would break the documented workflow outright -
+# Recorded first, and unconditionally: --project/--global are the user's
+# approval decision for future sessions, not a claim about this one. Gating
+# either on a live container would break the documented workflow outright -
 # approving dependencies requires leaving the sandbox, so the usual moment to
-# run this is precisely when nothing is running. Gating it on the reachability
+# run this is precisely when nothing is running. Gating on the reachability
 # probe below would refuse any declared domain that legitimately doesn't serve
-# HTTPS on 443. --global is deliberately different; see there.
-if [ -n "$project" ]; then
+# HTTPS on 443. The two scopes are independent, not exclusive: both may be
+# given together, and each persists to its own store.
+if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
     # shellcheck source=claude-sandbox-project-lib.sh
     source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+fi
+if [ -n "$project" ]; then
     project="$(cd "$project" && pwd)"
     store="$(ensure_project_store "$project")"
     approve_entry "$store" allowed-domains "$domain"
     echo "Added $domain to the approved domains for $project (applies to every future session in it)."
+fi
+if [ "$global" -eq 1 ]; then
+    store="$(ensure_global_store)"
+    approve_entry "$store" allowed-domains "$domain"
+    echo "Added $domain to the global approved domains (applies to every future session)."
 fi
 
 # The live-session update below needs a running container to exec into.
@@ -76,11 +84,10 @@ if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
         count=$(echo "$containers" | grep -c . || true)
         if [ "$count" -eq 0 ]; then
             echo "No running claude-sandbox container found." >&2
-            # With --project alone there is nothing left to do and nothing
-            # went wrong: the approval is recorded and applies from the next
-            # launch. --global still needs the verification below, so it
-            # cannot be satisfied without a container.
-            if [ -n "$project" ] && [ "$global" -eq 0 ]; then
+            # With --project or --global (or both) there is nothing left to
+            # do and nothing went wrong: the approval is already recorded and
+            # applies from the next launch.
+            if [ -n "$project" ] || [ "$global" -eq 1 ]; then
                 echo "Nothing to patch for this session; $domain applies from the next launch." >&2
                 exit 0
             fi
@@ -134,11 +141,14 @@ if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
     # the whole request, not just the connect phase - without it, a server that
     # accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
     # would hang this script indefinitely; curl maps that case to the same
-    # exit 28 the case below already handles, so no new branch is needed. Runs
-    # before --global persistence, and only that: a domain that demonstrably
-    # doesn't work must not be added to every project's allowlist on the
-    # strength of this run. --project is already recorded above, deliberately -
-    # a project may well declare a host that never answers on 443.
+    # exit 28 the case below already handles, so no new branch is needed. This
+    # is a report on this run, not a gate on either scope's approval: both
+    # --project and --global are already recorded above, deliberately - a
+    # declared host may legitimately not answer on 443 (an internal service,
+    # an SSH-only host, an apex that only serves a subdomain), and the natural
+    # moment to add a global approval is precisely when nothing is running to
+    # probe in the first place. The exit 2 below still means what it says:
+    # the live patch to this session did not verify.
     echo "Verifying $domain is reachable from $container..."
     rc=0
     docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
@@ -153,23 +163,4 @@ if [ "${CLAUDE_SANDBOX_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
             echo "Verified: $domain is reachable from $container."
             ;;
     esac
-fi
-
-if [ "$global" -eq 1 ]; then
-    # readlink -f resolves through the ~/.local/bin symlink install.sh sets
-    # up - see bin/claude-sandbox's SCRIPT_DIR comment for why this matters.
-    env_file="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)/config/env"
-    if [ -f "$env_file" ] && grep -q '^export ALLOWED_DOMAINS=' "$env_file"; then
-        current=$(sed -nE 's/^export ALLOWED_DOMAINS="(.*)"$/\1/p' "$env_file")
-        if [[ " $current " == *" $domain "* ]]; then
-            echo "$domain already in the global ALLOWED_DOMAINS (config/env)."
-        else
-            new="${current:+$current }$domain"
-            sed -i "s|^export ALLOWED_DOMAINS=.*|export ALLOWED_DOMAINS=\"$new\"|" "$env_file"
-            echo "Added $domain to config/env's ALLOWED_DOMAINS (picked up automatically by the next bin/claude-sandbox invocation - no need to source anything)."
-        fi
-    else
-        echo "Couldn't find 'export ALLOWED_DOMAINS=' in $env_file to update." >&2
-        exit 1
-    fi
 fi
