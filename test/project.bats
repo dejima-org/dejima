@@ -68,3 +68,56 @@ EOF
     [[ "$output" == *"truncated 250"* ]]
     [[ "$output" != *"apt:pkg201"* ]]
 }
+
+@test "project_slug matches the log-shipper project-key rule" {
+    run bash -c 'source "$1"; project_slug "/home/brad/my-proj"' _ "$LIB"
+    [ "$output" = "-home-brad-my-proj" ]
+}
+
+@test "ensure_project_store creates the store and records the real path" {
+    run bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -d "$output" ]
+    [ "$(cat "$output/path")" = "$PROJ" ]
+}
+
+@test "resolve_project_store finds nothing before anything is approved" {
+    run bash -c 'source "$1"; resolve_project_store "$2"' _ "$LIB" "$PROJ"
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "resolve_project_store walks up so a worktree inherits its parent's approvals" {
+    bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ" >/dev/null
+    mkdir -p "$PROJ/.worktrees/feature-x"
+    run bash -c 'source "$1"; resolve_project_store "$2"' _ "$LIB" "$PROJ/.worktrees/feature-x"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$output/path")" = "$PROJ" ]
+}
+
+@test "resolve_project_store fails loudly on a slug collision" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    echo "/some/other/project" > "$store/path"
+    run bash -c 'source "$1"; resolve_project_store "$2"' _ "$LIB" "$PROJ"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collision"* ]]
+}
+
+@test "approve_entry is idempotent and unapprove_entry removes" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    bash -c 'source "$1"; approve_entry "$2" allowed-domains crates.io' _ "$LIB" "$store"
+    bash -c 'source "$1"; approve_entry "$2" allowed-domains crates.io' _ "$LIB" "$store"
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$store"
+    [ "$(grep -c 'crates.io' <<< "$output")" -eq 1 ]
+    bash -c 'source "$1"; unapprove_entry "$2" allowed-domains crates.io' _ "$LIB" "$store"
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$store"
+    [ "$output" = "" ]
+}
+
+@test "approved_entries rejects a corrupt approval file rather than using it" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    echo 'evil.com; curl x' > "$store/allowed-domains"
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$store"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"corrupt"* ]]
+}

@@ -58,3 +58,91 @@ read_declared() {
     fi
     return 0
 }
+
+config_root() {
+    printf '%s' "${CLAUDE_SANDBOX_CONFIG_DIR:-$HOME/.config/claude-sandbox}"
+}
+
+# Same sanitization docker/log-shipper.sh uses for its Loki project key, so
+# one project has one identity everywhere in this repo.
+project_slug() {
+    printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/-/g'
+}
+
+# The store for this exact path, created if needed. The path file is what
+# makes a slug collision detectable: two different projects can sanitize to
+# the same slug, and silently applying one project's approvals to another
+# would be a real (if unlikely) grant the user never made.
+ensure_project_store() {
+    local path="$1" dir
+    dir="$(config_root)/projects/$(project_slug "$path")"
+    mkdir -p "$dir"
+    if [ -f "$dir/path" ] && [ "$(cat "$dir/path")" != "$path" ]; then
+        echo "Project slug collision: $dir already belongs to $(cat "$dir/path")" >&2
+        return 1
+    fi
+    printf '%s\n' "$path" > "$dir/path"
+    printf '%s' "$dir"
+}
+
+# Nearest ancestor with a store, so a git worktree under the project (the
+# workflow sandbox-context.sh tells agents to use) inherits the project's
+# approvals instead of silently getting none.
+resolve_project_store() {
+    local path="$1" dir
+    while [ -n "$path" ] && [ "$path" != "/" ]; do
+        dir="$(config_root)/projects/$(project_slug "$path")"
+        if [ -d "$dir" ]; then
+            if [ -f "$dir/path" ] && [ "$(cat "$dir/path")" != "$path" ]; then
+                echo "Project slug collision: $dir belongs to $(cat "$dir/path"), not $path" >&2
+                return 1
+            fi
+            printf '%s' "$dir"
+            return 0
+        fi
+        path="$(dirname "$path")"
+    done
+    return 0
+}
+
+_approved_validator() {
+    case "$1" in
+        allowed-domains) printf 'valid_domain' ;;
+        dependencies)    printf 'valid_dep_spec' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Approvals are host-side and trusted, so an entry that fails validation
+# means a bug or tampering, not user error - refuse rather than proceed.
+approved_entries() {
+    local store="$1" kind="$2" file validator line
+    validator="$(_approved_validator "$kind")" || return 1
+    file="$store/$kind"
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        if ! "$validator" "$line"; then
+            echo "corrupt approval entry in $file: $line" >&2
+            return 1
+        fi
+        printf '%s\n' "$line"
+    done < "$file"
+    return 0
+}
+
+approve_entry() {
+    local store="$1" kind="$2" entry="$3" validator
+    validator="$(_approved_validator "$kind")" || return 1
+    "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
+    touch "$store/$kind"
+    grep -qxF "$entry" "$store/$kind" || printf '%s\n' "$entry" >> "$store/$kind"
+}
+
+unapprove_entry() {
+    local store="$1" kind="$2" entry="$3" tmp
+    [ -f "$store/$kind" ] || return 0
+    tmp="$(mktemp)"
+    grep -vxF "$entry" "$store/$kind" > "$tmp" || true
+    mv "$tmp" "$store/$kind"
+}
