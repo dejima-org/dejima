@@ -1,6 +1,6 @@
 // TCP -> unix-socket byte pipe: Claude Code needs an http://127.0.0.1 base
 // URL, but the host-side credential proxy listens on a bind-mounted unix
-// socket (no host TCP exposure - see bin/claude-sandbox-anthropic-proxy).
+// socket (no host TCP exposure - see bin/dejima-anthropic-proxy).
 // Deliberately no HTTP awareness: bytes in, bytes out. Port 18300 is a repo
 // constant (the container's network namespace is private, so nothing can
 // collide with it); the env override exists only for host-side tests.

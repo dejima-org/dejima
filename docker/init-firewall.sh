@@ -212,7 +212,7 @@ iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
 # GitHub gets port 443 always - read access (clone/fetch/gh over HTTPS).
 # Port 22 (needed for SSH push) stays closed unless the caller explicitly
-# opted in via ALLOW_GITHUB_PUSH=1 (see bin/claude-sandbox and
+# opted in via ALLOW_GITHUB_PUSH=1 (see bin/dejima and
 # git-push-guard.sh, which independently also has to allow the host before a
 # push actually gets through) - default is push there stays physically
 # unreachable, not just discouraged.

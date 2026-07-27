@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host-side exit-time audit for bin/claude-sandbox. Snapshots the workspace's
+# Host-side exit-time audit for bin/dejima. Snapshots the workspace's
 # host-persistence surfaces before the container runs, and after it exits
 # reports (advisory only - never blocks) anything a session changed that
 # would execute or load OUTSIDE the sandbox: git config keys that run a
@@ -10,22 +10,22 @@ set -uo pipefail
 
 cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
 
-PROJECTS_DIR="${CLAUDE_SANDBOX_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
+PROJECTS_DIR="${DEJIMA_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
 
 # The one top-level ~/.claude entry docker-compose.yml's read-only overlays
 # don't cover (settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/
 # output-styles all are) - settings.json's statusLine.command runs it on the
-# HOST, unsandboxed, and bin/claude-sandbox's own read-only mount onto it
+# HOST, unsandboxed, and bin/dejima's own read-only mount onto it
 # doesn't reliably protect it when it's a symlink (the common case - runc
 # resolves the mount destination through the symlink; confirmed against a
 # live container, see test/runtime.bats). Detection here is the compensating
 # control for that gap. Overridable for tests.
-STATUSLINE_PATH="${CLAUDE_SANDBOX_AUDIT_STATUSLINE:-$HOME/.claude/statusline.sh}"
+STATUSLINE_PATH="${DEJIMA_AUDIT_STATUSLINE:-$HOME/.claude/statusline.sh}"
 
 # This script's own repo root - the sandbox's trusted computing base (see
 # tcb_snapshot below) is only monitored when the workspace being audited IS
 # this repo (a self-mounted session). Overridable for tests.
-AUDIT_REPO_ROOT="${CLAUDE_SANDBOX_AUDIT_REPO_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+AUDIT_REPO_ROOT="${DEJIMA_AUDIT_REPO_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 
 # git config keys whose values run a command on the next git invocation, or
 # (include.path/includeif.*.path) indirect to another config file that could
@@ -181,13 +181,13 @@ case "$cmd" in
         exit 0
         ;;
     compare)
-        [ -f "$state" ] || { echo "claude-sandbox audit: no snapshot to compare against, skipping." >&2; exit 0; }
+        [ -f "$state" ] || { echo "dejima audit: no snapshot to compare against, skipping." >&2; exit 0; }
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
                            echo "### projects";  projects_snapshot "$PROJECTS_DIR";
                            echo "### tcb";       tcb_snapshot "$ws";
                            echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
-            echo "claude-sandbox audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
+            echo "dejima audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
         findings=()
         # config diffs: added/changed lines present in new but not old
@@ -258,7 +258,7 @@ case "$cmd" in
         {
             echo ""
             echo "================================================================"
-            echo " claude-sandbox: this session changed host-persistence surfaces"
+            echo " dejima: this session changed host-persistence surfaces"
             echo " in $ws"
             echo " Review these BEFORE running 'git' or 'claude' in that repo:"
             echo "----------------------------------------------------------------"
@@ -268,7 +268,7 @@ case "$cmd" in
         exit 0
         ;;
     *)
-        echo "usage: claude-sandbox-audit {snapshot|compare} <workspace> <state-file>" >&2
+        echo "usage: dejima-audit {snapshot|compare} <workspace> <state-file>" >&2
         exit 2
         ;;
 esac

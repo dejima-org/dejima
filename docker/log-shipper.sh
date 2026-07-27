@@ -40,7 +40,7 @@ ship_stream() {
             | map(split("\t") | [.[0], (.[1:] | join("\t"))])
         ')
         payload=$(jq -n --arg job "$job" --argjson values "$values" \
-            '{streams: [{stream: {job: $job, source: "claude-sandbox"}, values: $values}]}')
+            '{streams: [{stream: {job: $job, source: "dejima"}, values: $values}]}')
         curl -s -o /dev/null --max-time 5 -H "Content-Type: application/json" \
             -XPOST "$LOKI_URL/loki/api/v1/push" -d "$payload" || true
         batch=()
@@ -137,15 +137,15 @@ if [ "${LOG_SHIPPER_LIB_ONLY:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-ship_stream "claude-sandbox-dns" /var/log/dnsmasq.log &
-ship_stream "claude-sandbox-net" /var/log/ulogd.json &
+ship_stream "dejima-dns" /var/log/dnsmasq.log &
+ship_stream "dejima-net" /var/log/ulogd.json &
 
 # Conversation shipping is opt-in on top of LOKI_URL: prompts/responses/
 # tool commands are session *content*, a different sensitivity class than
 # DNS names and firewall verdicts.
 if [ "${SANDBOX_LOG_CONVERSATION:-0}" = "1" ]; then
     watch_transcripts &
-    ship_stream "claude-sandbox-conversation" /var/log/claude-conversation.log &
+    ship_stream "dejima-conversation" /var/log/claude-conversation.log &
 fi
 
 wait

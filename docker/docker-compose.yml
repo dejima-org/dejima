@@ -1,13 +1,13 @@
 # Not meant to be run directly with plain `docker compose up`: WORKSPACE_DIR,
 # SSH_AUTH_SOCK, etc. must point at real host paths for a specific project.
-# Use `bin/claude-sandbox <path-to-project>` instead, which sets these and
+# Use `bin/dejima <path-to-project>` instead, which sets these and
 # invokes this file.
 
-# Pinned explicitly: bin/claude-sandbox-allow discovers running sandboxes
+# Pinned explicitly: bin/dejima-allow discovers running sandboxes
 # via the com.docker.compose.project label, which otherwise derives from
 # this file's directory name ("docker") and would never match the
-# "claude-sandbox" value that script filters on.
-name: claude-sandbox
+# "dejima" value that script filters on.
+name: dejima
 
 services:
   claude:
@@ -19,23 +19,23 @@ services:
         # Matches the container's own user to the real host user - see
         # Dockerfile. Defaults reproduce today's node/1000/1000//home/node
         # exactly if these aren't set (e.g. building directly, bypassing
-        # bin/claude-sandbox).
+        # bin/dejima).
         SANDBOX_USER: ${SANDBOX_USER:-node}
         SANDBOX_UID: ${SANDBOX_UID:-1000}
         SANDBOX_GID: ${SANDBOX_GID:-1000}
         SANDBOX_HOME: ${HOME:-/home/node}
-    # Tagged per-user, not a fixed :latest - bin/claude-sandbox explicitly
+    # Tagged per-user, not a fixed :latest - bin/dejima explicitly
     # builds this image before the run step below, and two different
     # accounts on a shared devbox building from their own checkouts would
     # otherwise silently overwrite each other's image under the same tag.
-    # $SANDBOX_IMAGE lets bin/claude-sandbox point a run at a derived,
+    # $SANDBOX_IMAGE lets bin/dejima point a run at a derived,
     # per-project image instead, without this build ever producing one
-    # under that name itself - see bin/claude-sandbox.
-    image: ${SANDBOX_IMAGE:-claude-sandbox:${SANDBOX_USER:-node}}
+    # under that name itself - see bin/dejima.
+    image: ${SANDBOX_IMAGE:-dejima:${SANDBOX_USER:-node}}
     # Run tini as PID 1 so orphaned processes get reaped. Without it PID 1 is
     # the session's own command (claude, or nvim under SANDBOX_NVIM_CONFIG),
     # which never reaps: every process-substitution child the test suite and
-    # bin/ scripts leave behind - `claude-sandbox-audit compare` alone leaks
+    # bin/ scripts leave behind - `dejima-audit compare` alone leaks
     # ten per run - becomes a permanent zombie, and a long session eventually
     # exhausts the cgroup pids limit and can no longer fork at all.
     init: true
@@ -57,7 +57,7 @@ services:
       GIT_CONFIG_GLOBAL: ${HOME}/.gitconfig-sandbox/.gitconfig
       ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-}
       # What actually runs as the sandbox user - defaults to bare `claude`.
-      # See entrypoint.sh and bin/claude-sandbox's SANDBOX_NVIM_CONFIG.
+      # See entrypoint.sh and bin/dejima's SANDBOX_NVIM_CONFIG.
       SANDBOX_CMD: ${SANDBOX_CMD:-claude}
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
@@ -69,7 +69,7 @@ services:
       LOKI_URL: ${LOKI_URL:-}
       # Opt-in (default off): also ship session prompts, assistant
       # responses, and tool invocations to Loki as the
-      # claude-sandbox-conversation job. Content only leaves the container
+      # dejima-conversation job. Content only leaves the container
       # if LOKI_URL is also set. See README "Network request logging".
       SANDBOX_LOG_CONVERSATION: ${SANDBOX_LOG_CONVERSATION:-0}
       SSH_AUTH_SOCK: /ssh-agent
@@ -81,7 +81,7 @@ services:
       # Ctrl-H/Backspace disambiguation config/tmux.conf sets up) against
       # the terminfo entry the rest of the chain actually expects.
       TERM: ${TERM:-xterm-256color}
-      # Host-side credential proxy (see bin/claude-sandbox and README
+      # Host-side credential proxy (see bin/dejima and README
       # "Security notes"): when enabled, Claude Code is pointed at a
       # loopback forwarder and given a placeholder token - the real OAuth
       # credential stays on the host, injected per-request by the proxy.
@@ -107,13 +107,13 @@ services:
       # caches, etc.) still needs to stay read-write.
       #
       # settings.json specifically comes from $SANDBOX_SETTINGS_FILE (a
-      # bin/claude-sandbox-generated copy with sandbox.enabled forced to
+      # bin/dejima-generated copy with sandbox.enabled forced to
       # false), not the real file directly - Claude Code's own internal
       # per-command sandboxing is redundant on top of this container (and
       # can't actually function inside it anyway), and mounting it read-only
       # means it can't be patched from inside, so the substitution has to
       # happen on the host before the container ever starts.
-      - ${SANDBOX_SETTINGS_FILE:?set by bin/claude-sandbox}:${HOME}/.claude/settings.json:ro
+      - ${SANDBOX_SETTINGS_FILE:?set by bin/dejima}:${HOME}/.claude/settings.json:ro
       - ${HOME}/.claude/CLAUDE.md:${HOME}/.claude/CLAUDE.md:ro
       - ${HOME}/.claude/plugins:${HOME}/.claude/plugins:ro
       # ~/.claude/hooks holds hook *code* too (install.sh symlinks this
@@ -122,7 +122,7 @@ services:
       # without this, the directory itself stays part of the read-write
       # ~/.claude mount, so a compromised session could unlink one of
       # install.sh's symlinks and drop a plain file in its place. The
-      # dynamic per-symlink-target mounts bin/claude-sandbox adds at
+      # dynamic per-symlink-target mounts bin/dejima adds at
       # launch (see below) only protect targets that resolve *outside*
       # ~/.claude - they never cover this directory itself, and a plain
       # file dropped here wouldn't be a symlink for that logic to even
@@ -134,7 +134,7 @@ services:
       # hooks/plugins above: a skill can ship an executable script, and a
       # command/agent is prompt text loaded into a later, unsandboxed host
       # session. Unlike those, they may not exist on a given host at all -
-      # bin/claude-sandbox pre-creates them (empty is fine; existence is what
+      # bin/dejima pre-creates them (empty is fine; existence is what
       # lets Docker overlay them) so a compromised session can't create-then-
       # populate one under the read-write parent mount.
       - ${HOME}/.claude/skills:${HOME}/.claude/skills:ro
@@ -144,14 +144,14 @@ services:
       # system prompt, same class as commands/agents above.
       - ${HOME}/.claude/output-styles:${HOME}/.claude/output-styles:ro
       # A throwaway per-session copy, not the real file - see
-      # bin/claude-sandbox and README "Throwaway ~/.claude.json". A plain
+      # bin/dejima and README "Throwaway ~/.claude.json". A plain
       # read-only mount hangs Claude Code on startup (it writes to this
       # file before login completes), so this can't just be layered
       # read-only the way settings.json/CLAUDE.md/plugins/hooks are above;
       # a generated, discarded copy is what actually stops a compromised
       # session's changes (e.g. a malicious mcpServers entry) from ever
       # reaching the real file.
-      - ${SANDBOX_CLAUDE_JSON_FILE:?set by bin/claude-sandbox}:${HOME}/.claude.json
+      - ${SANDBOX_CLAUDE_JSON_FILE:?set by bin/dejima}:${HOME}/.claude.json
       # ~/.claude/CLAUDE.md (mounted above) tells agents to write specs to
       # ~/specs/ rather than a project-local path - that instruction is
       # already in effect inside the container (CLAUDE.md carries over), so
@@ -166,13 +166,13 @@ services:
       # rename pattern, which fails on a single-file mount ("Device or
       # resource busy" - Linux won't let that mount point's backing inode be
       # replaced). GIT_CONFIG_GLOBAL above points git at the file inside
-      # this directory instead. See bin/claude-sandbox - nothing written
+      # this directory instead. See bin/dejima - nothing written
       # here ever reaches the user's real ~/.gitconfig.
-      - ${SANDBOX_GITCONFIG_DIR:?set by bin/claude-sandbox}:${HOME}/.gitconfig-sandbox
+      - ${SANDBOX_GITCONFIG_DIR:?set by bin/dejima}:${HOME}/.gitconfig-sandbox
       # ~/.claude/hooks contains symlinks whose targets live outside
       # ~/.claude itself (this repo's hooks/, and potentially others, e.g.
       # another config repo's hooks/) - those targets are bind-mounted at
-      # their own real host paths dynamically by bin/claude-sandbox at
+      # their own real host paths dynamically by bin/dejima at
       # launch (it inspects the symlinks and appends the exact mounts
       # needed), not listed statically here, since this repo can't assume
       # what else might be installed on a given host.
@@ -180,7 +180,7 @@ services:
       - nvim-data:${HOME}/.local/share/nvim
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim
-      # Required only if SANDBOX_SSH_KEY isn't set - bin/claude-sandbox
+      # Required only if SANDBOX_SSH_KEY isn't set - bin/dejima
       # itself enforces that at least one of the two is present.
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
       - ${SSH_KNOWN_HOSTS:-/dev/null}:${HOME}/.ssh/known_hosts:ro

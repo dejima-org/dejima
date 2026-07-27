@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PreToolUse hook: inside claude-sandbox, only allow `git push` to the Gitea
+# PreToolUse hook: inside dejima, only allow `git push` to the Gitea
 # host (GITEA_SSH_HOST / the GITEA_API host), and never directly to
 # main/master there - the sandbox workflow is feature branch + `gitea-pr
 # create`, never a direct push. GitHub push is also blocked here by default
@@ -9,10 +9,10 @@
 # too. This is a fast-fail guard against an overeager agent, not a hard
 # security boundary - a sandbox session has full shell access and could in
 # principle edit .git/config to route around it. No-op outside the sandbox
-# (CLAUDE_SANDBOX unset), since this restriction doesn't apply to normal host
+# (DEJIMA unset), since this restriction doesn't apply to normal host
 # usage.
 
-if [ -z "${CLAUDE_SANDBOX:-}" ]; then
+if [ -z "${DEJIMA:-}" ]; then
     exit 0
 fi
 

@@ -45,7 +45,7 @@ chown dnsmasq:dnsmasq "$LOG_FILE" 2>/dev/null || true
 
 # server=/domain/upstream lines live in their own file (rather than the main
 # conf) since dnsmasq only re-reads a --servers-file on SIGHUP - lets
-# bin/claude-sandbox-allow add a domain to a running session by appending a
+# bin/dejima-allow add a domain to a running session by appending a
 # line here and signaling the container's dnsmasq, no restart needed.
 {
     for domain in "${FIXED_DOMAINS[@]}" "${GITHUB_DNS_SUFFIXES[@]}" ${EXTRA_ALLOWED_DOMAINS:-}; do
@@ -107,7 +107,7 @@ EOF
     # name dnsmasq ever answers: only allowlisted names have an upstream at
     # all (no-resolv + servers-file), so "gets answered" and "is
     # allowlisted" are the same set - including domains added mid-session
-    # by bin/claude-sandbox-allow, which previously only got a one-time
+    # by bin/dejima-allow, which previously only got a one-time
     # snapshot (ipset= can't live in the SIGHUP-reloadable servers-file).
     # The explicit github-domains lines below still win for GitHub names -
     # dnsmasq applies the longest matching ipset= domain - which is what

@@ -1,15 +1,15 @@
 #!/bin/bash
-# Launch the claude-sandbox container, with a project directory bind-mounted
+# Launch the dejima container, with a project directory bind-mounted
 # at its real host path. Defaults to running bare `claude` inside (with
 # --dangerously-skip-permissions); set SANDBOX_CMD to run something else
 # instead (see README).
 #
-# Usage: claude-sandbox [path-to-project] [-- extra args...]
-#   claude-sandbox                      # sandbox the current directory
-#   claude-sandbox ~/repos/myproject
+# Usage: dejima [path-to-project] [-- extra args...]
+#   dejima                      # sandbox the current directory
+#   dejima ~/repos/myproject
 set -euo pipefail
 
-# readlink -f resolves through the ~/.local/bin/claude-sandbox symlink
+# readlink -f resolves through the ~/.local/bin/dejima symlink
 # install.sh sets up - without it, BASH_SOURCE[0] is the symlink's own path
 # when invoked by name via PATH, so dirname finds ~/.local/bin instead of
 # this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE)
@@ -32,7 +32,7 @@ fi
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
 # Allowed domains come only from the host-side approval store (see
-# bin/claude-sandbox-project-lib.sh), global then per-project. The first
+# bin/dejima-project-lib.sh), global then per-project. The first
 # assignment below is plain, not ${ALLOWED_DOMAINS:-}-preserving: the store
 # is the single host-side source of truth, and an exported ALLOWED_DOMAINS
 # in the user's shell profile must not be able to silently widen every
@@ -43,8 +43,8 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 # the read-write workspace mount, so treating it as a grant would let a
 # session widen its own firewall for the next run. The declaration is only
 # ever reported (see hooks/sandbox-context.sh) and approved by hand.
-# shellcheck source=claude-sandbox-project-lib.sh
-source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
 ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
 PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
 if [ -n "$PROJECT_STORE" ]; then
@@ -136,7 +136,7 @@ fi
 # touching the actual project checkout. Persists across sessions (it's a
 # real host directory, not a container volume) since the point is sharing
 # things with the host, not just scratch space for one run.
-SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/claude-sandbox/shared}"
+SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/dejima/shared}"
 mkdir -p "$SANDBOX_SHARE_DIR"
 
 # ~/.claude/CLAUDE.md (carried into the container) tells agents to write
@@ -159,7 +159,7 @@ mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" 
 # tamper with it, so it can't be patched from inside - generate a sandbox-
 # specific copy here instead and mount that in place of the real one.
 # Everything else in it (hooks, permissions, plugins) carries over unchanged.
-SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-settings.XXXXXX.json")"
+SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
 jq '.sandbox.enabled = false' "$HOME/.claude/settings.json" > "$SANDBOX_SETTINGS_FILE"
 
 # ~/.claude.json mixes live app state (project registry, usage stats,
@@ -179,14 +179,14 @@ jq '.sandbox.enabled = false' "$HOME/.claude/settings.json" > "$SANDBOX_SETTINGS
 # sandbox sessions never contend over the same file - each gets its own
 # copy. See README "Throwaway ~/.claude.json" for exactly what that means
 # doesn't carry over from a sandboxed session.
-SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-claude-json.XXXXXX.json")"
+SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then
     cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
 else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi
 
-SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-audit.XXXXXX")"
+SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 
 cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
@@ -210,7 +210,7 @@ trap cleanup EXIT
 # copy via GIT_CONFIG_GLOBAL instead of relying on it being at ~/.gitconfig.
 # Nothing written in here ever reaches the user's real ~/.gitconfig either
 # way, since it's a copy in its own directory, not the real file/parent.
-SANDBOX_GITCONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-gitconfig.XXXXXX")"
+SANDBOX_GITCONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-gitconfig.XXXXXX")"
 if [ -f "$HOME/.gitconfig" ]; then
     cp "$HOME/.gitconfig" "$SANDBOX_GITCONFIG_DIR/.gitconfig"
 else
@@ -294,7 +294,7 @@ if [ -n "${SANDBOX_NVIM_CONFIG:-}" ]; then
     # volume below already keeps the actual installed plugin files across
     # sessions - next to what a fully writable config directory would risk:
     # arbitrary Lua that runs unsandboxed the next time nvim starts for real.
-    SANDBOX_NVIM_LOCKFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-nvim-lock.XXXXXX.json")"
+    SANDBOX_NVIM_LOCKFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-nvim-lock.XXXXXX.json")"
     if [ -f "$SANDBOX_NVIM_CONFIG/lazy-lock.json" ]; then
         cp "$SANDBOX_NVIM_CONFIG/lazy-lock.json" "$SANDBOX_NVIM_LOCKFILE"
     fi
@@ -355,9 +355,9 @@ fi
 # replaceable. There is no mount-based fix for this: ~/.claude can't be made
 # read-only (session history has to stay writable), and mounting over the
 # resolved target instead of the symlink path isn't an option either, since
-# bin/claude-sandbox has no way to force the *destination* resolution to stop
+# bin/dejima has no way to force the *destination* resolution to stop
 # at the symlink. The compensating control is detection, not prevention:
-# bin/claude-sandbox-audit hashes the symlink's target string (so a
+# bin/dejima-audit hashes the symlink's target string (so a
 # repointed or replaced statusline.sh is caught) and reports it as a
 # host-code-execution finding after the session exits. Keep this mount
 # anyway - it's a real, verified fix for the regular-file case, and a no-op
@@ -382,7 +382,7 @@ fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
-# bin/claude-sandbox-anthropic-proxy and README "Security notes"), mount an
+# bin/dejima-anthropic-proxy and README "Security notes"), mount an
 # empty file over ~/.claude/.credentials.json and an empty read-only
 # directory over ~/.claude/.credentials-proxy-tmp (the proxy's write-back
 # staging directory - the parent ~/.claude mount must stay read-write, so
@@ -400,9 +400,9 @@ SANDBOX_CREDENTIALS_TMPDIR_MASK=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
-    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-anthropic-proxy.XXXXXX")"
+    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-anthropic-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
-    "$SCRIPT_DIR/claude-sandbox-anthropic-proxy" \
+    "$SCRIPT_DIR/dejima-anthropic-proxy" \
         --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET" \
         --credentials "$HOME/.claude/.credentials.json" &
     SANDBOX_ANTHROPIC_PROXY_PID=$!
@@ -419,8 +419,8 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
         echo "credential is then mounted into the container, as before)." >&2
         exit 1
     fi
-    SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-credentials-mask.XXXXXX")"
-    SANDBOX_CREDENTIALS_TMPDIR_MASK="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-credentials-tmpdir-mask.XXXXXX")"
+    SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-credentials-mask.XXXXXX")"
+    SANDBOX_CREDENTIALS_TMPDIR_MASK="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credentials-tmpdir-mask.XXXXXX")"
     extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
     extra_mounts+=(-v "$SANDBOX_CREDENTIALS_MASK_FILE:$HOME/.claude/.credentials.json")
     # Mount target must exist first, same as the skills/commands/etc. overlays
@@ -435,8 +435,8 @@ fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
 
 # Snapshot host-persistence surfaces so the post-run audit can report
-# anything this session changed (advisory - see bin/claude-sandbox-audit).
-"$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+# anything this session changed (advisory - see bin/dejima-audit).
+"$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
 # docker/, install.sh, test/) is mounted writable - warn, and the audit
@@ -450,10 +450,10 @@ fi
 # Compose builds the shared base image under its own tag, explicitly - with
 # image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
 # build would rebuild the base Dockerfile under the derived name.
-SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}" \
+SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \
     docker compose -f "$COMPOSE_FILE" build claude
 
-SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}"
+SANDBOX_IMAGE="dejima:${SANDBOX_USER}"
 
 # Each layer builds FROM whatever the previous one left in $SANDBOX_IMAGE, so
 # global packages are shared by every project instead of being rebuilt into
@@ -466,24 +466,24 @@ build_dep_layer() {
         # No fallback to a less-equipped image: that would hand the session an
         # environment missing the dependencies it was told it has.
         echo "Failed to build $tag." >&2
-        echo "Fix the approved dependencies (claude-sandbox-dep list) and retry." >&2
+        echo "Fix the approved dependencies (dejima-dep list) and retry." >&2
         exit 1
     fi
     SANDBOX_IMAGE="$tag"
 }
 
 if [ -s "$(config_root)/dependencies" ] || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
-    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-derived.XXXXXX")"
+    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
     # An empty context, never $WORKSPACE_DIR: the project directory is
     # session-writable, and a root-context build with it as context would let a
     # compromised session feed files into the image it then runs in.
-    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-derived-ctx.XXXXXX")"
+    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/dejima-derived-ctx.XXXXXX")"
 fi
 if [ -s "$(config_root)/dependencies" ]; then
-    build_dep_layer "claude-sandbox:${SANDBOX_USER}-global" "$(config_root)"
+    build_dep_layer "dejima:${SANDBOX_USER}-global" "$(config_root)"
 fi
 if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
-    build_dep_layer "claude-sandbox:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
+    build_dep_layer "dejima:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
 fi
 export SANDBOX_IMAGE
 
@@ -498,5 +498,5 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PR
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2
 fi
-"$SCRIPT_DIR/claude-sandbox-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+"$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 exit "$compose_status"

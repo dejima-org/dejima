@@ -7,7 +7,7 @@ PLACEHOLDER="sandbox-credential-proxy-placeholder"
 
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
-    PROXY="$REPO_ROOT/bin/claude-sandbox-anthropic-proxy"
+    PROXY="$REPO_ROOT/bin/dejima-anthropic-proxy"
     TD="$(mktemp -d)"
     SOCK="$TD/proxy.sock"
     CREDS="$TD/credentials.json"
