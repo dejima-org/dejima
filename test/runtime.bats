@@ -104,6 +104,9 @@ teardown() {
     docker rm -f "claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rmi "claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -692,6 +695,80 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"user-provider"* ]]
     [[ "$output" != *"sandbox-osc52"* ]]
+}
+
+@test "session context reports declared-but-missing project requirements" {
+    local ws; ws="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    printf 'apt:definitely-not-installed\n' > "$ws/.claude-sandbox/dependencies"
+    printf 'declared-not-allowed.example\n' > "$ws/.claude-sandbox/allowed-domains"
+    chmod -R 755 "$ws"
+
+    local test_container="claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$ws:$ws" \
+        -v "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh:/usr/local/bin/sandbox-context.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    # -w is deliberately an unrelated directory, not "$ws": if cwd extraction
+    # from the payload broke and silently fell back to $PWD, running with
+    # -w "$ws" would still find the declarations and pass regardless.
+    run docker exec -u node -w /tmp "$test_container" \
+        bash -c 'printf "{\"session_id\":\"s1\",\"cwd\":\"'"$ws"'\"}" | CLAUDE_SANDBOX=1 /usr/local/bin/sandbox-context.sh'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"definitely-not-installed"* ]]
+    [[ "$output" == *"declared-not-allowed.example"* ]]
+    [[ "$output" == *"claude-sandbox-project approve"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$ws"
+}
+
+@test "a derived project image gets the package and keeps the base privilege posture" {
+    local derived="claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")"
+    local ctx; ctx="$(mktemp -d)"
+    local store; store="$(mktemp -d)"
+    local df; df="$(mktemp)"
+    printf 'apt:cowsay\n' > "$store/dependencies"
+    bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+        _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$IMAGE" "$store" > "$df"
+    docker build -q -t "$derived" -f "$df" "$ctx" >&2
+
+    # The image's own config, not the running container: `docker run` below
+    # passes --entrypoint explicitly (this file's convention), which would
+    # override the image's ENTRYPOINT and mask its absence - so that run
+    # succeeding doesn't prove generate_derived_dockerfile's own ENTRYPOINT
+    # line survived. Checked here, straight off the build.
+    run docker inspect -f '{{json .Config.Entrypoint}}' "$derived"
+    [[ "$output" == *"/usr/local/bin/entrypoint.sh"* ]]
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$derived" >/dev/null
+    wait_ready "$test_container"
+
+    run docker exec "$test_container" dpkg-query -W -f='${Status}' cowsay
+    [[ "$output" == *"install ok installed"* ]]
+
+    # the hardening assertions that matter must hold on a derived image too.
+    # `run !` for sudo, matching "node has no working sudo" above: it exits
+    # 127 rather than a permission error, since sudo isn't installed at all.
+    run ! docker exec -u node "$test_container" sudo -n true
+    run docker exec -u node "$test_container" iptables -L
+    [ "$status" -ne 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    docker rmi "$derived" >/dev/null 2>&1 || true
+    rm -rf "$ctx" "$store" "$df"
 }
 
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {

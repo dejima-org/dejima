@@ -12,8 +12,8 @@ set -euo pipefail
 # readlink -f resolves through the ~/.local/bin/claude-sandbox symlink
 # install.sh sets up - without it, BASH_SOURCE[0] is the symlink's own path
 # when invoked by name via PATH, so dirname finds ~/.local/bin instead of
-# this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE,
-# config/env) resolves against the wrong directory entirely.
+# this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE)
+# resolves against the wrong directory entirely.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
@@ -31,19 +31,38 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
-# Load persisted config (currently just ALLOWED_DOMAINS) before it's read
-# below - lets `bin/claude-sandbox-allow --global` persist a domain across
-# sessions without depending on the user's own shell profile chain, which a
-# standalone install of this repo can't assume exists.
-# config/env is parsed, never sourced: it lives inside this repo, which is
-# itself a mountable/writable workspace, so executing it would be a
-# host-shell persistence path for a self-mounted session. A real env var
-# (exported before invoking this script - e.g. from the user's shell
-# profile) still takes precedence, unchanged.
-source "$SCRIPT_DIR/claude-sandbox-env.sh"
-if [ -z "${ALLOWED_DOMAINS:-}" ]; then
-    ALLOWED_DOMAINS="$(parse_allowed_domains_env "$REPO_ROOT/config/env")"
+# Allowed domains come only from the host-side approval store (see
+# bin/claude-sandbox-project-lib.sh), global then per-project. The first
+# assignment below is plain, not ${ALLOWED_DOMAINS:-}-preserving: the store
+# is the single host-side source of truth, and an exported ALLOWED_DOMAINS
+# in the user's shell profile must not be able to silently widen every
+# sandbox's firewall with nothing recording that it did.
+#
+# Per-project domains are read from the approval store only - deliberately
+# NOT from the project's own in-repo declaration directory: that lives on
+# the read-write workspace mount, so treating it as a grant would let a
+# session widen its own firewall for the next run. The declaration is only
+# ever reported (see hooks/sandbox-context.sh) and approved by hand.
+# shellcheck source=claude-sandbox-project-lib.sh
+source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
+PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+if [ -n "$PROJECT_STORE" ]; then
+    project_domains="$(approved_entries "$PROJECT_STORE" allowed-domains | tr '\n' ' ')"
+    ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
+
+# The approval store is only out of the container's reach while it isn't
+# inside the mounted workspace - same class of warning as the self-mounted
+# repo TCB warning below.
+case "$(config_root)/" in
+    "$WORKSPACE_DIR"/*)
+        echo "Warning: the approval store ($(config_root)) is inside the mounted" >&2
+        echo "workspace this session - both the global approvals and every" >&2
+        echo "project's under it are writable from inside the sandbox, so they" >&2
+        echo "are no longer out of reach. Review them after this session." >&2
+        ;;
+esac
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
@@ -173,8 +192,8 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}"
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}"
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
+    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
 }
 trap cleanup EXIT
 
@@ -420,13 +439,53 @@ export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC
 "$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
-# docker/, install.sh, config/env, test/) is mounted writable - warn, and
-# the audit below will report any change to it.
+# docker/, install.sh, test/) is mounted writable - warn, and the audit
+# below will report any change to it.
 if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "Warning: sandbox's own repo is the mounted workspace - its trusted" >&2
     echo "computing base (bin/, hooks/, docker/, install.sh) is writable this" >&2
     echo "session; the exit audit will report any changes to review." >&2
 fi
+
+# Compose builds the shared base image under its own tag, explicitly - with
+# image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
+# build would rebuild the base Dockerfile under the derived name.
+SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}" \
+    docker compose -f "$COMPOSE_FILE" build claude
+
+SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}"
+
+# Each layer builds FROM whatever the previous one left in $SANDBOX_IMAGE, so
+# global packages are shared by every project instead of being rebuilt into
+# each one's image.
+build_dep_layer() {
+    local tag="$1" store="$2"
+    generate_derived_dockerfile "$SANDBOX_IMAGE" "$store" > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building $tag (approved dependencies)..."
+    if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback to a less-equipped image: that would hand the session an
+        # environment missing the dependencies it was told it has.
+        echo "Failed to build $tag." >&2
+        echo "Fix the approved dependencies (claude-sandbox-dep list) and retry." >&2
+        exit 1
+    fi
+    SANDBOX_IMAGE="$tag"
+}
+
+if [ -s "$(config_root)/dependencies" ] || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
+    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-derived.XXXXXX")"
+    # An empty context, never $WORKSPACE_DIR: the project directory is
+    # session-writable, and a root-context build with it as context would let a
+    # compromised session feed files into the image it then runs in.
+    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-derived-ctx.XXXXXX")"
+fi
+if [ -s "$(config_root)/dependencies" ]; then
+    build_dep_layer "claude-sandbox:${SANDBOX_USER}-global" "$(config_root)"
+fi
+if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
+    build_dep_layer "claude-sandbox:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
+fi
+export SANDBOX_IMAGE
 
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
@@ -434,7 +493,7 @@ fi
 # audit entirely). Capture the status explicitly so the advisory audit runs
 # on every exit path, then propagate the real container exit code unchanged.
 compose_status=0
-docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2

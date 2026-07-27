@@ -24,11 +24,14 @@ services:
         SANDBOX_UID: ${SANDBOX_UID:-1000}
         SANDBOX_GID: ${SANDBOX_GID:-1000}
         SANDBOX_HOME: ${HOME:-/home/node}
-    # Tagged per-user, not a fixed :latest - bin/claude-sandbox always
-    # passes --build, and two different accounts on a shared devbox
-    # building from their own checkouts would otherwise silently overwrite
-    # each other's image under the same tag.
-    image: claude-sandbox:${SANDBOX_USER:-node}
+    # Tagged per-user, not a fixed :latest - bin/claude-sandbox explicitly
+    # builds this image before the run step below, and two different
+    # accounts on a shared devbox building from their own checkouts would
+    # otherwise silently overwrite each other's image under the same tag.
+    # $SANDBOX_IMAGE lets bin/claude-sandbox point a run at a derived,
+    # per-project image instead, without this build ever producing one
+    # under that name itself - see bin/claude-sandbox.
+    image: ${SANDBOX_IMAGE:-claude-sandbox:${SANDBOX_USER:-node}}
     # Run tini as PID 1 so orphaned processes get reaped. Without it PID 1 is
     # the session's own command (claude, or nvim under SANDBOX_NVIM_CONFIG),
     # which never reaps: every process-substitution child the test suite and

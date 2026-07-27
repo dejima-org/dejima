@@ -9,8 +9,13 @@ if [ -z "${CLAUDE_SANDBOX:-}" ]; then
     exit 0
 fi
 
-session_id=$(jq -r '.session_id // empty')
+# Read stdin once - it's consumed by the first reader, and this hook now
+# needs both session_id and cwd out of the same payload.
+payload=$(cat)
+session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty')
 resume_id="${session_id:-<unknown-session-id>}"
+project_dir=$(printf '%s' "$payload" | jq -r '.cwd // empty')
+project_dir="${project_dir:-$PWD}"
 
 # /etc/hostname in a docker container is the container's own ID, which
 # docker exec accepts directly - baking it into the suggested command below
@@ -19,6 +24,140 @@ resume_id="${session_id:-<unknown-session-id>}"
 # "succeed" against the wrong container).
 container_id=$(cat /etc/hostname 2>/dev/null)
 container_id="${container_id:-<container-id>}"
+
+# What the project says it needs, checked against what this container
+# actually has. .claude-sandbox/ is on the read-write workspace mount, so it
+# grants nothing - it's a declaration the user approves by hand on the host
+# (see bin/claude-sandbox-project). Reporting the gap here is what turns
+# "this fails mysteriously" into "tell the user to run one command".
+requirements=""
+decl_dir="$project_dir/.claude-sandbox"
+
+# Everything below reads attacker-controllable text on its way into an
+# agent's context window, so all three costs it can impose are bounded:
+#
+#   MAX_DECLARED  entries considered - the same cap read_declared() applies
+#                 host-side, so this reports on the same window
+#                 `claude-sandbox-project approve` will act on.
+#   MAX_ENTRY_LEN characters per entry.
+#
+# Within that window the report is a strict subset of what `approve` accepts,
+# never a superset: it never names something approve would reject, but it can
+# stay silent about something approve would take - a dotless domain (the
+# regex below requires a label separator, deliberately, so a bare
+# IGNORE-PREVIOUS-INSTRUCTIONS can't be echoed into the context) and a valid
+# domain longer than MAX_ENTRY_LEN are both approvable host-side and both
+# silently skipped here. Fail-closed in the direction that matters: the worst
+# case is a missing line of advice, not an unapproved entry presented as fine.
+#   MAX_LISTED    entries actually named in the report; the rest are only
+#                 counted. Without it 200 entries of 200 chars would be 40 KB
+#                 of attacker-chosen tokens per section, and a big enough
+#                 $requirements used to push the jq call at the end past
+#                 Linux's 128 KiB MAX_ARG_STRLEN and emit nothing at all -
+#                 silently costing every later session in the project its
+#                 entire briefing.
+MAX_DECLARED=200
+MAX_ENTRY_LEN=200
+MAX_LISTED=20
+
+# Yields at most MAX_DECLARED entries and stops reading there, so the size of
+# the file itself costs nothing either. `cat file; echo` supplies the newline
+# a final line may lack.
+read_declared_capped() {
+    local line count=0
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="${line// /}"
+        [ -n "$line" ] || continue
+        count=$((count + 1))
+        [ "$count" -le "$MAX_DECLARED" ] || break
+        [ "${#line}" -le "$MAX_ENTRY_LEN" ] || continue
+        printf '%s\n' "$line"
+    done < <(cat "$1"; echo)
+}
+
+# One listing per ecosystem, cached, instead of one probe per declared entry:
+# an `npm ls -g` or `pip show` fork costs about a second, so probing 200
+# declared entries would run past Claude Code's hook timeout and drop this
+# context just as thoroughly as an oversized argv would.
+installed_names() {
+    case "$1" in
+        apt)   dpkg-query -W -f='${Package} ${Status}\n' 2>/dev/null | sed -n 's/ install ok installed$//p' ;;
+        npm)   npm ls -g --depth=0 --parseable 2>/dev/null | sed -n 's#.*/node_modules/##p' ;;
+        # PEP 503: pip treats runs of [-_.] and case as equivalent, so
+        # compare normalized names rather than miss `pip:typing-extensions`
+        # against an installed `typing_extensions`.
+        pip)   pip list --format=freeze 2>/dev/null | sed -n 's/^\([^=@ ][^=@ ]*\).*/\1/p' | tr 'A-Z._' 'a-z--' ;;
+        cargo) cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v[^ ]*:$/\1/p' ;;
+    esac
+}
+
+if [ -f "$decl_dir/dependencies" ]; then
+    missing_deps=""
+    missing_deps_n=0
+    declare -A installed_cache=()
+    while IFS= read -r spec; do
+        # Same shape as valid_dep_spec() in claude-sandbox-project-lib.sh -
+        # a leading dash (e.g. "--allow-unauthenticated") must not validate
+        # as a name, or this hook would echo into the agent's context an
+        # entry the project's own approve/status commands treat as rejected.
+        [[ "$spec" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+        kind="${spec%%:*}"
+        name="${spec#*:}"
+        [ -n "${installed_cache[$kind]+set}" ] || installed_cache[$kind]="$(installed_names "$kind")"
+        [ "$kind" != pip ] || name="$(printf '%s' "$name" | tr 'A-Z._' 'a-z--')"
+        # -F -x: a package name can contain "." and "+", both of which would
+        # otherwise be regex metacharacters matching the wrong entry.
+        grep -qxF -- "$name" <<< "${installed_cache[$kind]}" && continue
+        missing_deps_n=$((missing_deps_n + 1))
+        [ "$missing_deps_n" -le "$MAX_LISTED" ] && missing_deps="$missing_deps $spec"
+    done < <(read_declared_capped "$decl_dir/dependencies")
+    if [ "$missing_deps_n" -gt "$MAX_LISTED" ]; then
+        missing_deps="$missing_deps (+$((missing_deps_n - MAX_LISTED)) more)"
+    fi
+    if [ -n "$missing_deps" ]; then
+        requirements="$requirements
+- Declared dependencies missing from this image:$missing_deps
+  These need an image rebuild, so they cannot be added to this session. Tell
+  the user to run, outside the sandbox:
+    claude-sandbox-project approve \"$project_dir\"
+  then restart the sandbox. Do not try to install them yourself."
+    fi
+fi
+
+if [ -f "$decl_dir/allowed-domains" ]; then
+    missing_domains=""
+    missing_domains_n=0
+    while IFS= read -r dom; do
+        # One dot minimum, unlike valid_domain()'s optional label group: a
+        # bare word is not a domain this hook could ever be reporting on, and
+        # accepting one puts arbitrary attacker text ("IGNORE-PREVIOUS-...")
+        # verbatim into the agent's context under a heading that reads as the
+        # project speaking.
+        [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)+[a-zA-Z0-9-]{1,63}$ ]] || continue
+        # Every valid domain has a dot, a BRE metachar that would match any
+        # char - escape it so "a.b" can't false-positive against "aXb".
+        grep -q "^server=/${dom//./\\.}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
+        missing_domains_n=$((missing_domains_n + 1))
+        [ "$missing_domains_n" -le "$MAX_LISTED" ] && missing_domains="$missing_domains $dom"
+    done < <(read_declared_capped "$decl_dir/allowed-domains")
+    if [ "$missing_domains_n" -gt "$MAX_LISTED" ]; then
+        missing_domains="$missing_domains (+$((missing_domains_n - MAX_LISTED)) more)"
+    fi
+    if [ -n "$missing_domains" ]; then
+        requirements="$requirements
+- Declared domains not allowed in this session:$missing_domains
+  Tell the user to run, outside the sandbox:
+    claude-sandbox-project approve \"$project_dir\"
+  (or, for one domain right now:
+    bin/claude-sandbox-allow <domain> --container $container_id)"
+    fi
+fi
+
+if [ -n "$requirements" ]; then
+    requirements="
+
+This project declares requirements this session does not satisfy:$requirements"
+fi
 
 context=$(cat <<EOF
 You are running inside the claude-sandbox Docker container, not directly on
@@ -34,10 +173,10 @@ What this means:
   ~/.claude is disposable: installed system packages, anything outside the
   mounted paths, and the container itself go away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
-  registry, GitHub read-only, the configured Gitea host, plus anything set
-  via ALLOWED_DOMAINS). Requests to anything else will simply fail to
-  connect. If a task needs one more domain and nothing else, that's a quick
-  fix, not a reason to stop: tell the user to run
+  registry, GitHub read-only, the configured Gitea host, plus anything
+  approved via claude-sandbox-allow). Requests to anything else will simply
+  fail to connect. If a task needs one more domain and nothing else, that's
+  a quick fix, not a reason to stop: tell the user to run
   \`bin/claude-sandbox-allow <domain> --container $container_id\` (add
   \`--global\` to persist it past this session) from a terminal outside the
   sandbox, then continue. Quote that --container value exactly as written
@@ -78,13 +217,17 @@ the host:
   claude --resume $resume_id
 
 (session history is shared via the bind-mounted ~/.claude, so it will pick
-up right where this left off).
+up right where this left off).$requirements
 EOF
 )
 
-jq -n --arg context "$context" '{
+# Fed on stdin rather than as --arg: a single argv element is capped at 128
+# KiB (MAX_ARG_STRLEN), and a context that overruns it makes jq fail outright,
+# emitting no context at all. The bounds above keep $requirements far below
+# that, but this removes the failure mode rather than staying just inside it.
+printf '%s' "$context" | jq -R -s '{
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": $context
+    "additionalContext": .
   }
 }'

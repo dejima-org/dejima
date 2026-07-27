@@ -1,5 +1,0 @@
-# Sourced by bin/claude-sandbox before reading ALLOWED_DOMAINS. Rewritten by
-# `bin/claude-sandbox-allow <domain> --global` to persist a domain past a
-# single session. A real environment variable (if already exported before
-# invoking bin/claude-sandbox) takes precedence over this file.
-export ALLOWED_DOMAINS=""

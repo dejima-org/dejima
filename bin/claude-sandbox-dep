@@ -1,0 +1,107 @@
+#!/bin/bash
+# Manage the approved dev-dependency list for a project or, with --global,
+# every project. Approvals live host-side (never mounted into the
+# container), so a sandboxed session can ask for a package but can never
+# grant itself one - the same split bin/claude-sandbox-allow uses for
+# domains.
+#
+# Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--global | --project <path>]
+#   claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
+#   claude-sandbox-dep add cargo:cargo-nextest --global
+#   claude-sandbox-dep list
+#
+# A spec is <apt|npm|pip|cargo>:<name>. The dependencies actually installed
+# for a project are the union of its global and project approvals.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=claude-sandbox-project-lib.sh
+source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+
+action=""
+spec=""
+project=""
+global=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --global) global=1; shift ;;
+        --project) project="$2"; shift 2 ;;
+        -*) echo "Unknown option: $1" >&2; exit 1 ;;
+        *)
+            if [ -z "$action" ]; then action="$1"
+            elif [ -z "$spec" ]; then spec="$1"
+            else echo "Unexpected argument: $1" >&2; exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+usage() {
+    echo "Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--global | --project <path>]" >&2
+    exit 1
+}
+
+[ -n "$action" ] || usage
+
+# An entry belongs to exactly one scope; silently picking one would misplace
+# an approval.
+if [ "$global" -eq 1 ] && [ -n "$project" ]; then
+    echo "--global and --project are mutually exclusive." >&2
+    exit 1
+fi
+
+# With --global there is no project path to resolve; doing it anyway would
+# put a misleading $PWD-derived path in error messages.
+if [ "$global" -eq 0 ]; then
+    project="$(cd "${project:-$PWD}" && pwd)"
+fi
+
+case "$action" in
+    list)
+        if [ "$global" -eq 1 ]; then
+            approved_entries "$(config_root)" dependencies
+        else
+            store="$(resolve_project_store "$project")"
+            [ -n "$store" ] || exit 0
+            approved_entries "$store" dependencies
+        fi
+        ;;
+    add)
+        [ -n "$spec" ] || usage
+        valid_dep_spec "$spec" || { echo "Not a valid dependency spec: $spec" >&2; echo "Expected <apt|npm|pip|cargo>:<name>" >&2; exit 1; }
+        if [ "$global" -eq 1 ]; then
+            store="$(ensure_global_store)"
+            approve_entry "$store" dependencies "$spec"
+            echo "Approved $spec globally (every project)."
+        else
+            store="$(ensure_project_store "$project")"
+            approve_entry "$store" dependencies "$spec"
+            echo "Approved $spec for $project."
+        fi
+        # Unlike claude-sandbox-allow, this cannot touch a running session:
+        # it needs an image rebuild. Say so, or an agent will keep insisting
+        # the dependency is missing right after the user added it.
+        echo "Takes effect on the next launch (bin/claude-sandbox rebuilds the project image)."
+        ;;
+    remove)
+        [ -n "$spec" ] || usage
+        if [ "$global" -eq 1 ]; then
+            # Same rule as the project path below: with no store there is
+            # nothing to remove from, and confirming a removal that never
+            # happened is how a typo'd or premature remove looks like it
+            # worked.
+            store="$(config_root)"
+            [ -d "$store" ] || { echo "No global approved config." >&2; exit 1; }
+            unapprove_entry "$store" dependencies "$spec"
+            echo "Removed $spec from the global dependencies (takes effect on the next launch)."
+        else
+            store="$(resolve_project_store "$project")"
+            [ -n "$store" ] || { echo "No approved config for $project." >&2; exit 1; }
+            unapprove_entry "$store" dependencies "$spec"
+            echo "Removed $spec from $project (takes effect on the next launch)."
+        fi
+        ;;
+    *) usage ;;
+esac

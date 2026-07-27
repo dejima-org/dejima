@@ -1,7 +1,8 @@
 #!/bin/bash
 # Idempotent installer for claude-sandbox. Symlinks this repo's hooks into
 # ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
-# bin/claude-sandbox + bin/claude-sandbox-allow on PATH. Safe to re-run -
+# bin/claude-sandbox, bin/claude-sandbox-allow, bin/claude-sandbox-dep and
+# bin/claude-sandbox-project on PATH. Safe to re-run -
 # every step is a no-op if already done, and every change is printed as it
 # happens.
 set -euo pipefail
@@ -116,6 +117,8 @@ link_bin() {
 
 link_bin claude-sandbox
 link_bin claude-sandbox-allow
+link_bin claude-sandbox-dep
+link_bin claude-sandbox-project
 echo
 
 echo "Done. Try: $BIN_DIR/claude-sandbox ~/some/project"
