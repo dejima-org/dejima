@@ -545,6 +545,40 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [[ " $(launched_env ALLOWED_DOMAINS) " != *" declared.example.com "* ]]
 }
 
+@test "the launcher passes an approved global domain to the container" {
+    printf 'global.example.com\n' > "$CONFIG_DIR/allowed-domains"
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -f "$LAUNCH_ENV" ]
+    [[ " $(launched_env ALLOWED_DOMAINS) " == *" global.example.com "* ]]
+}
+
+@test "the launcher merges global and project approved domains, neither replacing the other" {
+    printf 'global.example.com\n' > "$CONFIG_DIR/allowed-domains"
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'project.example.com\n' > "$store/allowed-domains"
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -f "$LAUNCH_ENV" ]
+    [[ " $(launched_env ALLOWED_DOMAINS) " == *" global.example.com "* ]]
+    [[ " $(launched_env ALLOWED_DOMAINS) " == *" project.example.com "* ]]
+}
+
+@test "an ALLOWED_DOMAINS exported before invocation is ignored, not merged in" {
+    launch_setup
+    HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
+        SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
+        SANDBOX_CREDENTIAL_PROXY=0 \
+        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \
+        run "$REPO_ROOT/bin/claude-sandbox" "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -f "$LAUNCH_ENV" ]
+    [[ " $(launched_env ALLOWED_DOMAINS) " != *"evil.example"* ]]
+}
+
 @test "the launcher runs the derived image only when the project has approved dependencies" {
     launch_setup
     run launch "$PROJ"

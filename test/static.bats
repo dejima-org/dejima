@@ -366,11 +366,12 @@ setup() {
     grep -q 'extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")' "$REPO_ROOT/bin/claude-sandbox"
 }
 
-@test "bin/claude-sandbox parses config/env instead of sourcing it" {
-    run grep -E 'source "\$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
+@test "bin/claude-sandbox reads allowed domains only from the approval store" {
+    [ ! -e "$REPO_ROOT/config/env" ]
+    [ ! -e "$REPO_ROOT/bin/claude-sandbox-env.sh" ]
+    run grep -n 'config/env\|claude-sandbox-env' "$REPO_ROOT/bin/claude-sandbox"
     [ "$status" -ne 0 ]
-    grep -q 'parse_allowed_domains_env "$REPO_ROOT/config/env"' "$REPO_ROOT/bin/claude-sandbox"
-    grep -q 'source "$SCRIPT_DIR/claude-sandbox-env.sh"' "$REPO_ROOT/bin/claude-sandbox"
+    grep -q 'ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains' "$REPO_ROOT/bin/claude-sandbox"
 }
 
 @test "bin/claude-sandbox snapshots before the run and compares after" {

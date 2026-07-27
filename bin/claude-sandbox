@@ -12,8 +12,8 @@ set -euo pipefail
 # readlink -f resolves through the ~/.local/bin/claude-sandbox symlink
 # install.sh sets up - without it, BASH_SOURCE[0] is the symlink's own path
 # when invoked by name via PATH, so dirname finds ~/.local/bin instead of
-# this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE,
-# config/env) resolves against the wrong directory entirely.
+# this repo's real bin/, and everything below (REPO_ROOT, COMPOSE_FILE)
+# resolves against the wrong directory entirely.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
@@ -31,32 +31,25 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
-# Load persisted config (currently just ALLOWED_DOMAINS) before it's read
-# below - lets `bin/claude-sandbox-allow --global` persist a domain across
-# sessions without depending on the user's own shell profile chain, which a
-# standalone install of this repo can't assume exists.
-# config/env is parsed, never sourced: it lives inside this repo, which is
-# itself a mountable/writable workspace, so executing it would be a
-# host-shell persistence path for a self-mounted session. A real env var
-# (exported before invoking this script - e.g. from the user's shell
-# profile) still takes precedence, unchanged.
-source "$SCRIPT_DIR/claude-sandbox-env.sh"
-if [ -z "${ALLOWED_DOMAINS:-}" ]; then
-    ALLOWED_DOMAINS="$(parse_allowed_domains_env "$REPO_ROOT/config/env")"
-fi
-
-# Per-project approved domains, from the host-side approval store (see
-# bin/claude-sandbox-project-lib.sh). Deliberately NOT read from the
-# project's own in-repo declaration directory: that lives on the read-write
-# workspace mount, so treating it as a grant would let a session widen its
-# own firewall for the next run. The declaration is only ever reported (see
-# hooks/sandbox-context.sh) and approved by hand.
+# Allowed domains come only from the host-side approval store (see
+# bin/claude-sandbox-project-lib.sh), global then per-project. The first
+# assignment below is plain, not ${ALLOWED_DOMAINS:-}-preserving: the store
+# is the single host-side source of truth, and an exported ALLOWED_DOMAINS
+# in the user's shell profile must not be able to silently widen every
+# sandbox's firewall with nothing recording that it did.
+#
+# Per-project domains are read from the approval store only - deliberately
+# NOT from the project's own in-repo declaration directory: that lives on
+# the read-write workspace mount, so treating it as a grant would let a
+# session widen its own firewall for the next run. The declaration is only
+# ever reported (see hooks/sandbox-context.sh) and approved by hand.
 # shellcheck source=claude-sandbox-project-lib.sh
 source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
 PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
 if [ -n "$PROJECT_STORE" ]; then
     project_domains="$(approved_entries "$PROJECT_STORE" allowed-domains | tr '\n' ' ')"
-    ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}${project_domains:+ $project_domains}"
+    ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
 
 # The approval store is only out of the container's reach while it isn't
@@ -445,8 +438,8 @@ export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC
 "$SCRIPT_DIR/claude-sandbox-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
-# docker/, install.sh, config/env, test/) is mounted writable - warn, and
-# the audit below will report any change to it.
+# docker/, install.sh, test/) is mounted writable - warn, and the audit
+# below will report any change to it.
 if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "Warning: sandbox's own repo is the mounted workspace - its trusted" >&2
     echo "computing base (bin/, hooks/, docker/, install.sh) is writable this" >&2
