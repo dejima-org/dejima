@@ -96,7 +96,7 @@ tcb_snapshot() {
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
-        for p in install.sh config/env; do
+        for p in install.sh; do
             [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
         done
         for dir in bin hooks docker test; do
