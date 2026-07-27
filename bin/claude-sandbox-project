@@ -60,9 +60,17 @@ case "$action" in
         pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
         pending_doms=$(classify allowed-domains valid_domain | sed -n 's/^pending //p')
         rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; } | sed -n 's/^rejected //p')
+        trunc_deps=$(classify dependencies valid_dep_spec | sed -n 's/^truncated //p')
+        trunc_doms=$(classify allowed-domains valid_domain | sed -n 's/^truncated //p')
+        if [ -n "$trunc_deps" ]; then
+            echo "Warning: dependencies declares $trunc_deps entries; only the first $CLAUDE_SANDBOX_MAX_DECLARED were considered." >&2
+        fi
+        if [ -n "$trunc_doms" ]; then
+            echo "Warning: allowed-domains declares $trunc_doms entries; only the first $CLAUDE_SANDBOX_MAX_DECLARED were considered." >&2
+        fi
         if [ -n "$rejected" ]; then
             echo "Refusing to approve these malformed entries (fix the declaration):" >&2
-            printf '  %s\n' $rejected >&2
+            sed 's/^/  /' <<< "$rejected" >&2
             echo >&2
         fi
         if [ -z "$pending_deps" ] && [ -z "$pending_doms" ]; then
@@ -74,7 +82,7 @@ case "$action" in
         [ -n "$pending_doms" ] && printf '  domain:     %s\n' $pending_doms
         echo
         printf 'Approve all of the above? [y/N] '
-        read -r reply
+        read -r reply || reply=n
         case "$reply" in
             y|Y) ;;
             *) echo "Nothing approved."; exit 0 ;;

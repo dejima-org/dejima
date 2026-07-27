@@ -208,3 +208,28 @@ EOF
     run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
     [[ "$output" != *"gem:rails"* ]]
 }
+
+@test "claude-sandbox-project approve reports a rejected entry's literal text, unsplit and unglobbed" {
+    printf 'npm:has space\n' > "$PROJ/.claude-sandbox/dependencies"
+    printf 'a*evil\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"npm:has space"* ]]
+    [[ "$output" == *"a*evil"* ]]
+}
+
+@test "claude-sandbox-project approve warns about entries beyond the 200-entry cap" {
+    for i in $(seq 1 250); do echo "apt:pkg$i"; done > "$PROJ/.claude-sandbox/dependencies"
+    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"250"* ]]
+}
+
+@test "claude-sandbox-project approve exits 0 and approves nothing when stdin is already at EOF" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    run "$REPO_ROOT/bin/claude-sandbox-project" approve "$PROJ" < /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Nothing approved."* ]]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"apt:libpq-dev"* ]]
+}
