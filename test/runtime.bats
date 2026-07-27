@@ -738,6 +738,14 @@ EOF
         _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$IMAGE" "$store" > "$df"
     docker build -q -t "$derived" -f "$df" "$ctx" >&2
 
+    # The image's own config, not the running container: `docker run` below
+    # passes --entrypoint explicitly (this file's convention), which would
+    # override the image's ENTRYPOINT and mask its absence - so that run
+    # succeeding doesn't prove generate_derived_dockerfile's own ENTRYPOINT
+    # line survived. Checked here, straight off the build.
+    run docker inspect -f '{{json .Config.Entrypoint}}' "$derived"
+    [[ "$output" == *"/usr/local/bin/entrypoint.sh"* ]]
+
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \

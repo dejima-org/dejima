@@ -614,6 +614,24 @@ this line is not json'
         "$SANDBOX_DIR/docker-compose.yml"
 }
 
+@test "bin/claude-sandbox explicitly builds the base image, pinned to the base tag on that exact line" {
+    # docker-compose.yml's image: now honors $SANDBOX_IMAGE (see the test
+    # above), so an unpinned `compose build claude` would inherit whatever
+    # $SANDBOX_IMAGE happens to be in the caller's environment - e.g. a
+    # derived tag left over from a previous project session - and rebuild
+    # the base Dockerfile under that name instead of the base tag. Anchored
+    # to the line immediately before the build invocation itself: the
+    # fallback `SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}"` assignment a
+    # couple of lines later would satisfy a looser "does the pin appear
+    # anywhere in the file" check just as well, without actually applying to
+    # this build.
+    local build_line
+    build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build claude' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    [ -n "$build_line" ]
+    run sed -n "$((build_line - 1))p" "$REPO_ROOT/bin/claude-sandbox"
+    [[ "$output" == 'SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}" \' ]]
+}
+
 @test "the derived image build never uses the workspace as its build context" {
     # A root-context build with the untrusted project as context would let a
     # session's own files influence the image it then runs in.

@@ -26,8 +26,12 @@ valid_domain() {
 # <ecosystem>:<name>. The character class is deliberately narrow: an
 # approved spec gets interpolated into a generated Dockerfile RUN line, so
 # anything shell-active here would be a root-context injection at build.
+# The name must start with an alphanumeric - without that, a leading dash
+# (e.g. "--allow-unauthenticated") validates as a name and lands in the
+# generated RUN line as an option instead, quietly weakening apt/pip/npm/
+# cargo's own signature/lockfile checks.
 valid_dep_spec() {
-    [[ "$1" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9._+-]+$ ]]
+    [[ "$1" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
 }
 
 # read_declared <file> <validator-fn>

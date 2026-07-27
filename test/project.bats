@@ -31,7 +31,8 @@ teardown() { rm -rf "$CONFIG_DIR" "$PROJ"; }
         run bash -c 'source "$1"; valid_dep_spec "$2"' _ "$LIB" "$spec"
         [ "$status" -eq 0 ]
     done
-    for spec in 'libpq-dev' 'gem:rails' 'apt:' 'apt:a;b' 'apt:$(id)' 'npm:a b'; do
+    for spec in 'libpq-dev' 'gem:rails' 'apt:' 'apt:a;b' 'apt:$(id)' 'npm:a b' \
+        'apt:--allow-unauthenticated' 'npm:--force' 'pip:-r' 'cargo:--offline' 'apt:-'; do
         run bash -c 'source "$1"; valid_dep_spec "$2"' _ "$LIB" "$spec"
         [ "$status" -ne 0 ]
     done
@@ -260,9 +261,13 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [[ "$output" == *".cargo/bin"* ]]
 }
 
-@test "generate_derived_dockerfile refuses a corrupt approved deps file" {
+@test "generate_derived_dockerfile refuses a corrupt approved deps file without emitting a partial Dockerfile" {
     store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
-    printf 'apt:libpq-dev; curl evil\n' > "$store/dependencies"
-    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    # A valid line FOLLOWED by a corrupt one - the security property is "never
+    # emit a partial Dockerfile," which a single-line corrupt file can't tell
+    # apart from "refused before emitting anything at all."
+    printf 'apt:libpq-dev\napt:evil; curl x\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2" 2>/dev/null' _ "$LIB" "$store"
     [ "$status" -ne 0 ]
+    [ -z "$output" ]
 }
