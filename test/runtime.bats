@@ -759,9 +759,10 @@ EOF
     run docker exec "$test_container" dpkg-query -W -f='${Status}' cowsay
     [[ "$output" == *"install ok installed"* ]]
 
-    # the hardening assertions that matter must hold on a derived image too
-    run docker exec -u node "$test_container" sudo -n true
-    [ "$status" -ne 0 ]
+    # the hardening assertions that matter must hold on a derived image too.
+    # `run !` for sudo, matching "node has no working sudo" above: it exits
+    # 127 rather than a permission error, since sudo isn't installed at all.
+    run ! docker exec -u node "$test_container" sudo -n true
     run docker exec -u node "$test_container" iptables -L
     [ "$status" -ne 0 ]
 
