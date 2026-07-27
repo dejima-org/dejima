@@ -187,6 +187,31 @@ EOF
     [[ "$output" == *"apt:parentpkg"* ]]
 }
 
+@test "ensure_project_store heals a store that has no slug-collision guard" {
+    # An interrupted write or a hand-restored directory leaves projects/<slug>/
+    # with no path file, and that file is the only thing resolve_project_store
+    # checks to catch two projects sanitizing to the same slug. Attaching to
+    # such a store without healing it leaves it unguarded permanently.
+    mkdir -p "$(store_of "$PROJ")"
+    run bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -qx "$PROJ" "$(store_of "$PROJ")/path"
+}
+
+@test "healing an unguarded store records the owner, not the path being approved" {
+    # The store found for a worktree belongs to the project above it. Writing
+    # the worktree's own path into it would make every later read from the
+    # real owner look like a slug collision and fail.
+    local wt="$PROJ/.worktrees/feat"
+    mkdir -p "$(store_of "$PROJ")" "$wt"
+    run bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$wt"
+    [ "$status" -eq 0 ]
+    grep -qx "$PROJ" "$(store_of "$PROJ")/path"
+    run bash -c 'source "$1"; resolve_project_store "$2"' _ "$LIB" "$PROJ"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(store_of "$PROJ")" ]
+}
+
 @test "resolve_project_store fails loudly on a slug collision" {
     store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
     echo "/some/other/project" > "$store/path"

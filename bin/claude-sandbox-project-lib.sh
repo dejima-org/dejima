@@ -90,7 +90,20 @@ ensure_project_store() {
     existing="$(resolve_project_store "$path")" || return 1
     if [ -n "$existing" ]; then
         owner="$(cat "$existing/path" 2>/dev/null)"
-        if [ -n "$owner" ] && [ "$owner" != "$path" ]; then
+        if [ -z "$owner" ]; then
+            # A store with no path file (an interrupted write, a hand-made
+            # directory) has no collision guard at all, and attaching to it
+            # would leave it that way permanently. Heal it - which ancestor
+            # it belongs to is whichever one's slug produced this directory,
+            # not necessarily $path, and recording the wrong one would make
+            # every later read from the real owner look like a collision.
+            owner="$path"
+            while [ "$(config_root)/projects/$(project_slug "$owner")" != "$existing" ]; do
+                owner="$(dirname "$owner")"
+            done
+            printf '%s\n' "$owner" > "$existing/path"
+        fi
+        if [ "$owner" != "$path" ]; then
             echo "Note: recorded under the existing approvals for $owner, which" >&2
             echo "$path inherits - so it applies to $owner and everything under it." >&2
         fi

@@ -37,9 +37,18 @@ decl_dir="$project_dir/.claude-sandbox"
 # agent's context window, so all three costs it can impose are bounded:
 #
 #   MAX_DECLARED  entries considered - the same cap read_declared() applies
-#                 host-side, so this reports on exactly the window
+#                 host-side, so this reports on the same window
 #                 `claude-sandbox-project approve` will act on.
 #   MAX_ENTRY_LEN characters per entry.
+#
+# Within that window the report is a strict subset of what `approve` accepts,
+# never a superset: it never names something approve would reject, but it can
+# stay silent about something approve would take - a dotless domain (the
+# regex below requires a label separator, deliberately, so a bare
+# IGNORE-PREVIOUS-INSTRUCTIONS can't be echoed into the context) and a valid
+# domain longer than MAX_ENTRY_LEN are both approvable host-side and both
+# silently skipped here. Fail-closed in the direction that matters: the worst
+# case is a missing line of advice, not an unapproved entry presented as fine.
 #   MAX_LISTED    entries actually named in the report; the rest are only
 #                 counted. Without it 200 entries of 200 chars would be 40 KB
 #                 of attacker-chosen tokens per section, and a big enough
