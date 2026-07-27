@@ -11,7 +11,7 @@ setup() {
     PROJ="$(mktemp -d)"
     mkdir -p "$PROJ/.claude-sandbox"
 }
-teardown() { rm -rf "$CONFIG_DIR" "$PROJ" ${STUB_DIR:+"$STUB_DIR"}; }
+teardown() { rm -rf "$CONFIG_DIR" "$PROJ" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"}; }
 
 store_of() {
     printf '%s/projects/%s' "$CONFIG_DIR" \
@@ -39,6 +39,44 @@ EOF
     chmod +x "$STUB_DIR/docker"
     PATH="$STUB_DIR:$PATH"
 }
+
+# bin/claude-sandbox is where an approval finally becomes a grant (a firewall
+# entry, an installed package), and nothing else in this suite exercises that
+# translation - the checks on it are greps over its source, which a deleted
+# line can satisfy just as well as a working one. These two helpers run the
+# real launcher against a stub `docker` and a throwaway $HOME, and capture the
+# environment it would have handed the container. Split in two because bats'
+# `run` executes in a subshell: everything the assertions need to see has to
+# be set up out here first.
+launch_setup() {
+    LAUNCH_DIR="$(mktemp -d)"
+    LAUNCH_ENV="$LAUNCH_DIR/run-env"
+    mkdir -p "$LAUNCH_DIR/home/.claude"
+    echo '{}' > "$LAUNCH_DIR/home/.claude/settings.json"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    [ "$arg" = run ] || continue
+    env > "$SANDBOX_TEST_RUN_ENV"
+    break
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    : > "$LAUNCH_DIR/sandbox-key"
+    chmod 600 "$LAUNCH_DIR/sandbox-key"
+}
+
+launch() {
+    HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
+        SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
+        SANDBOX_CREDENTIAL_PROXY=0 \
+        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        "$REPO_ROOT/bin/claude-sandbox" "$@"
+}
+
+launched_env() { sed -n "s/^$1=//p" "$LAUNCH_ENV"; }
 
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
@@ -378,4 +416,43 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2" 2>/dev/null' _ "$LIB" "$store"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
+}
+
+@test "the launcher passes approved project domains to the container, and declared ones never" {
+    printf 'declared.example.com\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    printf 'approved.example.com\n' > "$(store_of "$PROJ")/allowed-domains"
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -f "$LAUNCH_ENV" ]
+    [[ " $(launched_env ALLOWED_DOMAINS) " == *" approved.example.com "* ]]
+    [[ " $(launched_env ALLOWED_DOMAINS) " != *" declared.example.com "* ]]
+}
+
+@test "the launcher runs the derived image only when the project has approved dependencies" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)" ]
+
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    [ "$(launched_env SANDBOX_IMAGE)" = "claude-sandbox:$(id -un)-$slug" ]
+}
+
+@test "the launcher warns when the approval store sits inside the mounted workspace" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no longer out of reach"* ]]
+
+    # Same project, but with the store somewhere the session can rewrite it.
+    export CLAUDE_SANDBOX_CONFIG_DIR="$PROJ/.config/claude-sandbox"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no longer out of reach"* ]]
 }
