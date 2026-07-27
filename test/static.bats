@@ -66,6 +66,13 @@ setup() {
     done < <(grep "ipset add" "$SANDBOX_DIR/init-firewall.sh")
 }
 
+@test "docker-compose.yml runs an init so orphaned processes get reaped" {
+    # Without this the session's own command is PID 1 and never reaps, so
+    # leaked children accumulate as zombies until the pids cgroup is full
+    # and the container cannot fork - see the comment on the init: line.
+    grep -qE '^\s*init:\s*true\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
 @test "docker-compose.yml never mounts the Docker socket" {
     run grep -i "docker.sock" "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
@@ -277,6 +284,13 @@ setup() {
     grep -q 'looks like a default personal SSH key' "$REPO_ROOT/bin/claude-sandbox"
     run grep -E '^\s*id_rsa\|id_ecdsa\|id_ed25519\|id_dsa\|id_ecdsa_sk\|id_ed25519_sk\)\s*$' "$REPO_ROOT/bin/claude-sandbox"
     [ "$status" -eq 0 ]
+}
+
+@test "init-firewall.sh sends GH_TOKEN on its GitHub API fetch when one is set" {
+    # Unauthenticated /meta is capped at 60 requests/hour per source IP,
+    # shared across every container start; exhausting it fails the launch.
+    grep -q 'gh_auth=(-H "Authorization: Bearer \$GH_TOKEN")' "$SANDBOX_DIR/init-firewall.sh"
+    grep -q 'curl -s \${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
 }
 
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
