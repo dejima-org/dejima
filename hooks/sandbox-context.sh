@@ -38,6 +38,10 @@ if [ -f "$decl_dir/dependencies" ]; then
     while IFS= read -r spec; do
         spec="${spec%%#*}"; spec="${spec// /}"
         [ -n "$spec" ] || continue
+        # Unbounded context bloat from a session-writable file is its own
+        # problem even when the entry is otherwise well-formed - same spirit
+        # as the 200-entry cap the rest of this feature applies.
+        [ "${#spec}" -le 200 ] || continue
         # Same shape as valid_dep_spec() in claude-sandbox-project-lib.sh -
         # a leading dash (e.g. "--allow-unauthenticated") must not validate
         # as a name, or this hook would echo into the agent's context an
@@ -55,13 +59,13 @@ if [ -f "$decl_dir/dependencies" ]; then
             cargo:*) cargo install --list 2>/dev/null | grep -q "^${name//./\\.} " && continue ;;
         esac
         missing_deps="$missing_deps $spec"
-    done < "$decl_dir/dependencies"
+    done < <(cat "$decl_dir/dependencies"; echo)
     if [ -n "$missing_deps" ]; then
         requirements="$requirements
 - Declared dependencies missing from this image:$missing_deps
   These need an image rebuild, so they cannot be added to this session. Tell
   the user to run, outside the sandbox:
-    claude-sandbox-project approve $project_dir
+    claude-sandbox-project approve \"$project_dir\"
   then restart the sandbox. Do not try to install them yourself."
     fi
 fi
@@ -71,15 +75,20 @@ if [ -f "$decl_dir/allowed-domains" ]; then
     while IFS= read -r dom; do
         dom="${dom%%#*}"; dom="${dom// /}"
         [ -n "$dom" ] || continue
+        # Same context-bloat reasoning as the dependency length cap above.
+        [ "${#dom}" -le 200 ] || continue
         [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]] || continue
-        grep -q "^server=/${dom}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
+        # Every valid domain has a dot, so leaving it unescaped in this BRE
+        # (matches any char) is even more exposed than the cargo case above -
+        # escape it the same way.
+        grep -q "^server=/${dom//./\\.}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
         missing_domains="$missing_domains $dom"
-    done < "$decl_dir/allowed-domains"
+    done < <(cat "$decl_dir/allowed-domains"; echo)
     if [ -n "$missing_domains" ]; then
         requirements="$requirements
 - Declared domains not allowed in this session:$missing_domains
   Tell the user to run, outside the sandbox:
-    claude-sandbox-project approve $project_dir
+    claude-sandbox-project approve \"$project_dir\"
   (or, for one domain right now:
     bin/claude-sandbox-allow <domain> --container $container_id)"
     fi

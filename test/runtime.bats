@@ -746,7 +746,10 @@ EOF
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
 
-    run docker exec -u node -w "$ws" "$test_container" \
+    # -w is deliberately an unrelated directory, not "$ws": if cwd extraction
+    # from the payload broke and silently fell back to $PWD, running with
+    # -w "$ws" would still find the declarations and pass regardless.
+    run docker exec -u node -w /tmp "$test_container" \
         bash -c 'printf "{\"session_id\":\"s1\",\"cwd\":\"'"$ws"'\"}" | CLAUDE_SANDBOX=1 /usr/local/bin/sandbox-context.sh'
     [ "$status" -eq 0 ]
     [[ "$output" == *"definitely-not-installed"* ]]

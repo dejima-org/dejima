@@ -658,3 +658,23 @@ this line is not json'
     grep -q 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/sandbox-context.sh"
     grep -q 'claude-sandbox-project approve' "$REPO_ROOT/hooks/sandbox-context.sh"
 }
+
+@test "sandbox-context reports nothing when no project declarations exist" {
+    local ws; ws="$(mktemp -d)"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    [[ "$out" != *"declares requirements"* ]]
+}
+
+@test "sandbox-context still reports a declared dependency with no trailing newline" {
+    # A while/read loop fed straight from the file drops a final line that
+    # has no trailing newline - not a validation rejection, just never read.
+    local ws; ws="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    printf 'apt:definitely-not-installed-noeol' > "$ws/.claude-sandbox/dependencies"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | CLAUDE_SANDBOX=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    [[ "$out" == *"definitely-not-installed-noeol"* ]]
+}
