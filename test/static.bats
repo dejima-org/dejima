@@ -307,6 +307,15 @@ setup() {
     grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
 }
 
+@test "dns-proxy.sh refuses to start without Docker's embedded resolver, rather than falling back" {
+    # The allowlist only works because every forward goes to 127.0.0.11 on
+    # loopback; init-firewall.sh has no egress rule for UDP/53 anywhere else
+    # on purpose. Resolving via the host's nameservers instead would be an
+    # unrestricted-destination DNS channel, so absence must be fatal.
+    grep -q "nameserver.*127\\\\.0\\\\.0\\\\.11" "$SANDBOX_DIR/dns-proxy.sh"
+    grep -q '/etc/resolv.conf' "$SANDBOX_DIR/dns-proxy.sh"
+}
+
 @test "IPv6 blocking fails loud instead of silently swallowing errors once ip6tables is confirmed usable" {
     run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
     [ "$status" -ne 0 ]
@@ -530,4 +539,26 @@ this line is not json'
     [[ "$output" != *"tool output secret"* ]]
     [[ "$output" != *"hidden reasoning"* ]]
     [[ "$output" != *"not json"* ]]
+}
+
+@test "every container runtime.bats starts is attached to a user-defined network" {
+    # On the default bridge there's no 127.0.0.11, so dns-proxy.sh aborts and
+    # the container dies mid-startup - which used to surface as flaky,
+    # sometimes vacuous tests rather than an obvious failure. See runtime.bats'
+    # wait_ready comment.
+    local runs networks
+    runs=$(grep -cE '^\s*docker run -d' "$REPO_ROOT/test/runtime.bats")
+    networks=$(grep -cE '^\s*--network ' "$REPO_ROOT/test/runtime.bats")
+    [ "$runs" -gt 0 ]
+    [ "$runs" -eq "$networks" ]
+}
+
+@test "runtime.bats readiness waits for the final sleep infinity, not any startup sleep" {
+    # A bare `pgrep -x sleep` also matches dns-proxy.sh's dig-retry sleep and
+    # entrypoint.sh's forwarder-bind sleep, both of which run before
+    # init-firewall.sh has installed anything - asserting there would find
+    # OUTPUT ACCEPT and no ipsets, passing egress tests for the wrong reason.
+    grep -qF "pgrep -x -f 'sleep infinity'" "$REPO_ROOT/test/runtime.bats"
+    run grep -nE 'docker exec.*pgrep -x sleep' "$REPO_ROOT/test/runtime.bats"
+    [ "$status" -ne 0 ]
 }

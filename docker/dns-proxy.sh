@@ -20,6 +20,26 @@ CONF_FILE=/etc/dnsmasq-sandbox.conf
 SERVERS_FILE=/etc/dnsmasq-sandbox-servers.conf
 LOG_FILE=/var/log/dnsmasq.log
 
+# Every allowlisted name below is forwarded to Docker's embedded resolver at
+# 127.0.0.11, which only exists for containers on a user-defined network
+# (compose creates one for the real sandbox). On the default bridge the
+# container gets the host's own nameservers instead, dnsmasq has nothing to
+# forward to, and the readiness probe at the bottom fails ~24s later with a
+# generic timeout that says nothing about why. Falling back to whatever
+# resolver is in resolv.conf isn't an option: init-firewall.sh deliberately
+# has no egress rule for UDP/53 to an arbitrary destination (see its comment
+# on keeping DNS on loopback), so that would just move the failure. Fail
+# here instead, naming the actual cause.
+if ! grep -qE '^nameserver[[:space:]]+127\.0\.0\.11[[:space:]]*$' /etc/resolv.conf; then
+    echo "ERROR: Docker's embedded resolver (127.0.0.11) is not this container's" >&2
+    echo "nameserver, so the DNS allowlist has no upstream to forward to. Attach" >&2
+    echo "the container to a user-defined docker network (compose does this by" >&2
+    echo "default); the default bridge network does not provide the resolver." >&2
+    echo "Current /etc/resolv.conf nameservers:" >&2
+    grep -E '^nameserver' /etc/resolv.conf >&2 || echo "  (none)" >&2
+    exit 1
+fi
+
 touch "$LOG_FILE"
 chown dnsmasq:dnsmasq "$LOG_FILE" 2>/dev/null || true
 

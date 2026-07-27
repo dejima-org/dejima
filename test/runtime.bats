@@ -29,6 +29,35 @@ IMAGE=claude-sandbox:latest
 container_name() { echo "claude-sandbox-test-$(basename "$BATS_FILE_TMPDIR")"; }
 network_name() { echo "claude-sandbox-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 
+# Every container this file starts must go on network_name(), never the
+# default bridge: dns-proxy.sh forwards allowlisted names to Docker's
+# embedded resolver at 127.0.0.11, which only exists on a user-defined
+# network (compose gives the real sandbox one). On the default bridge the
+# container gets the host's nameservers instead, dnsmasq has nowhere to
+# forward, and startup dies in dns-proxy.sh - see its own check for this.
+#
+# Readiness is the *final* `sleep infinity` (entrypoint.sh's
+# SANDBOX_TEST_MODE exec), matched exactly. A bare `pgrep -x sleep` also
+# matches the short-lived sleeps of the startup sequence itself
+# (dns-proxy.sh's dig-retry loop, entrypoint.sh's forwarder-bind wait), and
+# a test that proceeds on one of those asserts against a container whose
+# firewall hasn't been installed yet - which silently turns egress
+# assertions into vacuous passes, since everything is still reachable at
+# that point. Waiting for `sleep infinity` means the whole startup sequence
+# (DNS proxy, firewall, ipsets, logging, forwarder bind) has completed.
+wait_ready() {
+    local container="$1"
+    for _ in $(seq 1 60); do
+        if docker exec "$container" pgrep -x -f 'sleep infinity' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "container $container never reached the post-entrypoint sleep - startup log:" >&2
+    docker logs "$container" >&2
+    return 1
+}
+
 setup_file() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
@@ -55,20 +84,7 @@ setup_file() {
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
-    for _ in $(seq 1 60); do
-        # pgrep -x sleep also transiently matches entrypoint.sh's own `sleep
-        # 0.5` (used for its ulogd readiness check) before the real, final
-        # `sleep infinity` - harmless here, since by the time *either* sleep
-        # runs, dns-proxy.sh/init-firewall.sh have already fully completed
-        # (they're earlier, sequential steps under set -e).
-        if docker exec "$container" pgrep -x sleep >/dev/null 2>&1; then
-            return
-        fi
-        sleep 1
-    done
-    echo "container never reached the post-entrypoint sleep - startup log:" >&2
-    docker logs "$container" >&2
-    return 1
+    wait_ready "$container"
 }
 
 teardown_file() {
@@ -113,14 +129,12 @@ dexec_node() {
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$test_image" >/dev/null
 
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     run docker exec -u testuser "$test_container" whoami
     [ "$status" -eq 0 ]
@@ -148,10 +162,7 @@ dexec_node() {
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     # A fresh `docker exec` is a sibling of PID 1, not a descendant of the
     # exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
@@ -199,15 +210,13 @@ dexec_node() {
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -v "$mounted_copy:/home/node/.claude.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     # Simulate the write Claude Code itself does against this path at
     # startup (before login even completes - see docker-compose.yml's
@@ -259,15 +268,13 @@ dexec_node() {
     local test_container="claude-sandbox-test-ghpush-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e ALLOW_GITHUB_PUSH=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
@@ -279,15 +286,13 @@ dexec_node() {
     local test_container="claude-sandbox-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GITEA_SSH_HOST=gitea.internal.example \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     run docker exec "$test_container" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
     [ "$status" -eq 0 ]
@@ -308,16 +313,14 @@ dexec_node() {
     mkdir -p "$src/skills" "$src/commands" "$src/agents"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -v "$src/skills:/home/node/.claude/skills:ro" \
         -v "$src/commands:/home/node/.claude/commands:ro" \
         -v "$src/agents:/home/node/.claude/agents:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
     for d in skills commands agents; do
         run docker exec -u node "$test_container" bash -c "touch /home/node/.claude/$d/pwned 2>&1"
         [ "$status" -ne 0 ]
@@ -345,15 +348,13 @@ dexec_node() {
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -v "$dotclaude:/home/node/.claude" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     # A `rm` on a bind-mounted file fails from ordinary mount-point-busy
     # semantics regardless of the :ro flag, so `rm -f X && echo pwned > X`
@@ -414,16 +415,14 @@ dexec_node() {
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -v "$dotclaude:/home/node/.claude" \
         -v "$target_dir:$target_dir:ro" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
-    for _ in $(seq 1 60); do
-        if docker exec "$test_container" pgrep -x sleep >/dev/null 2>&1; then break; fi
-        sleep 1
-    done
+    wait_ready "$test_container"
 
     run docker exec -u node "$test_container" sh -c \
         'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
@@ -558,30 +557,17 @@ EOF
     container="claude-sandbox-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
-    for _ in $(seq 1 60); do
-        docker exec "$container" pgrep -x sleep >/dev/null 2>&1 && break
-        sleep 1
-    done
-    # pgrep -x sleep (above) is an approximate readiness signal shared with
-    # every other test in this file - it also transiently matches earlier,
-    # short-lived sleeps in the startup sequence (dns-proxy.sh's dig-retry
-    # loop in particular can legitimately take tens of seconds under real
-    # DNS latency, well past a brief follow-up wait), not just the final
-    # `sleep infinity`. That ambiguity is harmless for tests that only need
-    # the container generally up, but this test specifically depends on the
-    # forwarder having already bound port 18300 - wait for that directly,
-    # on the same generous budget as the outer loop above, rather than
-    # assuming the outer loop's "ready" already means it.
-    for _ in $(seq 1 60); do
-        docker exec "$container" bash -c '(exec 3<>/dev/tcp/127.0.0.1/18300) 2>/dev/null && exec 3>&-' && break
-        sleep 1
-    done
+    # This test depends on the forwarder having already bound port 18300;
+    # wait_ready covers that, since entrypoint.sh waits for the bind itself
+    # before reaching the `sleep infinity` wait_ready matches on.
+    wait_ready "$container"
 
     run docker exec "$container" node -e '
         fetch("http://127.0.0.1:18300/v1/messages", {method: "POST",
@@ -630,15 +616,13 @@ EOF
     container="claude-sandbox-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -v "$TD/dotclaude:/home/node/.claude" \
         -v "$mask_file:/home/node/.claude/.credentials.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
-    for _ in $(seq 1 60); do
-        docker exec "$container" pgrep -x sleep >/dev/null 2>&1 && break
-        sleep 1
-    done
+    wait_ready "$container"
 
     run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
     status_creds=$status; output_creds=$output
