@@ -90,9 +90,21 @@ case "$action" in
         for spec in $pending_deps; do
             "$SCRIPT_DIR/claude-sandbox-dep" add "$spec" --project "$project"
         done
+        # claude-sandbox-allow records the approval before it touches a
+        # running session, so a nonzero exit here means only that the live
+        # patch or its reachability probe didn't succeed - a declared host
+        # that doesn't serve HTTPS on 443, say. Under set -e that used to
+        # abort the loop and silently skip every remaining domain, so collect
+        # and report instead.
+        unapplied=""
         for dom in $pending_doms; do
-            "$SCRIPT_DIR/claude-sandbox-allow" "$dom" --project "$project"
+            "$SCRIPT_DIR/claude-sandbox-allow" "$dom" --project "$project" || unapplied="$unapplied $dom"
         done
+        if [ -n "$unapplied" ]; then
+            echo
+            echo "Approved for $project, but not applied to a running session:$unapplied" >&2
+            echo "They take effect at the next launch either way." >&2
+        fi
         ;;
     *)
         echo "Usage: claude-sandbox-project <status|approve> [<path>]" >&2

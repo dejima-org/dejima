@@ -284,7 +284,9 @@ reachable from inside that same container and prints a definitive verdict
 that demonstrably doesn't work never makes it into `config/env` on the
 strength of that run. (This check is an HTTPS connection attempt, so a
 service that doesn't listen on port 443 will fail it spuriously even
-though DNS and the firewall are both fine.) `--global` also appends the
+though DNS and the firewall are both fine. `--project` persistence is
+deliberately *not* gated on it, and does not need a running container at
+all — see below.) `--global` also appends the
 domain to `ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
 automatically by the next `bin/claude-sandbox` invocation, no sourcing
 needed. If more than one claude-sandbox container is running, pass
@@ -339,6 +341,14 @@ Approved domains join the allowlist at the next launch (or immediately, for
 `claude-sandbox-allow`, which also updates the running session). Approved
 dependencies are baked into a per-project image built `FROM` the shared base,
 so they need an image rebuild: they take effect on the **next** launch.
+
+Because of that rebuild, the usual moment to approve is *after* leaving the
+sandbox — so `--project` persistence never requires a running container, and
+is never gated on the reachability probe `--global` is gated on. Recording the
+approval is your decision; patching a live session and verifying the domain
+answers on 443 are best-effort on top of it, and `claude-sandbox-project
+approve` reports at the end which domains it could not apply to a running
+session rather than stopping at the first one.
 
 A session whose project declares something it doesn't have is told so in its
 startup context, with the exact command to hand you. Approvals are inherited

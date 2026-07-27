@@ -11,7 +11,34 @@ setup() {
     PROJ="$(mktemp -d)"
     mkdir -p "$PROJ/.claude-sandbox"
 }
-teardown() { rm -rf "$CONFIG_DIR" "$PROJ"; }
+teardown() { rm -rf "$CONFIG_DIR" "$PROJ" ${STUB_DIR:+"$STUB_DIR"}; }
+
+store_of() {
+    printf '%s/projects/%s' "$CONFIG_DIR" \
+        "$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$1")"
+}
+
+# A fake `docker` on PATH, so the container-facing half of
+# claude-sandbox-allow can be exercised without a daemon. $1 is how many
+# running sandboxes to report, $2 the exit status the in-container curl
+# reachability check should return.
+stub_docker() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<EOF
+#!/bin/bash
+if [ "\$1" = ps ]; then
+    [ "$1" -eq 0 ] || echo claude-sandbox-test-container
+    exit 0
+fi
+case "\$*" in
+    *dig*)  echo 10.0.0.1; exit 0 ;;
+    *curl*) exit $2 ;;
+    *)      exit 0 ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+}
 
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
@@ -190,6 +217,61 @@ EOF
     [ "$status" -eq 0 ]
     store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     grep -qx 'crates.io' "$store/allowed-domains"
+}
+
+@test "claude-sandbox-allow --project records the approval with no sandbox running" {
+    # The documented moment to approve is right after leaving the sandbox -
+    # dependency approvals need a relaunch - so requiring a live container
+    # broke the main path: the domain was never persisted at all.
+    stub_docker 0 0
+    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "claude-sandbox-allow --project records a domain the reachability probe rejects" {
+    # A declared host may legitimately not answer on 443 - an internal
+    # service, an SSH-only host, an apex that only serves a subdomain. The
+    # probe's verdict is worth reporting, but it is not the user's approval
+    # decision, and it used to discard it.
+    stub_docker 1 7
+    run "$REPO_ROOT/bin/claude-sandbox-allow" crates.io --project "$PROJ"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"still NOT reachable"* ]]
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "--global stays gated on the reachability probe even though --project no longer is" {
+    # Run from a copy so the real config/env is never touched: env_file is
+    # resolved relative to the script's own realpath.
+    local fake; fake="$(mktemp -d)"
+    mkdir -p "$fake/bin" "$fake/config"
+    cp "$REPO_ROOT/bin/claude-sandbox-allow" "$REPO_ROOT/bin/claude-sandbox-project-lib.sh" "$fake/bin/"
+    chmod +x "$fake/bin/claude-sandbox-allow"
+    printf 'export ALLOWED_DOMAINS=""\n' > "$fake/config/env"
+    stub_docker 1 7
+    run "$fake/bin/claude-sandbox-allow" crates.io --global --project "$PROJ"
+    [ "$status" -eq 2 ]
+    # one run must not add a demonstrably broken domain to every project...
+    grep -qx 'export ALLOWED_DOMAINS=""' "$fake/config/env"
+    # ...but the project the user explicitly named is their decision to make
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+    rm -rf "$fake"
+}
+
+@test "claude-sandbox-project approve persists every domain when one fails to apply" {
+    # Under set -e the first claude-sandbox-allow to exit nonzero used to
+    # abort the loop, silently skipping every domain after it - and, before
+    # persistence moved ahead of the container work, persisting none at all.
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    printf 'crates.io\nstatic.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    stub_docker 1 7
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+    grep -qx 'static.crates.io' "$(store_of "$PROJ")/allowed-domains"
+    grep -qx 'apt:libpq-dev' "$(store_of "$PROJ")/dependencies"
+    [[ "$output" == *"not applied to a running session"* ]]
 }
 
 @test "claude-sandbox-allow --project still refuses an invalid domain" {
