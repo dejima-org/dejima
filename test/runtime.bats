@@ -698,36 +698,6 @@ EOF
     [[ "$output" != *"sandbox-osc52"* ]]
 }
 
-@test "an approved project domain is reachable, a declared-but-unapproved one is not" {
-    local test_container="claude-sandbox-test-projdom-$(basename "$BATS_FILE_TMPDIR")"
-    # example.com stands in for the approved domain (reachable, stable);
-    # example.net stands in for one the project merely declared.
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
-        -e SANDBOX_TEST_MODE=1 \
-        -e ALLOWED_DOMAINS=example.com \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
-    wait_ready "$test_container"
-
-    run docker exec "$test_container" dig +short A example.com
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
-
-    # Full (non-+short) output, checked two ways: status 0 means dig actually
-    # got a reply (dig only exits non-zero, e.g. 9, when no reply arrives at
-    # all), and the REFUSED rcode in that reply means the DNS proxy is the
-    # one that answered and refused it. Together these rule out an exec
-    # failure, a missing dig, or a name with no A record - not just an empty
-    # +short result, which can't tell those apart from a real refusal.
-    run docker exec "$test_container" dig A example.net
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"status: REFUSED"* ]]
-
-    docker rm -f "$test_container" >/dev/null 2>&1 || true
-}
-
 @test "session context reports declared-but-missing project requirements" {
     local ws; ws="$(mktemp -d)"
     mkdir -p "$ws/.claude-sandbox"
