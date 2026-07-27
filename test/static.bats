@@ -814,3 +814,17 @@ EOF
     grep -q 'claude-sandbox-project approve' "$REPO_ROOT/README.md"
     grep -q 'claude-sandbox-dep' "$REPO_ROOT/README.md"
 }
+
+@test "README no longer documents the removed config/env flow" {
+    run grep -n 'config/env\|claude-sandbox-env' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "README documents claude-sandbox-dep --global" {
+    grep -q 'claude-sandbox-dep add cargo:cargo-nextest --global' "$REPO_ROOT/README.md"
+}
+
+@test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
+    run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -ne 0 ]
+}

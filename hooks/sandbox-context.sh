@@ -173,10 +173,10 @@ What this means:
   ~/.claude is disposable: installed system packages, anything outside the
   mounted paths, and the container itself go away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
-  registry, GitHub read-only, the configured Gitea host, plus anything set
-  via ALLOWED_DOMAINS). Requests to anything else will simply fail to
-  connect. If a task needs one more domain and nothing else, that's a quick
-  fix, not a reason to stop: tell the user to run
+  registry, GitHub read-only, the configured Gitea host, plus anything
+  approved via claude-sandbox-allow). Requests to anything else will simply
+  fail to connect. If a task needs one more domain and nothing else, that's
+  a quick fix, not a reason to stop: tell the user to run
   \`bin/claude-sandbox-allow <domain> --container $container_id\` (add
   \`--global\` to persist it past this session) from a terminal outside the
   sandbox, then continue. Quote that --container value exactly as written

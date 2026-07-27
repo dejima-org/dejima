@@ -34,7 +34,6 @@ Everything else is optional, depending on which workflow(s) you want:
 | `GITEA_TOKEN` | env, else `~/.config/gitea/token` | Gitea/Forgejo API token |
 | `GH_TOKEN` | env, else `~/.config/gh/sandbox-token` | read-only PAT for private GitHub repos / `gh` |
 | `ALLOW_GITHUB_PUSH` | `0` | opt-in: allow `git push` to GitHub (blocked by default — see below) |
-| `ALLOWED_DOMAINS` | unset | extra egress-allowed domains, space-separated |
 | `SANDBOX_CMD` | `claude` | container's main process (e.g. `nvim`) |
 | `SANDBOX_NVIM_CONFIG` | unset | nvim config dir, used when `SANDBOX_CMD=nvim` |
 | `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
@@ -181,9 +180,10 @@ or per-project `npm install playwright` needed.
 
 `localhost`/loopback traffic never goes through the egress firewall, so a
 project's own dev server needs no firewall changes. A real external site
-needs to be on the allowlist like any other network use (`ALLOWED_DOMAINS`,
-or `bin/claude-sandbox-allow <domain>` for a running session) — the firewall
-applies to the browser's traffic exactly like `curl`/`git`.
+needs to be on the allowlist like any other network use
+(`bin/claude-sandbox-allow <domain>` for a running session, add
+`--global`/`--project <path>` to persist it) — the firewall applies to the
+browser's traffic exactly like `curl`/`git`.
 
 If a project pins its own `playwright`/`@playwright/test` version, its
 `npm install` may try to download a different Chromium build from
@@ -239,9 +239,10 @@ default:
 - whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
-Everything else is rejected. Set `ALLOWED_DOMAINS` (space-separated) to allow
-more (e.g. `crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable
-the firewall entirely (debugging only).
+Everything else is rejected. Run `bin/claude-sandbox-allow <domain> --global`
+(or `--project <path>` for one project) to allow more permanently (e.g.
+`crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable the
+firewall entirely (debugging only).
 
 IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
 strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
@@ -265,13 +266,13 @@ attacker-controlled domain, even with no direct connection ever possible.
 
 ### Adding a domain to a running session
 
-`ALLOWED_DOMAINS` only takes effect at container start. For a domain a
+Approved domains only take effect at container start. For a domain a
 *running* session needs right now, run from the host (not inside the
 sandbox — it has no privilege to do this itself):
 
 ```sh
 bin/claude-sandbox-allow crates.io                # this session only
-bin/claude-sandbox-allow crates.io --global       # + persist in config/env
+bin/claude-sandbox-allow crates.io --global       # + persist for every project
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -280,16 +281,16 @@ file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
 `docker exec -u root`. It finishes by checking the domain is actually
 reachable from inside that same container and prints a definitive verdict
-— exit code 2 if it isn't, before `--global` persistence runs, so a domain
-that demonstrably doesn't work never makes it into `config/env` on the
-strength of that run. (This check is an HTTPS connection attempt, so a
-service that doesn't listen on port 443 will fail it spuriously even
-though DNS and the firewall are both fine. `--project` persistence is
-deliberately *not* gated on it, and does not need a running container at
-all — see below.) `--global` also appends the
-domain to `ALLOWED_DOMAINS` in `config/env` for future sessions - picked up
-automatically by the next `bin/claude-sandbox` invocation, no sourcing
-needed. If more than one claude-sandbox container is running, pass
+— exit code 2 if it isn't. That check is a report on the live session only,
+not a gate on approval: `--global`/`--project` persistence is recorded
+first and unconditionally, since a declared host may legitimately not
+answer on 443 (an internal service, an SSH-only host) and the natural
+moment to add a global approval is precisely when nothing is running to
+probe in the first place. (`--project` persistence likewise does not need a
+running container at all — see below.) `--global` writes the domain to the
+global approval store for every future session; `--global` and `--project`
+are not mutually exclusive here - give both together and each persists to
+its own store. If more than one claude-sandbox container is running, pass
 `--container <name>` to disambiguate - `docker ps` finds it, or use the
 container's own ID, which `sandbox-context.sh` already hands the agent in
 its startup context (and which is always available inside the sandbox as
@@ -309,13 +310,26 @@ RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
 rejects private answers for any domain not exempted at startup, and that
 exemption list can only be extended by restarting dnsmasq. Internal hosts
 named before the container starts (`GITEA_SSH_HOST`, `GITEA_API`,
-`LOKI_URL`, `ALLOWED_DOMAINS`) are already exempted and unaffected by this.
+`LOKI_URL`, and any globally or per-project approved domain) are already
+exempted and unaffected by this.
 
 The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
 stopping the whole session over it.
 
-## Per-project domains and dependencies
+## Global and per-project domains and dependencies
+
+Allowed domains and dependencies each stack through their own layers, least
+specific first:
+
+| Config | Layers, least specific first |
+| --- | --- |
+| Allowed domains | built-in → global → project → container (one session) |
+| Dependencies | base image → global → project |
+
+Dependencies have no container-only scope: installing one always needs an
+image rebuild, so there's no `claude-sandbox-allow`-style live-session patch
+for them.
 
 A project can declare what it needs in two committed files:
 
@@ -327,32 +341,51 @@ A project can declare what it needs in two committed files:
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a compromised session could write these files - they are only
 ever read to compare against reality and suggest a command. Approvals live
-outside the container, under `~/.config/claude-sandbox/projects/<slug>/`, and
-are written only by tools you run on the host:
+outside the container - globally at `~/.config/claude-sandbox/` (or
+`$CLAUDE_SANDBOX_CONFIG_DIR`), per project under
+`~/.config/claude-sandbox/projects/<slug>/` - and are written only by tools
+you run on the host:
 
 ```sh
-claude-sandbox-project status ~/myproject   # declared vs approved vs missing
-claude-sandbox-project approve ~/myproject  # review and approve the declared set
+claude-sandbox-project status ~/myproject     # declared vs approved vs missing
+claude-sandbox-project approve ~/myproject    # review and approve the declared set
 claude-sandbox-allow crates.io --project ~/myproject
+claude-sandbox-allow crates.io --global       # applies to every project
 claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
+claude-sandbox-dep add cargo:cargo-nextest --global
 ```
+
+`claude-sandbox-project status`/`approve` classify a declared entry against
+the union of global and project approvals, so something already approved
+globally shows as approved, not pending. Unlike `claude-sandbox-allow`,
+`claude-sandbox-dep`'s `--global` and `--project` are mutually exclusive -
+an entry belongs to exactly one scope.
 
 Approved domains join the allowlist at the next launch (or immediately, for
 `claude-sandbox-allow`, which also updates the running session). Approved
-dependencies are baked into a per-project image built `FROM` the shared base,
-so they need an image rebuild: they take effect on the **next** launch.
+dependencies are baked into a derived image built `FROM` the shared base -
+first `claude-sandbox:$USER-global`, if the global store has any dependency
+approved, then `claude-sandbox:$USER-<slug>` on top of that, if the project
+store does - so they need an image rebuild: they take effect on the **next**
+launch.
 
 Because of that rebuild, the usual moment to approve is *after* leaving the
-sandbox — so `--project` persistence never requires a running container, and
-is never gated on the reachability probe `--global` is gated on. Recording the
-approval is your decision; patching a live session and verifying the domain
-answers on 443 are best-effort on top of it, and `claude-sandbox-project
-approve` reports at the end which domains it could not apply to a running
-session rather than stopping at the first one.
+sandbox — so persistence (`--global` or `--project`) never requires a running
+container, and is never gated on the reachability probe `claude-sandbox-allow`
+runs against a live session. Recording the approval is your decision;
+patching a live session and verifying the domain answers on 443 are
+best-effort on top of it, and `claude-sandbox-project approve` reports at the
+end which domains it could not apply to a running session rather than
+stopping at the first one.
 
 A session whose project declares something it doesn't have is told so in its
-startup context, with the exact command to hand you. Approvals are inherited
-by subdirectories, so a git worktree under the project gets its parent's.
+startup context, with the exact command to hand you. Project approvals are
+inherited by subdirectories, so a git worktree under the project gets its
+parent's; global approvals apply everywhere regardless.
+
+**There is no migration from the old repo-local file `ALLOWED_DOMAINS` used
+to persist to:** domains that persisted there previously must be re-added by
+hand with `claude-sandbox-allow <domain> --global`.
 
 ## Network request logging
 
@@ -514,7 +547,7 @@ one can't happen.
   under `~/.claude/projects` (see below). When the mounted workspace *is*
   this repo's own sandbox itself (see the trusted-computing-base note
   further below), it also diffs content hashes of the sandbox's own trusted
-  computing base - `bin/`, `hooks/`, `docker/`, `install.sh`, `config/env`,
+  computing base - `bin/`, `hooks/`, `docker/`, `install.sh`,
   `test/` - under that workspace. It's **advisory only**: it fires *after*
   the session has already ended, so a report of a planted `core.hooksPath`
   or hook file is something to read and clean up *before* the next `git`
@@ -729,20 +762,22 @@ one can't happen.
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
-- Repo-local `config/env` (which persists `ALLOWED_DOMAINS` across sessions,
-  see "Files" below) used to be `source`d by `bin/claude-sandbox` on the
-  host. Since `config/env` lives inside this repo - itself a mountable,
-  writable-from-inside workspace - that meant a compromised session with
-  this repo mounted on itself could plant arbitrary host shell there for
-  the *next* launch to execute. It's now read by a small string parser
-  (`bin/claude-sandbox-env.sh`) that pulls out only the `ALLOWED_DOMAINS`
-  value and never executes the file's contents. One known edge: it doesn't
-  strip CRLF line endings, but the only writer, `claude-sandbox-allow
-  --global`, never emits CRLF, so that only bites a manual cross-platform
-  edit.
+- The approval store (`${CLAUDE_SANDBOX_CONFIG_DIR:-$HOME/.config/claude-sandbox}`,
+  see "Global and per-project domains and dependencies" above) lives outside
+  this repo, and outside every project mount, by default - unlike a
+  project's own `.claude-sandbox/` declaration files, it's never
+  bind-mounted into the container, so a compromised
+  session has no path to write to it at all, let alone plant something for
+  the *next* launch to pick up. Its files are read by a small
+  line-oriented parser (`approved_entries` in
+  `bin/claude-sandbox-project-lib.sh`), never sourced or executed, and are
+  written only by the CLIs (`claude-sandbox-allow`, `claude-sandbox-dep`,
+  `claude-sandbox-project`) a human runs on the host. `bin/claude-sandbox`
+  warns at launch if `CLAUDE_SANDBOX_CONFIG_DIR` has been pointed somewhere
+  under the mounted workspace instead, rather than silently trusting it.
 - When the mounted workspace *is* this repo itself, `bin/claude-sandbox`
   warns at launch that the repo's own trusted computing base - `bin/`,
-  `hooks/`, `docker/`, `install.sh` (also `config/env` and `test/`, per the
+  `hooks/`, `docker/`, `install.sh` (also `test/`, per the
   exit-time audit's exact TCB path list above) - is writable for the
   session (it's inside the project mount, which has no write protection,
   per above), and that the exit-time audit will report any changes to it.
@@ -799,8 +834,6 @@ likely to collide with a real container you have running.
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `config/env` | Persists `ALLOWED_DOMAINS` across sessions (rewritten by `--global`); parsed, never sourced |
-| `bin/claude-sandbox-env.sh` | Parses `ALLOWED_DOMAINS` out of `config/env` without executing it |
 | `bin/claude-sandbox-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
 | `bin/claude-sandbox-dep` | Review and approve project dependencies declared in `.claude-sandbox/dependencies` |
 | `bin/claude-sandbox-project` | Review and approve project domains and dependencies from the host |

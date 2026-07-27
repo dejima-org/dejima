@@ -57,9 +57,10 @@ fi
 # repo TCB warning below.
 case "$(config_root)/" in
     "$WORKSPACE_DIR"/*)
-        echo "Warning: the per-project approval store ($(config_root)) is inside the" >&2
-        echo "mounted workspace this session - it is writable from inside the sandbox," >&2
-        echo "so approvals are no longer out of reach. Review them after this session." >&2
+        echo "Warning: the approval store ($(config_root)) is inside the mounted" >&2
+        echo "workspace this session - both the global approvals and every" >&2
+        echo "project's under it are writable from inside the sandbox, so they" >&2
+        echo "are no longer out of reach. Review them after this session." >&2
         ;;
 esac
 
