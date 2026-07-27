@@ -140,7 +140,7 @@ setup() {
 }
 
 @test "docker-compose.yml builds with a per-user image tag and passes the host identity as build args" {
-    grep -qE '^\s*image:\s*claude-sandbox:\$\{SANDBOX_USER:-node\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-claude-sandbox:\$\{SANDBOX_USER:-node\}\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_USER:\s*\$\{SANDBOX_USER:-node\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_UID:\s*\$\{SANDBOX_UID:-1000\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_GID:\s*\$\{SANDBOX_GID:-1000\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
@@ -402,7 +402,7 @@ setup() {
 
 @test "bin/claude-sandbox's exit-time audit still runs when the container run fails or is interrupted" {
     local run_line
-    run_line=$(grep -n 'docker compose .* run --rm --build' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
+    run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/claude-sandbox" | cut -d: -f1)
     [ -n "$run_line" ]
     # The compose invocation must not be a bare command under set -e - a
     # nonzero/interrupted exit there would otherwise abort the script before
@@ -607,4 +607,17 @@ this line is not json'
     # what to allow.
     run grep -n '\.claude-sandbox/' "$REPO_ROOT/bin/claude-sandbox"
     [ "$status" -ne 0 ]
+}
+
+@test "docker-compose.yml image honors SANDBOX_IMAGE with today's default" {
+    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-claude-sandbox:\$\{SANDBOX_USER:-node\}\}\s*$' \
+        "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "the derived image build never uses the workspace as its build context" {
+    # A root-context build with the untrusted project as context would let a
+    # session's own files influence the image it then runs in.
+    run grep -n 'docker build.*"\$WORKSPACE_DIR"' "$REPO_ROOT/bin/claude-sandbox"
+    [ "$status" -ne 0 ]
+    grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/claude-sandbox"
 }

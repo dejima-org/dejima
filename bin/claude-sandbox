@@ -198,8 +198,8 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}"
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}"
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
+    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
 }
 trap cleanup EXIT
 
@@ -453,13 +453,41 @@ if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "session; the exit audit will report any changes to review." >&2
 fi
 
+# Compose builds the shared base image under its own tag, explicitly - with
+# image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
+# build would rebuild the base Dockerfile under the derived name.
+SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}" \
+    docker compose -f "$COMPOSE_FILE" build claude
+
+SANDBOX_IMAGE="claude-sandbox:${SANDBOX_USER}"
+if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
+    derived="claude-sandbox:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")"
+    SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-derived.XXXXXX")"
+    # An empty context, never $WORKSPACE_DIR: the project directory is
+    # session-writable, and a root-context build with it as context would
+    # let a compromised session feed files into the image it then runs in.
+    SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/claude-sandbox-derived-ctx.XXXXXX")"
+    generate_derived_dockerfile "$SANDBOX_IMAGE" "$PROJECT_STORE" \
+        > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building project image $derived (approved dependencies)..."
+    if ! docker build -t "$derived" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback to the base image: that would hand the session an
+        # environment missing the dependencies it was told it has.
+        echo "Failed to build the project image for $WORKSPACE_DIR." >&2
+        echo "Fix the approved dependencies (claude-sandbox-dep list) and retry." >&2
+        exit 1
+    fi
+    SANDBOX_IMAGE="$derived"
+fi
+export SANDBOX_IMAGE
+
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
 # Ctrl-C returning 130 - would otherwise abort the script here, skipping the
 # audit entirely). Capture the status explicitly so the advisory audit runs
 # on every exit path, then propagate the real container exit code unchanged.
 compose_status=0
-docker compose -f "$COMPOSE_FILE" run --rm --build ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2

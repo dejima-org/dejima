@@ -105,6 +105,8 @@ teardown() {
     docker rm -f "claude-sandbox-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-projdom-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rmi "claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -723,6 +725,39 @@ EOF
     [[ "$output" == *"status: REFUSED"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "a derived project image gets the package and keeps the base privilege posture" {
+    local derived="claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")"
+    local ctx; ctx="$(mktemp -d)"
+    local store; store="$(mktemp -d)"
+    local df; df="$(mktemp)"
+    printf 'apt:cowsay\n' > "$store/dependencies"
+    bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+        _ "$BATS_TEST_DIRNAME/../bin/claude-sandbox-project-lib.sh" "$IMAGE" "$store" > "$df"
+    docker build -q -t "$derived" -f "$df" "$ctx" >&2
+
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$derived" >/dev/null
+    wait_ready "$test_container"
+
+    run docker exec "$test_container" dpkg-query -W -f='${Status}' cowsay
+    [[ "$output" == *"install ok installed"* ]]
+
+    # the hardening assertions that matter must hold on a derived image too
+    run docker exec -u node "$test_container" sudo -n true
+    [ "$status" -ne 0 ]
+    run docker exec -u node "$test_container" iptables -L
+    [ "$status" -ne 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    docker rmi "$derived" >/dev/null 2>&1 || true
+    rm -rf "$ctx" "$store" "$df"
 }
 
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {

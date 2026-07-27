@@ -233,3 +233,36 @@ EOF
     run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
     [[ "$output" != *"apt:libpq-dev"* ]]
 }
+
+@test "generate_derived_dockerfile emits one layer per ecosystem and re-asserts privilege" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'apt:libpq-dev\nnpm:typescript\npip:ruff\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FROM base:tag"* ]]
+    [[ "$output" == *"apt-get install -y --no-install-recommends libpq-dev"* ]]
+    [[ "$output" == *"npm install -g typescript"* ]]
+    [[ "$output" == *"pip install --break-system-packages ruff"* ]]
+    # the last privilege-relevant lines must restore the base posture
+    [[ "$(grep -E '^(USER|ENTRYPOINT)' <<< "$output" | tail -2)" == "USER root
+ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
+}
+
+@test "generate_derived_dockerfile installs rustup only when a cargo spec is present" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'apt:libpq-dev\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [[ "$output" != *"rustup"* ]]
+    printf 'cargo:cargo-nextest\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [[ "$output" == *"rustup"* ]]
+    [[ "$output" == *"cargo install cargo-nextest"* ]]
+    [[ "$output" == *".cargo/bin"* ]]
+}
+
+@test "generate_derived_dockerfile refuses a corrupt approved deps file" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'apt:libpq-dev; curl evil\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [ "$status" -ne 0 ]
+}

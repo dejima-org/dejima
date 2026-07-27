@@ -150,3 +150,49 @@ unapprove_entry() {
     grep -vxF "$entry" "$store/$kind" > "$tmp" || true
     mv "$tmp" "$store/$kind"
 }
+
+# Prints a Dockerfile that layers approved packages onto the shared base
+# image. Only validated tokens are interpolated (approved_entries refuses
+# anything else), so a RUN line here can't become a root-context injection.
+#
+# Installs run at BUILD time, where there's no egress firewall - which is
+# why this is a derived image rather than an install step in entrypoint.sh:
+# the latter would need apt/npm/PyPI/crates.io reachable as root before
+# init-firewall.sh locks egress down.
+generate_derived_dockerfile() {
+    local base="$1" store="$2" entries apt npm pip cargo spec name
+    entries="$(approved_entries "$store" dependencies)" \
+        || { echo "refusing to build from a corrupt dependency list in $store" >&2; return 1; }
+
+    apt=""; npm=""; pip=""; cargo=""
+    while IFS= read -r spec; do
+        [ -n "$spec" ] || continue
+        name="${spec#*:}"
+        case "$spec" in
+            apt:*)   apt="$apt $name" ;;
+            npm:*)   npm="$npm $name" ;;
+            pip:*)   pip="$pip $name" ;;
+            cargo:*) cargo="$cargo $name" ;;
+        esac
+    done <<< "$entries"
+
+    printf 'FROM %s\n' "$base"
+    printf 'USER root\n'
+    [ -n "$apt" ] && printf 'RUN apt-get update && apt-get install -y --no-install-recommends%s \\\n  && apt-get clean && rm -rf /var/lib/apt/lists/*\n' "$apt"
+    [ -n "$pip" ] && printf 'RUN pip install --break-system-packages%s\n' "$pip"
+    printf 'USER ${SANDBOX_USER}\n'
+    [ -n "$npm" ] && printf 'RUN npm install -g%s\n' "$npm"
+    if [ -n "$cargo" ]; then
+        # The base image has no Rust toolchain - a cargo: spec is the only
+        # thing that pulls one in, so projects without one pay nothing.
+        printf 'RUN curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path\n'
+        printf 'ENV PATH=$PATH:${SANDBOX_HOME}/.cargo/bin\n'
+        printf 'RUN cargo install%s\n' "$cargo"
+    fi
+    # Restore the base image's privilege posture no matter what the layers
+    # above left behind - entrypoint.sh must still start as root and drop
+    # via gosu, with no escalation path for the session user.
+    printf 'USER root\n'
+    printf 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n'
+    return 0
+}
