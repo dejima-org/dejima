@@ -1,0 +1,69 @@
+#!/bin/bash
+# Manage the approved dev-dependency list for a project. Approvals live
+# host-side (never mounted into the container), so a sandboxed session can
+# ask for a package but can never grant itself one - the same split
+# bin/claude-sandbox-allow uses for domains.
+#
+# Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--project <path>]
+#   claude-sandbox-dep add cargo:cargo-nextest --project ~/myproject
+#   claude-sandbox-dep list
+#
+# A spec is <apt|npm|pip|cargo>:<name>.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=claude-sandbox-project-lib.sh
+source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+
+action=""
+spec=""
+project=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --project) project="$2"; shift 2 ;;
+        -*) echo "Unknown option: $1" >&2; exit 1 ;;
+        *)
+            if [ -z "$action" ]; then action="$1"
+            elif [ -z "$spec" ]; then spec="$1"
+            else echo "Unexpected argument: $1" >&2; exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+usage() {
+    echo "Usage: claude-sandbox-dep <add|remove|list> [<spec>] [--project <path>]" >&2
+    exit 1
+}
+
+[ -n "$action" ] || usage
+project="$(cd "${project:-$PWD}" && pwd)"
+
+case "$action" in
+    list)
+        store="$(resolve_project_store "$project")"
+        [ -n "$store" ] || exit 0
+        approved_entries "$store" dependencies
+        ;;
+    add)
+        [ -n "$spec" ] || usage
+        valid_dep_spec "$spec" || { echo "Not a valid dependency spec: $spec" >&2; echo "Expected <apt|npm|pip|cargo>:<name>" >&2; exit 1; }
+        store="$(ensure_project_store "$project")"
+        approve_entry "$store" dependencies "$spec"
+        echo "Approved $spec for $project."
+        # Unlike claude-sandbox-allow, this cannot touch a running session:
+        # it needs an image rebuild. Say so, or an agent will keep insisting
+        # the dependency is missing right after the user added it.
+        echo "Takes effect on the next launch (bin/claude-sandbox rebuilds the project image)."
+        ;;
+    remove)
+        [ -n "$spec" ] || usage
+        store="$(resolve_project_store "$project")"
+        [ -n "$store" ] || { echo "No approved config for $project." >&2; exit 1; }
+        unapprove_entry "$store" dependencies "$spec"
+        echo "Removed $spec from $project (takes effect on the next launch)."
+        ;;
+    *) usage ;;
+esac

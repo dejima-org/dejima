@@ -127,3 +127,32 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"absolute"* ]]
 }
+
+@test "claude-sandbox-dep add approves a spec and list shows it" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ"
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"apt:libpq-dev"* ]]
+}
+
+@test "claude-sandbox-dep add says the change needs a relaunch" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"next launch"* ]]
+}
+
+@test "claude-sandbox-dep rejects a malformed spec without writing anything" {
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add 'apt:a;b' --project "$PROJ"
+    [ "$status" -ne 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"a;b"* ]]
+}
+
+@test "claude-sandbox-dep remove takes a spec back out" {
+    "$REPO_ROOT/bin/claude-sandbox-dep" add npm:typescript --project "$PROJ" >/dev/null
+    run "$REPO_ROOT/bin/claude-sandbox-dep" remove npm:typescript --project "$PROJ"
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"npm:typescript"* ]]
+}
