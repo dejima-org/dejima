@@ -639,3 +639,22 @@ this line is not json'
     [ "$status" -ne 0 ]
     grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/claude-sandbox"
 }
+
+@test "sandbox-context reads its stdin payload once" {
+    # jq is called more than once now (session_id and cwd); reading stdin
+    # twice would silently give the second call nothing.
+    grep -q 'payload=$(cat)' "$REPO_ROOT/hooks/sandbox-context.sh"
+    run grep -c "jq -r '\.session_id" "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$output" -eq 1 ]
+}
+
+@test "sandbox-context probes declared dependencies and never treats them as granted" {
+    grep -q 'dpkg-query' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'npm ls -g' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'pip show' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'cargo install --list' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # domains are checked against what this container actually resolves,
+    # not against the host-side approval store it cannot see
+    grep -q 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'claude-sandbox-project approve' "$REPO_ROOT/hooks/sandbox-context.sh"
+}

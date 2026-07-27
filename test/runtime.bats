@@ -107,6 +107,7 @@ teardown() {
     docker rm -f "claude-sandbox-test-projdom-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "claude-sandbox-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rmi "claude-sandbox-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -725,6 +726,35 @@ EOF
     [[ "$output" == *"status: REFUSED"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "session context reports declared-but-missing project requirements" {
+    local ws; ws="$(mktemp -d)"
+    mkdir -p "$ws/.claude-sandbox"
+    printf 'apt:definitely-not-installed\n' > "$ws/.claude-sandbox/dependencies"
+    printf 'declared-not-allowed.example\n' > "$ws/.claude-sandbox/allowed-domains"
+    chmod -R 755 "$ws"
+
+    local test_container="claude-sandbox-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -v "$ws:$ws" \
+        -v "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh:/usr/local/bin/sandbox-context.sh:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    run docker exec -u node -w "$ws" "$test_container" \
+        bash -c 'printf "{\"session_id\":\"s1\",\"cwd\":\"'"$ws"'\"}" | CLAUDE_SANDBOX=1 /usr/local/bin/sandbox-context.sh'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"definitely-not-installed"* ]]
+    [[ "$output" == *"declared-not-allowed.example"* ]]
+    [[ "$output" == *"claude-sandbox-project approve"* ]]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$ws"
 }
 
 @test "a derived project image gets the package and keeps the base privilege posture" {

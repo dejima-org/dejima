@@ -9,8 +9,13 @@ if [ -z "${CLAUDE_SANDBOX:-}" ]; then
     exit 0
 fi
 
-session_id=$(jq -r '.session_id // empty')
+# Read stdin once - it's consumed by the first reader, and this hook now
+# needs both session_id and cwd out of the same payload.
+payload=$(cat)
+session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty')
 resume_id="${session_id:-<unknown-session-id>}"
+project_dir=$(printf '%s' "$payload" | jq -r '.cwd // empty')
+project_dir="${project_dir:-$PWD}"
 
 # /etc/hostname in a docker container is the container's own ID, which
 # docker exec accepts directly - baking it into the suggested command below
@@ -19,6 +24,72 @@ resume_id="${session_id:-<unknown-session-id>}"
 # "succeed" against the wrong container).
 container_id=$(cat /etc/hostname 2>/dev/null)
 container_id="${container_id:-<container-id>}"
+
+# What the project says it needs, checked against what this container
+# actually has. .claude-sandbox/ is on the read-write workspace mount, so it
+# grants nothing - it's a declaration the user approves by hand on the host
+# (see bin/claude-sandbox-project). Reporting the gap here is what turns
+# "this fails mysteriously" into "tell the user to run one command".
+requirements=""
+decl_dir="$project_dir/.claude-sandbox"
+
+if [ -f "$decl_dir/dependencies" ]; then
+    missing_deps=""
+    while IFS= read -r spec; do
+        spec="${spec%%#*}"; spec="${spec// /}"
+        [ -n "$spec" ] || continue
+        # Same shape as valid_dep_spec() in claude-sandbox-project-lib.sh -
+        # a leading dash (e.g. "--allow-unauthenticated") must not validate
+        # as a name, or this hook would echo into the agent's context an
+        # entry the project's own approve/status commands treat as rejected.
+        [[ "$spec" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+        name="${spec#*:}"
+        case "$spec" in
+            apt:*)   dpkg-query -W -f='${Status}' "$name" 2>/dev/null | grep -q 'install ok installed' && continue ;;
+            npm:*)   npm ls -g --depth=0 "$name" >/dev/null 2>&1 && continue ;;
+            pip:*)   pip show "$name" >/dev/null 2>&1 && continue ;;
+            # $name is validated but may still contain "." (a BRE metachar
+            # that would match any char) - escape it so a name like
+            # "foo.bar" can't false-positive against "fooXbar" in the
+            # installed list. "+" needs no escaping: it's literal in BRE.
+            cargo:*) cargo install --list 2>/dev/null | grep -q "^${name//./\\.} " && continue ;;
+        esac
+        missing_deps="$missing_deps $spec"
+    done < "$decl_dir/dependencies"
+    if [ -n "$missing_deps" ]; then
+        requirements="$requirements
+- Declared dependencies missing from this image:$missing_deps
+  These need an image rebuild, so they cannot be added to this session. Tell
+  the user to run, outside the sandbox:
+    claude-sandbox-project approve $project_dir
+  then restart the sandbox. Do not try to install them yourself."
+    fi
+fi
+
+if [ -f "$decl_dir/allowed-domains" ]; then
+    missing_domains=""
+    while IFS= read -r dom; do
+        dom="${dom%%#*}"; dom="${dom// /}"
+        [ -n "$dom" ] || continue
+        [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]] || continue
+        grep -q "^server=/${dom}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
+        missing_domains="$missing_domains $dom"
+    done < "$decl_dir/allowed-domains"
+    if [ -n "$missing_domains" ]; then
+        requirements="$requirements
+- Declared domains not allowed in this session:$missing_domains
+  Tell the user to run, outside the sandbox:
+    claude-sandbox-project approve $project_dir
+  (or, for one domain right now:
+    bin/claude-sandbox-allow <domain> --container $container_id)"
+    fi
+fi
+
+if [ -n "$requirements" ]; then
+    requirements="
+
+This project declares requirements this session does not satisfy:$requirements"
+fi
 
 context=$(cat <<EOF
 You are running inside the claude-sandbox Docker container, not directly on
@@ -78,7 +149,7 @@ the host:
   claude --resume $resume_id
 
 (session history is shared via the bind-mounted ~/.claude, so it will pick
-up right where this left off).
+up right where this left off).$requirements
 EOF
 )
 
