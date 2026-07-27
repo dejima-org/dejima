@@ -1,0 +1,93 @@
+#!/bin/bash
+# Review and approve what a project declares it needs.
+#
+# A project declares its requirements in .claude-sandbox/{dependencies,
+# allowed-domains}, which are committed and shared - but declaring grants
+# nothing. This is where a human turns a declaration into an approval.
+#
+# Usage: claude-sandbox-project <status|approve> [<path>]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=claude-sandbox-project-lib.sh
+source "$SCRIPT_DIR/claude-sandbox-project-lib.sh"
+
+action="${1:-}"
+project="${2:-$PWD}"
+[ -n "$action" ] || { echo "Usage: claude-sandbox-project <status|approve> [<path>]" >&2; exit 1; }
+project="$(cd "$project" && pwd)"
+
+decl_dir="$project/.claude-sandbox"
+store="$(resolve_project_store "$project")"
+
+approved_of() {
+    local kind="$1"
+    [ -n "$store" ] || return 0
+    approved_entries "$store" "$kind"
+}
+
+# Prints "<state> <entry>" per declared entry: approved / pending / rejected.
+classify() {
+    local kind="$1" validator="$2" approved state entry
+    approved="$(approved_of "$kind")"
+    while read -r state entry; do
+        case "$state" in
+            rejected)  printf 'rejected %s\n' "$entry" ;;
+            truncated) printf 'truncated %s\n' "$entry" ;;
+            ok)
+                if grep -qxF "$entry" <<< "$approved"; then
+                    printf 'approved %s\n' "$entry"
+                else
+                    printf 'pending %s\n' "$entry"
+                fi
+                ;;
+        esac
+    done < <(read_declared "$decl_dir/$kind" "$validator")
+    return 0
+}
+
+case "$action" in
+    status)
+        echo "Project: $project"
+        echo "Approvals: ${store:-<none yet>}"
+        echo
+        echo "dependencies:"
+        classify dependencies valid_dep_spec | sed 's/^/  /'
+        echo "allowed-domains:"
+        classify allowed-domains valid_domain | sed 's/^/  /'
+        ;;
+    approve)
+        pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
+        pending_doms=$(classify allowed-domains valid_domain | sed -n 's/^pending //p')
+        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; } | sed -n 's/^rejected //p')
+        if [ -n "$rejected" ]; then
+            echo "Refusing to approve these malformed entries (fix the declaration):" >&2
+            printf '  %s\n' $rejected >&2
+            echo >&2
+        fi
+        if [ -z "$pending_deps" ] && [ -z "$pending_doms" ]; then
+            echo "Nothing pending approval for $project."
+            exit 0
+        fi
+        echo "Declared but not approved for $project:"
+        [ -n "$pending_deps" ] && printf '  dependency: %s\n' $pending_deps
+        [ -n "$pending_doms" ] && printf '  domain:     %s\n' $pending_doms
+        echo
+        printf 'Approve all of the above? [y/N] '
+        read -r reply
+        case "$reply" in
+            y|Y) ;;
+            *) echo "Nothing approved."; exit 0 ;;
+        esac
+        for spec in $pending_deps; do
+            "$SCRIPT_DIR/claude-sandbox-dep" add "$spec" --project "$project"
+        done
+        for dom in $pending_doms; do
+            "$SCRIPT_DIR/claude-sandbox-allow" "$dom" --project "$project"
+        done
+        ;;
+    *)
+        echo "Usage: claude-sandbox-project <status|approve> [<path>]" >&2
+        exit 1
+        ;;
+esac

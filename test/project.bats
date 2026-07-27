@@ -170,3 +170,41 @@ EOF
         "$REPO_ROOT/bin/claude-sandbox-allow" 'evil.com; curl x' --project "$PROJ"
     [ "$status" -ne 0 ]
 }
+
+@test "claude-sandbox-project status shows declared, approved and rejected" {
+    printf 'apt:libpq-dev\ngem:rails\n' > "$PROJ/.claude-sandbox/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    run "$REPO_ROOT/bin/claude-sandbox-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
+    [[ "$output" == *"rejected"*"gem:rails"* ]]
+    [[ "$output" == *"static.crates.io"* ]]
+}
+
+@test "claude-sandbox-project approve declines without confirmation" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    run bash -c 'echo n | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"apt:libpq-dev"* ]]
+}
+
+@test "claude-sandbox-project approve approves the declared set on confirmation" {
+    printf 'apt:libpq-dev\n' > "$PROJ/.claude-sandbox/dependencies"
+    printf 'static.crates.io\n' > "$PROJ/.claude-sandbox/allowed-domains"
+    run bash -c 'echo y | CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 "$1" approve "$2"' \
+        _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    [ "$status" -eq 0 ]
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" == *"apt:libpq-dev"* ]]
+    store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    grep -qx 'static.crates.io' "$store/allowed-domains"
+}
+
+@test "claude-sandbox-project approve never approves a rejected entry" {
+    printf 'gem:rails\n' > "$PROJ/.claude-sandbox/dependencies"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/claude-sandbox-project" "$PROJ"
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$PROJ"
+    [[ "$output" != *"gem:rails"* ]]
+}
