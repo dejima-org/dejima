@@ -680,8 +680,8 @@ this line is not json'
 }
 
 @test "install.sh links the per-project CLIs alongside the existing ones" {
-    grep -q 'claude-sandbox-dep' "$REPO_ROOT/install.sh"
-    grep -q 'claude-sandbox-project' "$REPO_ROOT/install.sh"
+    grep -qx 'link_bin claude-sandbox-dep' "$REPO_ROOT/install.sh"
+    grep -qx 'link_bin claude-sandbox-project' "$REPO_ROOT/install.sh"
 }
 
 @test "README documents the declaration/approval split" {
