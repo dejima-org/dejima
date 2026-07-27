@@ -96,6 +96,32 @@ EOF
     [ "$(cat "$output/path")" = "$PROJ" ]
 }
 
+@test "approving from inside a worktree writes to the project's store, not a shadowing one" {
+    # Readers walk ancestors, writers used to create a store at the exact
+    # path - so the first approval made from inside a worktree created one
+    # that shadowed the project's for every later read, silently un-applying
+    # everything the worktree had been inheriting. Both writers, since they
+    # share ensure_project_store.
+    local parent wt
+    parent="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    wt="$PROJ/.worktrees/feat"
+    "$REPO_ROOT/bin/claude-sandbox-dep" add apt:parentpkg --project "$PROJ" >/dev/null
+    mkdir -p "$wt"
+
+    run "$REPO_ROOT/bin/claude-sandbox-dep" add apt:branchpkg --project "$wt"
+    [ "$status" -eq 0 ]
+    run env CLAUDE_SANDBOX_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/claude-sandbox-allow" branch.example --project "$wt"
+    [ "$status" -eq 0 ]
+
+    [ ! -d "$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$wt")" ]
+    grep -qx 'apt:branchpkg' "$parent/dependencies"
+    grep -qx 'branch.example' "$parent/allowed-domains"
+    # and the inherited approval is still in force from the worktree
+    run "$REPO_ROOT/bin/claude-sandbox-dep" list --project "$wt"
+    [[ "$output" == *"apt:parentpkg"* ]]
+}
+
 @test "resolve_project_store fails loudly on a slug collision" {
     store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
     echo "/some/other/project" > "$store/path"

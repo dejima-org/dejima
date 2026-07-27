@@ -73,18 +73,32 @@ project_slug() {
     printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/-/g'
 }
 
-# The store for this exact path, created if needed. The path file is what
-# makes a slug collision detectable: two different projects can sanitize to
-# the same slug, and silently applying one project's approvals to another
-# would be a real (if unlikely) grant the user never made.
+# The store a writer must use: whatever a reader would resolve to, created
+# for this exact path only when nothing above already covers it. Creating one
+# per path unconditionally would be wrong in the workflow inheritance exists
+# for - the first approval made from inside a worktree would create a store
+# that shadows the project's for every later read, silently un-applying
+# everything the worktree had been inheriting.
+#
+# Recording into the ancestor widens its scope instead, which is the lesser
+# surprise but still a surprise, so it says so. The path file is what makes a
+# slug collision detectable (resolve_project_store checks it at every level):
+# two different projects can sanitize to the same slug, and silently applying
+# one project's approvals to another would be a real grant the user never made.
 ensure_project_store() {
-    local path="$1" dir
+    local path="$1" dir existing owner
+    existing="$(resolve_project_store "$path")" || return 1
+    if [ -n "$existing" ]; then
+        owner="$(cat "$existing/path" 2>/dev/null)"
+        if [ -n "$owner" ] && [ "$owner" != "$path" ]; then
+            echo "Note: recorded under the existing approvals for $owner, which" >&2
+            echo "$path inherits - so it applies to $owner and everything under it." >&2
+        fi
+        printf '%s' "$existing"
+        return 0
+    fi
     dir="$(config_root)/projects/$(project_slug "$path")"
     mkdir -p "$dir"
-    if [ -f "$dir/path" ] && [ "$(cat "$dir/path")" != "$path" ]; then
-        echo "Project slug collision: $dir already belongs to $(cat "$dir/path")" >&2
-        return 1
-    fi
     printf '%s\n' "$path" > "$dir/path"
     printf '%s' "$dir"
 }
