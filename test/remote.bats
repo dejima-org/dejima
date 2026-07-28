@@ -198,3 +198,47 @@ EOF
     [[ "$entry" =~ started=[0-9]+ ]]
     rm -rf "$PROJ"
 }
+
+@test "a workspace path containing a newline is refused" {
+    # A newline could inject an extra key=value line into the flat registry
+    # entry (e.g. a forged pane=), so a path that can't be represented safely
+    # is a hard failure, not silently sanitized.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    bad_proj="$PROJ"/$'line1\nline2'
+    mkdir -p "$bad_proj"
+    run launch "$bad_proj"
+    [ "$status" -ne 0 ]
+    [ -z "$(ls -A "$RUNTIME_DIR/dejima/sessions" 2>/dev/null)" ]
+    rm -rf "$PROJ"
+}
+
+@test "a pre-existing symlink at the state dir is refused, not followed" {
+    # /tmp (the fallback parent when XDG_RUNTIME_DIR is unset) is
+    # world-writable, and `mkdir -p -m 700` only sets the mode of the leaf it
+    # creates - a planted symlink at the state dir itself must be refused,
+    # not followed into wherever it points.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    elsewhere="$(mktemp -d)"
+    ln -s "$elsewhere" "$RUNTIME_DIR/dejima"
+    run launch "$PROJ"
+    [ "$status" -ne 0 ]
+    [ -z "$(ls -A "$elsewhere")" ]
+    rm -rf "$elsewhere" "$PROJ"
+}
+
+@test "an inherited DEJIMA_NOTIFY_DIR is not deleted when remote access is off" {
+    # DEJIMA_NOTIFY_DIR is also the name of a container-facing env var; if it
+    # happens to be set in the launching shell for any other reason, a run
+    # with the feature off must not treat it as its own and delete it.
+    stub_launch
+    survive_parent="$(mktemp -d)"
+    survive="$survive_parent/must-survive"
+    mkdir -p "$survive"
+    export DEJIMA_NOTIFY_DIR="$survive"
+    launch "$PROJ"
+    unset DEJIMA_NOTIFY_DIR
+    [ -d "$survive" ]
+    rm -rf "$survive_parent" "$PROJ"
+}

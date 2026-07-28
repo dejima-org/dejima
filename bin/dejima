@@ -436,6 +436,15 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
 
+# Initialized here, unconditionally, so the EXIT trap never observes a
+# nonempty value it didn't itself set - e.g. an operator's environment
+# happening to export a variable of this exact name. With remote access off,
+# a `rm -rf "$DEJIMA_NOTIFY_DIR"` against an inherited value would be a data
+# loss bug, not just a no-op (same class of concern as the credential-proxy
+# variables above, pre-initialized the same way).
+DEJIMA_NOTIFY_DIR=""
+DEJIMA_SESSION_FILE=""
+
 # Optional remote access (see README "Remote access"). Entirely skipped
 # unless ~/.config/dejima/remote.conf exists - with it absent nothing below
 # runs, no state is created, and the compose invocation is exactly what it
@@ -443,6 +452,31 @@ export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC
 if remote_enabled; then
     DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
     DEJIMA_STATE_DIR="$(remote_state_dir)"
+
+    # The state dir's parent (e.g. /tmp, when XDG_RUNTIME_DIR is unset - the
+    # common case for exactly the non-systemd ssh sessions this feature
+    # targets) is world-writable, and `mkdir -p -m 700` only applies MODE to
+    # the leaf it creates - an already-existing path here (a symlink an
+    # attacker pre-created, or a directory some other user owns) is left as
+    # is. Since the notify dir created under it is bind-mounted read-write
+    # into the container and later `rm -rf`'d by the EXIT trap, following a
+    # planted symlink would hand a compromised session (or the trap itself)
+    # access to an attacker-chosen path. Create it, then verify it's a real
+    # directory we own and not a symlink before trusting it - refuse rather
+    # than proceed on anything else. Once this check passes, everything
+    # created below it (sessions/, notify/, notify/<run-id>) is safe: mode
+    # 700 here means no other user can plant anything inside it afterward.
+    mkdir -p -m 700 "$DEJIMA_STATE_DIR" 2>/dev/null || true
+    if [ -L "$DEJIMA_STATE_DIR" ] || [ ! -d "$DEJIMA_STATE_DIR" ] \
+        || [ "$(stat -c %u "$DEJIMA_STATE_DIR")" != "$(id -u)" ]; then
+        echo "Refusing remote access: $DEJIMA_STATE_DIR exists and is not a plain" >&2
+        echo "directory owned by the current user (or is a symlink). This could be a" >&2
+        echo "symlink attack via a shared /tmp - remove it, or set XDG_RUNTIME_DIR to" >&2
+        echo "somewhere else, and retry." >&2
+        exit 1
+    fi
+    chmod 700 "$DEJIMA_STATE_DIR"
+
     mkdir -p -m 700 "$DEJIMA_STATE_DIR/sessions" "$DEJIMA_STATE_DIR/notify"
     DEJIMA_SESSION_FILE="$DEJIMA_STATE_DIR/sessions/$DEJIMA_RUN_ID"
     DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
@@ -456,6 +490,26 @@ if remote_enabled; then
         dejima_tmux_label="$(tmux display-message -p -t "$TMUX_PANE" \
             '#{session_name}:#{window_index}' 2>/dev/null || true)"
     fi
+
+    # A newline in either value would inject an extra key=value line into the
+    # flat registry entry below - e.g. a fabricated `pane=` line inside a
+    # crafted label, which the last-match-wins parser (see dejima-attach)
+    # would honor over the real one, redirecting an operator to an
+    # attacker-chosen pane. Refuse outright rather than sanitize: a value
+    # that can't be represented safely here is the same class of problem as
+    # a corrupt approval store elsewhere in this repo.
+    case "$WORKSPACE_DIR" in
+        *$'\n'*)
+            echo "Refusing remote access: workspace path contains a newline: $WORKSPACE_DIR" >&2
+            exit 1
+            ;;
+    esac
+    case "$dejima_tmux_label" in
+        *$'\n'*)
+            echo "Refusing remote access: tmux session/window label contains a newline." >&2
+            exit 1
+            ;;
+    esac
 
     # Flat key=value, like the rest of the host-side store: no jq dependency
     # here, and nothing that reads it ever sources it.
