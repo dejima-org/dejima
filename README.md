@@ -15,7 +15,7 @@ runtime.
 ## The name
 
 [Dejima](https://en.wikipedia.org/wiki/Dejima) was a small artificial island
-in Nagasaki harbour and was the only Japanese territory open to Westerners
+in Nagasaki harbour, and was the only Japanese territory open to Westerners
 for over two centuries. A single guarded bridge connected it to the mainland,
 and nothing crossed in either direction without permission. The containment
 was real in both directions, and so was the trade: most of what Japan learned
