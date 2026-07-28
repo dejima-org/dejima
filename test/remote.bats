@@ -103,3 +103,98 @@ EOF
     run lib remote_state_dir
     [ "$output" = "$RUNTIME_DIR/dejima" ]
 }
+
+# A fake `docker` that records its argv, so bin/dejima's launch path can be
+# exercised with no daemon. Same approach as test/project.bats.
+stub_launch() {
+    LAUNCH_DIR="$(mktemp -d)"
+    mkdir -p "$LAUNCH_DIR/home/.claude"
+    echo '{}' > "$LAUNCH_DIR/home/.claude/settings.json"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    : > "$LAUNCH_DIR/sandbox-key"
+    chmod 600 "$LAUNCH_DIR/sandbox-key"
+    PROJ="$(mktemp -d)"
+}
+
+launch() {
+    HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
+        SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
+        SANDBOX_CREDENTIAL_PROXY=0 \
+        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        "$REPO_ROOT/bin/dejima" "$@"
+}
+
+run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
+
+@test "with no remote.conf the compose invocation is unchanged" {
+    # The opt-in guarantee, tested rather than asserted: an operator who has
+    # not configured this feature must get byte-identical behavior.
+    stub_launch
+    launch "$PROJ"
+    baseline="$(run_line)"
+    [ -n "$baseline" ]
+    case "$baseline" in
+        *DEJIMA_RUN_ID*|*dejima-notify*) false ;;
+    esac
+    [ ! -d "$RUNTIME_DIR/dejima" ]
+    rm -rf "$PROJ"
+}
+
+@test "with remote.conf a registry entry is written and removed on exit" {
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    launch "$PROJ"
+    # The EXIT trap removes it, so the directory exists but is empty by now.
+    [ -d "$RUNTIME_DIR/dejima/sessions" ]
+    [ -z "$(ls -A "$RUNTIME_DIR/dejima/sessions")" ]
+    [ -z "$(ls -A "$RUNTIME_DIR/dejima/notify")" ]
+    rm -rf "$PROJ"
+}
+
+@test "the mounted marker directory is this run's own, and the registry is never mounted" {
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    launch "$PROJ"
+    line="$(run_line)"
+
+    # The run ID appears as the LAST path segment of the mount source: the
+    # container gets its own directory, never the parent, so it cannot
+    # fabricate markers for another session.
+    [[ "$line" =~ -v\ [^[:space:]]*/notify/([0-9a-f]{16}):/run/dejima-notify ]]
+    [[ "$line" =~ -e\ DEJIMA_RUN_ID=([0-9a-f]{16}) ]]
+    [[ "$line" =~ -e\ DEJIMA_NOTIFY_DIR=/run/dejima-notify ]]
+
+    # The registry decides which pane an operator gets attached to. A session
+    # able to write it could redirect them, so it is never mounted.
+    case "$line" in
+        *sessions*) false ;;
+    esac
+    rm -rf "$PROJ"
+}
+
+@test "a sandbox started outside tmux records an empty pane rather than being skipped" {
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    # The EXIT trap removes the entry, so snapshot it from inside the run:
+    # the stub stands in for the container, and runs while it still exists.
+    cat > "$LAUNCH_DIR/docker" <<EOF
+#!/bin/bash
+echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+rm -rf "$LAUNCH_DIR/sessions-snapshot"
+cp -r "$RUNTIME_DIR/dejima/sessions" "$LAUNCH_DIR/sessions-snapshot" 2>/dev/null || true
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    TMUX_PANE= launch "$PROJ"
+    entry="$(cat "$LAUNCH_DIR"/sessions-snapshot/*)"
+    [[ "$entry" == *"workspace=$PROJ"* ]]
+    [[ "$entry" == *"pane="* ]]
+    [[ "$entry" =~ started=[0-9]+ ]]
+    rm -rf "$PROJ"
+}

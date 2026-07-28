@@ -194,6 +194,8 @@ cleanup() {
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
     rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
+    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}"
+    rm -rf "${DEJIMA_NOTIFY_DIR:-}"
 }
 trap cleanup EXIT
 
@@ -433,6 +435,52 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+
+# Optional remote access (see README "Remote access"). Entirely skipped
+# unless ~/.config/dejima/remote.conf exists - with it absent nothing below
+# runs, no state is created, and the compose invocation is exactly what it
+# was before this feature existed.
+if remote_enabled; then
+    DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
+    DEJIMA_STATE_DIR="$(remote_state_dir)"
+    mkdir -p -m 700 "$DEJIMA_STATE_DIR/sessions" "$DEJIMA_STATE_DIR/notify"
+    DEJIMA_SESSION_FILE="$DEJIMA_STATE_DIR/sessions/$DEJIMA_RUN_ID"
+    DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
+    mkdir -p -m 700 "$DEJIMA_NOTIFY_DIR"
+
+    # $TMUX_PANE is set by tmux in the launching shell. Empty when the
+    # sandbox wasn't started from tmux: the session is still registered, just
+    # listed as not-attachable, rather than silently omitted.
+    dejima_tmux_label=""
+    if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+        dejima_tmux_label="$(tmux display-message -p -t "$TMUX_PANE" \
+            '#{session_name}:#{window_index}' 2>/dev/null || true)"
+    fi
+
+    # Flat key=value, like the rest of the host-side store: no jq dependency
+    # here, and nothing that reads it ever sources it.
+    {
+        printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        printf 'pane=%s\n' "${TMUX_PANE:-}"
+        printf 'label=%s\n' "$dejima_tmux_label"
+        printf 'started=%s\n' "$(date +%s)"
+    } > "$DEJIMA_SESSION_FILE"
+
+    # This run's OWN marker directory is the only thing mounted in - never
+    # its parent - so a compromised session can write markers for itself and
+    # for nothing else. The registry is never mounted at all: dejima-attach
+    # trusts it to decide which pane to attach an operator to, so a session
+    # able to rewrite it could redirect them.
+    #
+    # -e alongside -v here: this array is passed straight to `docker compose
+    # run`, where both are valid flags.
+    extra_mounts+=(-v "$DEJIMA_NOTIFY_DIR:/run/dejima-notify")
+    extra_mounts+=(-e "DEJIMA_NOTIFY_DIR=/run/dejima-notify")
+    # Lets the host correlate this run to its container via `docker inspect`,
+    # so the container never needs write access to the registry to report its
+    # own ID.
+    extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
+fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything this session changed (advisory - see bin/dejima-audit).
