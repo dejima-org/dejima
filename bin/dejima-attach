@@ -1,0 +1,166 @@
+#!/bin/bash
+# List live dejima sandbox sessions and attach to one. This is the shared
+# core behind both remote front doors: it runs as a forced SSH command
+# (restrict,pty,command="...") and as ttyd's command. See README "Remote
+# access".
+#
+# Usage: dejima-attach [run-id|--list]
+#   (no argument)  numbered picker, attaches to the choice
+#   run-id         attach directly - what a notification deep link and ttyd's
+#                  --url-arg produce
+#   --list         one tab-separated row per live session, for scripting
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+if ! remote_enabled; then
+    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "See README \"Remote access\"." >&2
+    exit 1
+fi
+
+STATE_DIR="$(remote_state_dir)"
+SESSIONS_DIR="$STATE_DIR/sessions"
+
+# Parsed, never sourced: this file is host-written, but treating state files
+# as code is the habit this repo doesn't have.
+read_entry() {
+    local file="$1" line
+    entry_workspace=""; entry_pane=""; entry_label=""; entry_started=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            workspace=*) entry_workspace="${line#*=}" ;;
+            pane=*)      entry_pane="${line#*=}" ;;
+            label=*)     entry_label="${line#*=}" ;;
+            started=*)   entry_started="${line#*=}" ;;
+        esac
+    done < "$file"
+}
+
+# The container that reports this run ID. bin/dejima passes DEJIMA_RUN_ID in
+# as env precisely so this correlation is possible without the container
+# having any write access to the registry.
+container_for() {
+    local run_id="$1" name
+    for name in $(docker ps --filter "label=com.docker.compose.project=dejima" \
+                            --filter "status=running" --format '{{.Names}}' 2>/dev/null); do
+        if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null \
+            | grep -qxF "DEJIMA_RUN_ID=$run_id"; then
+            printf '%s' "$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+pane_alive() {
+    [ -n "$1" ] || return 1
+    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"
+}
+
+# The registry is a hint, not truth: bin/dejima's EXIT trap doesn't run under
+# SIGKILL or a host crash, so an entry can outlive its session. An entry with
+# no matching container is pruned outright; one whose pane is gone is shown
+# as stale rather than offered for attachment.
+list_sessions() {
+    local file run_id container state now
+    [ -d "$SESSIONS_DIR" ] || return 0
+    now="$(date +%s)"
+    for file in "$SESSIONS_DIR"/*; do
+        [ -f "$file" ] || continue
+        run_id="$(basename "$file")"
+        valid_run_id "$run_id" || continue
+        if ! container="$(container_for "$run_id")"; then
+            rm -f "$file"
+            rm -rf "${STATE_DIR:?}/notify/$run_id"
+            continue
+        fi
+        read_entry "$file"
+        if [ -z "$entry_pane" ]; then
+            state="no-tmux"
+        elif pane_alive "$entry_pane"; then
+            state="attachable"
+        else
+            state="stale"
+        fi
+        printf '%s\t%s\t%s\t%dm\t%s\t%s\n' \
+            "$run_id" "${entry_label:-?}" "$(basename "$entry_workspace")" \
+            "$(( (now - ${entry_started:-$now}) / 60 ))" "$state" "${container:0:12}"
+    done
+}
+
+# Attaches through a GROUPED session rather than the operator's own. Grouped
+# sessions share windows but track their own current window, so a phone can
+# sit on a different sandbox than the desktop; destroy-unattached disposes of
+# the throwaway on detach; window-size latest keeps the desktop from being
+# resized down to phone dimensions while both view the same window.
+attach() {
+    local run_id="$1" file group win
+    file="$SESSIONS_DIR/$run_id"
+    [ -f "$file" ] || { echo "No such session: $run_id" >&2; exit 1; }
+    read_entry "$file"
+    if [ -z "$entry_pane" ]; then
+        echo "Session $run_id was not started from tmux - nothing to attach to." >&2
+        exit 1
+    fi
+    if ! pane_alive "$entry_pane"; then
+        echo "Session $run_id is stale - its tmux pane is gone." >&2
+        exit 1
+    fi
+    group="dejima-$run_id"
+    if ! tmux has-session -t "=$group" 2>/dev/null; then
+        tmux new-session -d -t "${entry_label%%:*}" -s "$group"
+        tmux set-option -t "=$group" destroy-unattached on
+        tmux set-option -t "=$group" window-size latest
+    fi
+    # Select within the GROUP, not via the pane id directly: the latter would
+    # move the operator's own session's current window too.
+    win="$(tmux display-message -p -t "$entry_pane" '#{window_index}')"
+    tmux select-window -t "$group:$win"
+    exec tmux attach-session -t "=$group"
+}
+
+picker() {
+    local -a ids=() lines=()
+    local line i choice
+    while IFS= read -r line; do
+        ids+=("${line%%$'\t'*}")
+        lines+=("$line")
+    done < <(list_sessions)
+    if [ "${#ids[@]}" -eq 0 ]; then
+        echo "No live dejima sessions."
+        exit 0
+    fi
+    echo "Live dejima sessions:"
+    for i in "${!lines[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "$(printf '%s' "${lines[$i]}" | cut -f2-)"
+    done
+    # Numbered rather than arrow-driven: phone soft keyboards handle digits
+    # far better than arrow keys, and this is the phone's entry point.
+    printf 'Attach to [1-%d, q to quit]: ' "${#ids[@]}"
+    read -r choice
+    case "$choice" in
+        q|Q|'') exit 0 ;;
+        *[!0-9]*) echo "Not a number." >&2; exit 1 ;;
+    esac
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#ids[@]}" ]; then
+        echo "Out of range." >&2
+        exit 1
+    fi
+    attach "${ids[$((choice - 1))]}"
+}
+
+case "${1:-}" in
+    '')      picker ;;
+    --list)  list_sessions ;;
+    *)
+        # This argument arrives from ttyd's --url-arg, i.e. from whoever can
+        # reach the web front door. Validate its shape before it is used as a
+        # path component or anything else.
+        valid_run_id "$1" || { echo "Invalid session id." >&2; exit 1; }
+        [ -f "$SESSIONS_DIR/$1" ] || { echo "No such session: $1" >&2; exit 1; }
+        attach "$1"
+        ;;
+esac

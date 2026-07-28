@@ -261,3 +261,81 @@ EOF
     [ -d "$survive" ]
     rm -rf "$survive_parent" "$PROJ"
 }
+
+# A fake `docker` reporting one running sandbox whose DEJIMA_RUN_ID env
+# matches $1, so the liveness check can be exercised with no daemon.
+stub_docker_run_id() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<EOF
+#!/bin/bash
+case "\$1" in
+    ps)      echo dejima-test-container ;;
+    inspect) echo "DEJIMA_RUN_ID=$1" ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+}
+
+write_entry() {
+    mkdir -p "$RUNTIME_DIR/dejima/sessions"
+    cat > "$RUNTIME_DIR/dejima/sessions/$1" <<EOF
+workspace=/home/someone/myproject
+pane=$2
+label=$3
+started=$(date +%s)
+EOF
+}
+
+@test "dejima-attach refuses an id that is not a run id" {
+    : > "$CONFIG_DIR/remote.conf"
+    for bad in 'nope' '../../etc/passwd' '$(id)' '0123456789abcdef0'; do
+        run "$REPO_ROOT/bin/dejima-attach" "$bad"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"Invalid session id"* ]]
+    done
+}
+
+@test "dejima-attach refuses a well-formed id with no registry entry" {
+    : > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No such session"* ]]
+}
+
+@test "dejima-attach refuses to run at all without remote.conf" {
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not configured"* ]]
+}
+
+@test "--list prunes entries whose container is gone" {
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id ffffffffffffffff
+    write_entry 0123456789abcdef '%1' 'work:2'
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # Pruned from disk, not merely hidden from the listing.
+    [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+}
+
+@test "--list marks a session started outside tmux as not attachable" {
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0123456789abcdef '' ''
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"myproject"* ]]
+    [[ "$output" == *"no-tmux"* ]]
+}
+
+@test "--list marks a session whose pane is gone as stale" {
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0123456789abcdef '%99999' 'work:2'
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"stale"* ]]
+}
