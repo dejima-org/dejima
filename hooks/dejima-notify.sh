@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Notification/Stop hook, registered ONLY into the throwaway settings.json
-# copy bin/dejima generates for a session that has remote access enabled -
-# never into the operator's real settings.json by install.sh. That copy is
-# mounted read-only (see docker-compose.yml), so a session cannot
-# unregister its own hook.
+# Notification/Stop hook. bin/dejima registers it, per session, into the
+# throwaway settings.json copy it generates for a session that has remote
+# access enabled, and nowhere else: the operator's real settings.json is
+# shared with the host's own Claude Code and with every non-remote sandbox,
+# where this hook has no marker directory to write into. That copy is
+# mounted read-only (see docker-compose.yml), so a session cannot unregister
+# its own hook.
 #
 # It writes one empty file whose NAME is its entire meaning. No content, no
 # stdin, no network. The host-side watcher composes the whole notification

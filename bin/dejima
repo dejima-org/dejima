@@ -197,10 +197,18 @@ SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 # between here and that block would otherwise fire the trap while these
 # still held whatever came in from the environment (same class of concern as
 # the credential-proxy variables further down, pre-initialized the same way,
-# just earlier here since the trap is installed sooner).
+# just earlier here since the trap is installed sooner). Every name cleanup()
+# removes but does not itself create belongs here, not just the remote-access
+# ones: the three below are assigned only inside conditional blocks (an nvim
+# config being present, dependencies being approved), so an ordinary run with
+# neither would otherwise carry an inherited value all the way to the trap -
+# and SANDBOX_DERIVED_CONTEXT is one of the `rm -rf` arguments.
 DEJIMA_NOTIFY_DIR=""
 DEJIMA_SESSION_FILE=""
 SANDBOX_REMOTE_SETTINGS_TMP=""
+SANDBOX_NVIM_LOCKFILE=""
+SANDBOX_DERIVED_DOCKERFILE=""
+SANDBOX_DERIVED_CONTEXT=""
 
 cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then

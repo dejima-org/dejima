@@ -115,7 +115,20 @@ EOF
 stub_launch() {
     LAUNCH_DIR="$(mktemp -d)"
     mkdir -p "$LAUNCH_DIR/home/.claude"
-    echo '{}' > "$LAUNCH_DIR/home/.claude/settings.json"
+    # Seeded with hooks the operator already had, not an empty object: the
+    # per-session registration appends to whatever Notification/Stop entries
+    # are there, and against `{}` there is nothing to lose, so replacing
+    # instead of appending would look identical. Kept as a pristine copy too,
+    # to assert the real file is left byte-for-byte alone.
+    cat > "$LAUNCH_DIR/settings-seed.json" <<'EOF'
+{
+  "hooks": {
+    "Notification": [{"matcher": "", "hooks": [{"type": "command", "command": "operator-desktop-notify.sh"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "operator-tts.sh"}]}]
+  }
+}
+EOF
+    cp "$LAUNCH_DIR/settings-seed.json" "$LAUNCH_DIR/home/.claude/settings.json"
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
@@ -267,10 +280,28 @@ EOF
     survive_file="$survive_parent/must-survive-too"
     : > "$survive_file"
     export SANDBOX_REMOTE_SETTINGS_TMP="$survive_file"
+    # The same hazard for every other name cleanup() removes but only assigns
+    # inside a conditional block. This run has no nvim config and no approved
+    # dependencies, so none of the three is ever set - and one of them is an
+    # `rm -rf` argument, which takes a whole tree, not a file.
+    survive_lock="$survive_parent/must-survive-lock"
+    survive_dockerfile="$survive_parent/must-survive-dockerfile"
+    survive_ctx="$survive_parent/must-survive-ctx"
+    : > "$survive_lock"
+    : > "$survive_dockerfile"
+    mkdir -p "$survive_ctx/deep"
+    : > "$survive_ctx/deep/canary"
+    export SANDBOX_NVIM_LOCKFILE="$survive_lock"
+    export SANDBOX_DERIVED_DOCKERFILE="$survive_dockerfile"
+    export SANDBOX_DERIVED_CONTEXT="$survive_ctx"
     launch "$PROJ"
-    unset DEJIMA_NOTIFY_DIR SANDBOX_REMOTE_SETTINGS_TMP
+    unset DEJIMA_NOTIFY_DIR SANDBOX_REMOTE_SETTINGS_TMP SANDBOX_NVIM_LOCKFILE \
+        SANDBOX_DERIVED_DOCKERFILE SANDBOX_DERIVED_CONTEXT
     [ -d "$survive" ]
     [ -f "$survive_file" ]
+    [ -f "$survive_lock" ]
+    [ -f "$survive_dockerfile" ]
+    [ -f "$survive_ctx/deep/canary" ]
     rm -rf "$survive_parent" "$PROJ"
 }
 
@@ -777,10 +808,42 @@ EOF
     [ "$status" -eq 0 ]
     [ -f "$NOTIFY/done" ]
     [ ! -s "$NOTIFY/done" ]
-    # The marker's name is its entire meaning: nothing else is created, and
-    # the hook's stdin (which carries the session's own text) is never read.
+    # The marker's name is its entire meaning: the two events it accepts
+    # created two files and nothing else. (Stdin is a separate property with
+    # its own test below - `run` closes stdin, so nothing here can see it.)
     [ "$(ls -A "$NOTIFY" | sort | tr '\n' ' ')" = "done waiting " ]
     rm -rf "$NOTIFY"
+}
+
+@test "the notify hook never reads its stdin" {
+    # Stdin is where sandbox-controlled bytes actually arrive: Claude Code
+    # hands a hook a JSON payload containing the Notification `message` the
+    # session itself wrote, plus transcript_path and cwd. If any of it landed
+    # in the marker, the watcher would be composing the operator's phone
+    # notification partly from text the sandbox chose.
+    #
+    # This needs real bytes in a real pipe. Every other hook test runs under
+    # bats' `run`, which hands the hook an EOF stdin - so a hook that read
+    # stdin straight into the marker would leave it empty there and pass.
+    NOTIFY="$(mktemp -d)"
+    payload='{"message":"INJECTED-DEEP-LINK-https://evil.invalid/x","cwd":"/w"}'
+    payload_file="$(mktemp)"
+    printf '%s' "$payload" > "$payload_file"
+
+    # Redirected from a shared fd rather than a pipe, so this can assert the
+    # stronger property: not "the bytes did not reach the marker" but "the
+    # bytes were never consumed". The hook inherits fd 9's open file
+    # description, offset included, so anything it read would be missing from
+    # what is left to read here afterwards.
+    exec 9<"$payload_file"
+    DEJIMA_NOTIFY_DIR="$NOTIFY" "$REPO_ROOT/hooks/dejima-notify.sh" waiting <&9
+    leftover="$(cat <&9)"
+    exec 9<&-
+
+    [ "$leftover" = "$payload" ]
+    [ -f "$NOTIFY/waiting" ]
+    [ ! -s "$NOTIFY/waiting" ]
+    rm -rf "$NOTIFY" "$payload_file"
 }
 
 @test "the notify hook refuses any event name outside the enum" {
@@ -815,10 +878,18 @@ EOF
     grep -q 'dejima-notify.sh waiting' "$LAUNCH_DIR/settings-copy.json"
     grep -q 'dejima-notify.sh done' "$LAUNCH_DIR/settings-copy.json"
     # The copy is a throwaway, so the operator's real settings.json - which
-    # install.sh deliberately never registers this hook into - is untouched.
-    [ "$(cat "$LAUNCH_DIR/home/.claude/settings.json")" = '{}' ]
+    # nothing registers this hook into - is left byte-for-byte alone.
+    cmp -s "$LAUNCH_DIR/settings-seed.json" "$LAUNCH_DIR/home/.claude/settings.json"
     # And what the copy carried before is still there: this appends, it does
     # not replace the file bin/dejima generated.
     [ "$(jq '.sandbox.enabled' "$LAUNCH_DIR/settings-copy.json")" = "false" ]
+    # Including the operator's OWN Notification and Stop hooks - a desktop
+    # notifier, a TTS reader, a logger. Replacing rather than appending would
+    # silently disable them in every remote-enabled sandbox. They come first,
+    # ahead of the appended dejima entries.
+    [ "$(jq '.hooks.Notification | length' "$LAUNCH_DIR/settings-copy.json")" = "2" ]
+    [ "$(jq '.hooks.Stop | length' "$LAUNCH_DIR/settings-copy.json")" = "2" ]
+    [ "$(jq -r '.hooks.Notification[0].hooks[0].command' "$LAUNCH_DIR/settings-copy.json")" = "operator-desktop-notify.sh" ]
+    [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$LAUNCH_DIR/settings-copy.json")" = "operator-tts.sh" ]
     rm -rf "$PROJ"
 }
