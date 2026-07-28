@@ -25,10 +25,13 @@ STATE_DIR="$(remote_state_dir)"
 SESSIONS_DIR="$STATE_DIR/sessions"
 
 # Parsed, never sourced: this file is host-written, but treating state files
-# as code is the habit this repo doesn't have.
+# as code is the habit this repo doesn't have. Returns nonzero for an entry
+# that can't be read or doesn't parse; callers skip it rather than dying,
+# since one bad entry must not hide every other live session.
 read_entry() {
     local file="$1" line
     entry_workspace=""; entry_pane=""; entry_label=""; entry_started=""
+    [ -r "$file" ] || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             workspace=*) entry_workspace="${line#*=}" ;;
@@ -36,16 +39,28 @@ read_entry() {
             label=*)     entry_label="${line#*=}" ;;
             started=*)   entry_started="${line#*=}" ;;
         esac
-    done < "$file"
+    done < "$file" || return 1
+    # started is the one field that reaches an arithmetic context, where a
+    # non-numeric value is evaluated as a *variable name* - so "started=x[$(cmd)]"
+    # executes cmd, and set -u doesn't catch it when the name is already bound.
+    # Refuse the entry instead of arithmetic-evaluating anything from a file.
+    case "$entry_started" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
 }
 
 # The container that reports this run ID. bin/dejima passes DEJIMA_RUN_ID in
 # as env precisely so this correlation is possible without the container
 # having any write access to the registry.
+#
+# Exit status distinguishes "no such container" (1) from "couldn't ask" (2):
+# the caller prunes on the former, and pruning on the latter would permanently
+# unregister every running sandbox the moment dockerd happens to be restarting.
 container_for() {
-    local run_id="$1" name
-    for name in $(docker ps --filter "label=com.docker.compose.project=dejima" \
-                            --filter "status=running" --format '{{.Names}}' 2>/dev/null); do
+    local run_id="$1" names name
+    names="$(docker ps --filter "label=com.docker.compose.project=dejima" \
+                       --filter "status=running" --format '{{.Names}}' 2>/dev/null)" || return 2
+    for name in $names; do
         if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null \
             | grep -qxF "DEJIMA_RUN_ID=$run_id"; then
             printf '%s' "$name"
@@ -65,19 +80,31 @@ pane_alive() {
 # no matching container is pruned outright; one whose pane is gone is shown
 # as stale rather than offered for attachment.
 list_sessions() {
-    local file run_id container state now
+    local file run_id container state now rc warned=""
     [ -d "$SESSIONS_DIR" ] || return 0
     now="$(date +%s)"
     for file in "$SESSIONS_DIR"/*; do
         [ -f "$file" ] || continue
         run_id="$(basename "$file")"
         valid_run_id "$run_id" || continue
-        if ! container="$(container_for "$run_id")"; then
+        rc=0
+        container="$(container_for "$run_id")" || rc=$?
+        if [ "$rc" -eq 1 ]; then
             rm -f "$file"
             rm -rf "${STATE_DIR:?}/notify/$run_id"
             continue
         fi
-        read_entry "$file"
+        if [ "$rc" -ne 0 ]; then
+            # An unanswerable question is never a "no": the entry stays, and
+            # the container column says the daemon couldn't confirm it.
+            container="?"
+            [ -n "$warned" ] || echo "warning: could not query docker - sessions listed unverified." >&2
+            warned=1
+        fi
+        if ! read_entry "$file"; then
+            echo "warning: skipping unreadable or malformed registry entry: $file" >&2
+            continue
+        fi
         if [ -z "$entry_pane" ]; then
             state="no-tmux"
         elif pane_alive "$entry_pane"; then
@@ -87,7 +114,7 @@ list_sessions() {
         fi
         printf '%s\t%s\t%s\t%dm\t%s\t%s\n' \
             "$run_id" "${entry_label:-?}" "$(basename "$entry_workspace")" \
-            "$(( (now - ${entry_started:-$now}) / 60 ))" "$state" "${container:0:12}"
+            "$(( (now - entry_started) / 60 ))" "$state" "${container:0:12}"
     done
 }
 
@@ -100,7 +127,10 @@ attach() {
     local run_id="$1" file group win
     file="$SESSIONS_DIR/$run_id"
     [ -f "$file" ] || { echo "No such session: $run_id" >&2; exit 1; }
-    read_entry "$file"
+    if ! read_entry "$file"; then
+        echo "Session $run_id has an unreadable or malformed registry entry." >&2
+        exit 1
+    fi
     if [ -z "$entry_pane" ]; then
         echo "Session $run_id was not started from tmux - nothing to attach to." >&2
         exit 1
@@ -110,16 +140,32 @@ attach() {
         exit 1
     fi
     group="dejima-$run_id"
-    if ! tmux has-session -t "=$group" 2>/dev/null; then
-        tmux new-session -d -t "${entry_label%%:*}" -s "$group"
-        tmux set-option -t "=$group" destroy-unattached on
-        tmux set-option -t "=$group" window-size latest
+    # The pane can go away between the check above and here; display-message
+    # prints nothing and still exits 0 for a target that no longer exists, and
+    # an empty index would silently select the group's current window instead
+    # of the requested one.
+    win="$(tmux display-message -p -t "$entry_pane" '#{window_index}' 2>/dev/null || true)"
+    if [ -z "$win" ]; then
+        echo "Session $run_id is stale - its tmux pane went away." >&2
+        exit 1
     fi
-    # Select within the GROUP, not via the pane id directly: the latter would
-    # move the operator's own session's current window too.
-    win="$(tmux display-message -p -t "$entry_pane" '#{window_index}')"
-    tmux select-window -t "$group:$win"
-    exec tmux attach-session -t "=$group"
+    if tmux has-session -t "=$group" 2>/dev/null; then
+        # Select within the GROUP, not via the pane id directly: the latter
+        # would move the operator's own session's current window too.
+        tmux select-window -t "=$group:$win"
+        exec tmux attach-session -t "=$group"
+    fi
+    # One command sequence, and the order in it is load-bearing:
+    # destroy-unattached has to be set by the same command that attaches,
+    # because setting it on a still-detached session makes the server reap the
+    # session before the attach lands. window-size is a WINDOW option, so it
+    # has to come after select-window or it lands on the wrong window; latest
+    # keeps the desktop from being resized down to phone dimensions while both
+    # view the same window.
+    exec tmux new-session -t "${entry_label%%:*}" -s "$group" \; \
+        select-window -t "=$group:$win" \; \
+        set-option -w window-size latest \; \
+        set-option destroy-unattached on
 }
 
 picker() {

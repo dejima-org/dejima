@@ -514,6 +514,17 @@ if remote_enabled; then
             exit 1
             ;;
     esac
+    # $TMUX_PANE comes from the launching shell's environment, so it is the
+    # one value here an attacker could pick outright rather than merely
+    # influence - and it is written last, where an injected line would win the
+    # parser's last-match-wins race (e.g. a forged started=, which reaches an
+    # arithmetic context in dejima-attach).
+    case "${TMUX_PANE:-}" in
+        *$'\n'*)
+            echo "Refusing remote access: \$TMUX_PANE contains a newline." >&2
+            exit 1
+            ;;
+    esac
 
     # Flat key=value, like the rest of the host-side store: no jq dependency
     # here, and nothing that reads it ever sources it.

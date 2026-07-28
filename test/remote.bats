@@ -14,7 +14,13 @@ setup() {
     export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 }
 teardown() {
-    rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"}
+    # Only ever the private server start_tmux created (its own TMUX_TMPDIR),
+    # never the operator's.
+    if [ -n "${TMUX_DIR:-}" ]; then
+        TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
+    fi
+    rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
+        ${TMUX_DIR:+"$TMUX_DIR"}
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
@@ -338,4 +344,146 @@ EOF
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -eq 0 ]
     [[ "$output" == *"stale"* ]]
+}
+
+# A `docker` that can't answer - the daemon restarting, or docker not
+# installed at all. Distinct from "no such container", and must stay that way.
+stub_docker_broken() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." >&2
+exit 1
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+}
+
+# A real tmux server of our own, on a private TMUX_TMPDIR so nothing here can
+# touch an operator's sessions. Two windows, so selecting the right one is
+# distinguishable from selecting the current one. $TARGET_PANE is in window 1.
+start_tmux() {
+    TMUX_DIR="$(mktemp -d)"
+    export TMUX_TMPDIR="$TMUX_DIR"
+    unset TMUX
+    tmux -f /dev/null new-session -d -s work -x 80 -y 24 'sleep 300'
+    tmux new-window -t work -d 'sleep 300'
+    TARGET_PANE="$(tmux list-panes -t work:1 -F '#{pane_id}')"
+}
+
+@test "--list shows a live tmux pane as attachable" {
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"attachable"* ]]
+}
+
+@test "attaching creates a grouped session on the requested window and disposes of it on detach" {
+    # The positive direction, which is where every interesting tmux mistake
+    # lives: an invalid set-option target, or setting destroy-unattached while
+    # the session is still detached, both leave the negative tests green while
+    # no one can actually attach.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    # A pty that is NOT a tmux pane: tmux refuses to nest, and ttyd/ssh give
+    # dejima-attach a bare pty too.
+    script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
+    attach_pid=$!
+    for _ in $(seq 50); do
+        if tmux has-session -t '=dejima-0123456789abcdef' 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    tmux has-session -t '=dejima-0123456789abcdef'
+    [ "$(tmux list-clients -F '#{client_session}')" = "dejima-0123456789abcdef" ]
+    # On the requested window - and the operator's own session was not dragged
+    # along to it.
+    [ "$(tmux display-message -p -t dejima-0123456789abcdef '#{window_index}')" = "1" ]
+    [ "$(tmux display-message -p -t work '#{window_index}')" = "0" ]
+    [ "$(tmux show-options -t dejima-0123456789abcdef destroy-unattached)" = "destroy-unattached on" ]
+
+    # destroy-unattached actually applied: the throwaway must not outlive the
+    # remote client, or every phone detach leaks a session on the host server.
+    kill "$attach_pid" 2>/dev/null || true
+    for _ in $(seq 50); do
+        if ! tmux has-session -t '=dejima-0123456789abcdef' 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    run tmux has-session -t '=dejima-0123456789abcdef'
+    [ "$status" -ne 0 ]
+    tmux has-session -t '=work'
+}
+
+@test "--list never prunes when docker cannot be asked" {
+    # "Couldn't ask" is not "it's gone". bin/dejima stamps the registry only at
+    # launch, so pruning here would permanently unregister every running
+    # sandbox - and rm -rf the notify dir out from under a live bind mount.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_broken
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [ -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+}
+
+@test "a registry entry cannot execute anything through the uptime arithmetic" {
+    # started= reaches $(( )), where bash evaluates a non-numeric value as a
+    # variable name and runs any command substitution in its subscript - and
+    # set -u does not catch it when that name is already bound.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0123456789abcdef '%1' 'work:2'
+    canary="$RUNTIME_DIR/PWNED"
+    printf 'started=now[$(touch %s)]\n' "$canary" >> "$RUNTIME_DIR/dejima/sessions/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ ! -e "$canary" ]
+    run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
+    [ "$status" -ne 0 ]
+    [ ! -e "$canary" ]
+}
+
+@test "one unreadable entry does not hide every other live session" {
+    # The unreadable entry sorts first, so a fatal read aborts the loop before
+    # the live session below it is ever printed - and the picker's process
+    # substitution swallows the status, so sandboxes just silently vanish.
+    : > "$CONFIG_DIR/remote.conf"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+case "$1" in
+    ps)      echo dejima-test-container ;;
+    # Reports both run IDs, so neither entry is pruned for the unrelated
+    # reason that its container is gone.
+    inspect) echo DEJIMA_RUN_ID=0000000000000000; echo DEJIMA_RUN_ID=0123456789abcdef ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0123456789abcdef '%1' 'work:2'
+    chmod 000 "$RUNTIME_DIR/dejima/sessions/0000000000000000"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+}
+
+@test "a TMUX_PANE containing a newline is refused" {
+    # $TMUX_PANE is taken straight from the launching shell's environment and
+    # written last into the flat entry, so an injected line would win the
+    # parser's last-match-wins race - a forged started= being the sharp case.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    TMUX_PANE=$'%1\nstarted=now[$(id)]' run launch "$PROJ"
+    [ "$status" -ne 0 ]
+    [ -z "$(ls -A "$RUNTIME_DIR/dejima/sessions" 2>/dev/null)" ]
+    rm -rf "$PROJ"
 }
