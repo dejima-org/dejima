@@ -852,3 +852,10 @@ top-level entries like `statusline.sh`) to resolve, and runs
 adds a domain to a running session's firewall from the host - see "Adding a
 domain to a running session" above. `install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later
+(GPL-3.0-or-later) — see [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 Brad Anderson

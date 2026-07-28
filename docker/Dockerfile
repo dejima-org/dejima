@@ -1,5 +1,8 @@
-# Based on the official Anthropic reference dev container:
-# https://github.com/anthropics/claude-code/tree/main/.devcontainer
+# Loosely inspired by the general shape of Anthropic's public reference dev
+# container (https://github.com/anthropics/claude-code/tree/main/.devcontainer),
+# substantially extended and reworked for this project's own sandboxing model
+# (parametrized SANDBOX_USER, DNS proxy + ulogd2 logging, gosu-based privilege
+# drop, nvim/Go/Playwright/tree-sitter toolchain, gitea-pr helper, etc).
 FROM node:22
 
 ARG TZ
@@ -89,11 +92,11 @@ ENV SANDBOX_HOME=$SANDBOX_HOME
 RUN mkdir -p /usr/local/share/npm-global && \
   chown -R $SANDBOX_USER:$SANDBOX_USER /usr/local/share
 
-# Persist bash history.
-RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-  && mkdir /commandhistory \
-  && touch /commandhistory/.bash_history \
-  && chown -R $SANDBOX_USER /commandhistory
+# Persist bash history. The env vars that actually wire history up to this
+# file are set below via zsh-in-docker's -a flag.
+RUN mkdir /commandhistory && \
+  touch /commandhistory/.bash_history && \
+  chown -R $SANDBOX_USER /commandhistory
 
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
@@ -199,14 +202,16 @@ ENV SHELL=/bin/zsh
 ENV EDITOR=nano
 ENV VISUAL=nano
 
-# Default powerline10k theme
+# Default powerline10k theme, git/fzf oh-my-zsh plugins, fzf's own key
+# bindings, and wiring HISTFILE to the persisted /commandhistory volume -
+# see https://github.com/deluan/zsh-in-docker for the installer's own flags.
 ARG ZSH_IN_DOCKER_VERSION=1.2.0
 RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
-  -p git \
   -p fzf \
+  -p git \
+  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
   -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   -x
 
 # Install Claude Code
