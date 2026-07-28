@@ -142,7 +142,7 @@ list_sessions() {
 # permanently overwrites their choice, with nothing to restore it afterwards -
 # and global. An operator who deliberately set smallest keeps it.
 attach() {
-    local run_id="$1" file group win base
+    local run_id="$1" file group win base target
     file="$SESSIONS_DIR/$run_id"
     [ -f "$file" ] || { echo "No such session: $run_id" >&2; exit 1; }
     if ! read_entry "$file"; then
@@ -158,12 +158,24 @@ attach() {
         exit 1
     fi
     group="dejima-$run_id"
-    # The pane can go away between the check above and here; display-message
-    # prints nothing and still exits 0 for a target that no longer exists, and
-    # an empty index would silently select the group's current window instead
-    # of the requested one.
-    win="$(tmux display-message -p -t "$entry_pane" '#{window_index}' 2>/dev/null || true)"
-    if [ -z "$win" ]; then
+    # Both values come from the same live pane, in one round trip. Taking the
+    # session name from the recorded label instead would follow a name rather
+    # than the sandbox: an operator renaming sessions is enough to point it at
+    # an unrelated session, and a label naming nothing at all is not an error
+    # to tmux - `new-session -t` silently creates a fresh UNGROUPED session
+    # under that name, handing a remote client a plain host shell with no
+    # sandbox in it. A name taken from a pane that is alive right now always
+    # exists, so that hole is closed by construction rather than by a check.
+    #
+    # display-message prints nothing and still exits 0 for a target that no
+    # longer exists, so an empty result means the pane went away between the
+    # check above and here - and an empty window index would silently select
+    # the group's current window instead of the requested one.
+    target="$(tmux display-message -p -t "$entry_pane" '#{session_name}:#{window_index}' 2>/dev/null || true)"
+    # Session names may contain ':', window indexes can't.
+    base="${target%:*}"
+    win="${target##*:}"
+    if [ -z "$base" ] || [ -z "$win" ]; then
         echo "Session $run_id is stale - its tmux pane went away." >&2
         exit 1
     fi
@@ -173,17 +185,10 @@ attach() {
         tmux select-window -t "=$group:$win"
         exec tmux attach-session -t "=$group"
     fi
-    base="${entry_label%%:*}"
-    # Anchored with "=": an unanchored target prefix/fnmatch-matches, so a
-    # recorded label of "wor" would join the operator's "work" session. And a
-    # target matching nothing is not an error to tmux - it silently creates a
-    # fresh ungrouped session under that name, handing the caller a plain host
-    # shell instead of the sandbox - so an empty or vanished base must be
-    # refused here rather than left for tmux to "handle".
-    if [ -z "$base" ] || ! tmux has-session -t "=$base" 2>/dev/null; then
-        echo "Session $run_id records tmux session \"$base\", which no longer exists." >&2
-        exit 1
-    fi
+    # Every session target here is "="-anchored: an unanchored one
+    # prefix/fnmatch-matches, so a name that is a prefix of another can
+    # resolve to the wrong session entirely.
+    #
     # One command sequence, and the order in it is load-bearing:
     # destroy-unattached has to be set by the same command that attaches,
     # because setting it on a still-detached session makes the server reap the

@@ -537,3 +537,113 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"0123456789abcdef"* ]]
 }
+
+# Waits for the grouped session an attach should have created, then prints
+# "<name> <group>" for it - empty group means UNGROUPED, i.e. a fresh session
+# tmux conjured out of a name rather than a clone of the sandbox's own.
+await_group() {
+    local i
+    for i in $(seq 50); do
+        if tmux has-session -t "=dejima-$1" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    tmux list-sessions -F '#{session_name} #{session_group}' | grep "^dejima-$1 " || true
+}
+
+@test "a recorded session name that no longer exists cannot conjure a session of its own" {
+    # tmux does not fail on `new-session -t <nothing-matches>` - it creates a
+    # fresh ungrouped session under that name, which for a remote client is a
+    # plain host shell with no sandbox in it. The base session must therefore
+    # come from the live pane, never from the recorded label.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'nope:0'
+    script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
+    attach_pid=$!
+    # Grouped with the session that actually holds the pane, on its window.
+    [ "$(await_group 0123456789abcdef)" = "dejima-0123456789abcdef work" ]
+    [ "$(tmux display-message -p -t dejima-0123456789abcdef '#{window_index}')" = "1" ]
+    kill "$attach_pid" 2>/dev/null || true
+}
+
+@test "attaching follows the pane's session across a rename, not the recorded name" {
+    # The registry can outlive the shape of the operator's tmux server. If the
+    # base came from the label, renaming the real session and letting anything
+    # else take the old name would silently attach the remote client to that
+    # unrelated session.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+    tmux rename-session -t '=work' old
+    tmux new-session -d -s work 'sleep 300'
+    script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
+    attach_pid=$!
+    [ "$(await_group 0123456789abcdef)" = "dejima-0123456789abcdef old" ]
+    [ "$(tmux display-message -p -t dejima-0123456789abcdef '#{window_index}')" = "1" ]
+    kill "$attach_pid" 2>/dev/null || true
+}
+
+@test "every tmux session target in dejima-attach is anchored" {
+    # An unanchored target prefix/fnmatch-matches. Taking the base session
+    # from a live pane means the name always resolves exactly today, so this
+    # is defence in depth rather than a behavior any test can observe - which
+    # is exactly why it needs pinning: nothing else would notice it going.
+    while IFS= read -r line; do
+        case "$line" in
+            # Pane ids (%N) are already exact; "=" is not valid for them.
+            *'-t "$entry_pane"'*|*'-t "=$'*) continue ;;
+        esac
+        echo "unanchored tmux target: $line"
+        return 1
+    done < <(grep -n 'tmux [a-z-]*.*-t "' "$REPO_ROOT/bin/dejima-attach")
+}
+
+@test "--list survives a timestamp with a leading zero" {
+    # Bash reads a leading zero as octal, so an all-digits "0999999999" is
+    # still not a number and $(( )) would abort the whole listing under set -e.
+    # The 10# that fixes it is also the second line of defence behind the
+    # started validation: "10#now[$(cmd)]" fails to lex before the array
+    # subscript is ever evaluated.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0123456789abcdef '%1' 'work:2'
+    sed -i 's/^started=.*/started=0999999999/' "$RUNTIME_DIR/dejima/sessions/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+}
+
+# A tmux that reproduces the one behavior a live race produces and no test can
+# otherwise force: display-message printing nothing, and still exiting 0, for
+# a pane that went away after the liveness check. Everything else passes
+# through to the real tmux.
+stub_tmux_lost_pane() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    cat > "$STUB_DIR/tmux" <<EOF
+#!/bin/bash
+for arg in "\$@"; do
+    [ "\$arg" = '#{session_name}:#{window_index}' ] && exit 0
+done
+exec $(command -v tmux) "\$@"
+EOF
+    chmod +x "$STUB_DIR/tmux"
+    PATH="$STUB_DIR:$PATH"
+}
+
+@test "a pane that vanishes between the liveness check and the attach is refused" {
+    # Without the guard, an empty session name and window index are handed
+    # straight to tmux, which reads them as "no target given" - a new ungrouped
+    # session, and the group's current window rather than the sandbox's.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    stub_tmux_lost_pane
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+    run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"stale"* ]]
+    run tmux has-session -t '=dejima-0123456789abcdef'
+    [ "$status" -ne 0 ]
+}
