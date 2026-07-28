@@ -515,10 +515,12 @@ if remote_enabled; then
             ;;
     esac
     # $TMUX_PANE comes from the launching shell's environment, so it is the
-    # one value here an attacker could pick outright rather than merely
-    # influence - and it is written last, where an injected line would win the
-    # parser's last-match-wins race (e.g. a forged started=, which reaches an
-    # arithmetic context in dejima-attach).
+    # one value here that is taken verbatim rather than derived. It is written
+    # second of the four lines below, so an injected line lands ahead of
+    # label= and started= and would lose the parser's last-match-wins race to
+    # the real ones - but it would WIN against the pane= it is part of, which
+    # is the field deciding which pane an operator gets attached to. Refusing
+    # the newline outright is what makes that independent of printf ordering.
     case "${TMUX_PANE:-}" in
         *$'\n'*)
             echo "Refusing remote access: \$TMUX_PANE contains a newline." >&2

@@ -44,6 +44,7 @@ read_entry() {
     # non-numeric value is evaluated as a *variable name* - so "started=x[$(cmd)]"
     # executes cmd, and set -u doesn't catch it when the name is already bound.
     # Refuse the entry instead of arithmetic-evaluating anything from a file.
+    # (Digits alone aren't enough for the arithmetic itself - see the 10# below.)
     case "$entry_started" in
         ''|*[!0-9]*) return 1 ;;
     esac
@@ -57,16 +58,22 @@ read_entry() {
 # the caller prunes on the former, and pruning on the latter would permanently
 # unregister every running sandbox the moment dockerd happens to be restarting.
 container_for() {
-    local run_id="$1" names name
+    local run_id="$1" names name env unasked=""
     names="$(docker ps --filter "label=com.docker.compose.project=dejima" \
                        --filter "status=running" --format '{{.Names}}' 2>/dev/null)" || return 2
     for name in $names; do
-        if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null \
-            | grep -qxF "DEJIMA_RUN_ID=$run_id"; then
+        # Captured rather than piped straight into grep: a pipeline reports
+        # only grep's status, which would turn "inspect couldn't answer for
+        # this container" into "this isn't the one" - and one such container
+        # anywhere in the list would prune an unrelated live session.
+        env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null)" \
+            || { unasked=1; continue; }
+        if printf '%s\n' "$env" | grep -qxF "DEJIMA_RUN_ID=$run_id"; then
             printf '%s' "$name"
             return 0
         fi
     done
+    [ -z "$unasked" ] || return 2
     return 1
 }
 
@@ -91,7 +98,12 @@ list_sessions() {
         container="$(container_for "$run_id")" || rc=$?
         if [ "$rc" -eq 1 ]; then
             rm -f "$file"
-            rm -rf "${STATE_DIR:?}/notify/$run_id"
+            # Non-fatal: the marker directory is bind-mounted read-write into
+            # the sandbox, so a compromised session can chmod it such that this
+            # rm fails - and a failure here under set -e would abort the whole
+            # listing, letting that session deny the operator the front door.
+            rm -rf "${STATE_DIR:?}/notify/$run_id" \
+                || echo "warning: could not remove the marker directory for $run_id" >&2
             continue
         fi
         if [ "$rc" -ne 0 ]; then
@@ -114,17 +126,23 @@ list_sessions() {
         fi
         printf '%s\t%s\t%s\t%dm\t%s\t%s\n' \
             "$run_id" "${entry_label:-?}" "$(basename "$entry_workspace")" \
-            "$(( (now - entry_started) / 60 ))" "$state" "${container:0:12}"
+            "$(( (now - 10#$entry_started) / 60 ))" "$state" "${container:0:12}"
     done
 }
 
 # Attaches through a GROUPED session rather than the operator's own. Grouped
 # sessions share windows but track their own current window, so a phone can
-# sit on a different sandbox than the desktop; destroy-unattached disposes of
-# the throwaway on detach; window-size latest keeps the desktop from being
-# resized down to phone dimensions while both view the same window.
+# sit on a different sandbox than the desktop, and destroy-unattached disposes
+# of the throwaway on detach.
+#
+# Nothing here sets window-size, deliberately: keeping the desktop from being
+# resized down to phone dimensions is what tmux's own default (latest, since
+# 3.1) already does, and the option's only scopes are the window - which a
+# grouped session SHARES with the operator's own, so setting it there
+# permanently overwrites their choice, with nothing to restore it afterwards -
+# and global. An operator who deliberately set smallest keeps it.
 attach() {
-    local run_id="$1" file group win
+    local run_id="$1" file group win base
     file="$SESSIONS_DIR/$run_id"
     [ -f "$file" ] || { echo "No such session: $run_id" >&2; exit 1; }
     if ! read_entry "$file"; then
@@ -155,16 +173,23 @@ attach() {
         tmux select-window -t "=$group:$win"
         exec tmux attach-session -t "=$group"
     fi
+    base="${entry_label%%:*}"
+    # Anchored with "=": an unanchored target prefix/fnmatch-matches, so a
+    # recorded label of "wor" would join the operator's "work" session. And a
+    # target matching nothing is not an error to tmux - it silently creates a
+    # fresh ungrouped session under that name, handing the caller a plain host
+    # shell instead of the sandbox - so an empty or vanished base must be
+    # refused here rather than left for tmux to "handle".
+    if [ -z "$base" ] || ! tmux has-session -t "=$base" 2>/dev/null; then
+        echo "Session $run_id records tmux session \"$base\", which no longer exists." >&2
+        exit 1
+    fi
     # One command sequence, and the order in it is load-bearing:
     # destroy-unattached has to be set by the same command that attaches,
     # because setting it on a still-detached session makes the server reap the
-    # session before the attach lands. window-size is a WINDOW option, so it
-    # has to come after select-window or it lands on the wrong window; latest
-    # keeps the desktop from being resized down to phone dimensions while both
-    # view the same window.
-    exec tmux new-session -t "${entry_label%%:*}" -s "$group" \; \
+    # session before the attach lands.
+    exec tmux new-session -t "=$base" -s "$group" \; \
         select-window -t "=$group:$win" \; \
-        set-option -w window-size latest \; \
         set-option destroy-unattached on
 }
 

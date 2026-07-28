@@ -487,3 +487,53 @@ EOF
     [ -z "$(ls -A "$RUNTIME_DIR/dejima/sessions" 2>/dev/null)" ]
     rm -rf "$PROJ"
 }
+
+@test "--list never prunes when docker inspect cannot answer for some container" {
+    # The other half of "couldn't ask": inspect failing for an unrelated
+    # container must not read as "this isn't the one" for the session being
+    # checked. Piping inspect into grep reports only grep's status, and a
+    # spurious prune is unrecoverable - bin/dejima stamps at launch only.
+    : > "$CONFIG_DIR/remote.conf"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+case "$1" in
+    ps) echo dejima-a; echo dejima-b ;;
+    inspect)
+        case "$*" in
+            *dejima-a*) echo DEJIMA_RUN_ID=aaaaaaaaaaaaaaaa ;;
+            *) echo "Error response from daemon: dejima-b" >&2; exit 1 ;;
+        esac
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+    write_entry aaaaaaaaaaaaaaaa '%1' 'work:1'
+    write_entry bbbbbbbbbbbbbbbb '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/bbbbbbbbbbbbbbbb"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"aaaaaaaaaaaaaaaa"* ]]
+    # B's container could not be examined, so B is unverified, not gone.
+    [ -f "$RUNTIME_DIR/dejima/sessions/bbbbbbbbbbbbbbbb" ]
+    [ -d "$RUNTIME_DIR/dejima/notify/bbbbbbbbbbbbbbbb" ]
+}
+
+@test "a marker directory the sandbox made undeletable does not kill the listing" {
+    # /run/dejima-notify is bind-mounted read-write, so a compromised session
+    # can chmod its own marker directory on the way out and make the next
+    # prune's rm -rf fail. Aborting there would blank the picker - a sandbox
+    # must not be able to deny the operator the front door.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0000000000000000/waiting-dir"
+    chmod 500 "$RUNTIME_DIR/dejima/notify/0000000000000000"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    chmod 700 "$RUNTIME_DIR/dejima/notify/0000000000000000"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+}
