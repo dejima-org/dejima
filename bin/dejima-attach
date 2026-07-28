@@ -161,16 +161,23 @@ attach() {
     # Both values come from the same live pane, in one round trip. Taking the
     # session name from the recorded label instead would follow a name rather
     # than the sandbox: an operator renaming sessions is enough to point it at
-    # an unrelated session, and a label naming nothing at all is not an error
-    # to tmux - `new-session -t` silently creates a fresh UNGROUPED session
-    # under that name, handing a remote client a plain host shell with no
-    # sandbox in it. A name taken from a pane that is alive right now always
-    # exists, so that hole is closed by construction rather than by a check.
+    # an unrelated session that has since taken the old name.
+    #
+    # The name is a starting point, never a guarantee. It is frequently
+    # ANOTHER remote client's throwaway group (tmux reports whichever session
+    # holding the window is most recent, and every grouped session here is
+    # newer than the operator's own), and those carry destroy-unattached - so
+    # the base can be made to stop existing on demand by anyone holding a
+    # second connection. That is why the session created from it is verified
+    # below instead of trusted: `new-session -t` does not fail on a name that
+    # matches nothing, it silently creates a fresh UNGROUPED session, which
+    # for a remote client is a plain host shell with no sandbox in it.
     #
     # display-message prints nothing and still exits 0 for a target that no
     # longer exists, so an empty result means the pane went away between the
-    # check above and here - and an empty window index would silently select
-    # the group's current window instead of the requested one.
+    # check above and here. That case is caught by the verification below too;
+    # bailing early just avoids creating a junk session to immediately kill,
+    # and says what actually happened.
     target="$(tmux display-message -p -t "$entry_pane" '#{session_name}:#{window_index}' 2>/dev/null || true)"
     # Session names may contain ':', window indexes can't.
     base="${target%:*}"
@@ -185,17 +192,24 @@ attach() {
         tmux select-window -t "=$group:$win"
         exec tmux attach-session -t "=$group"
     fi
-    # Every session target here is "="-anchored: an unanchored one
-    # prefix/fnmatch-matches, so a name that is a prefix of another can
-    # resolve to the wrong session entirely.
-    #
-    # One command sequence, and the order in it is load-bearing:
-    # destroy-unattached has to be set by the same command that attaches,
-    # because setting it on a still-detached session makes the server reap the
+    # Created DETACHED first so the result can be inspected before a client
+    # ever sees it: whatever tmux gave us has to actually contain the sandbox
+    # pane, or it is a session tmux invented from a name that stopped existing
+    # while we were looking at it. Anything else is killed rather than handed
+    # over. ("="-anchored, so a name can only ever resolve exactly - an
+    # unanchored target prefix/fnmatch-matches some other session.)
+    tmux new-session -d -t "=$base" -s "$group"
+    if ! tmux list-panes -s -t "=$group" -F '#{pane_id}' 2>/dev/null \
+        | grep -qxF "$entry_pane"; then
+        tmux kill-session -t "=$group" 2>/dev/null || true
+        echo "Session $run_id is stale - the tmux session holding its pane went away." >&2
+        exit 1
+    fi
+    tmux select-window -t "=$group:$win"
+    # destroy-unattached has to be set by the same command that attaches:
+    # setting it while the session is still detached makes the server reap the
     # session before the attach lands.
-    exec tmux new-session -t "=$base" -s "$group" \; \
-        select-window -t "=$group:$win" \; \
-        set-option destroy-unattached on
+    exec tmux attach-session -t "=$group" \; set-option destroy-unattached on
 }
 
 picker() {

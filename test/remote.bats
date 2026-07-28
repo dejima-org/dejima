@@ -477,9 +477,10 @@ EOF
 }
 
 @test "a TMUX_PANE containing a newline is refused" {
-    # $TMUX_PANE is taken straight from the launching shell's environment and
-    # written last into the flat entry, so an injected line would win the
-    # parser's last-match-wins race - a forged started= being the sharp case.
+    # $TMUX_PANE is taken straight from the launching shell's environment, the
+    # one value in the entry that is verbatim rather than derived. An injected
+    # line loses the parser's last-match-wins race to the real label= and
+    # started= that follow it, but wins outright for a second pane=.
     stub_launch
     : > "$CONFIG_DIR/remote.conf"
     TMUX_PANE=$'%1\nstarted=now[$(id)]' run launch "$PROJ"
@@ -585,21 +586,6 @@ await_group() {
     kill "$attach_pid" 2>/dev/null || true
 }
 
-@test "every tmux session target in dejima-attach is anchored" {
-    # An unanchored target prefix/fnmatch-matches. Taking the base session
-    # from a live pane means the name always resolves exactly today, so this
-    # is defence in depth rather than a behavior any test can observe - which
-    # is exactly why it needs pinning: nothing else would notice it going.
-    while IFS= read -r line; do
-        case "$line" in
-            # Pane ids (%N) are already exact; "=" is not valid for them.
-            *'-t "$entry_pane"'*|*'-t "=$'*) continue ;;
-        esac
-        echo "unanchored tmux target: $line"
-        return 1
-    done < <(grep -n 'tmux [a-z-]*.*-t "' "$REPO_ROOT/bin/dejima-attach")
-}
-
 @test "--list survives a timestamp with a leading zero" {
     # Bash reads a leading zero as octal, so an all-digits "0999999999" is
     # still not a number and $(( )) would abort the whole listing under set -e.
@@ -646,4 +632,73 @@ EOF
     [[ "$output" == *"stale"* ]]
     run tmux has-session -t '=dejima-0123456789abcdef'
     [ "$status" -ne 0 ]
+}
+
+# A tmux that reports the sandbox pane as living in a session it destroys on
+# the way out. Not hypothetical: display-message names whichever session
+# holding the window is most recent, which is typically another remote
+# client's grouped throwaway - and those carry destroy-unattached, so that
+# client detaching is what makes the name stop resolving.
+stub_tmux_doomed_base() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    cat > "$STUB_DIR/tmux" <<EOF
+#!/bin/bash
+real=$(command -v tmux)
+for arg in "\$@"; do
+    if [ "\$arg" = '#{session_name}:#{window_index}' ]; then
+        "\$real" kill-session -t '=doomed' 2>/dev/null
+        echo 'doomed:1'
+        exit 0
+    fi
+done
+exec "\$real" "\$@"
+EOF
+    chmod +x "$STUB_DIR/tmux"
+    PATH="$STUB_DIR:$PATH"
+}
+
+@test "a base session that disappears before the attach yields no session at all" {
+    # tmux does not fail on `new-session -t <matches nothing>` - it silently
+    # creates a fresh UNGROUPED session, i.e. a plain host shell with no
+    # sandbox in it, which is the containment escape. Since the base is
+    # routinely another client's throwaway, whoever holds a second connection
+    # can drive this race, so the created session must be verified to actually
+    # hold the sandbox pane rather than assumed to.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    # Stands in for that other client's group: really does hold the pane, and
+    # really does go away.
+    tmux new-session -d -t '=work' -s doomed
+    stub_tmux_doomed_base
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+    run timeout 20 script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"stale"* ]]
+    # Nothing left behind for a client to be sitting in.
+    run tmux list-sessions -F '#{session_name}'
+    [[ "$output" != *"dejima-0123456789abcdef"* ]]
+}
+
+@test "an existing session whose name merely starts with the group name is not attached to" {
+    # tmux resolves an unanchored target by prefix, then by fnmatch, so a
+    # session named dejima-<id><anything> answers to the group's own name -
+    # and "is the group already there?" answering yes about someone else's
+    # session hands the remote client that session instead of the sandbox.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    tmux new-session -d -s 'dejima-0123456789abcdefx' 'sleep 300'
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
+    attach_pid=$!
+    for _ in $(seq 50); do
+        [ -n "$(tmux list-clients -F '#{client_session}')" ] && break
+        sleep 0.1
+    done
+    [ "$(tmux list-clients -F '#{client_session}')" = "dejima-0123456789abcdef" ]
+    # And it is the sandbox's window, not the decoy's shell.
+    tmux list-panes -s -t '=dejima-0123456789abcdef' -F '#{pane_id}' | grep -qxF "$TARGET_PANE"
+    kill "$attach_pid" 2>/dev/null || true
 }
