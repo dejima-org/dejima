@@ -242,3 +242,22 @@ EOF
     [ -d "$survive" ]
     rm -rf "$survive_parent" "$PROJ"
 }
+
+@test "an inherited DEJIMA_NOTIFY_DIR is not deleted on an early exit before remote access is evaluated" {
+    # trap cleanup EXIT is installed long before the remote-access block ever
+    # runs - several unrelated `exit 1` paths sit in between (a bad
+    # SANDBOX_EXTRA_MOUNTS entry is one), and the trap must not delete an
+    # inherited DEJIMA_NOTIFY_DIR on any of them either, not just on the
+    # ordinary feature-off success path the previous test covers.
+    stub_launch
+    survive_parent="$(mktemp -d)"
+    survive="$survive_parent/must-survive"
+    mkdir -p "$survive"
+    export DEJIMA_NOTIFY_DIR="$survive"
+    export SANDBOX_EXTRA_MOUNTS="$LAUNCH_DIR/does-not-exist"
+    run launch "$PROJ"
+    unset DEJIMA_NOTIFY_DIR SANDBOX_EXTRA_MOUNTS
+    [ "$status" -ne 0 ]
+    [ -d "$survive" ]
+    rm -rf "$survive_parent" "$PROJ"
+}

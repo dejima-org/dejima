@@ -188,6 +188,19 @@ fi
 
 SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 
+# Initialized here, before the trap below is installed, so cleanup() never
+# observes a nonempty value it didn't itself set - e.g. an operator's
+# environment happening to export a variable of one of these exact names.
+# With remote access off (or on an early exit before the remote-access block
+# below ever runs), `rm -rf "$DEJIMA_NOTIFY_DIR"` against an inherited value
+# would be a data loss bug, not just a no-op - and several `exit 1` paths
+# between here and that block would otherwise fire the trap while these
+# still held whatever came in from the environment (same class of concern as
+# the credential-proxy variables further down, pre-initialized the same way,
+# just earlier here since the trap is installed sooner).
+DEJIMA_NOTIFY_DIR=""
+DEJIMA_SESSION_FILE=""
+
 cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
@@ -435,15 +448,6 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
-
-# Initialized here, unconditionally, so the EXIT trap never observes a
-# nonempty value it didn't itself set - e.g. an operator's environment
-# happening to export a variable of this exact name. With remote access off,
-# a `rm -rf "$DEJIMA_NOTIFY_DIR"` against an inherited value would be a data
-# loss bug, not just a no-op (same class of concern as the credential-proxy
-# variables above, pre-initialized the same way).
-DEJIMA_NOTIFY_DIR=""
-DEJIMA_SESSION_FILE=""
 
 # Optional remote access (see README "Remote access"). Entirely skipped
 # unless ~/.config/dejima/remote.conf exists - with it absent nothing below
