@@ -809,8 +809,11 @@ EOF
     [ -f "$NOTIFY/done" ]
     [ ! -s "$NOTIFY/done" ]
     # The marker's name is its entire meaning: the two events it accepts
-    # created two files and nothing else. (Stdin is a separate property with
-    # its own test below - `run` closes stdin, so nothing here can see it.)
+    # created two files and nothing else. (Stdin is a separate property, and
+    # this test does not pin it: `run` does not redirect stdin, so what the
+    # hook gets here is whatever the suite was invoked with - normally
+    # /dev/null, and normally already drained by an earlier test. See the
+    # test below, which supplies stdin itself rather than inheriting it.)
     [ "$(ls -A "$NOTIFY" | sort | tr '\n' ' ')" = "done waiting " ]
     rm -rf "$NOTIFY"
 }
@@ -822,19 +825,23 @@ EOF
     # in the marker, the watcher would be composing the operator's phone
     # notification partly from text the sandbox chose.
     #
-    # This needs real bytes in a real pipe. Every other hook test runs under
-    # bats' `run`, which hands the hook an EOF stdin - so a hook that read
-    # stdin straight into the marker would leave it empty there and pass.
+    # This has to supply stdin itself. The other hook tests run under bats'
+    # `run`, which is a plain command substitution with no stdin redirection,
+    # so the hook there inherits whatever the suite was invoked with: at
+    # /dev/null (the usual case) a hook reading stdin into the marker leaves
+    # it empty and passes. Those tests are not stdin-independent, they are
+    # stdin-ambient - which is exactly why this property needs its own.
     NOTIFY="$(mktemp -d)"
     payload='{"message":"INJECTED-DEEP-LINK-https://evil.invalid/x","cwd":"/w"}'
     payload_file="$(mktemp)"
     printf '%s' "$payload" > "$payload_file"
 
-    # Redirected from a shared fd rather than a pipe, so this can assert the
-    # stronger property: not "the bytes did not reach the marker" but "the
-    # bytes were never consumed". The hook inherits fd 9's open file
-    # description, offset included, so anything it read would be missing from
-    # what is left to read here afterwards.
+    # A regular file behind a shared fd, not a pipe: a pipe could not support
+    # this check at all. The hook inherits fd 9's open file description,
+    # offset included, so the assertion is the stronger "the bytes were never
+    # consumed" rather than "the bytes did not reach the marker" - anything
+    # the hook read, even to discard it, would be missing from what is left
+    # to read here afterwards.
     exec 9<"$payload_file"
     DEJIMA_NOTIFY_DIR="$NOTIFY" "$REPO_ROOT/hooks/dejima-notify.sh" waiting <&9
     leftover="$(cat <&9)"
