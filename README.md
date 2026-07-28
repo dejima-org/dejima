@@ -2,9 +2,9 @@
 
 Runs Claude Code inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
-auto-accepted), against a project bind-mounted from the host. Based on
+auto-accepted), against a project bind-mounted from the host. Inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-adapted to run via `docker compose` directly and extended with a `gitea-pr`
+reworked to run via `docker compose` directly and extended with a `gitea-pr`
 helper for opening/iterating on PRs against Gitea or Forgejo, plus an
 optional editor-driven workflow in place of bare Claude Code (see "Usage").
 
@@ -852,3 +852,10 @@ top-level entries like `statusline.sh`) to resolve, and runs
 adds a domain to a running session's firewall from the host - see "Adding a
 domain to a running session" above. `install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later
+(GPL-3.0-or-later) — see [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 Brad Anderson

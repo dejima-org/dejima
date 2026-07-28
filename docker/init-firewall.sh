@@ -1,17 +1,25 @@
 #!/bin/bash
-# Based on the official Anthropic reference dev container:
-# https://github.com/anthropics/claude-code/tree/main/.devcontainer
-set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
-IFS=$'\n\t'       # Stricter word splitting
+# Default-deny egress firewall for the sandbox, allowlisting only GitHub's
+# published ranges, the fixed/extra domains below, and the Docker host
+# itself. The overall shape (ipset + iptables, GitHub ranges via api.github.com/meta,
+# allowlist domains resolved via dig) follows the same idea sketched in
+# Anthropic's public reference dev container
+# (https://github.com/anthropics/claude-code/tree/main/.devcontainer), but
+# everything here - IPv6 blocking, ulogd2 verdict logging, the GitHub
+# push/pull split, GH_TOKEN auth, and the extra-domains allowlist - is this
+# project's own.
+set -euo pipefail
+IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fixed-domains.sh
 source "$SCRIPT_DIR/fixed-domains.sh"
 
-# 1. Extract Docker DNS info BEFORE any flushing
-DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
+# Docker's embedded-DNS NAT rules live in the same table we're about to
+# flush - snapshot them first so they can be reinstated afterward.
+docker_dns_nat_rules=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
-# Flush existing rules and delete existing ipsets
+# Reset to a known-empty state before laying down the real ruleset.
 iptables -F
 iptables -X
 iptables -t nat -F
@@ -38,14 +46,15 @@ else
     echo "ip6tables unusable - assuming IPv6 is unavailable at the kernel level"
 fi
 
-# 2. Selectively restore ONLY internal Docker DNS resolution
-if [ -n "$DOCKER_DNS_RULES" ]; then
-    echo "Restoring Docker DNS rules..."
+# Reinsert just the rules captured above - nothing else Docker had set up in
+# nat comes back, so the reset above stays meaningful.
+if [ -n "$docker_dns_nat_rules" ]; then
+    echo "Reinstating captured Docker DNS rules"
     iptables -t nat -N DOCKER_OUTPUT 2>/dev/null || true
     iptables -t nat -N DOCKER_POSTROUTING 2>/dev/null || true
-    echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
+    echo "$docker_dns_nat_rules" | xargs -L 1 iptables -t nat
 else
-    echo "No Docker DNS rules to restore"
+    echo "No Docker DNS rules were present to restore"
 fi
 
 # Allow localhost. DNS resolution goes entirely through Docker's embedded
@@ -65,8 +74,9 @@ iptables -A OUTPUT -o lo -j ACCEPT
 ipset create allowed-domains hash:net
 ipset create github-domains hash:net
 
-# Fetch GitHub meta information and aggregate + add their IP ranges
-echo "Fetching GitHub IP ranges..."
+# Pull GitHub's published IP ranges so GitHub traffic can be allowed without
+# opening up the entire internet.
+echo "Looking up GitHub's IP ranges..."
 # Authenticated whenever GH_TOKEN is set: unauthenticated /meta is capped at
 # 60 requests per hour per source IP, shared across every container start and
 # everything else on the host, so a session that starts sandboxes in a loop
@@ -78,7 +88,7 @@ if [ -n "${GH_TOKEN:-}" ]; then
 fi
 gh_ranges=$(curl -s ${gh_auth[@]+"${gh_auth[@]}"} https://api.github.com/meta)
 if [ -z "$gh_ranges" ]; then
-    echo "ERROR: Failed to fetch GitHub IP ranges"
+    echo "ERROR: Empty response fetching GitHub's IP ranges"
     exit 1
 fi
 
@@ -95,13 +105,13 @@ if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
     exit 1
 fi
 
-echo "Processing GitHub IPs..."
+echo "Loading GitHub's ranges into the ipset..."
 while read -r cidr; do
     if [[ ! "$cidr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-        echo "ERROR: Invalid CIDR range from GitHub meta: $cidr"
+        echo "ERROR: GitHub meta returned a malformed CIDR range: $cidr"
         exit 1
     fi
-    echo "Adding GitHub range $cidr"
+    echo "  + $cidr"
     # -exist: aggregate -q collapses overlapping ranges within each of
     # web/api/git, but not necessarily across all three combined - the same
     # crash this already caused once on the allowed-domains ipset (a
@@ -113,19 +123,19 @@ done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 # Resolve and add other allowed domains (shared with dns-proxy.sh's name
 # allowlist via fixed-domains.sh, so the two can't drift apart)
 for domain in "${FIXED_DOMAINS[@]}"; do
-    echo "Resolving $domain..."
+    echo "Looking up $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
-        echo "ERROR: Failed to resolve $domain"
+        echo "ERROR: DNS lookup for $domain returned nothing"
         exit 1
     fi
 
     while read -r ip; do
         if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "ERROR: Invalid IP from DNS for $domain: $ip"
+            echo "ERROR: $domain resolved to something that isn't an IPv4 address: $ip"
             exit 1
         fi
-        echo "Adding $ip for $domain"
+        echo "  + $ip ($domain)"
         # -exist: two domains can resolve to the same IP (e.g. pypi.org and
         # files.pythonhosted.org share Fastly edge IPs), and ipset otherwise
         # errors on a duplicate add, which -e/set -e turns into the whole
@@ -171,14 +181,15 @@ if [ -n "${EXTRA_ALLOWED_DOMAINS:-}" ]; then
     done
 fi
 
-# Get host IP from default route
-HOST_IP=$(ip route | grep default | cut -d" " -f3)
+# The Docker host's IP, taken from the container's default route - needed
+# below so the sandbox can still reach services running on the host itself.
+HOST_IP=$(ip -4 route show default | awk '{print $3; exit}')
 if [ -z "$HOST_IP" ]; then
-    echo "ERROR: Failed to detect host IP"
+    echo "ERROR: Couldn't determine the Docker host's IP from the default route"
     exit 1
 fi
 
-echo "Host detected as: $HOST_IP"
+echo "Docker host IP: $HOST_IP"
 
 # Only the host itself, not its whole subnet - other machines on the same
 # LAN/VPC have no reason to be reachable from this container.
@@ -229,21 +240,20 @@ fi
 iptables -A OUTPUT -j NFLOG --nflog-group 2 --nflog-prefix "reject"
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
-echo "Firewall configuration complete"
-echo "Verifying firewall rules..."
+echo "Firewall rules applied. Self-checking..."
 if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
-    echo "ERROR: Firewall verification failed - was able to reach https://example.com"
+    echo "ERROR: self-check failed - a non-allowlisted host (example.com) was reachable"
     exit 1
 else
-    echo "Firewall verification passed - unable to reach https://example.com as expected"
+    echo "self-check ok - example.com is unreachable, as it should be"
 fi
 
-# Verify GitHub API access
+# Confirm the allowlist itself actually works, not just that the default-deny does.
 if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
-    echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"
+    echo "ERROR: self-check failed - api.github.com should be reachable but wasn't"
     exit 1
 else
-    echo "Firewall verification passed - able to reach https://api.github.com as expected"
+    echo "self-check ok - api.github.com is reachable, as expected"
 fi
 
 # Verify GitHub SSH (port 22) matches whichever mode was requested - this is
@@ -253,16 +263,16 @@ fi
 # rather than silently running in the wrong mode.
 if [ "${ALLOW_GITHUB_PUSH:-0}" = "1" ]; then
     if timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22" 2>/dev/null; then
-        echo "Firewall verification passed - able to reach github.com:22 as expected (ALLOW_GITHUB_PUSH=1)"
+        echo "self-check ok - github.com:22 is reachable, as expected with ALLOW_GITHUB_PUSH=1"
     else
-        echo "ERROR: Firewall verification failed - unable to reach github.com on port 22 despite ALLOW_GITHUB_PUSH=1"
+        echo "ERROR: self-check failed - github.com:22 should be reachable under ALLOW_GITHUB_PUSH=1 but wasn't"
         exit 1
     fi
 else
     if timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22" 2>/dev/null; then
-        echo "ERROR: Firewall verification failed - was able to reach github.com on port 22"
+        echo "ERROR: self-check failed - github.com:22 was reachable without ALLOW_GITHUB_PUSH=1"
         exit 1
     else
-        echo "Firewall verification passed - unable to reach github.com:22 as expected"
+        echo "self-check ok - github.com:22 is unreachable, as it should be"
     fi
 fi
