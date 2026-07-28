@@ -2,9 +2,9 @@
 
 Runs Claude Code inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
-auto-accepted), against a project bind-mounted from the host. Based on
+auto-accepted), against a project bind-mounted from the host. Inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-adapted to run via `docker compose` directly and extended with a `gitea-pr`
+reworked to run via `docker compose` directly and extended with a `gitea-pr`
 helper for opening/iterating on PRs against Gitea or Forgejo, plus an
 optional editor-driven workflow in place of bare Claude Code (see "Usage").
 
