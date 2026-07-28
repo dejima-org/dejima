@@ -119,6 +119,16 @@ stub_launch() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# Snapshot the generated settings copy while it still exists - bin/dejima's
+# EXIT trap deletes it. It has to come from the exported
+# $SANDBOX_SETTINGS_FILE rather than from a -v argument, because that mount
+# is declared in docker-compose.yml and so never appears in this argv (same
+# reason test/project.bats reads the run environment).
+for arg in "$@"; do
+    [ "$arg" = run ] || continue
+    [ -z "${SANDBOX_TEST_SETTINGS_COPY:-}" ] || cp "$SANDBOX_SETTINGS_FILE" "$SANDBOX_TEST_SETTINGS_COPY"
+    break
+done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
@@ -130,6 +140,7 @@ EOF
 launch() {
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
+        SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \
         SANDBOX_CREDENTIAL_PROXY=0 \
         SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
@@ -149,6 +160,13 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
         *DEJIMA_RUN_ID*|*dejima-notify*) false ;;
     esac
     [ ! -d "$RUNTIME_DIR/dejima" ]
+    # The settings copy is off-argv (docker-compose.yml declares that mount),
+    # so an unchanged run line alone would not notice a notify hook being
+    # registered into it. Assert it was actually captured first - grep on a
+    # missing file also "finds nothing".
+    [ "$(jq '.sandbox.enabled' "$LAUNCH_DIR/settings-copy.json")" = "false" ]
+    run grep -q 'dejima-notify' "$LAUNCH_DIR/settings-copy.json"
+    [ "$status" -ne 0 ]
     rm -rf "$PROJ"
 }
 
@@ -243,9 +261,16 @@ EOF
     survive="$survive_parent/must-survive"
     mkdir -p "$survive"
     export DEJIMA_NOTIFY_DIR="$survive"
+    # Same hazard for the settings-rewrite scratch file the remote block
+    # uses: cleanup() rm -f's it, so an inherited value must not be believed
+    # either.
+    survive_file="$survive_parent/must-survive-too"
+    : > "$survive_file"
+    export SANDBOX_REMOTE_SETTINGS_TMP="$survive_file"
     launch "$PROJ"
-    unset DEJIMA_NOTIFY_DIR
+    unset DEJIMA_NOTIFY_DIR SANDBOX_REMOTE_SETTINGS_TMP
     [ -d "$survive" ]
+    [ -f "$survive_file" ]
     rm -rf "$survive_parent" "$PROJ"
 }
 
@@ -740,4 +765,60 @@ EOF
     # And it is the sandbox's window, not the decoy's shell.
     tmux list-panes -s -t '=dejima-0123456789abcdef' -F '#{pane_id}' | grep -qxF "$TARGET_PANE"
     kill "$attach_pid" 2>/dev/null || true
+}
+
+@test "the notify hook writes an empty file named for the event and nothing else" {
+    NOTIFY="$(mktemp -d)"
+    DEJIMA_NOTIFY_DIR="$NOTIFY" run "$REPO_ROOT/hooks/dejima-notify.sh" waiting
+    [ "$status" -eq 0 ]
+    [ -f "$NOTIFY/waiting" ]
+    [ ! -s "$NOTIFY/waiting" ]
+    DEJIMA_NOTIFY_DIR="$NOTIFY" run "$REPO_ROOT/hooks/dejima-notify.sh" done
+    [ "$status" -eq 0 ]
+    [ -f "$NOTIFY/done" ]
+    [ ! -s "$NOTIFY/done" ]
+    # The marker's name is its entire meaning: nothing else is created, and
+    # the hook's stdin (which carries the session's own text) is never read.
+    [ "$(ls -A "$NOTIFY" | sort | tr '\n' ' ')" = "done waiting " ]
+    rm -rf "$NOTIFY"
+}
+
+@test "the notify hook refuses any event name outside the enum" {
+    NOTIFY="$(mktemp -d)"
+    for bad in 'error' '../escape' 'waiting done' '' '$(id)' 'waiting;done' '.'; do
+        DEJIMA_NOTIFY_DIR="$NOTIFY" run "$REPO_ROOT/hooks/dejima-notify.sh" "$bad"
+        [ "$status" -eq 0 ]
+    done
+    # Nothing at all was created - the enum is a whitelist, not a filter.
+    [ -z "$(ls -A "$NOTIFY")" ]
+    rm -rf "$NOTIFY"
+}
+
+@test "the notify hook is inert when the marker directory is not mounted" {
+    # Outside a remote-enabled session the variable is simply absent, and a
+    # hook that failed there would surface an error on every notification in
+    # an ordinary sandbox. A stale value pointing at nothing is the same
+    # case, so it is refused the same way rather than by creating the path.
+    run env -u DEJIMA_NOTIFY_DIR "$REPO_ROOT/hooks/dejima-notify.sh" waiting
+    [ "$status" -eq 0 ]
+
+    missing="$(mktemp -d)/gone"
+    DEJIMA_NOTIFY_DIR="$missing" run "$REPO_ROOT/hooks/dejima-notify.sh" waiting
+    [ "$status" -eq 0 ]
+    [ ! -e "$missing" ]
+}
+
+@test "notify hooks are registered only in the throwaway settings copy" {
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    launch "$PROJ"
+    grep -q 'dejima-notify.sh waiting' "$LAUNCH_DIR/settings-copy.json"
+    grep -q 'dejima-notify.sh done' "$LAUNCH_DIR/settings-copy.json"
+    # The copy is a throwaway, so the operator's real settings.json - which
+    # install.sh deliberately never registers this hook into - is untouched.
+    [ "$(cat "$LAUNCH_DIR/home/.claude/settings.json")" = '{}' ]
+    # And what the copy carried before is still there: this appends, it does
+    # not replace the file bin/dejima generated.
+    [ "$(jq '.sandbox.enabled' "$LAUNCH_DIR/settings-copy.json")" = "false" ]
+    rm -rf "$PROJ"
 }

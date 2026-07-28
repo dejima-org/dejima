@@ -200,6 +200,7 @@ SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 # just earlier here since the trap is installed sooner).
 DEJIMA_NOTIFY_DIR=""
 DEJIMA_SESSION_FILE=""
+SANDBOX_REMOTE_SETTINGS_TMP=""
 
 cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
@@ -551,6 +552,22 @@ if remote_enabled; then
     # so the container never needs write access to the registry to report its
     # own ID.
     extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
+
+    # The notify hook is registered per session, into the generated copy from
+    # above and nowhere else: registering it in the operator's real
+    # settings.json would run it for every sandbox and for the host's own
+    # Claude Code, which share that file, when it is only meaningful for a
+    # session that has a marker directory. $SANDBOX_SETTINGS_FILE is
+    # already a throwaway mktemp copy, so this rewrite cannot reach the
+    # operator's real settings.json; the copy is mounted read-only, so the
+    # session cannot unregister itself either. $HOME is left unexpanded for
+    # Claude Code to resolve at hook-run time - inside the container, not
+    # here - matching the convention install.sh already uses.
+    SANDBOX_REMOTE_SETTINGS_TMP="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
+    jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
+      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+        "$SANDBOX_SETTINGS_FILE" > "$SANDBOX_REMOTE_SETTINGS_TMP"
+    mv "$SANDBOX_REMOTE_SETTINGS_TMP" "$SANDBOX_SETTINGS_FILE"
 fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
