@@ -680,6 +680,45 @@ EOF
     [[ "$output" != *"dejima-0123456789abcdef"* ]]
 }
 
+@test "an attach that cannot open a terminal leaves no session behind" {
+    # `restrict,pty` in an authorized_keys entry permits a pty, it doesn't
+    # force one, so `ssh -T <host>` runs the forced command with no terminal -
+    # and the group is created before tmux ever tries to open one. A leaked
+    # group never gets destroy-unattached, and every later attach to that run
+    # id joins it instead of creating one, so it stays leaked.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+    run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
+    [ "$status" -ne 0 ]
+    run tmux has-session -t '=dejima-0123456789abcdef'
+    [ "$status" -ne 0 ]
+    tmux has-session -t '=work'
+}
+
+@test "attaching to a group that already exists still sets destroy-unattached" {
+    # The option is per-session state, not per-client, so a group that ever
+    # came into being without it outlives its client on every later attach.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    tmux new-session -d -t '=work' -s 'dejima-0123456789abcdef'
+    # show-options prints nothing at all for an option left at its default.
+    [ -z "$(tmux show-options -t dejima-0123456789abcdef destroy-unattached)" ]
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
+    attach_pid=$!
+    for _ in $(seq 50); do
+        [ -n "$(tmux list-clients -F '#{client_session}')" ] && break
+        sleep 0.1
+    done
+    [ "$(tmux list-clients -F '#{client_session}')" = "dejima-0123456789abcdef" ]
+    [ "$(tmux show-options -t dejima-0123456789abcdef destroy-unattached)" = "destroy-unattached on" ]
+    kill "$attach_pid" 2>/dev/null || true
+}
+
 @test "an existing session whose name merely starts with the group name is not attached to" {
     # tmux resolves an unanchored target by prefix, then by fnmatch, so a
     # session named dejima-<id><anything> answers to the group's own name -

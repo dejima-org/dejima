@@ -190,7 +190,10 @@ attach() {
         # Select within the GROUP, not via the pane id directly: the latter
         # would move the operator's own session's current window too.
         tmux select-window -t "=$group:$win"
-        exec tmux attach-session -t "=$group"
+        # Set here too, not just on the session we create: the option is
+        # per-session state, so a group that ever reached this point without it
+        # would keep outliving its client on every later attach.
+        exec tmux attach-session -t "=$group" \; set-option destroy-unattached on
     fi
     # Created DETACHED first so the result can be inspected before a client
     # ever sees it: whatever tmux gave us has to actually contain the sandbox
@@ -199,9 +202,19 @@ attach() {
     # over. ("="-anchored, so a name can only ever resolve exactly - an
     # unanchored target prefix/fnmatch-matches some other session.)
     tmux new-session -d -t "=$base" -s "$group"
+    # Detached, it now outlives every failure below, and a session leaked that
+    # way never gets destroy-unattached set on it, so it sits on the host for
+    # good. The trap only ever names a session this call just created:
+    # new-session fails on a duplicate name before we reach it.
+    # ("="-anchored also so it can never mean "the current session", which is
+    # what an empty target means to kill-session.)
+    #
+    # The name is baked in here rather than read at exit: $group is local, and
+    # a trap body runs after the function's locals are gone, where set -u
+    # would abort it and leak the session it exists to remove.
+    trap "tmux kill-session -t '=$group' 2>/dev/null || true" EXIT
     if ! tmux list-panes -s -t "=$group" -F '#{pane_id}' 2>/dev/null \
         | grep -qxF "$entry_pane"; then
-        tmux kill-session -t "=$group" 2>/dev/null || true
         echo "Session $run_id is stale - the tmux session holding its pane went away." >&2
         exit 1
     fi
@@ -209,7 +222,15 @@ attach() {
     # destroy-unattached has to be set by the same command that attaches:
     # setting it while the session is still detached makes the server reap the
     # session before the attach lands.
-    exec tmux attach-session -t "=$group" \; set-option destroy-unattached on
+    #
+    # Deliberately not exec'd, unlike the branch above, which creates nothing:
+    # attaching is the step most likely to fail on a remote client's terms -
+    # no terminal for `ssh -T`, or a $TERM the host has no entry for, both of
+    # which the client picks - and an exec leaves no shell behind to clean up
+    # the session we just made. Detaching normally returns 0 and disarms the
+    # trap; the session then goes away by destroy-unattached, not by us.
+    tmux attach-session -t "=$group" \; set-option destroy-unattached on
+    trap - EXIT
 }
 
 picker() {
