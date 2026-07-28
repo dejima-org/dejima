@@ -14,16 +14,17 @@ runtime.
 
 ## The name
 
-Dejima was a small artificial island in Nagasaki harbour — for over two
-centuries, the only Japanese territory open to Westerners. A single guarded
-bridge connected it to the mainland, and nothing crossed in either direction
-without permission. The containment was real in both directions, and so was
-the trade: most of what Japan learned of Western medicine and science in that
-period arrived across that one bridge.
+[Dejima](https://en.wikipedia.org/wiki/Dejima) was a small artificial island
+in Nagasaki harbour and was the only Japanese territory open to Westerners
+for over two centuries. A single guarded bridge connected it to the mainland,
+and nothing crossed in either direction without permission. The containment
+was real in both directions, and so was the trade: most of what Japan learned
+of Western medicine and science in that period arrived across that one bridge.
 
 That's roughly the arrangement here. The agent gets a bounded island and one
 controlled crossing; in exchange it gets to work without stopping to ask
-permission for every step. The walls are what make the latitude affordable.
+permission for every step. Dejima keeps your host safe from your agent, and your
+agent relatively safe from the public internet.
 
 ## Prerequisites
 
