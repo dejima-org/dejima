@@ -62,7 +62,7 @@ services:
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}
-      # Base URL of a Loki push endpoint (e.g. http://192.0.2.11:3100) to
+      # Base URL of a Loki push endpoint (e.g. http://192.0.2.10:3100) to
       # ship DNS-query and firewall allow/reject logs to. Its host is
       # automatically firewall-allowlisted (see entrypoint.sh). Optional -
       # logging is skipped entirely if unset.

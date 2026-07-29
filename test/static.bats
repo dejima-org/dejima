@@ -828,3 +828,39 @@ EOF
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]
 }
+
+# The repo is public; the operator's own network is not. Both shapes below
+# leaked into it once (a .localdomain Gitea host in bin/gitea-pr, a real LAN
+# address as the Loki example in docker-compose.yml), so they are pinned
+# here. Documentation addresses belong in RFC 5737's ranges (192.0.2.0/24,
+# 198.51.100.0/24, 203.0.113.0/24) and documentation names under RFC 2606's
+# reserved TLDs.
+#
+# test/ is deliberately out of scope: fixtures stub real resolver answers
+# (project.bats feeds dig a 10.0.0.1) and those are inputs to a test, not
+# addresses an operator is being told to use.
+#
+# This catches address- and hostname-shaped leaks only. A personal domain
+# that looks like any other public one is not mechanically distinguishable
+# and still rests on review.
+SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd)
+
+@test "no private or link-local address is used as a documentation example" {
+    run grep -rnIE '\b(10|127\.0\.0\.[2-9]|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' \
+        "${SCANNED_PATHS[@]/#/$REPO_ROOT/}"
+    [ "$status" -ne 0 ] || {
+        echo "use an RFC 5737 documentation address instead:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
+@test "no hostname under a private-network suffix is used as a documentation example" {
+    run grep -rnIE '[A-Za-z0-9-]+\.(localdomain|lan|internal|home\.arpa)\b' \
+        "${SCANNED_PATHS[@]/#/$REPO_ROOT/}"
+    [ "$status" -ne 0 ] || {
+        echo "use an RFC 2606 reserved name (example.com, .invalid, .test) instead:" >&2
+        echo "$output" >&2
+        false
+    }
+}
