@@ -32,8 +32,10 @@
 #      Authentication alone does not stop a page in your browser from
 #      opening a WebSocket to this vhost and having the browser attach your
 #      credential to it, which is why bin/dejima-ttyd passes --check-origin.
-#      That check compares the Origin against the Host header, so `Host
-#      $host` below is load-bearing, not tidiness.
+#      That check compares the Origin against the Host header, so the
+#      `Host $http_host` line below is load-bearing, not tidiness - and it
+#      has to be $http_host, which keeps the port, on any listen other
+#      than 443. See the comment on that line.
 #
 # TLS is not optional either: HTTP Basic sends the password on every request,
 # and the terminal itself carries whatever the session is working on.
@@ -65,7 +67,14 @@ server {
         proxy_set_header Connection "upgrade";
         # ttyd's --check-origin compares the client's Origin against Host.
         # Drop this line and it compares against 127.0.0.1:<port> instead.
-        proxy_set_header Host       $host;
+        #
+        # $http_host, not $host: $host has the port stripped, and ttyd keeps
+        # the port in what it compares unless it is 80 or 443. On a vhost
+        # listening anywhere else - 8443, say - $host would make ttyd compare
+        # "name:8443" against "name" and refuse every WebSocket: the page
+        # loads, the terminal never connects, and the only sign is
+        # "refuse to serve WS client from different origin" in ttyd's log.
+        proxy_set_header Host       $http_host;
 
         # An attached terminal can sit idle for hours; nginx's default read
         # timeout is 60 seconds. ttyd's own WebSocket ping (every 5s by

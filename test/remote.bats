@@ -1534,8 +1534,10 @@ unit_exec_start() {
     # And which ttyd: -W/--writable does not exist before 1.7.4 (1.7.3 and
     # earlier have --readonly and are writable by default), so an older
     # package makes every start a getopt usage error. An operator reading
-    # "install ttyd" would install exactly that.
-    [[ "$output" == *"1.7.4"* ]]
+    # "install ttyd" would install exactly that. Anchored to the headline
+    # rather than matched anywhere in the output: the version is named twice,
+    # so a loose match lets the line an operator actually reads say 1.6.0.
+    [[ "$output" == *"needs it, 1.7.4 or newer"* ]]
 }
 
 @test "dejima-ttyd refuses an out-of-range TTYD_PORT rather than launching without one" {
@@ -1572,7 +1574,14 @@ unit_exec_start() {
     # being compared. The two ship together or not at all.
     local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
     [ -f "$ex" ]
-    grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Host[[:space:]]+\$host;' "$ex"
+    # $http_host, not $host: nginx's $host has the PORT STRIPPED, and ttyd
+    # keeps the port in what it compares whenever it is not 80 or 443. A front
+    # door on 8443 - the common case, when 443 is already taken - would then
+    # compare "host:8443" against "host" and refuse every WebSocket, with the
+    # page loading fine and nothing but an lwsl_warn in the journal to say why.
+    grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Host[[:space:]]+\$http_host;' "$ex"
+    run grep -nE '\$host;' "$ex"
+    [ "$status" -ne 0 ]
 }
 
 @test "nothing shipped by the front doors binds a routable address" {
@@ -1642,6 +1651,13 @@ unit_exec_start() {
     run bash -c 'grep -hE "^[[:space:]]*listen[[:space:]]" "$1" \
         | grep -vE "<LAN-IP>:[0-9]+[[:space:]]+ssl;"' _ "$ex"
     [ "$status" -ne 0 ]
+    # And every block has one. A server block with NO listen is not caught by
+    # anything above, and nginx defaults it to *:80 - the wildcard plaintext
+    # bind this whole test exists to forbid.
+    local servers listens
+    servers="$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$ex")"
+    listens="$(grep -cE '^[[:space:]]*listen[[:space:]]' "$ex")"
+    [ "$listens" -ge "$servers" ]
 }
 
 @test "the nginx example proxies to the port dejima-ttyd defaults to, over a connection that can idle" {
@@ -1674,11 +1690,15 @@ unit_exec_start() {
     # Counted against the server blocks rather than just found somewhere: auth
     # is a per-block directive, so one block with it and one without passes
     # every "is it present" grep and still leaves an open door.
+    # A realm, not just the directive: `auth_basic off;` IS an auth_basic line
+    # and turns authentication off for the block it is in.
     local servers auths
     servers="$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$ex")"
-    auths="$(grep -cE '^[[:space:]]*auth_basic[[:space:]]' "$ex")"
+    auths="$(grep -cE '^[[:space:]]*auth_basic[[:space:]]+"' "$ex")"
     [ "$servers" -ge 1 ]
     [ "$auths" -ge "$servers" ]
+    run grep -nE '^[[:space:]]*auth_basic[[:space:]]+off' "$ex"
+    [ "$status" -ne 0 ]
     # ttyd is started --writable and with no credential of its own, so nginx
     # is the whole gate. If that ever changes, both halves have to change
     # together rather than one of them drifting.
@@ -1762,6 +1782,18 @@ unit_exec_start() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"nothing is listening"* ]]
     [[ "$output" == *"$CONFIG_DIR/remote.conf"* ]]
+
+    # With DEJIMA_CONFIG_DIR unset, which is how every operator runs it: the
+    # installer has to look where the library looks. Everything above runs
+    # with the variable exported, so the default path is otherwise never
+    # exercised and could point anywhere.
+    mkdir -p "$FAKE_HOME/.config/dejima"
+    : > "$FAKE_HOME/.config/dejima/remote.conf"
+    run env -u DEJIMA_CONFIG_DIR HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/install.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"nothing is listening"* ]]
+    [[ "$output" == *"$FAKE_HOME/.config/dejima/remote.conf"* ]]
 }
 
 @test "the systemd units are user units that run the installed scripts and duplicate no configuration" {
@@ -1775,11 +1807,18 @@ unit_exec_start() {
         # name the very things a directive may not set ("do not repeat
         # NTFY_URL here"), and a grep that could not tell the two apart would
         # force those comments out of the file to stay green.
+        # Restarting on failure, not always: these units exist to be given up
+        # on when remote.conf is missing or wrong, which is a clean-ish exit
+        # away from Restart=always.
+        grep -q '^Restart=on-failure$' "$f"
         # A WHITELIST of directive names, not a list of banned ones: a denylist
         # only ever catches the directives someone thought of, and these units
         # run a host shell - StandardOutput=file:..., User=, Environment=,
         # ExecStartPre= are all things that change what runs or where its
-        # output goes. Anything not on this line has to be added deliberately.
+        # output goes. Anything not on this line has to be added deliberately -
+        # including a systemd line continuation, whose second line carries no
+        # "=" and so fails this. That is the intended trade: these units are
+        # five directives long and none of them needs one.
         run bash -c 'grep -vE "^[[:space:]]*([#;]|$)" "$1" \
             | grep -vxE "\[(Unit|Service|Install)\]" | sed "s/=.*//" | sort -u \
             | grep -vxE "Description|StartLimitIntervalSec|StartLimitBurst|ExecStart|Restart|RestartSec|WantedBy"' \

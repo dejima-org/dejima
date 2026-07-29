@@ -158,7 +158,12 @@ echo
 # Conditional, because the unconditional version is a false statement to the
 # operator most likely to see it: someone with a front door already up,
 # re-running this after a git pull.
-remote_conf="${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}/remote.conf"
+# From the library rather than spelled out again here: the config root has
+# one definition (config_root, which honours DEJIMA_CONFIG_DIR) and a second
+# copy of it would drift without anything noticing.
+# shellcheck source=bin/dejima-project-lib.sh
+source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
+remote_conf="$(remote_conf_path)"
 if [ -f "$remote_conf" ]; then
     echo "Remote access is configured ($remote_conf); this script did not start or stop anything."
     echo "See README \"Remote access\"."
