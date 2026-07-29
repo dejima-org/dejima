@@ -1639,6 +1639,62 @@ unit_exec_start() {
     assert_ttyd_argv 7681
 }
 
+@test "dejima-ttyd refuses to start when something else already holds its port" {
+    command -v ss >/dev/null 2>&1 || skip "ss is not available"
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    stub_ttyd
+
+    # The distro's ttyd package ships an enabled service that binds every
+    # interface on this same default port. When it wins the port, this unit
+    # dies at every start and the reverse proxy in front of it serves THAT -
+    # a host login prompt - behind the operator's own password. Nothing in
+    # that path looks broken, so the refusal here is the only thing that says
+    # what happened.
+    #
+    # Driven from python so the listener cannot outlive the test: the socket
+    # dies with the interpreter no matter how the assertions below go. A
+    # background process holding it would leak on the first failure, since
+    # bats runs test bodies under errexit.
+    #
+    # Both halves in one run, against ONE port: bound, then closed. Without
+    # the second half a script that refused unconditionally would pass.
+    run python3 - "$REPO_ROOT/bin/dejima-ttyd" "$CONFIG_DIR" <<'PY'
+import os, socket, subprocess, sys
+
+script, config_dir = sys.argv[1], sys.argv[2]
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(1)
+port = s.getsockname()[1]
+with open(os.path.join(config_dir, "remote.conf"), "w") as f:
+    f.write("TTYD_PORT=%d\n" % port)
+
+held = subprocess.run([script], capture_output=True, text=True)
+s.close()
+free = subprocess.run([script], capture_output=True, text=True)
+
+print("PORT", port)
+print("HELD_RC", held.returncode)
+print("FREE_RC", free.returncode)
+print("HELD_ERR", held.stderr.replace("\n", " "))
+PY
+    [ "$status" -eq 0 ]
+    local port
+    port="$(printf '%s\n' "$output" | sed -n 's/^PORT //p')"
+    [ -n "$port" ]
+    printf '%s\n' "$output" | grep -qx 'HELD_RC 1'
+    printf '%s\n' "$output" | grep -qx 'FREE_RC 0'
+    # Names the port, and names the service that is usually holding it - a
+    # bare "address in use" is what this exists to replace.
+    printf '%s\n' "$output" | grep -q "HELD_ERR .*$port"
+    printf '%s\n' "$output" | grep -q 'HELD_ERR .*ttyd\.service'
+
+    # And it refused rather than proceeding: exactly one ttyd launch reached
+    # the stub, the one made after the port was released. A check that printed
+    # a warning and exec'd anyway would leave two.
+    [ "$(ttyd_log | grep -c -- '--interface')" -eq 1 ]
+}
+
 @test "dejima-ttyd refuses to start without remote.conf, before ttyd is reached" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     stub_ttyd
@@ -2294,6 +2350,21 @@ readme_section() {
     # drag the whole host to sid on the next upgrade.
     if printf '%s\n' "$blocks" | grep -qE '\bunstable\b|\bsid\b'; then
         printf '%s\n' "$blocks" | grep -q 'Pin-Priority'
+    fi
+
+    # Any instruction to install ttyd from a package has to be accompanied by
+    # the one that disables the service the package turns on. Debian/Ubuntu
+    # enable it on install; it serves a login prompt and, passing no
+    # --interface, binds every address - so it is reachable from inside a
+    # sandbox, on the port this feature defaults to, purely as a result of
+    # following the install step above it. Documenting the install without the
+    # disable is worse than documenting neither.
+    # Both halves, asserted separately: disable stops the running listener,
+    # mask is what stops the next `apt install` from turning it back on, and
+    # an alternation over the two passes on a file that only has one.
+    if printf '%s\n' "$blocks" | grep -qE 'apt(-get)? install .*ttyd'; then
+        printf '%s\n' "$blocks" | grep -qE 'systemctl +disable.*ttyd'
+        printf '%s\n' "$blocks" | grep -qE 'systemctl +mask.*ttyd'
     fi
 
     # This repo is public, and this section is where an operator's own setup

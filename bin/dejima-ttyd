@@ -65,5 +65,42 @@ if ! command -v ttyd >/dev/null 2>&1; then
     exit 1
 fi
 
+# The distro's own ttyd package ships an ENABLED system service that runs
+# `login` and, having no --interface of its own, binds every interface - the
+# bridge address a sandbox can route to included. Installing ttyd to set this
+# feature up is therefore enough to open a host login prompt to the sandbox,
+# on this very port, before any of this runs.
+#
+# It also takes the port. Binding the loopback address below while another
+# process already holds that port on every interface fails with EADDRINUSE, so
+# this unit dies at every start while the reverse proxy in front of it happily
+# proxies to whatever DID get the port. The operator sees the password prompt
+# they configured and then a host login shell, and nothing in that path looks
+# broken.
+#
+# So refuse, and say which. Left to exec, the whole failure is ttyd's one-line
+# bind error in a unit nobody is watching.
+if command -v ss >/dev/null 2>&1; then
+    listeners="$(ss -ltnH "sport = :$port" 2>/dev/null || true)"
+    if [ -n "$listeners" ]; then
+        echo "Something is already listening on port $port:" >&2
+        echo "$listeners" >&2
+        echo >&2
+        echo "The web front door cannot start, and until that listener is gone the" >&2
+        echo "reverse proxy in front of this port serves IT, not dejima." >&2
+        echo >&2
+        echo "The usual cause is the distro's own ttyd service, which is enabled on" >&2
+        echo "install and runs 'login' on every interface - reachable from inside a" >&2
+        echo "sandbox. Check and disable it:" >&2
+        echo >&2
+        echo "  systemctl status ttyd.service" >&2
+        echo "  sudo systemctl disable --now ttyd.service" >&2
+        echo "  sudo systemctl mask ttyd.service" >&2
+        echo >&2
+        echo "See README \"Remote access\"." >&2
+        exit 1
+    fi
+fi
+
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
     "$SCRIPT_DIR/dejima-attach"

@@ -158,7 +158,10 @@ wrong still looks like it works.
    `restrict,pty,command="…/dejima-attach"` line to `authorized_keys` for the
    same Unix user that runs `bin/dejima`. →
    [SSH front door](#ssh-front-door)
-4. **Web front door.** Get `ttyd` 1.7.4 or newer, install
+4. **Web front door.** Get `ttyd` 1.7.4 or newer. If it came from a distro
+   package, `systemctl disable --now ttyd.service` **and** `mask` it first —
+   the package ships an enabled service that puts a login prompt on every
+   interface, reachable from inside your sandboxes. Then install
    `systemd/dejima-ttyd.service` as a *user* unit, and put a reverse proxy in
    front of it adapted from `docs/nginx-dejima.conf.example` — with
    authentication on every server block, TLS, a `default_server` that
@@ -747,7 +750,9 @@ timeout 5 bash -c "cat < /dev/null > /dev/tcp/$gw/443"  && echo BAD || echo ok
 ```
 
 `BAD` on either line means stop and fix the bind before going further -
-whatever answered is reachable from inside the sandbox. `test/runtime.bats`
+whatever answered is reachable from inside the sandbox. The first line is
+also what catches a distro `ttyd.service` still running on that port, which
+is why this is worth doing even if you are confident about the proxy. `test/runtime.bats`
 asserts this same containment property against a live container (with a
 positive control on the same path, so a passing result can't come from the
 container simply reaching nothing), and it passes on a real Docker host.
@@ -809,6 +814,35 @@ Read what `apt` proposes before agreeing to it. One package from sid drags
 its libraries along, and if the plan includes `libc6` you are no longer
 taking one package - back out and use an upstream release binary instead.
 `apt_preferences(5)` has the details.
+
+**Installing the package opens a door of its own. Close it.** However you get
+`ttyd` from a distro repository - stable, sid, Ubuntu - the package ships a
+*system* service that systemd enables and starts on install. It serves a
+login prompt, and because it passes no `--interface` of its own it binds
+**every** interface, the bridge address a sandbox routes to included. It
+listens on `ttyd`'s default port, which is the port this feature defaults to
+as well.
+
+Two consequences, and the second is the one that hides:
+
+- A host login prompt is now reachable *from inside every container you run*,
+  put there by the act of installing the package.
+- It holds the port, so `dejima-ttyd` fails to bind at every start while your
+  reverse proxy proxies to the distro's `ttyd` instead. You get your own
+  password prompt and then a host login shell, on the hostname you set up for
+  dejima, with nothing along the way appearing broken.
+
+```sh
+systemctl status ttyd.service              # almost certainly active
+sudo systemctl disable --now ttyd.service
+sudo systemctl mask ttyd.service           # so reinstalling cannot revive it
+```
+
+`bin/dejima-ttyd` refuses to start when anything already holds its port and
+names this as the likely cause, rather than leaving you with `ttyd`'s
+one-line bind error in a unit nobody is watching. That is a diagnostic, not a
+fix: the listener is there from the moment the package lands, whether or not
+you ever run `dejima-ttyd`.
 
 `bin/dejima-ttyd` reads `TTYD_PORT` and launches
 `ttyd --interface 127.0.0.1 --port <port> --check-origin --url-arg --writable dejima-attach`.
