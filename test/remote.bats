@@ -934,8 +934,13 @@ expect_argv() {
     [ -z "${3:-}" ] || printf '%s\n' -H "Click: $3"
     printf '%s\n' -d "$2" -- https://ntfy.example.invalid/dejima
 }
-# Compared as a whole file, so a SECOND push would fail this too.
-assert_argv() { [ "$(cat "$STUB_DIR/curl-argv")" = "$(expect_argv "$@")" ]; }
+# Compared as a whole file, so a SECOND push would fail this too. The
+# sentinel is what makes "whole" true: both sides are command substitutions,
+# which strip trailing newlines, so without it a vector ending in an empty
+# argument compares equal to one that does not have it.
+assert_argv() {
+    [ "$( { cat "$STUB_DIR/curl-argv"; echo .; } )" = "$( { expect_argv "$@"; echo .; } )" ]
+}
 
 marker() {
     mkdir -p "$RUNTIME_DIR/dejima/notify/$1"
@@ -1365,6 +1370,16 @@ EOF
     conf_with_ntfy
     stub_curl
     for rc in 1 0; do
+        # Thresholds differ because the two guards bound different rates, and
+        # a threshold the floor alone can meet would leave the other unpinned:
+        #   rc=1 - floor then a five second fallback, so one call in three
+        #     seconds. Two or more means only the floor is left.
+        #   rc=0 - the floor alone, about one a second. Unbounded, this is in
+        #     the hundreds (571 in five seconds, measured).
+        case "$rc" in
+            1) max=2 ;;
+            0) max=10 ;;
+        esac
         : > "$STUB_DIR/inotify-calls"
         cat > "$STUB_DIR/inotifywait" <<EOF
 #!/bin/bash
@@ -1377,10 +1392,32 @@ EOF
         sleep 3
         kill "$watcher" 2>/dev/null || true
         wait "$watcher" 2>/dev/null || true
-        # At most a handful in three seconds; unbounded, the loop re-scans as
-        # fast as the host can fork, which measures in the hundreds.
-        [ "$(wc -c < "$STUB_DIR/inotify-calls")" -lt 10 ]
+        [ "$(wc -c < "$STUB_DIR/inotify-calls")" -lt "$max" ]
     done
+}
+
+@test "a marker that cannot be consumed is warned about once, not once per scan" {
+    # The warning is on the path a session controls - it makes its own marker
+    # undeletable - and the loop revisits it on every scan, so undeduplicated
+    # this is the journal-growth half of the same denial of service.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting/not-empty"
+    # Scans have to actually repeat for this to mean anything, and this host
+    # has no inotifywait, which would leave the loop sleeping 5s and the test
+    # vacuous. A stub that returns at once puts it at the floor: ~3 scans.
+    cat > "$STUB_DIR/inotifywait" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$STUB_DIR/inotifywait"
+    "$REPO_ROOT/bin/dejima-notify-watch" > /dev/null 2> "$STUB_DIR/watch-err" &
+    watcher=$!
+    sleep 3
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    [ "$(grep -c 'could not consume marker' "$STUB_DIR/watch-err")" -eq 1 ]
 }
 
 @test "the state directory is tightened even when another process created it" {

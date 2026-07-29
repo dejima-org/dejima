@@ -114,13 +114,13 @@ project_of() {
     # a failure: one scan covers every run directory, so aborting here would
     # take every other session's notification down with it. `|| raw=""` is
     # what guarantees that - a failed redirection makes the compound command
-    # return nonzero, and the || consumes it. Errexit is NOT the mechanism, in
-    # either direction: bash does not inherit it into a command substitution
-    # (the only way project_of is ever called) absent shopt inherit_errexit,
-    # and suppresses it anyway throughout a function called from a condition.
-    # The [ -r ] check is therefore about noise, not control flow: without it
-    # a chmod'd entry prints "Permission denied" on every scan for as long as
-    # it exists.
+    # return nonzero, and the || consumes it. Errexit is not the mechanism:
+    # the sole caller is push(), which reaches this through a command
+    # substitution, and bash does not inherit errexit into one absent shopt
+    # inherit_errexit. The [ -r ] check is therefore about noise, not control
+    # flow - and not much noise either, since push() runs only for a marker
+    # that was consumed and not debounced: without it, a chmod'd entry prints
+    # "Permission denied" once per push for that session.
     if [ -r "$file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
@@ -212,7 +212,13 @@ scan() {
                 # Once per marker per process, not once per scan: the marker
                 # survives, so every later scan finds it again, and a session
                 # that leaves one in place could otherwise fill the journal
-                # for as long as the watcher runs.
+                # for as long as the watcher runs. Permanently, deliberately -
+                # a marker that becomes deletable and then undeletable again
+                # is the same stuck session, not news. The key cannot be
+                # inflated to grow this map: scan() iterates only the top
+                # level of $NOTIFY_DIR against a two-name enum, and a session
+                # can create directories only inside its own run directory,
+                # so it is bounded at twice the number of run directories.
                 if [ -z "${WARNED[$run_id/$event]:-}" ]; then
                     echo "dejima-notify-watch: warning: could not consume marker $run_id/$event" >&2
                     WARNED[$run_id/$event]=1
