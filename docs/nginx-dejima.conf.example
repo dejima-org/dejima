@@ -116,9 +116,11 @@ server {
         # the device's real width, which lets xterm.js fit an honest column
         # count and lets rotating the phone actually reflow.
         #
-        # Needs nginx built with the sub module - check before relying on it,
-        # because a missing module is a config error at reload, not a silent
-        # no-op:
+        # Needs nginx built with the sub module. Check before relying on it,
+        # and validate with `nginx -t` rather than trusting the reload: a
+        # config that does not parse leaves the OLD one running while
+        # `systemctl reload nginx` still reports success, so an unknown
+        # directive here looks just like one that ran and did nothing.
         #     nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
         #
         # Desktop browsers ignore width=device-width, so this costs them

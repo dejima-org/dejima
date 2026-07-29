@@ -683,6 +683,20 @@ TTYD_PORT=7681
 # TTYD_FONT_SIZE=20   # optional, and applies to the desktop too
 ```
 
+**Editing this file changes nothing until the services restart.** Every value
+is read once, at process start - `dejima-ttyd` reads `TTYD_PORT` and
+`TTYD_FONT_SIZE` and then `exec`s `ttyd` with them baked into its argv. So:
+
+```sh
+systemctl --user restart dejima-ttyd.service
+systemctl --user restart dejima-notify-watch.service   # if NTFY_URL changed
+pgrep -a ttyd    # confirm the argv is what you just configured
+```
+
+Skipping this is quiet rather than loud: nothing warns, and the front door
+keeps serving with the old settings, which reads as "the setting had no
+effect" rather than as "the process is older than the file".
+
 ### The bind address is the one thing to get right
 
 This is the step that carries the whole feature's security, and the only one
@@ -947,10 +961,15 @@ browsers ignore `width=device-width`, so nothing changes there.
 
 Two things that will waste your time if you skip them:
 
-- Your nginx needs the sub module. A missing one is a config error at
-  reload, not a silent no-op - confirm with
-  `nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module`. Debian's `nginx-light`
-  is built without it; `nginx-core`, `nginx-full` and `nginx-extras` have it.
+- Your nginx needs the sub module, and a missing one fails *quietly*. Check
+  for it up front with
+  `nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module` - Debian's
+  `nginx-light` is built without it, while `nginx-core`, `nginx-full` and
+  `nginx-extras` have it - and validate with **`nginx -t`** rather than
+  trusting the reload. A reload whose config does not parse leaves the *old*
+  config running, and `systemctl reload nginx` still reports success, so an
+  unknown `sub_filter` directive looks from the outside exactly like a
+  directive that ran and did nothing.
 - `sub_filter` cannot rewrite a compressed response body and passes it
   through untouched, which looks exactly like the tag not working. Clearing
   `Accept-Encoding` toward the upstream is what stops that.
