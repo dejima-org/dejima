@@ -98,6 +98,10 @@ if [ -L "$STATE_DIR" ] || [ ! -d "$STATE_DIR" ] \
     echo "by the current user. Remove it, or set XDG_RUNTIME_DIR somewhere else." >&2
     exit 1
 fi
+# -m 700 above applies only when this process is the one that creates it, and
+# either side may get there first, so the mode is set unconditionally here -
+# same as bin/dejima:491.
+chmod 700 "$STATE_DIR"
 mkdir -p -m 700 "$NOTIFY_DIR" "$DEBOUNCE_DIR"
 
 # From the registry (host-written), not from anything the session wrote. Still
@@ -108,13 +112,15 @@ project_of() {
     file="$STATE_DIR/sessions/$run_id"
     # An entry that can't be opened must degrade to an unnamed push, never to
     # a failure: one scan covers every run directory, so aborting here would
-    # take every other session's notification down with it. A failed
-    # redirection on `done < "$file"` is fatal under set -e where dejima-attach
-    # calls read_entry - directly - but NOT here, because bash does not inherit
-    # errexit into a command substitution without `shopt -s inherit_errexit`,
-    # and project_of is only ever reached through one. Guarded anyway, so the
-    # function is safe wherever it is called from, and so a chmod'd entry does
-    # not print "Permission denied" on every scan for as long as it exists.
+    # take every other session's notification down with it. `|| raw=""` is
+    # what guarantees that - a failed redirection makes the compound command
+    # return nonzero, and the || consumes it. Errexit is NOT the mechanism, in
+    # either direction: bash does not inherit it into a command substitution
+    # (the only way project_of is ever called) absent shopt inherit_errexit,
+    # and suppresses it anyway throughout a function called from a condition.
+    # The [ -r ] check is therefore about noise, not control flow: without it
+    # a chmod'd entry prints "Permission denied" on every scan for as long as
+    # it exists.
     if [ -r "$file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
@@ -177,6 +183,8 @@ debounced() {
     [ "$(( now - 10#$last ))" -lt "$DEBOUNCE_SECONDS" ]
 }
 
+declare -A WARNED=()
+
 scan() {
     local dir run_id event marker now
     now="$(date +%s)"
@@ -201,7 +209,14 @@ scan() {
             # Skipped rather than pushed anyway, because a marker that
             # survives would otherwise re-push on every scan from now on.
             if ! rm -f "$marker"; then
-                echo "dejima-notify-watch: warning: could not consume marker $run_id/$event" >&2
+                # Once per marker per process, not once per scan: the marker
+                # survives, so every later scan finds it again, and a session
+                # that leaves one in place could otherwise fill the journal
+                # for as long as the watcher runs.
+                if [ -z "${WARNED[$run_id/$event]:-}" ]; then
+                    echo "dejima-notify-watch: warning: could not consume marker $run_id/$event" >&2
+                    WARNED[$run_id/$event]=1
+                fi
                 continue
             fi
             if debounced "$run_id-$event" "$now"; then
@@ -213,18 +228,46 @@ scan() {
     done
 }
 
-if [ "${1:-}" = "--once" ]; then
+ONCE=""
+case "${1:-}" in
+    --once) ONCE=1 ;;
+    "") ;;
+    *)
+        echo "usage: ${0##*/} [--once]" >&2
+        exit 2
+        ;;
+esac
+
+if [ -n "$ONCE" ]; then
     scan
-    exit 0
 fi
+# A separate top-level command from the scan above, deliberately: a bash
+# arithmetic error unwinds to the top level and discards the REST of the
+# enclosing top-level command, so a `scan; exit 0` pair sharing one `if` can
+# lose its exit and run the watch loop instead of returning. Nothing should
+# reach such an error (debounced() refuses a non-numeric stamp before the
+# arithmetic), but a --once run that never exits is a bad way to find out.
+[ -z "$ONCE" ] || exit 0
 
 # inotify-tools is optional: without it this degrades to a 5s poll rather
 # than failing. The -t 30 timeout also closes the race where a marker lands
 # in a run directory created after the current watch was established.
 while :; do
     scan
+    # A floor under the loop, unconditional and ahead of the wait: inotify
+    # wakes on the sandbox's OWN file creations, so without it a session that
+    # creates files in a loop drives one scan per creation for as long as it
+    # likes. One scan a second is far more than the notifications need.
+    sleep 1
     if command -v inotifywait >/dev/null 2>&1; then
-        inotifywait -qq -r -t 30 -e create -e moved_to "$NOTIFY_DIR" >/dev/null 2>&1 || true
+        # A failure here is reachable from inside a sandbox rather than rare:
+        # -r takes one inotify watch per directory below $NOTIFY_DIR, and a
+        # session owns its own marker directory, so it can mkdir enough of
+        # them to exhaust this uid's max_user_watches - after which every
+        # inotifywait returns immediately. Falling back to the poll interval
+        # costs a little latency and bounds it; `|| true` would spin.
+        inotifywait -qq -r -t 30 -e create -e moved_to "$NOTIFY_DIR" >/dev/null 2>&1 \
+            || sleep 5
     else
         sleep 5
     fi

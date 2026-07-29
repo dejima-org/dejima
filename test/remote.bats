@@ -901,21 +901,41 @@ EOF
     rm -rf "$PROJ"
 }
 
-# A fake `curl` that records what would have been sent to ntfy: joined, for
-# header greps, and one argument per line, so an argument curl would read as
-# an OPTION rather than as the URL is visible.
+# A fake `curl` that records the ARGUMENT VECTOR it was handed: joined, and
+# one argument per line. Deliberately not "what would have been sent" - real
+# curl expands @file (in -H and -d), -K and -T, so bytes can reach the wire
+# without ever appearing in argv. Confirmed against curl 7.88.1 and a live
+# listener: `-H @/path` arrives as the header the file contains. Assertions
+# that a secret is ABSENT from this log therefore prove nothing on their own;
+# the whitelist below is what makes the log sufficient.
 stub_curl() {
     STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
     cat > "$STUB_DIR/curl" <<EOF
 #!/bin/bash
-printf '%s\n' "\$*" >> "$STUB_DIR/curl-log"
 printf '%s\n' "\$@" >> "$STUB_DIR/curl-argv"
 exit 0
 EOF
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
 }
-curl_log() { cat "$STUB_DIR/curl-log" 2>/dev/null; }
+curl_log() { cat "$STUB_DIR/curl-argv" 2>/dev/null; }
+
+# The EXACT argument vector of one push, one argument per line - a whitelist,
+# not a search. Absence assertions cannot do this job: an argument that leaks
+# by REFERENCE ("-H @/path/to/secret") contains none of the bytes it sends, so
+# every grep for the secret passes while the secret goes out. Compared whole,
+# an added argument of any kind fails the test.
+#
+# $1 title suffix, $2 body, $3 click URL ("" for a config with no BASE_URL).
+expect_argv() {
+    printf '%s\n' -fsS --max-time 10 --retry 2 \
+        -H "Title: dejima: $1" \
+        -H "Priority: default"
+    [ -z "${3:-}" ] || printf '%s\n' -H "Click: $3"
+    printf '%s\n' -d "$2" -- https://ntfy.example.invalid/dejima
+}
+# Compared as a whole file, so a SECOND push would fail this too.
+assert_argv() { [ "$(cat "$STUB_DIR/curl-argv")" = "$(expect_argv "$@")" ]; }
 
 marker() {
     mkdir -p "$RUNTIME_DIR/dejima/notify/$1"
@@ -940,20 +960,21 @@ EOF
     # the project name comes from the registry's workspace= (host-written by
     # bin/dejima; write_entry sets it to /home/someone/myproject). Nothing
     # here is sourced from the marker.
-    [[ "$(curl_log)" == *"Click: https://dejima.example.invalid/?arg=0123456789abcdef"* ]]
-    [[ "$(curl_log)" == *"myproject"* ]]
-    [[ "$(curl_log)" == *"needs input"* ]]
-    # The URL reaches curl as the URL - the last argument, verbatim - and not
-    # as an option (see the option-injection test below).
-    [ "$(tail -1 "$STUB_DIR/curl-argv")" = "https://ntfy.example.invalid/dejima" ]
+    # Every argument, in order, and nothing else. The URL reaches curl as the
+    # URL - last, after --, verbatim - and not as an option.
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
     # Consumed, so a rerun doesn't re-push.
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
 
-    # The other half of the enum, which is otherwise never exercised.
+    # The other half of the enum, which is otherwise never exercised. The log
+    # is compared whole, so it starts empty for the second push.
+    : > "$STUB_DIR/curl-argv"
     marker 0123456789abcdef done
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
-    [[ "$(curl_log)" == *"finished"* ]]
+    assert_argv 'myproject finished' 'Session has stopped.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/done" ]
 }
 
@@ -992,10 +1013,11 @@ EOF
         > "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting"
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
-    # It really did push - otherwise the two refutations below hold vacuously.
-    [ -n "$(curl_log)" ]
-    [[ "$(curl_log)" != *"evil.example.invalid"* ]]
-    [[ "$(curl_log)" != *"X-Actions"* ]]
+    # The whole vector, not a grep for the payload: a watcher that passed the
+    # marker on by reference (-H @"$marker", or a copy of it) would send this
+    # header verbatim while every absence assertion still passed.
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
 }
 
 @test "a symlinked marker is removed without its target being read or touched" {
@@ -1015,8 +1037,12 @@ EOF
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
     [ -f "$secret" ]
     [ "$(cat "$secret")" = "HOSTSECRET" ]
-    [ -n "$(curl_log)" ]
-    [[ "$(curl_log)" != *"HOSTSECRET"* ]]
+    # Intact is not enough - the target must not have been READ either, and a
+    # read that leaves the file alone is invisible from the filesystem. The
+    # whole vector says so: no argument names the marker, the link, or the
+    # target, so there is nothing for curl to open on their behalf.
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
 }
 
 @test "a dangling symlinked marker is consumed rather than left in place forever" {
@@ -1061,11 +1087,15 @@ EOF
     write_entry 0123456789abcdef '%1' 'work:2'
     marker 0123456789abcdef waiting
     "$REPO_ROOT/bin/dejima-notify-watch" --once
-    [ "$(curl_log | wc -l)" -eq 1 ]
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
     marker 0123456789abcdef waiting
     DEJIMA_DEBOUNCE_SECONDS=3600 run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
-    [ "$(curl_log | wc -l)" -eq 1 ]
+    # Still that one push and no other: the vector is compared whole, so a
+    # second would appear as trailing arguments and fail here.
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
     # Debounced means "not pushed", not "not consumed" - a marker left behind
     # would re-push the moment the window expired.
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
@@ -1134,11 +1164,11 @@ EOF
     canary="$RUNTIME_DIR/PWNED"
     printf 'now[$(touch %s)]' "$canary" \
         > "$RUNTIME_DIR/dejima/debounce/0123456789abcdef-waiting"
-    # Bounded, because the failure this pins is not only execution: a bash
-    # arithmetic *error* unwinds to the top level and discards the rest of the
-    # enclosing command, so a --once scan that reaches one never runs its
-    # `exit` and falls into the watch loop. Untimed, that hangs the suite
-    # instead of failing it.
+    # Bounded because this is the probe most likely to reach an arithmetic
+    # error, and such an error unwinds to the top level, discarding the rest
+    # of the enclosing command - the script keeps its --once exit OUT of that
+    # command for exactly this reason, and if that ever regresses a bounded
+    # test fails where an unbounded one hangs the whole file.
     run timeout 30 "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
     [ ! -e "$canary" ]
@@ -1216,7 +1246,152 @@ EOF
     marker 0123456789abcdef waiting
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
-    [[ "$(curl_log)" == *"myproject"* ]]
-    [[ "$(curl_log)" != *"Click:"* ]]
+    # No Click argument at all, rather than an empty one.
+    assert_argv 'myproject needs input' 'Session is waiting for you.' ''
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+}
+
+@test "an argument that is not --once is refused rather than watched forever" {
+    # Anything unrecognized - a typo, --help - used to fall into the watch
+    # loop, which for an interactive invocation looks like a hang.
+    conf_with_ntfy
+    stub_curl
+    for bad in --help --onces -x once; do
+        run timeout 10 "$REPO_ROOT/bin/dejima-notify-watch" "$bad"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"usage:"* ]]
+    done
+    [ -z "$(curl_log)" ]
+}
+
+@test "the watcher refuses a state directory it does not own or that is not a directory" {
+    # The other two arms of the same guard. The ownership arm is the one that
+    # matters for the /tmp fallback - another local user pre-creating
+    # /tmp/dejima as a real directory of their own - and it cannot be set up
+    # for real without root, so the ownership PROBE is stubbed instead: the
+    # script asks `stat -c %u`, and here it gets an answer that is not us.
+    conf_with_ntfy
+    stub_curl
+    cat > "$STUB_DIR/stat" <<EOF
+#!/bin/bash
+[ "\$1" = "-c" ] && [ "\$2" = "%u" ] && { printf '4242\n'; exit 0; }
+exec $(command -v stat) "\$@"
+EOF
+    chmod +x "$STUB_DIR/stat"
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"owned"* ]]
+    [ -z "$(curl_log)" ]
+    # Refused, not cleaned up: it is not ours to touch.
+    [ -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+
+    # And the arm for a state path that is not a directory at all.
+    rm -f "$STUB_DIR/stat"
+    rm -rf "$RUNTIME_DIR/dejima"
+    printf 'not a directory' > "$RUNTIME_DIR/dejima"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [ -z "$(curl_log)" ]
+    [ "$(cat "$RUNTIME_DIR/dejima")" = "not a directory" ]
+}
+
+@test "a workspace path that would split a header is reduced before it is sent" {
+    # The registry is host-written, so this is not a sandbox escape - it is an
+    # operator whose directory name contains a CR, which would end the Title
+    # header and start one of the reader's choosing.
+    conf_with_ntfy
+    stub_curl
+    mkdir -p "$RUNTIME_DIR/dejima/sessions"
+    # No slash in the payload: basename would eat everything before the last
+    # one, which would hide what this test is about.
+    printf 'workspace=/home/someone/my%sX-Actions: pwn\npane=%%1\n' \
+        "$(printf '\r')" > "$RUNTIME_DIR/dejima/sessions/0123456789abcdef"
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    # One Title argument, on one line, with the CR, the space and the colon
+    # gone - so there is no second header and no header value to control.
+    assert_argv 'myX-Actionspwn needs input' \
+        'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
+}
+
+@test "a workspace name longer than the header allowance is truncated" {
+    conf_with_ntfy
+    stub_curl
+    mkdir -p "$RUNTIME_DIR/dejima/sessions"
+    long="$(printf 'a%.0s' $(seq 1 200))"
+    printf 'workspace=/home/someone/%s\npane=%%1\n' "$long" \
+        > "$RUNTIME_DIR/dejima/sessions/0123456789abcdef"
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    assert_argv "$(printf 'a%.0s' $(seq 1 64)) needs input" \
+        'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
+}
+
+@test "a debounce window that is not a number is refused" {
+    # It reaches an arithmetic context, and it is the one input to this script
+    # that comes from the unit file's environment rather than from a file.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    # Not the empty string: unset and empty both mean "use the default".
+    for bad in 'x[$(touch '"$RUNTIME_DIR"'/PWNED)]' '60s' '-1' '6 0'; do
+        DEJIMA_DEBOUNCE_SECONDS="$bad" run "$REPO_ROOT/bin/dejima-notify-watch" --once
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"DEJIMA_DEBOUNCE_SECONDS"* ]]
+    done
+    [ ! -e "$RUNTIME_DIR/PWNED" ]
+    [ -z "$(curl_log)" ]
+    # Refused before the scan, so the marker is still there to push later.
+    [ -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+}
+
+@test "an inotifywait that returns immediately does not spin the watcher" {
+    # Both ways a sandbox can make the wait stop waiting, and they need
+    # different guards:
+    #   exit 1 - the wait FAILS. Reachable from inside: -r takes one inotify
+    #     watch per directory under the marker root, and a session owns its
+    #     own marker directory, so it can mkdir enough of them to exhaust this
+    #     uid's max_user_watches. Bounded by the fallback sleep.
+    #   exit 0 - the wait SUCCEEDS, over and over. Needs no exhaustion at all:
+    #     the enum does not gate the wake path, so any file the session
+    #     creates is an event. Bounded by the floor under the loop.
+    conf_with_ntfy
+    stub_curl
+    for rc in 1 0; do
+        : > "$STUB_DIR/inotify-calls"
+        cat > "$STUB_DIR/inotifywait" <<EOF
+#!/bin/bash
+printf 'x' >> "$STUB_DIR/inotify-calls"
+exit $rc
+EOF
+        chmod +x "$STUB_DIR/inotifywait"
+        "$REPO_ROOT/bin/dejima-notify-watch" >/dev/null 2>&1 &
+        watcher=$!
+        sleep 3
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+        # At most a handful in three seconds; unbounded, the loop re-scans as
+        # fast as the host can fork, which measures in the hundreds.
+        [ "$(wc -c < "$STUB_DIR/inotify-calls")" -lt 10 ]
+    done
+}
+
+@test "the state directory is tightened even when another process created it" {
+    # -m 700 applies only to the process that creates the directory, and by
+    # this script's own design either side may get there first.
+    conf_with_ntfy
+    stub_curl
+    mkdir -p -m 755 "$RUNTIME_DIR/dejima"
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ "$(stat -c %a "$RUNTIME_DIR/dejima")" = "700" ]
 }
