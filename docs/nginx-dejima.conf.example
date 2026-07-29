@@ -134,5 +134,21 @@ server {
         # sub_filter cannot rewrite a compressed body, and silently passes it
         # through unchanged - which looks exactly like the tag not working.
         proxy_set_header Accept-Encoding "";
+
+        # ttyd sends this page with no Cache-Control, no ETag and no
+        # Last-Modified - src/http.c sets status, content-type,
+        # content-encoding and content-length, and nothing else - and a
+        # response carrying neither freshness information nor a validator is
+        # cacheable at the browser's discretion, which on a phone means
+        # indefinitely. That is harmless while the page is served verbatim and
+        # a trap once it is REWRITTEN here: a phone that cached the
+        # un-injected page goes on rendering it, so the tag reads as broken
+        # long after it works, and no future change to the injection reaches
+        # a browser that has already been here. Nothing is lost by refusing
+        # the cache - with no validator upstream, a revalidation could never
+        # come back 304 anyway - and the page is still gzipped to the client,
+        # since clearing Accept-Encoding above only applies to the request
+        # made to ttyd.
+        add_header Cache-Control "no-store" always;
     }
 }

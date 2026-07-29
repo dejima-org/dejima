@@ -953,13 +953,14 @@ the way past. `docs/nginx-dejima.conf.example` ships it:
 sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
 sub_filter_once on;
 proxy_set_header Accept-Encoding "";
+add_header Cache-Control "no-store" always;
 ```
 
 Now the browser lays out at the device's real width, xterm.js fits an honest
 column count to it, and rotating the phone reflows properly. Desktop
 browsers ignore `width=device-width`, so nothing changes there.
 
-Two things that will waste your time if you skip them:
+Three things that will waste your time if you skip them:
 
 - Your nginx needs the sub module, and a missing one fails *quietly*. Check
   for it up front, and validate with **`nginx -t`** rather than trusting the
@@ -981,6 +982,23 @@ Two things that will waste your time if you skip them:
 - `sub_filter` cannot rewrite a compressed response body and passes it
   through untouched, which looks exactly like the tag not working. Clearing
   `Accept-Encoding` toward the upstream is what stops that.
+- **Your phone may already be holding the un-injected page.** `ttyd` sends it
+  with no `Cache-Control`, no `ETag` and no `Last-Modified`, and a response
+  with neither freshness information nor a validator is cacheable for as long
+  as the browser feels like it. Fine while the body is served verbatim; a trap
+  once the proxy rewrites it, because the stale copy renders forever and the
+  injection reads as broken long after it works. `add_header Cache-Control
+  "no-store" always;` closes it going forward - to check *right now*, load the
+  front door in a private tab, which bypasses the cache without clearing
+  anything else.
+
+Confirm it server-side before blaming the browser, or the other way round -
+the first 220 bytes of the response settle it, and the tag should sit ahead
+of `<meta charset>`:
+
+```sh
+curl -sk -u USER:PASS https://<front-door>/ | head -c 220; echo
+```
 
 If the text is still smaller than you want once the layout is honest, set
 `TTYD_FONT_SIZE` in `remote.conf` (8-72). Be aware of what it costs:

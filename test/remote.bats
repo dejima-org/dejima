@@ -2036,6 +2036,12 @@ nginx_blocks() {
     # this couples against.
     if grep -qE '^[[:space:]]*sub_filter[[:space:]]' "$ex"; then
         grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Accept-Encoding[[:space:]]+"";' "$ex"
+        # ttyd sends the page with no Cache-Control, no ETag and no
+        # Last-Modified, so a browser may cache it indefinitely. Harmless while
+        # the body is served verbatim; once it is rewritten here, a phone that
+        # cached the un-injected page renders it forever and the tag looks
+        # broken long after it works.
+        grep -qE '^[[:space:]]*add_header[[:space:]]+Cache-Control[[:space:]]+"no-store"' "$ex"
     fi
 
     # Injected once. Without sub_filter_once, the string is replaced
