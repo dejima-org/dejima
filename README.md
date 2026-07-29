@@ -1107,6 +1107,47 @@ last point is what the enum is really for: ntfy's own headers include
 issue an arbitrary HTTP request, so a single attacker-controlled header
 would turn it into a confused deputy inside your network.
 
+**When no notification arrives.** Five things have to happen in order, and a
+break in any of them looks identical from the phone - which is to say, like
+nothing at all. Walk them from the inside out; each step tells you whether
+the next one is worth checking.
+
+1. **Is the session registered?** Inside the sandbox, `echo $DEJIMA_RUN_ID`
+   and `echo $DEJIMA_NOTIFY_DIR`. Both empty means `bin/dejima` started this
+   container with remote access off - `remote.conf` did not exist at launch,
+   and no later change affects a session already running.
+2. **Is the hook registered?** The `Notification` and `Stop` entries live in
+   the throwaway settings copy, not in your real `settings.json`:
+   `grep -c dejima-notify ~/.claude/settings.json` from inside should be 2.
+3. **Does the marker reach the host?** This is the one worth knowing, because
+   it splits the chain cleanly in half. From inside the sandbox:
+
+   ```sh
+   : > "$DEJIMA_NOTIFY_DIR/waiting" && sleep 2 && ls "$DEJIMA_NOTIFY_DIR"
+   ```
+
+   The file vanishing means the host watcher is running and consuming, and
+   everything below this line is host-side. The file remaining means
+   `dejima-notify-watch` is not running - `systemctl --user status
+   dejima-notify-watch`, and check `enable-linger` if it died with your
+   session.
+4. **Did the push succeed?** `curl`'s stderr goes to the watcher's journal:
+   `journalctl --user -u dejima-notify-watch -n 50`. A `push failed` line
+   with a 404 usually means `NTFY_URL` names the server but no topic; a 401
+   or 403 means the instance wants credentials, which the URL can carry as
+   `https://<user>:<token>@<host>/<topic>` - nothing here sends an auth
+   header of its own.
+5. **Is the phone subscribed to the topic the config names?** Last in the
+   list and first to check in practice, since it is the only link with no
+   log anywhere. The topic in `NTFY_URL` and the one in the app have to be
+   the same string.
+
+Note also that step 3 sends a real notification when the chain is healthy,
+which makes it a test of the whole path rather than only of the watcher.
+Repeat runs within `DEJIMA_DEBOUNCE_SECONDS` (60 by default) are consumed
+without pushing, so leave a minute between attempts or you will diagnose the
+debounce instead.
+
 ### Attaching
 
 `dejima-attach` with no argument gives a numbered picker - digits rather
