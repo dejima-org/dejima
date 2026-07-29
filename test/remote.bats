@@ -1887,3 +1887,172 @@ unit_exec_start() {
         'https://dejima.example.invalid/?arg=0123456789abcdef'
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
 }
+
+# The body of a "## <name>" section, up to the next same-level heading. Every
+# documentation assertion below runs against this rather than the whole file:
+# a string that only has to appear *somewhere* in a 900-line README is
+# satisfied by an unrelated section, and would keep passing after the section
+# it was meant to check was deleted.
+readme_section() {
+    awk -v want="## $1" '
+        $0 == want { inside = 1; next }
+        inside && /^## / { exit }
+        inside
+    ' "$REPO_ROOT/README.md"
+}
+
+@test "the README section the front doors point readers at exists under the name they use" {
+    # bin/dejima-ttyd, install.sh and four more end their diagnostics with
+    # `See README "Remote access"`. Nothing else in the repo notices when one
+    # side of that is renamed: the scripts still run, the README still reads
+    # fine, and the operator who most needs the section is sent nowhere. The
+    # name is READ OUT of the script rather than written here twice, so a
+    # rename on the code side fails this test instead of quietly passing it.
+    #
+    # Normalized before matching, because the reference is not written the
+    # same way twice: dejima-ttyd carries it as a plain comment, install.sh
+    # and dejima-attach escape both quotes inside an echo, and the notify
+    # hook's wraps across two comment lines. Dropping backslashes, joining
+    # lines and squashing '#' and runs of spaces makes all three the same
+    # string without making the pattern itself lax.
+    ref() { tr -d '\\' < "$1" | tr '\n' ' ' | sed 's/#/ /g; s/  */ /g'; }
+    local name
+    name="$(ref "$REPO_ROOT/bin/dejima-ttyd" | grep -m1 -oE 'README "[^"]+"' \
+        | sed 's/^README "//; s/"$//')"
+    [ -n "$name" ]
+    grep -qxF "## $name" "$REPO_ROOT/README.md"
+
+    # And every other file that points at this feature points at the SAME
+    # name - one renamed pointer is as dangling as one renamed heading.
+    local f
+    for f in bin/dejima-attach bin/dejima-ttyd bin/dejima-notify-watch \
+             bin/dejima bin/dejima-project-lib.sh hooks/dejima-notify.sh install.sh; do
+        ref "$REPO_ROOT/$f" | grep -qF "README \"$name\"" || {
+            echo "$f does not point at README \"$name\"" >&2
+            false
+        }
+    done
+}
+
+@test "the README documents every remote access setup step" {
+    local section
+    section="$(readme_section 'Remote access')"
+    [ -n "$section" ]
+    # has <-F|-E> <pattern>. Fails the test on the first missing item, naming
+    # it - a bare grep chain reports only a line number. The pattern goes
+    # through -e because half of what's looked for below is a command-line
+    # flag, which grep would otherwise try to interpret as its own.
+    has() {
+        printf '%s\n' "$section" | grep -q "$1" -e "$2" || {
+            echo "README \"Remote access\" is missing: $2" >&2
+            return 1
+        }
+    }
+
+    # Opt-in, and the file whose mere existence is the switch.
+    has -F 'remote.conf'
+    has -F '~/.config/dejima/remote.conf'
+
+    # Every key the parser accepts, derived from the parser rather than
+    # listed here: a fourth key added to valid_remote_key without a row in
+    # the table fails this.
+    local keys key
+    keys="$(sed -n '/^valid_remote_key()/,/^}/p' "$REPO_ROOT/bin/dejima-project-lib.sh" \
+        | grep -oE '\b[A-Z][A-Z_]+\b' | sort -u)"
+    [ -n "$keys" ]
+    for key in $keys; do has -F "\`$key\`"; done
+
+    # The port default, taken from the library so the two cannot drift.
+    : > "$CONFIG_DIR/remote.conf"
+    run lib remote_ttyd_port
+    [ "$status" -eq 0 ]
+    has -F "$output"
+
+    # The binding requirement, which is the whole security of the feature:
+    # ttyd on loopback, the proxy on one specific address, and the reason -
+    # the container can route to the bridge gateway, and a tmux client is a
+    # host shell.
+    has -F '127.0.0.1'
+    has -F '0.0.0.0'
+    has -E 'bridge gateway'
+    has -E 'host shell'
+    # As a step the operator performs, not only as prose: a probe run from
+    # inside a live sandbox at the host's own default-route address. Matched
+    # loosely on purpose - that some runnable check is there is the point,
+    # not which tool it reaches for.
+    has -E 'ip route|default route'
+    has -E '/dev/tcp|\bnc |ncat|curl '
+
+    # Both front doors, the pieces each one needs, and the hook and watcher
+    # behind the notification.
+    has -F 'authorized_keys'
+    has -F 'restrict,pty,command='
+    has -F 'dejima-attach'
+    has -F 'hooks/dejima-notify.sh'
+    has -F 'docs/nginx-dejima.conf.example'
+    has -F 'systemctl --user enable'
+    # Derived from what the repo ships: a third unit cannot be added and left
+    # undocumented. (Full names, so "dejima-ttyd" alone does not satisfy it.)
+    local unit
+    for unit in "$REPO_ROOT"/systemd/*; do has -F "$(basename "$unit")"; done
+
+    # ttyd's two load-bearing flags, and the version floor --writable needs.
+    # An operator who installs an older ttyd gets a unit that fails at every
+    # start, or - worse, before 1.7.4 inverted the default - a front door
+    # whose only gate is the proxy.
+    has -F '--check-origin'
+    has -F '--writable'
+    has -F '1.7.4'
+    # The header --check-origin compares against, in the form that keeps the
+    # port. The negative test next door forbids the other form; this one
+    # makes sure the right one is actually named.
+    has -F '$http_host'
+
+    # The notification: what it says, what it deliberately does not, and the
+    # deep link's shape.
+    has -F 'ntfy'
+    has -F 'inotify-tools'
+    has -F 'needs input'
+    has -F '?arg='
+}
+
+@test "the README's remote access section repeats no advice that would break or unbolt the front door" {
+    local section
+    section="$(readme_section 'Remote access')"
+    [ -n "$section" ]
+
+    # Both checks below run against the section's FENCED BLOCKS only - what a
+    # reader copies out. Applied to the whole section they would forbid the
+    # prose that explains why each is wrong, which is the opposite of what
+    # this section needs to say.
+    local blocks
+    blocks="$(printf '%s\n' "$section" | awk '/^```/ { inblock = !inblock; next } inblock')"
+    [ -n "$blocks" ]
+
+    # $host, not $http_host, is the single most repeatable way to break this
+    # setup: nginx's $host has the port stripped, ttyd keeps the port in what
+    # --check-origin compares unless it is 80 or 443, and a vhost on any
+    # other port then refuses every WebSocket while serving the page fine.
+    # docs/nginx-dejima.conf.example is already guarded against it; the
+    # README is the other place the line gets copied from.
+    run bash -c 'printf "%s\n" "$1" | grep -nE "\\\$host([^_a-zA-Z]|$)"' _ "$blocks"
+    [ "$status" -ne 0 ]
+
+    # No package-manager one-liner for ttyd. Debian bookworm and Ubuntu 22.04
+    # both package a build older than 1.7.4, so an apt line here is an
+    # instruction that yields a broken front door - and a command in a fenced
+    # block is what gets copied, not the caveat beside it.
+    run bash -c 'printf "%s\n" "$1" | grep -nE "apt(-get)? install.*ttyd"' _ "$blocks"
+    [ "$status" -ne 0 ]
+
+    # This repo is public, and this section is where an operator's own setup
+    # is most likely to leak in. Every absolute URL has to be loopback or a
+    # name that cannot belong to anyone (RFC 2606). test/static.bats catches
+    # address- and suffix-shaped leaks across the whole README; this catches
+    # a real ntfy topic, which is always a URL.
+    run bash -c 'printf "%s\n" "$1" | grep -hoiE "https?://[a-z0-9.:@_-]+" \
+        | grep -viE "^https?://(127\.0\.0\.1(:[0-9]+)?|(www\.)?example\.(com|net|org)|[a-z0-9-]+\.(invalid|example|test))"' \
+        _ "$section"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}

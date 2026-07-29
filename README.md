@@ -494,6 +494,285 @@ one.
 `ALLOW_GITHUB_PUSH` is a per-launch variable, not a persistent toggle — it
 only affects the one `bin/dejima` invocation it's set for.
 
+## Remote access
+
+**Opt-in, and entirely off until you create one file.** Nothing here runs and
+no front door exists unless `~/.config/dejima/remote.conf` is present. With
+it absent, `bin/dejima` builds exactly the `docker compose` invocation it
+built before this feature existed, no session state is written, no
+notification hook is registered, and `dejima-attach`, `dejima-ttyd` and
+`dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
+three onto `PATH` and stops there - it runs no `systemctl`, copies no unit,
+and starts nothing.
+
+What this is: a way to get back to a session that is *already running* on
+your machine, from a phone on the same network, when it stops to ask you
+something. What it is not: a way to start a session, a hosted service, or
+anything that should face the internet.
+
+**Both front doors hand out a host shell.** `dejima-attach` attaches a tmux
+client on your own tmux server, and a tmux client is one prefix key away
+from a new window that has nothing to do with any sandbox. Everything below
+follows from that single fact - it is why the listener is on loopback, why
+the proxy needs authentication, and why the bind address is the one step to
+get right.
+
+### `remote.conf`
+
+Flat `KEY=value` lines, `#` comments and blank lines ignored, at
+`~/.config/dejima/remote.conf` (`$DEJIMA_CONFIG_DIR` relocates the whole
+config tree, same as it does for approvals):
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `NTFY_URL` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
+| `BASE_URL` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
+| `TTYD_PORT` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
+
+`NTFY_URL` and `BASE_URL` must carry an explicit `http://` or `https://`
+scheme; a value without one is refused rather than guessed at, because
+`curl` reads a leading `-K/path` as an *option* that takes the request's URL
+from that file instead. Values are restricted to
+`A-Za-z0-9:/._~?=%@+-` — no whitespace and nothing shell-active, since these
+end up in an HTTP header and in a URL handed to a phone.
+
+**A malformed file is a hard failure, not a warning.** The whole file is
+validated on every read, not just the key being asked for: an unknown key, a
+value outside that character set, or a line without an `=` makes every
+remote-access script refuse to start and say which line was wrong. A
+`TTYD_PORT` that isn't a number in 1-65535 is refused the same way.
+
+```
+# ~/.config/dejima/remote.conf - substitute your own topic and hostname
+NTFY_URL=https://ntfy.example.invalid/your-topic-here
+BASE_URL=https://dejima.example.invalid
+TTYD_PORT=7681
+```
+
+### The bind address is the one thing to get right
+
+This is the step that carries the whole feature's security, and the only one
+where a plausible-looking choice is a full sandbox escape.
+
+`docker/init-firewall.sh` deliberately ACCEPTs container OUTPUT to the
+container's default-route address - the Docker bridge gateway, which is your
+host. That is the one host address a sandbox can reach at all. Combine it
+with the fact above (a tmux client is a host shell) and the consequence is
+direct: **a front door the sandbox can reach is a compromised session's own
+escape hatch.**
+
+So:
+
+- `ttyd` is bound to `127.0.0.1` by `bin/dejima-ttyd`, hardcoded, not
+  configurable. The container has no route to your host's loopback, so
+  nothing but a process on this host can open that socket.
+- The reverse proxy in front of it must bind **one specific address of your
+  LAN interface**. Never the wildcard (a bare `listen 443 ssl;`, which is
+  every interface *including* the bridge gateway), never `0.0.0.0`, and
+  never the bridge gateway address itself. `ip -br addr` lists the
+  candidates, `ss -ltnp` afterwards shows what you actually bound.
+
+Verify it rather than assume it. With a sandbox running, from inside it:
+
+```sh
+# the bridge gateway - the only host address this container can route to
+gw=$(ip route | grep default | cut -d' ' -f3)
+
+# both should fail: the loopback ttyd, and the front door's own port
+timeout 5 bash -c "cat < /dev/null > /dev/tcp/$gw/7681" && echo BAD || echo ok
+timeout 5 bash -c "cat < /dev/null > /dev/tcp/$gw/443"  && echo BAD || echo ok
+```
+
+`BAD` on either line means stop and fix the bind before going further -
+whatever answered is reachable from inside the sandbox. `test/runtime.bats`
+asserts this same containment property against a live container (with a
+positive control on the same path, so a passing result can't come from the
+container simply reaching nothing), and it passes on a real Docker host.
+
+### SSH front door
+
+Generate a key that exists only for this, and give it a forced command:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/dejima-phone -C phone
+```
+
+Then one line in `~/.ssh/authorized_keys`, with the full path to the symlink
+`install.sh` made:
+
+```
+restrict,pty,command="/home/<you>/.local/bin/dejima-attach" ssh-ed25519 AAAA... phone
+```
+
+`restrict` turns off port forwarding, agent forwarding, X11 and everything
+else; `pty` adds back the one thing a terminal needs; `command=` runs
+`dejima-attach` no matter what the client asks to run. Nothing the phone
+sends is interpreted as a command, so this needs no client-side
+"run this on connect" support - any plain SSH app lands on the picker.
+
+It has to be the **same Unix user** that runs `bin/dejima`: tmux sockets are
+per-user, and `dejima-attach` talks to the tmux server of whoever runs it.
+Options are per-key, so your normal key still gets a normal shell - worth
+confirming both after you add the line.
+
+### Web front door
+
+Needs `ttyd` **1.7.4 or newer**. `-W`/`--writable` arrived in 1.7.4, which
+inverted the old default (before it, the terminal was writable unless you
+passed `--readonly`), so an older build rejects the flag and
+`bin/dejima-ttyd` fails at every start. Your distro's package may well be
+too old: Debian bookworm's is 1.7.3 and Ubuntu 22.04's is 1.6.3, neither of
+which has the flag - Ubuntu 24.04's 1.7.4 does. Check with `ttyd --version`,
+and take an upstream release binary if the packaged one is behind.
+
+`bin/dejima-ttyd` reads `TTYD_PORT` and launches
+`ttyd --interface 127.0.0.1 --port <port> --check-origin --url-arg --writable dejima-attach`.
+Two of those are load-bearing:
+
+- **`--check-origin`** is not tidiness. Without it `ttyd` does no origin
+  validation at all, and browsers do not apply the same-origin policy to
+  WebSockets - they do attach the cached credential for the target origin.
+  Any page loaded in an authenticated operator's browser could open
+  `wss://<front-door>/ws` and be handed this host shell, with no interaction
+  beyond visiting the page. Proxy authentication cannot stop that; it is
+  satisfied by the victim's own browser.
+- **`--url-arg`** is what lets the notification's deep link name a session
+  (`?arg=<run-id>`). It reaches `dejima-attach` as argv, never as a shell
+  word, and has to match the run-id shape before it is used for anything.
+
+Install the unit by hand - it ships disabled, and `install.sh` will not do
+this for you:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp systemd/dejima-ttyd.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dejima-ttyd.service
+```
+
+It is a **user** unit, not a system one, and it repeats no configuration:
+`ExecStart` is `%h/.local/bin/dejima-ttyd`, and the bind address and port
+live in the script and `remote.conf` so the two cannot drift.
+
+Then put a reverse proxy in front of it. Adapt
+`docs/nginx-dejima.conf.example` - it will not load as written, deliberately,
+so it can never become a live config by being dropped into `sites-enabled`
+and forgotten. What matters in it:
+
+- **Authentication on every server block.** `ttyd` is started with no
+  credential of its own, because the loopback bind means only this host can
+  reach it - the proxy is the entire gate. A block without `auth_basic` is
+  an unauthenticated host shell on your network.
+- **TLS.** HTTP Basic sends the password on every request, and the terminal
+  itself carries whatever the session is working on.
+- **`proxy_set_header Host $http_host;`** — `$http_host`, not `$host`.
+  `--check-origin` compares the client's `Origin` against the `Host` header,
+  and nginx's `$host` has the port stripped while `ttyd` keeps the port in
+  what it compares unless it is 80 or 443. On a vhost listening anywhere
+  else - 8443, say - `$host` makes `ttyd` compare `name:8443` against `name`
+  and refuse every WebSocket: the page loads, the terminal never connects,
+  and the only sign is a "refuse to serve WS client from different origin"
+  line in `ttyd`'s log.
+- **A long `proxy_read_timeout`.** An attached terminal sits idle for hours;
+  nginx's default is 60 seconds.
+
+### Notifications
+
+`bin/dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
+`Stop` hook for a remote-enabled session - into the throwaway settings copy
+it already generates for that session, never into your real
+`~/.claude/settings.json`, which every sandbox's copy derives from and your
+host's own Claude Code reads directly. That copy is mounted read-only, so a
+session cannot unregister its own hook. The hook writes one empty file, named `waiting` or
+`done`, into this run's own bind-mounted marker directory. No content, no
+stdin, no network.
+
+On the host, `dejima-notify-watch` turns those markers into ntfy pushes.
+Same installation shape as above:
+
+```sh
+cp systemd/dejima-notify-watch.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dejima-notify-watch.service
+```
+
+`inotify-tools` is optional - without `inotifywait` the watcher degrades to
+a five-second poll rather than failing. Repeat markers for the same session
+and event inside 60 seconds are debounced (`DEJIMA_DEBOUNCE_SECONDS`
+overrides that).
+
+One environment gotcha, because it fails silently: the watcher and
+`bin/dejima` both resolve the marker root as `${XDG_RUNTIME_DIR:-/tmp}/dejima`,
+so they only meet when they agree on `XDG_RUNTIME_DIR`. systemd sets it for
+user units and a login shell gets it from pam_systemd, but a `bin/dejima`
+run from a context that has neither - a bare `su`, a cron job, a tmux server
+started before login - writes its markers under `/tmp/dejima` while the unit
+watches `/run/user/<uid>/dejima`, and no push is ever sent, with nothing
+logged to say so. `systemctl --user show-environment` is where to check.
+
+**What a notification contains.** A title of `dejima: <project> needs input`
+(or `dejima: <project> finished`), a fixed one-line body, and - when
+`BASE_URL` is set - a click link of `<BASE_URL>/?arg=<run-id>` that opens the
+web front door already attached to that session. `<project>` is the
+workspace directory's name, taken from the host-side registry and reduced to
+`A-Za-z0-9._-`.
+
+**And nothing about what Claude is actually asking.** That absence is
+deliberate, not a missing feature: your phone is outside the sandbox, so no
+sandbox-controlled bytes are allowed to reach it. The question itself is on
+the terminal you are about to attach to; the push exists only to tell you to
+go look.
+
+The guarantee for that is host-side, and it is worth being precise about
+where it lives. The in-container hook's `waiting|done` whitelist is **not**
+it - a compromised session owns its own bind-mounted marker directory and
+can create any file name in it, hook or no hook. What holds is
+`bin/dejima-notify-watch`: it iterates a literal two-name enum rather than
+reading the directory, so a name outside it is never stat'd, read or
+removed; it never reads marker *content*; and it consumes markers with
+`rm -f`, which unlinks a symlink instead of following it. Every byte it
+sends - title, body, headers, click URL - is composed from host data. That
+last point is what the enum is really for: ntfy's own headers include
+`X-Actions`, `X-Attach` and `X-Icon`, which can make the receiving phone
+issue an arbitrary HTTP request, so a single attacker-controlled header
+would turn it into a confused deputy inside your network.
+
+### Attaching
+
+`dejima-attach` with no argument gives a numbered picker - digits rather
+than arrow keys, because a phone soft keyboard handles those far better.
+`--list` prints one tab-separated row per live session for scripting, and a
+run-id argument attaches directly, which is what the deep link and `ttyd`'s
+`--url-arg` produce. Rows carry the run id, the tmux label, the workspace
+name, the session's age, its state, and the container id.
+
+Three states, from a registry `bin/dejima` writes on launch and removes on
+exit:
+
+- `attachable` - a live tmux pane to join.
+- `stale` - registered, but its pane is gone. Listed rather than hidden,
+  since the registry is a hint and not truth: the exit trap doesn't run
+  under `SIGKILL` or a host crash.
+- `no-tmux` - the sandbox was started outside tmux, so there is no pane to
+  attach to. Still listed, deliberately, rather than silently omitted.
+
+Entries whose container has gone away are pruned as they're listed. When
+Docker can't be asked at all, nothing is pruned and the container column
+reads `?` - an unanswerable question is never treated as a "no".
+
+Attaching creates a **grouped** tmux session (`dejima-<run-id>`) rather than
+joining yours. Grouped sessions share windows but track their own current
+window, so the phone can sit on one sandbox while the desktop sits on
+another, and the throwaway carries `destroy-unattached`, so it disposes of
+itself when the phone detaches or the connection drops.
+
+Sizing is left to tmux on purpose: `dejima-attach` sets no `window-size`.
+tmux's own default (`latest`, since 3.1) already keeps a small phone client
+from shrinking the desktop's view, and the option's only scopes are the
+window - which a grouped session *shares* with yours, so setting it there
+would permanently overwrite your choice with nothing to restore afterwards -
+and global. An operator who deliberately set `smallest` keeps it.
+
 ## Security notes
 
 **Threat model, honestly stated:** this reduces the blast radius of a
