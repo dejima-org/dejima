@@ -20,7 +20,7 @@ teardown() {
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
     fi
     rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
-        ${TMUX_DIR:+"$TMUX_DIR"}
+        ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
@@ -1431,4 +1431,362 @@ EOF
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
     [ "$(stat -c %a "$RUNTIME_DIR/dejima")" = "700" ]
+}
+
+# ---------------------------------------------------------------------------
+# The front doors: bin/dejima-ttyd, the systemd units that run it and the
+# watcher, the nginx example that fronts it, and the install.sh wiring that
+# puts all of it where those units expect to find it.
+#
+# Most of what follows is necessarily static - there is no ttyd, no systemd
+# and no nginx on the machines this suite runs on. Two things guard against
+# the vacuous pass that invites: every negative grep is preceded by a check
+# that its files exist (a grep against a missing file "finds nothing" too),
+# and the two properties that actually matter - what ttyd is launched with,
+# and what environment the units give the scripts - are executed rather than
+# grepped.
+# ---------------------------------------------------------------------------
+
+# A fake ttyd that records the argv it was exec'd with. ttyd is not installed
+# here, which is exactly why it is stubbed rather than skipped: without it
+# every "dejima-ttyd fails" assertion below is true for the wrong reason.
+stub_ttyd() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    cat > "$STUB_DIR/ttyd" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" >> "$STUB_DIR/ttyd-argv"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/ttyd"
+    PATH="$STUB_DIR:$PATH"
+}
+ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
+
+# The EXACT argument vector, one argument per line - a whitelist, for the same
+# reason expect_argv above is one. The bind address is the security property
+# of this whole task, and an absence grep cannot see a SECOND --interface, a
+# --credential that turns nginx's auth into a duplicate, or a dropped flag.
+# $1 is the expected port. The command must be this repo's dejima-attach,
+# resolved the way the script resolves it (readlink -f, so a $BATS_TEST_DIRNAME
+# with a ".." in it does not make this a comparison of two spellings).
+expect_ttyd_argv() {
+    printf '%s\n' --interface 127.0.0.1 --port "$1" --url-arg --writable \
+        "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
+}
+# Sentinel on both sides: both are command substitutions, which strip trailing
+# newlines, so without it a vector ending in an empty argument compares equal
+# to one that does not have it.
+assert_ttyd_argv() {
+    [ "$( { cat "$STUB_DIR/ttyd-argv"; echo .; } )" = "$( { expect_ttyd_argv "$@"; echo .; } )" ]
+}
+
+# ExecStart= with %h expanded, i.e. what systemd would actually run. Read out
+# of the unit rather than repeated here, so a unit that points somewhere else
+# fails these tests instead of quietly testing a path nothing uses.
+unit_exec_start() {
+    local line
+    line="$(grep -m1 '^ExecStart=' "$REPO_ROOT/systemd/$1")"
+    line="${line#ExecStart=}"
+    printf '%s' "${line//%h/$2}"
+}
+
+@test "dejima-ttyd binds ttyd to loopback and takes its port from remote.conf" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345
+
+    # The default is the library's, not a second copy of it in this script.
+    : > "$STUB_DIR/ttyd-argv"
+    : > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 7681
+}
+
+@test "dejima-ttyd refuses to start without remote.conf, before ttyd is reached" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not configured"* ]]
+    # The reason matters: on a machine with no ttyd this test passes for free.
+    [ -z "$(ttyd_log)" ]
+}
+
+@test "dejima-ttyd reports a missing ttyd instead of exec-ing into nothing" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    : > "$CONFIG_DIR/remote.conf"
+    # A PATH holding only what the script itself needs, so the absence of ttyd
+    # is a property of this test rather than of whoever runs it.
+    STUB_DIR="$(mktemp -d)"
+    for tool in readlink dirname; do
+        ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
+    done
+    run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    # The exact message, not just a failure: an unwritten script is "not
+    # found" too, and `exec ttyd` with no ttyd says so in bash's words rather
+    # than in words that tell an operator what to install.
+    [[ "$output" == *"ttyd is not installed"* ]]
+}
+
+@test "dejima-ttyd refuses an out-of-range TTYD_PORT rather than launching without one" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    # Named, so this cannot pass because ttyd was missing or the config was.
+    [[ "$output" == *"TTYD_PORT out of range"* ]]
+    [ -z "$(ttyd_log)" ]
+}
+
+@test "nothing shipped by the front doors binds a routable address" {
+    # Load-bearing, not stylistic. docker/init-firewall.sh:187 accepts
+    # container OUTPUT to the default-route address, which is the Docker
+    # bridge gateway - the host - and attaching tmux gives a host shell. A
+    # listener on any address the container can route to is the sandbox's own
+    # escape hatch. Loopback is not one of those addresses.
+    local f
+    for f in bin/dejima-ttyd systemd/dejima-ttyd.service \
+             systemd/dejima-notify-watch.service docs/nginx-dejima.conf.example; do
+        # Without this, every negative grep below passes on a missing file.
+        [ -f "$REPO_ROOT/$f" ]
+    done
+    grep -q -- '--interface 127\.0\.0\.1' "$REPO_ROOT/bin/dejima-ttyd"
+    # Not just "no 0.0.0.0": the only address any of these files may name is
+    # the loopback one dejima-ttyd binds and nginx proxies to.
+    run bash -c 'grep -rhoE "([0-9]{1,3}\.){3}[0-9]{1,3}" "$@" | sort -u' _ \
+        "$REPO_ROOT/bin/dejima-ttyd" "$REPO_ROOT/systemd" \
+        "$REPO_ROOT/docs/nginx-dejima.conf.example"
+    [ "$status" -eq 0 ]
+    [ "$output" = "127.0.0.1" ]
+}
+
+@test "the shipped front-door artifacts carry no real network details" {
+    # This repo is public. No operator's hostnames, LAN addresses or ntfy
+    # topics belong in it - not even in a comment. Every host in these files
+    # is an <angle-bracket> placeholder, so anything that could resolve to a
+    # real machine is a mistake.
+    local files=("$REPO_ROOT/bin/dejima-ttyd" "$REPO_ROOT/systemd"
+                 "$REPO_ROOT/docs/nginx-dejima.conf.example") f
+    for f in "${files[@]}"; do
+        # Without this, both greps below "find nothing" in a missing file.
+        [ -e "$f" ]
+    done
+    # Every absolute URL has to be a name that cannot belong to anyone: the
+    # loopback address, or an RFC 2606 documentation name. This is the rule
+    # that catches an ntfy topic, which is always a URL.
+    run bash -c 'grep -rhoiE "https?://[a-z0-9.:@_-]+" "$@" \
+        | grep -viE "^https?://(127\.0\.0\.1(:[0-9]+)?|(www\.)?example\.(com|net|org)|[a-z0-9-]+\.invalid)"' \
+        _ "${files[@]}"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # And no private-network or mDNS suffix in any form, URL or not. The
+    # leading host character is what keeps this off ~/.local/bin, which is
+    # where these units point.
+    run grep -rniE '[a-z0-9-]\.(localdomain|lan|local|home|internal|arpa)([^a-z0-9/-]|$)' "${files[@]}"
+    [ "$status" -ne 0 ]
+    # And the placeholders really are placeholders.
+    grep -q '<LAN-IP>' "$REPO_ROOT/docs/nginx-dejima.conf.example"
+    grep -q '<hostname>' "$REPO_ROOT/docs/nginx-dejima.conf.example"
+}
+
+@test "the nginx example cannot be loaded as-is and never binds every interface" {
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
+    [ -f "$ex" ]
+    grep -q '/path/to/' "$ex"
+    # At least one listen, and no listen line that omits the placeholder
+    # address: a bare `listen 443 ssl;` binds every interface, including the
+    # bridge address the container can reach.
+    run grep -cE '^[[:space:]]*listen[[:space:]]+<LAN-IP>:' "$ex"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    run bash -c 'grep -hE "^[[:space:]]*listen[[:space:]]" "$1" | grep -v "<LAN-IP>:"' _ "$ex"
+    [ "$status" -ne 0 ]
+}
+
+@test "the nginx example proxies to the port dejima-ttyd defaults to, over a connection that can idle" {
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example" port
+    [ -f "$ex" ]
+    # Taken from the library rather than hardcoded, so the example and the
+    # default can never drift apart without this failing.
+    : > "$CONFIG_DIR/remote.conf"
+    run lib remote_ttyd_port
+    [ "$status" -eq 0 ]
+    port="$output"
+    [ -n "$port" ]
+    grep -qF "proxy_pass http://127.0.0.1:$port;" "$ex"
+    grep -qE '^[[:space:]]*proxy_http_version[[:space:]]+1\.1;' "$ex"
+    grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Upgrade[[:space:]]+\$http_upgrade;' "$ex"
+    grep -qiE '^[[:space:]]*proxy_set_header[[:space:]]+Connection[[:space:]]+"upgrade";' "$ex"
+    # An attached terminal can sit idle for hours, so the read timeout has to
+    # be measured in hours or days - nginx's own default is 60 seconds.
+    run grep -hoE 'proxy_read_timeout[[:space:]]+[0-9]+[smhd]?' "$ex"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ [0-9]+[hd]$ ]]
+}
+
+@test "the nginx example carries the only authentication there is" {
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
+    [ -f "$ex" ]
+    grep -qE '^[[:space:]]*auth_basic[[:space:]]' "$ex"
+    grep -qE '^[[:space:]]*auth_basic_user_file[[:space:]]' "$ex"
+    grep -qE '^[[:space:]]*ssl_certificate[[:space:]]' "$ex"
+    # ttyd is started --writable and with no credential of its own, so nginx
+    # is the whole gate. If that ever changes, both halves have to change
+    # together rather than one of them drifting.
+    grep -q -- '--writable' "$REPO_ROOT/bin/dejima-ttyd"
+    run grep -nE -- '--credential|[[:space:]]-c[[:space:]]' "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+}
+
+@test "install.sh links the remote scripts and the notify hook, registers neither, and enables nothing" {
+    grep -q '^link_hook dejima-notify.sh$' "$REPO_ROOT/install.sh"
+    grep -q '^link_bin dejima-attach$' "$REPO_ROOT/install.sh"
+    grep -q '^link_bin dejima-ttyd$' "$REPO_ROOT/install.sh"
+    grep -q '^link_bin dejima-notify-watch$' "$REPO_ROOT/install.sh"
+    # The notify hook is registered per session by bin/dejima, into a
+    # throwaway settings copy. Registered here it would fire for every
+    # unsandboxed host session too.
+    run grep -nE 'register_hook.*dejima-notify' "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ]
+    # Standing up a front door is an explicit operator decision. Nothing in
+    # the installer may start, enable or even copy a unit. Code only - the
+    # comment that says the script never touches systemd is not a violation
+    # of itself.
+    run bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -nE "systemctl|loginctl|systemd"' \
+        _ "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ]
+}
+
+@test "install.sh puts the notify hook and the remote scripts where the container and the units expect them" {
+    FAKE_HOME="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    # install.sh checks for docker and `docker compose version`; jq and
+    # python3 are real, and it needs them to be.
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_DIR/docker"
+    chmod +x "$STUB_DIR/docker"
+
+    run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
+    [ "$status" -eq 0 ]
+
+    # bin/dejima registers $HOME/.claude/hooks/dejima-notify.sh per session,
+    # and ~/.claude/hooks is what gets mounted read-only into the container.
+    # Without this link every Notification and Stop is an exit-127.
+    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    [ "$(readlink -f "$FAKE_HOME/.claude/hooks/dejima-notify.sh")" \
+      = "$(readlink -f "$REPO_ROOT/hooks/dejima-notify.sh")" ]
+    [ -x "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    local b
+    for b in dejima-attach dejima-ttyd dejima-notify-watch; do
+        [ -L "$FAKE_HOME/.local/bin/$b" ]
+        [ "$(readlink -f "$FAKE_HOME/.local/bin/$b")" = "$(readlink -f "$REPO_ROOT/bin/$b")" ]
+        [ -x "$FAKE_HOME/.local/bin/$b" ]
+    done
+
+    # Positive first: an absence assertion against a settings.json that did
+    # not get written would pass on its own.
+    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("sandbox-context.sh"))' \
+        "$FAKE_HOME/.claude/settings.json"
+    [ "$status" -eq 0 ]
+    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
+        "$FAKE_HOME/.claude/settings.json"
+    [ "$status" -ne 0 ]
+
+    # Nothing was enabled, and nothing under the runtime dir was created: the
+    # feature stays off until the operator writes remote.conf.
+    [ ! -e "$RUNTIME_DIR/dejima" ]
+    [ ! -e "$FAKE_HOME/.config/systemd" ]
+
+    # Re-runnable: the second pass displaces nothing into the backup dir.
+    run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
+    [ "$status" -eq 0 ]
+    [ ! -e "$FAKE_HOME/.dejima-backup" ]
+    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+}
+
+@test "the systemd units are user units that run the installed scripts and duplicate no configuration" {
+    local u f
+    for u in dejima-ttyd dejima-notify-watch; do
+        f="$REPO_ROOT/systemd/$u.service"
+        [ -f "$f" ]
+        grep -q "^ExecStart=%h/\.local/bin/$u\$" "$f"
+        grep -q '^WantedBy=default\.target$' "$f"
+        # Directives only, from here down: these files carry comments that
+        # name the very things a directive may not set ("do not repeat
+        # NTFY_URL here"), and a grep that could not tell the two apart would
+        # force those comments out of the file to stay green.
+        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "^(User|Group)="' _ "$f"
+        [ "$status" -ne 0 ]
+        # No absolute home - %h is what makes these units the same file for
+        # every operator.
+        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "/home/|/root/|/Users/"' _ "$f"
+        [ "$status" -ne 0 ]
+        # remote.conf is the single source of truth for all of these. A unit
+        # that repeated one would drift from the script that reads it.
+        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "TTYD_PORT|NTFY_URL|BASE_URL|--port|--interface"' _ "$f"
+        [ "$status" -ne 0 ]
+        # No environment of their own either. The two tests below run
+        # ExecStart under an environment they build themselves, so an
+        # Environment= line here - an XDG_RUNTIME_DIR pointing somewhere the
+        # markers are not, say - would be invisible to them.
+        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "^(Environment|EnvironmentFile)="' _ "$f"
+        [ "$status" -ne 0 ]
+    done
+}
+
+@test "the ttyd unit's ExecStart launches ttyd with nothing but what systemd gives a user unit" {
+    # systemd starts a user unit with the user manager's environment, not the
+    # operator's shell's. env -i with the floor systemd guarantees (HOME,
+    # PATH, XDG_RUNTIME_DIR) is what makes this test worth having: a script
+    # that works only because some interactive-shell variable happened to be
+    # set fails here rather than on the operator's phone.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.config/dejima"
+    ln -s "$REPO_ROOT/bin/dejima-ttyd" "$FAKE_HOME/.local/bin/dejima-ttyd"
+    printf 'TTYD_PORT=12345\n' > "$FAKE_HOME/.config/dejima/remote.conf"
+    stub_ttyd
+
+    local exec_start
+    exec_start="$(unit_exec_start dejima-ttyd.service "$FAKE_HOME")"
+    [ "$exec_start" = "$FAKE_HOME/.local/bin/dejima-ttyd" ]
+    run env -i HOME="$FAKE_HOME" PATH="$STUB_DIR:/usr/bin:/bin" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" "$exec_start"
+    [ "$status" -eq 0 ]
+    # %h resolved to the install destination, the symlink resolved back to
+    # this repo (the command below is the repo's dejima-attach, not the
+    # link), and remote.conf was found at the default config path with no
+    # DEJIMA_CONFIG_DIR in the environment to point at it.
+    assert_ttyd_argv 12345
+}
+
+@test "the notify-watch unit's ExecStart finds the markers in the runtime dir systemd gives it" {
+    # The highest-risk integration point in the feature. bin/dejima resolves
+    # ${XDG_RUNTIME_DIR:-/tmp}/dejima from the operator's shell; this unit
+    # resolves it from the user manager's environment. If those ever disagree
+    # the watcher watches an empty directory and no notification is ever
+    # pushed - with no error anywhere to say so.
+    conf_with_ntfy
+    stub_curl
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.config/dejima"
+    ln -s "$REPO_ROOT/bin/dejima-notify-watch" "$FAKE_HOME/.local/bin/dejima-notify-watch"
+    cp "$CONFIG_DIR/remote.conf" "$FAKE_HOME/.config/dejima/remote.conf"
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+
+    local exec_start
+    exec_start="$(unit_exec_start dejima-notify-watch.service "$FAKE_HOME")"
+    [ "$exec_start" = "$FAKE_HOME/.local/bin/dejima-notify-watch" ]
+    # --once bounds the scan; the unit's own argv is the line asserted above.
+    run env -i HOME="$FAKE_HOME" PATH="$STUB_DIR:/usr/bin:/bin" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" "$exec_start" --once
+    [ "$status" -eq 0 ]
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
 }

@@ -1,0 +1,67 @@
+# Example nginx vhost for the dejima web front door. EVERY address, hostname
+# and path below is a placeholder - substitute your own. As written this file
+# will not load: that is deliberate, so it can never become a live config by
+# being copied into sites-enabled and forgotten.
+#
+# ---------------------------------------------------------------------------
+# Read this part before the config part.
+#
+# Whoever reaches this vhost gets a HOST SHELL. ttyd runs bin/dejima-attach,
+# which attaches a tmux client on the operator's own tmux server - and a tmux
+# client is a shell outside the container, one prefix key away from a new
+# window that has nothing to do with any sandbox.
+#
+# So two things carry this feature's entire security, and both live here:
+#
+#   1. The listen address. docker/init-firewall.sh:187 accepts container
+#      OUTPUT to the default-route address - the Docker bridge gateway, which
+#      is the host. A vhost bound to every interface, or to that gateway
+#      address, is reachable FROM a sandbox, which would let a compromised
+#      session walk out through its own escape hatch. Bind one specific LAN
+#      address, never the wildcard form (a bare `listen 443 ssl;`), and never
+#      the bridge address. `ip -br addr` lists the candidates; `ss -ltnp`
+#      afterwards shows what you actually bound.
+#
+#   2. Authentication. ttyd is started with no credential of its own (see
+#      bin/dejima-ttyd), because it is bound to 127.0.0.1 where only this
+#      host can reach it - this proxy is the only gate in front of it. A
+#      vhost without auth_basic (or something stronger in its place) is an
+#      unauthenticated host shell on your LAN.
+#
+# TLS is not optional either: HTTP Basic sends the password on every request,
+# and the terminal itself carries whatever the session is working on.
+# ---------------------------------------------------------------------------
+
+server {
+    # One specific address. Not the wildcard form, not the Docker bridge.
+    listen <LAN-IP>:443 ssl;
+    server_name <hostname>;
+
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    # The only authentication there is. See point 2 above.
+    #   htpasswd -c /path/to/dejima.htpasswd <username>
+    auth_basic           "dejima";
+    auth_basic_user_file /path/to/dejima.htpasswd;
+
+    location / {
+        # Loopback: ttyd binds 127.0.0.1 only, so nginx has to be on the same
+        # host. The port must match TTYD_PORT in ~/.config/dejima/remote.conf
+        # (7681 when it is not set).
+        proxy_pass http://127.0.0.1:7681;
+
+        # ttyd serves its page over HTTP and then upgrades to a WebSocket;
+        # both need HTTP/1.1 and the upgrade headers passed through.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+
+        # An attached terminal can sit idle for hours; nginx's default read
+        # timeout is 60 seconds. ttyd's own WebSocket ping (every 5s by
+        # default) normally keeps the connection alive on its own, but that
+        # is ttyd's default to change, not something to depend on here.
+        proxy_read_timeout 1d;
+    }
+}

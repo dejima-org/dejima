@@ -1,0 +1,48 @@
+#!/bin/bash
+# Launches ttyd with dejima-attach as its command, reading TTYD_PORT from
+# remote.conf so the port has exactly one source of truth (the systemd unit
+# deliberately does not repeat it). Started by systemd/dejima-ttyd.service.
+# See README "Remote access".
+#
+# --interface 127.0.0.1 is a security requirement, not a preference.
+# docker/init-firewall.sh:187 accepts container OUTPUT to the default-route
+# address - the Docker bridge gateway, i.e. the host - and attaching tmux
+# gives a HOST shell (the prefix key opens a new window outside the
+# container). A listener on any address the container can route to would hand
+# a compromised session its own escape hatch. Loopback is not one of those
+# addresses: the container has no route to the host's 127.0.0.1. Put nginx in
+# front, bound to one specific LAN address - see
+# docs/nginx-dejima.conf.example.
+#
+# ttyd is given no credential of its own, so nginx is the only authentication
+# there is, and the loopback bind is what makes that safe rather than
+# careless: nothing but a process on this host can open the socket at all.
+# --writable is what makes the terminal a terminal rather than a viewer.
+#
+# --url-arg lets the client pass ?arg=<run-id>, which is what the notification
+# deep link uses. It reaches dejima-attach as argv, never as a shell word, and
+# anything there that is not --list has to match the run-id shape before it is
+# used as a path component or anything else.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+if ! remote_enabled; then
+    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "See README \"Remote access\"." >&2
+    exit 1
+fi
+
+# Checked rather than left to exec, whose failure is bash's "ttyd: not found"
+# on a line number - true, and useless to an operator who needs to know that
+# the missing piece is a package.
+if ! command -v ttyd >/dev/null 2>&1; then
+    echo "ttyd is not installed - the web front door needs it (e.g. apt install ttyd)." >&2
+    exit 1
+fi
+
+port="$(remote_ttyd_port)"
+exec ttyd --interface 127.0.0.1 --port "$port" --url-arg --writable \
+    "$SCRIPT_DIR/dejima-attach"
