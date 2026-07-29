@@ -121,7 +121,11 @@ server {
         # config that does not parse leaves the OLD one running while
         # `systemctl reload nginx` still reports success, so an unknown
         # directive here looks just like one that ran and did nothing.
-        #     nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
+        # Spelled out because Debian/Ubuntu install nginx to /usr/sbin, which
+        # is on root's PATH and not yours: a bare `nginx -V` says "command
+        # not found" on a box that is running nginx perfectly well.
+        #     /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
+        #     sudo /usr/sbin/nginx -t
         #
         # Desktop browsers ignore width=device-width, so this costs them
         # nothing.

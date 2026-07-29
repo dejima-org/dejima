@@ -962,14 +962,22 @@ browsers ignore `width=device-width`, so nothing changes there.
 Two things that will waste your time if you skip them:
 
 - Your nginx needs the sub module, and a missing one fails *quietly*. Check
-  for it up front with
-  `nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module` - Debian's
-  `nginx-light` is built without it, while `nginx-core`, `nginx-full` and
-  `nginx-extras` have it - and validate with **`nginx -t`** rather than
-  trusting the reload. A reload whose config does not parse leaves the *old*
-  config running, and `systemctl reload nginx` still reports success, so an
-  unknown `sub_filter` directive looks from the outside exactly like a
-  directive that ran and did nothing.
+  for it up front, and validate with **`nginx -t`** rather than trusting the
+  reload - a reload whose config does not parse leaves the *old* config
+  running while `systemctl reload nginx` still reports success, so an unknown
+  `sub_filter` directive looks from the outside exactly like a directive that
+  ran and did nothing.
+
+  ```sh
+  /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
+  sudo /usr/sbin/nginx -t
+  ```
+
+  The path is spelled out because Debian and Ubuntu install nginx to
+  `/usr/sbin`, which is on root's `PATH` and not on yours - a bare `nginx -V`
+  answers `command not found` on a box that is running nginx perfectly well.
+  Debian's `nginx-light` is built without the module; `nginx-core`,
+  `nginx-full` and `nginx-extras` have it.
 - `sub_filter` cannot rewrite a compressed response body and passes it
   through untouched, which looks exactly like the tag not working. Clearing
   `Accept-Encoding` toward the upstream is what stops that.
