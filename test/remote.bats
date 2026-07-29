@@ -1602,9 +1602,13 @@ ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 # $1 is the expected port. The command must be this repo's dejima-attach,
 # resolved the way the script resolves it (readlink -f, so a $BATS_TEST_DIRNAME
 # with a ".." in it does not make this a comparison of two spellings).
+# $2 is the expected TTYD_FONT_SIZE, empty or absent for "no -t at all" - the
+# unset default, which has to stay a genuine absence rather than a value that
+# happens to match ttyd's own, or the option is no longer optional.
 expect_ttyd_argv() {
-    printf '%s\n' --interface 127.0.0.1 --port "$1" --check-origin --url-arg --writable \
-        "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
+    printf '%s\n' --interface 127.0.0.1 --port "$1" --check-origin --url-arg --writable
+    [ -z "${2:-}" ] || printf '%s\n' -t "fontSize=$2"
+    printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
 # newlines, so without it a vector ending in an empty argument compares equal
@@ -1777,6 +1781,54 @@ PY
     [ -z "$(ttyd_log)" ]
 }
 
+@test "TTYD_FONT_SIZE reaches ttyd as an option, and its absence sends none at all" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # Unset first. The point of the default is that no -t is sent, leaving
+    # ttyd on whatever its own default is - not that we send a number that
+    # currently happens to agree with it.
+    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345
+    run grep -c -- '-t' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "0" ]
+
+    # Set. Checked through the exact vector, not a substring: "fontSize=20
+    # arrived somewhere" would also pass if it were welded onto another
+    # argument, and this is a value from a config file reaching an exec.
+    : > "$STUB_DIR/ttyd-argv"
+    printf 'TTYD_PORT=12345\nTTYD_FONT_SIZE=20\n' > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 20
+}
+
+@test "dejima-ttyd refuses a TTYD_FONT_SIZE outside its range rather than launching with one" {
+    # A size large enough to make a single glyph wider than the viewport
+    # renders a terminal that displays nothing, which an operator reads as a
+    # broken front door rather than as a typo in a file three steps back. Same
+    # treatment TTYD_PORT gets, and for the same reason: refuse at the config,
+    # where the message can name the key.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    local bad
+    for bad in 0 7 73 999 abc 1e2 -20; do
+        stub_ttyd
+        : > "$STUB_DIR/ttyd-argv"
+        printf 'TTYD_PORT=12345\nTTYD_FONT_SIZE=%s\n' "$bad" > "$CONFIG_DIR/remote.conf"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -ne 0 ] || { echo "accepted TTYD_FONT_SIZE=$bad" >&2; false; }
+        # Named, so this cannot pass because ttyd was missing or the port was
+        # bad. "abc"/"1e2"/"-20" are refused a step earlier, by the character
+        # class remote.conf values are held to, so either message is correct -
+        # what must not happen is a launch.
+        [[ "$output" == *"TTYD_FONT_SIZE"* ]] \
+            || { echo "refused TTYD_FONT_SIZE=$bad without naming it: $output" >&2; false; }
+        [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite TTYD_FONT_SIZE=$bad" >&2; false; }
+    done
+}
+
 @test "ttyd validates the WebSocket origin, and the proxy passes the Host it compares against" {
     # Without --check-origin ttyd does no origin validation at all (its
     # protocol.c only calls check_host_origin when the flag is set), and
@@ -1878,7 +1930,7 @@ nginx_blocks() {
         }
         !inb && /^[[:space:]]*server[[:space:]]*\{/ {
             inb = 1; depth = 0
-            listen = "NONE"; auth = 0; pass = 0; reject = 0; def = 0
+            listen = "NONE"; auth = 0; pass = 0; reject = 0; def = 0; subf = 0
         }
         inb {
             if ($0 ~ /^[[:space:]]*listen[[:space:]]/)          listen = $0
@@ -1887,10 +1939,11 @@ nginx_blocks() {
             if ($0 ~ /^[[:space:]]*ssl_reject_handshake[[:space:]]+on;/ ||
                 $0 ~ /^[[:space:]]*return[[:space:]]+444;/)     reject = 1
             if ($0 ~ /default_server/)                          def = 1
+            if ($0 ~ /^[[:space:]]*sub_filter[[:space:]]/)      subf = 1
             depth += count($0, "{") - count($0, "}")
             if (depth <= 0) {
-                printf "auth=%d pass=%d reject=%d def=%d listen=<%s>\n", \
-                    auth, pass, reject, def, listen
+                printf "auth=%d pass=%d reject=%d def=%d sub=%d listen=<%s>\n", \
+                    auth, pass, reject, def, subf, listen
                 inb = 0
             }
         }
@@ -1959,6 +2012,44 @@ nginx_blocks() {
     run grep -hoE 'proxy_read_timeout[[:space:]]+[0-9]+[smhd]?' "$ex"
     [ "$status" -eq 0 ]
     [[ "$output" =~ [0-9]+[hd]$ ]]
+}
+
+@test "the nginx example's viewport injection ships with the thing that makes it work" {
+    # ttyd serves no <meta name="viewport"> - not in 1.7.7, not on main - so a
+    # phone lays the page out at a virtual desktop width and scales it down,
+    # which no font size can undo and which zooming cannot reflow. The proxy
+    # supplying the missing tag is the fix.
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
+    [ -f "$ex" ]
+    # Asserted against the sub_filter DIRECTIVE, not against the file: the
+    # comment above it names the same tag, so a file-wide grep is satisfied by
+    # the prose explaining the fix even after the fix itself is gone.
+    run grep -E '^[[:space:]]*sub_filter[[:space:]]' "$ex"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'name="viewport"'* ]]
+    [[ "$output" == *'width=device-width'* ]]
+
+    # sub_filter cannot rewrite a COMPRESSED body: it passes it through
+    # untouched and says nothing, which looks exactly like the tag not
+    # working. The two directives are only correct together, so shipping the
+    # filter without clearing Accept-Encoding toward the upstream is the bug
+    # this couples against.
+    if grep -qE '^[[:space:]]*sub_filter[[:space:]]' "$ex"; then
+        grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Accept-Encoding[[:space:]]+"";' "$ex"
+    fi
+
+    # Injected once. Without sub_filter_once, the string is replaced
+    # everywhere it appears in a body that inlines ttyd's whole bundle.
+    grep -qE '^[[:space:]]*sub_filter_once[[:space:]]+on;' "$ex"
+
+    # Belongs to the block that actually serves ttyd. In the reject block it
+    # would be inert, and an operator moving it there would think it was on.
+    local block
+    while IFS= read -r block; do
+        [[ "$block" == *"pass=1"* ]] && continue
+        [[ "$block" != *"sub=1"* ]] \
+            || { echo "a block that proxies nothing carries the viewport filter: $block" >&2; false; }
+    done < <(nginx_blocks "$ex")
 }
 
 @test "the nginx example carries the only authentication there is" {

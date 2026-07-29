@@ -261,7 +261,7 @@ remote_enabled() {
 }
 
 valid_remote_key() {
-    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT)$ ]]
+    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT|TTYD_FONT_SIZE)$ ]]
 }
 
 # Deliberately narrow. These values end up in a curl -H header, an nginx
@@ -325,4 +325,21 @@ remote_ttyd_port() {
         return 1
     fi
     printf '%s' "$port"
+}
+
+# Empty when unset, which is the signal to pass no -t at all and leave ttyd on
+# its own default. Bounded rather than merely numeric: this reaches ttyd as
+# argv, and a value large enough to make one glyph wider than the viewport
+# leaves a terminal that can render nothing at all - reported as "the front
+# door is broken", with the cause three files away. 8 is already small on a
+# phone; 72 is already absurd on a desktop.
+remote_ttyd_font_size() {
+    local size
+    size="$(remote_conf_get TTYD_FONT_SIZE)" || return 1
+    [ -n "$size" ] || return 0
+    if [[ ! "$size" =~ ^[0-9]+$ ]] || [ "$size" -lt 8 ] || [ "$size" -gt 72 ]; then
+        echo "TTYD_FONT_SIZE must be 8-72 in $(remote_conf_path): $size" >&2
+        return 1
+    fi
+    printf '%s' "$size"
 }

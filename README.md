@@ -169,10 +169,18 @@ wrong still looks like it works.
    `proxy_set_header Host $http_host`. Make sure the name you pick actually
    resolves to this box and your certificate covers it. →
    [Web front door](#web-front-door)
-5. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
+5. **If you will read it on a phone**, take the `sub_filter` viewport line
+   from the example config too. `ttyd` ships no viewport meta, so without it
+   the mobile view is unreadably small and will not reflow. →
+   [Reading it on a phone](#reading-it-on-a-phone)
+6. **If another reverse proxy sits in front of this one**, it needs SNI, a
+   single literal `Host`, the upgrade headers and its own long read timeout —
+   and it changes the threat model. →
+   [Behind another reverse proxy](#behind-another-reverse-proxy)
+7. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
    way, then `loginctl enable-linger "$USER"` so both units survive logout. →
    [Notifications](#notifications)
-6. **Verify the containment from inside a running sandbox** before relying on
+8. **Verify the containment from inside a running sandbox** before relying on
    any of it. →
    [Verifying it](#verifying-it)
 
@@ -641,6 +649,7 @@ config tree, same as it does for approvals):
 | `NTFY_URL` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
 | `BASE_URL` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
 | `TTYD_PORT` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
+| `TTYD_FONT_SIZE` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
 
 `NTFY_URL` and `BASE_URL` must carry an explicit `http://` or `https://`
 scheme; a value without one is refused rather than guessed at, because
@@ -654,7 +663,9 @@ validated on every read, not just the key being asked for: an unknown key, a
 value outside that character set, or a line without an `=` makes
 `dejima-ttyd` and `dejima-notify-watch` refuse to start and say which line
 was wrong. A `TTYD_PORT` that isn't a number in 1-65535 is refused the same
-way.
+way, as is a `TTYD_FONT_SIZE` outside 8-72 - a size big enough to make one
+glyph wider than the viewport renders a terminal that shows nothing, which
+reads as a broken front door rather than as a typo three files away.
 
 Those are the two scripts that read a *value* out of the file.
 `dejima-attach` and `bin/dejima` do not - to them the file is a switch, and
@@ -668,6 +679,7 @@ to open over a typo would take away the terminal you would fix it from.
 NTFY_URL=https://ntfy.example.invalid/your-topic-here
 BASE_URL=https://dejima.example.invalid
 TTYD_PORT=7681
+# TTYD_FONT_SIZE=20   # optional, and applies to the desktop too
 ```
 
 ### The bind address is the one thing to get right
@@ -904,6 +916,110 @@ and forgotten. What matters in it:
 - **A long `proxy_read_timeout`.** An attached terminal sits idle for hours;
   nginx's default is 60 seconds.
 
+### Reading it on a phone
+
+Out of the box the phone view is close to unusable: text renders far too
+small to read, and pinch-zooming leaves you panning around a giant canvas
+instead of reflowing anything. That is not a font setting you missed.
+
+**`ttyd` serves no viewport meta tag** - not in 1.7.7, not on `main` at the
+time of writing. A mobile browser that finds no `<meta name="viewport">`
+assumes the page was written for a desktop, lays it out at a virtual width
+of around 980 CSS pixels, and scales the result down to fit the screen.
+Everything shrinks together, so raising the font size just gives you a
+larger font scaled down by the same factor. And a terminal is a fixed
+character grid on a canvas: zooming magnifies pixels, it does not re-wrap
+lines the way zooming a text page does.
+
+The fix is to supply the tag the page is missing, which the proxy can do on
+the way past. `docs/nginx-dejima.conf.example` ships it:
+
+```nginx
+sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
+sub_filter_once on;
+proxy_set_header Accept-Encoding "";
+```
+
+Now the browser lays out at the device's real width, xterm.js fits an honest
+column count to it, and rotating the phone reflows properly. Desktop
+browsers ignore `width=device-width`, so nothing changes there.
+
+Two things that will waste your time if you skip them:
+
+- Your nginx needs the sub module. A missing one is a config error at
+  reload, not a silent no-op - confirm with
+  `nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module`. Debian's `nginx-light`
+  is built without it; `nginx-core`, `nginx-full` and `nginx-extras` have it.
+- `sub_filter` cannot rewrite a compressed response body and passes it
+  through untouched, which looks exactly like the tag not working. Clearing
+  `Accept-Encoding` toward the upstream is what stops that.
+
+If the text is still smaller than you want once the layout is honest, set
+`TTYD_FONT_SIZE` in `remote.conf` (8-72). Be aware of what it costs:
+**it applies to every client.** `ttyd` 1.7.7 accepts client options only at
+launch - the URL-query override that would let a deep link carry its own
+size landed upstream after 1.7.7 was cut - so there is no way from here to
+give a phone one size and the desktop another. A larger size also means
+fewer columns, and because attaching shares the window with your desktop
+session, tmux resizes that window to whichever client used it last. Start by
+fixing the viewport and only reach for this if you still need it.
+
+### Behind another reverse proxy
+
+Terminating TLS somewhere else and forwarding here is a supported shape, but
+read this first: it moves the front door out of the LAN threat model
+everything above is written against. If the outer proxy is internet-facing,
+`auth_basic` over TLS is now the only thing between the public internet and
+a host shell. Put something stronger in front of it, and take the
+"Security notes" section as the floor rather than the ceiling.
+
+The mechanical part has four requirements at the outer hop, and each one
+fails differently:
+
+```nginx
+proxy_ssl_server_name on;                    # else: TLS handshake refused
+proxy_ssl_name  dejima.example.invalid;
+proxy_set_header Host dejima.example.invalid;   # exactly once - see below
+proxy_http_version 1.1;                      # else: page loads, terminal never connects
+proxy_set_header Upgrade    $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 1d;                       # else: dropped after 60s idle
+```
+
+- **`proxy_ssl_server_name` is off by default**, so nginx proxying to an
+  HTTPS upstream sends no SNI at all. The inner nginx sees a handshake with
+  no name, hands it to the `default_server` - which exists precisely to
+  refuse unrecognised names - and you get a 502 at the outer hop.
+- **Set `Host` exactly once.** `proxy_set_header` is additive within a
+  configuration level rather than overriding, so declaring `Host` twice
+  sends *two* `Host` headers and the inner nginx answers 400 to all of it.
+  The easy way to do this by accident is `include proxy_params;` (Debian
+  ships one that already sets `Host $http_host`) plus your own `Host` line
+  in the same block.
+- **A literal, not `$host` or `$http_host`.** The value has to be the
+  hostname the *browser* used, because that is what `ttyd`'s
+  `--check-origin` compares the `Origin` against at the far end. A literal
+  also guarantees it agrees with `proxy_ssl_name`.
+- **`Upgrade`/`Connection` and the timeout are needed at every hop**, not
+  just the inner one. Miss them outside and the page loads while the
+  terminal never connects - the same symptom the inner config produces, from
+  a different place.
+
+nginx logs the *reason* for a 400 at `info` level, which is below the
+default. When something here is wrong and the access log only says `400`,
+set `error_log /var/log/nginx/error.log info;` on the inner proxy, reproduce
+once, and it names the cause outright. Turn it back down afterwards. To
+establish which hop is at fault, bypass the outer one from the dejima box
+itself:
+
+```sh
+curl -vk --resolve dejima.example.invalid:443:<dejima-box-lan-ip> \
+    https://dejima.example.invalid/
+```
+
+A `401` there means the inner config is correct and the fault is entirely in
+what the outer proxy sends.
+
 ### Notifications
 
 `bin/dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
@@ -1019,6 +1135,21 @@ joining yours. Grouped sessions share windows but track their own current
 window, so the phone can sit on one sandbox while the desktop sits on
 another, and the throwaway carries `destroy-unattached`, so it disposes of
 itself when the phone detaches or the connection drops.
+
+**You get the whole window list, not just the one sandbox.** Sharing windows
+is what "grouped" means: you land on the right window, and every other
+window on your tmux server is one tab away - other sandboxes, and whatever
+non-dejima windows you have open. Worth knowing before you first connect,
+because it is a surprise otherwise.
+
+It is not a containment boundary being crossed, which is why it is left as
+it is. Whoever reaches this terminal is one prefix key away from a brand new
+host shell no matter what the tab bar shows - that is the fact this entire
+feature is designed around, and tmux offers no per-client way to take the
+prefix away (key tables are server-global, so disabling it for the phone
+would disable it for your desktop too). Restricting the view would be
+tidier; it would not make a reachable front door any less of a host shell.
+Authentication and the bind address are the controls that matter here.
 
 Sizing is left to tmux on purpose: `dejima-attach` sets no `window-size`.
 tmux's own default (`latest`, since 3.1) already keeps a small phone client

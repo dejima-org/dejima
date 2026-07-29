@@ -55,6 +55,17 @@ fi
 # set -e on the assignment.
 port="$(remote_ttyd_port)"
 
+# Optional, and applied to EVERY client - ttyd 1.7.7 takes client options only
+# at launch (the URL-query override that would allow a per-client size landed
+# after that release), so there is no way to give a phone one size and a
+# desktop another from here. Left unset, ttyd keeps its own default.
+#
+# It is the smaller half of the mobile fix, not the fix: ttyd's page carries no
+# viewport meta, so a phone lays it out at a virtual desktop width and scales
+# the result down - a bigger font scales down with everything else. The nginx
+# example injects the meta; see docs/nginx-dejima.conf.example.
+font_size="$(remote_ttyd_font_size)"
+
 # Checked rather than left to exec, whose failure is bash's "ttyd: not found"
 # on a line number - true, and useless to an operator who needs to know that
 # the missing piece is a package.
@@ -102,5 +113,9 @@ if command -v ss >/dev/null 2>&1; then
     fi
 fi
 
+font_opt=()
+[ -z "$font_size" ] || font_opt=(-t "fontSize=$font_size")
+
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
+    ${font_opt[@]+"${font_opt[@]}"} \
     "$SCRIPT_DIR/dejima-attach"

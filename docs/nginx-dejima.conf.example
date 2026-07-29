@@ -103,5 +103,30 @@ server {
         # default) normally keeps the connection alive on its own, but that
         # is ttyd's default to change, not something to depend on here.
         proxy_read_timeout 1d;
+
+        # ---- Phone rendering. Drop this if you only ever connect from a
+        # desktop; it is inert there.
+        #
+        # ttyd's page ships no viewport meta - not in 1.7.7, not on main - so
+        # a mobile browser assumes a desktop-width layout (~980 CSS px) and
+        # scales the whole thing down to fit. Text lands at a size no font
+        # setting can rescue, because the font is scaled down with everything
+        # else, and pinch-zoom does not reflow a terminal: you get a giant
+        # canvas to pan around. Injecting the tag makes the browser lay out at
+        # the device's real width, which lets xterm.js fit an honest column
+        # count and lets rotating the phone actually reflow.
+        #
+        # Needs nginx built with the sub module - check before relying on it,
+        # because a missing module is a config error at reload, not a silent
+        # no-op:
+        #     nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
+        #
+        # Desktop browsers ignore width=device-width, so this costs them
+        # nothing.
+        sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
+        sub_filter_once on;
+        # sub_filter cannot rewrite a compressed body, and silently passes it
+        # through unchanged - which looks exactly like the tag not working.
+        proxy_set_header Accept-Encoding "";
     }
 }
