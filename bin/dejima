@@ -217,7 +217,15 @@ cleanup() {
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
     rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}"
-    rm -rf "${DEJIMA_NOTIFY_DIR:-}"
+    # The one removal here a session can make fail, and the last command of an
+    # EXIT trap: the marker directory is bind-mounted read-write, so a session
+    # can leave it undeletable (an unwritable subdirectory is enough), and
+    # under set -e a failing command in an EXIT trap REPLACES the shell's exit
+    # status - so without this a compromised session could report 1 in place
+    # of Claude Code's real exit code. Same guard, for the same reason, as
+    # dejima-attach's prune and dejima-notify-watch's marker consumption.
+    rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
+        || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
 }
 trap cleanup EXIT
 

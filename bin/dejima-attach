@@ -103,6 +103,15 @@ pane_alive() {
     tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"
 }
 
+# Does session $1 actually hold pane $2? The only question that separates the
+# session we mean from one that merely carries its name. -s enumerates every
+# pane of every window in the session, and pane ids are never reused within a
+# server, so a match cannot be some later pane wearing an old id. pipefail
+# makes an unanswerable list-panes a "no", which is the safe direction.
+group_holds_pane() {
+    tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null | grep -qxF "$2"
+}
+
 # True while an entry is young enough that its container may simply not exist
 # YET - see STARTUP_GRACE. Judged against the entry's own started=, since
 # nothing else records when the launch began. An entry that doesn't parse has
@@ -139,6 +148,12 @@ list_sessions() {
             container="starting"
         elif [ "$rc" -eq 1 ]; then
             rm -f "$file"
+            # dejima-notify-watch keys its debounce stamps by run id too, and
+            # nothing else ever removes them - without this, every session
+            # leaves two behind for the life of the login session. Unguarded,
+            # like the rm above and unlike the rm -rf below: the debounce
+            # directory is host-owned and is never mounted into a sandbox.
+            rm -f "$STATE_DIR/debounce/$run_id-waiting" "$STATE_DIR/debounce/$run_id-done"
             # Non-fatal: the marker directory is bind-mounted read-write into
             # the sandbox, so a compromised session can chmod it such that this
             # rm fails - and a failure here under set -e would abort the whole
@@ -227,6 +242,19 @@ attach() {
         exit 1
     fi
     if tmux has-session -t "=$group" 2>/dev/null; then
+        # Verified exactly like the session created below, and for the same
+        # reason: nothing here created this one, so carrying the name is not
+        # evidence of holding the sandbox. Reachable only as debris - a
+        # dejima-<run-id> that exists but no longer contains the pane - and
+        # anyone able to create that name already has a host shell, so this is
+        # about landing in the right window rather than about containment.
+        # Refused rather than killed: destroying a session this script did not
+        # create is not its call, and the message names the one to look at.
+        if ! group_holds_pane "$group" "$entry_pane"; then
+            echo "Session $run_id: the existing tmux session $group does not hold its pane." >&2
+            echo "Remove it (tmux kill-session -t '=$group') and attach again." >&2
+            exit 1
+        fi
         # Select within the GROUP, not via the pane id directly: the latter
         # would move the operator's own session's current window too.
         tmux select-window -t "=$group:$win"
@@ -253,8 +281,7 @@ attach() {
     # a trap body runs after the function's locals are gone, where set -u
     # would abort it and leak the session it exists to remove.
     trap "tmux kill-session -t '=$group' 2>/dev/null || true" EXIT
-    if ! tmux list-panes -s -t "=$group" -F '#{pane_id}' 2>/dev/null \
-        | grep -qxF "$entry_pane"; then
+    if ! group_holds_pane "$group" "$entry_pane"; then
         echo "Session $run_id is stale - the tmux session holding its pane went away." >&2
         exit 1
     fi
@@ -296,6 +323,20 @@ picker() {
         q|Q|'') exit 0 ;;
         *[!0-9]*) echo "Not a number." >&2; exit 1 ;;
     esac
+    # Normalized to base 10 once, here, because the range check and the
+    # subscript below do not read a number the same way: `[` is POSIX test and
+    # decimal-only, while $(( )) reads a leading zero as OCTAL. Without this,
+    # "010" - which a phone keypad makes easy to type - passes the check as 10
+    # and indexes as 8, and the caller is attached to a DIFFERENT session than
+    # the one they picked, with nothing printed to say so.
+    #
+    # It fixes the two ugly shapes as well. "09" is a value here rather than
+    # the "invalid octal constant" arithmetic error it is to $(( )); and a
+    # number past int64 wraps to one the range check can answer for, where
+    # `[ 99999999999999999999999 -gt 11 ]` instead exits 2 with "integer
+    # expression expected" - which makes the `if` false, so "Out of range."
+    # is never printed and the subscript below dies on an unbound element.
+    choice="$((10#$choice))"
     if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#ids[@]}" ]; then
         echo "Out of range." >&2
         exit 1

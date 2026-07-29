@@ -215,6 +215,39 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
     rm -rf "$PROJ"
 }
 
+@test "a session cannot rewrite Claude Code's exit code through its marker directory" {
+    # /run/dejima-notify is bind-mounted read-write, so a session can leave it
+    # undeletable, and that rm -rf is the LAST command of bin/dejima's EXIT
+    # trap - where under set -e a failure replaces the shell's exit status
+    # with 1. Both halves are the session's to control, so without the guard a
+    # compromised sandbox reports its own status in place of the real one.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in
+        *:/run/dejima-notify)
+            dir="${arg%:/run/dejima-notify}"
+            mkdir -p "$dir/undeletable"
+            : > "$dir/undeletable/file"
+            chmod 500 "$dir/undeletable"
+            exit 3
+            ;;
+    esac
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    run launch "$PROJ"
+    [ "$status" -eq 3 ]
+    # Left behind rather than deleted, and said so out loud.
+    [[ "$output" == *"could not remove the marker directory"* ]]
+    # teardown's rm -rf would inherit the same refusal.
+    chmod -R u+rwX "$RUNTIME_DIR"
+    rm -rf "$PROJ"
+}
+
 @test "a sandbox started outside tmux records an empty pane rather than being skipped" {
     stub_launch
     : > "$CONFIG_DIR/remote.conf"
@@ -382,11 +415,17 @@ EOF
     # and a container that has not been created yet look identical to `docker
     # ps`, and only the age tells them apart.
     write_entry 0123456789abcdef '%1' 'work:2' $(( $(date +%s) - 86400 ))
+    # Keyed by run id and written by the watcher, which never removes them:
+    # unless the prune takes them too, they outlive every session.
+    mkdir -p "$RUNTIME_DIR/dejima/debounce"
+    : > "$RUNTIME_DIR/dejima/debounce/0123456789abcdef-waiting"
+    : > "$RUNTIME_DIR/dejima/debounce/0123456789abcdef-done"
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     # Pruned from disk, not merely hidden from the listing.
     [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+    [ -z "$(ls -A "$RUNTIME_DIR/dejima/debounce")" ]
 }
 
 @test "a session whose container has not started yet is not unregistered" {
@@ -426,6 +465,51 @@ EOF
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -eq 0 ]
     [[ "$output" == *"stale"* ]]
+}
+
+# A `docker` that reports one running container per registry entry, so a
+# listing of N sessions can be built without N containers.
+stub_docker_sessions() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    cat > "$STUB_DIR/docker" <<EOF
+#!/bin/bash
+case "\$1" in
+    ps)      ls "$RUNTIME_DIR/dejima/sessions" | sed 's/^/c-/' ;;
+    inspect) name="\${!#}"; echo "DEJIMA_RUN_ID=\${name#c-}" ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH"
+}
+
+@test "the picker reads the operator's choice in base 10, not base 8" {
+    # The range check is `[`, which is decimal-only, and the subscript is
+    # $(( )), which reads a leading zero as OCTAL. They therefore disagree
+    # about "010": in range as 10, indexed as 8, and the caller is attached to
+    # a session they did not pick with nothing printed to say so. A leading
+    # zero is not exotic on the front door this exists for - it is one stray
+    # keypress on a phone keyboard.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_sessions
+    local i
+    for i in $(seq 11); do write_entry "$(printf '%016d' "$i")" '' ''; done
+    # Every entry is pane-less, so attach() refuses by name - which is what
+    # makes the session that was actually picked visible at all.
+    run "$REPO_ROOT/bin/dejima-attach" <<< '010'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Session 0000000000000010 was not started from tmux"* ]]
+    # "09" is not an octal number at all, so the same subscript aborts the
+    # script outright under set -e.
+    run "$REPO_ROOT/bin/dejima-attach" <<< '09'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Session 0000000000000009 was not started from tmux"* ]]
+    # And a number `[` cannot compare: both comparisons exit 2, which makes
+    # the `if` false, so the range is never reported as the problem and the
+    # subscript dies on an unbound element instead.
+    run "$REPO_ROOT/bin/dejima-attach" <<< '99999999999999999999999'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Out of range."* ]]
 }
 
 # A `docker` that can't answer - the daemon restarting, or docker not
@@ -799,6 +883,29 @@ EOF
     [ "$(tmux list-clients -F '#{client_session}')" = "dejima-0123456789abcdef" ]
     [ "$(tmux show-options -t dejima-0123456789abcdef destroy-unattached)" = "destroy-unattached on" ]
     kill "$attach_pid" 2>/dev/null || true
+}
+
+@test "an existing group that no longer holds the sandbox's pane is not attached to" {
+    # The has-session branch hands the client whatever carries the name, and
+    # nothing in this script created it. Only reachable as debris - a
+    # dejima-<run-id> that exists but shares no window with the sandbox - and
+    # anyone who can create that name already has a host shell, so the stake
+    # is landing in the right window rather than containment. The session
+    # created twenty lines below is verified for exactly this; this one was
+    # not.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    tmux new-session -d -s 'dejima-0123456789abcdef' 'sleep 300'
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
+    [ "$status" -ne 0 ]
+    # The message, not just the failure: with no pty this attach cannot
+    # succeed either way, and "open terminal failed" would pass a bare status
+    # check while still having tried to hand over the wrong session.
+    [[ "$output" == *"does not hold its pane"* ]]
+    [ -z "$(tmux list-clients -F '#{client_session}')" ]
 }
 
 @test "an existing session whose name merely starts with the group name is not attached to" {
