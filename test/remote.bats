@@ -340,13 +340,16 @@ EOF
     PATH="$STUB_DIR:$PATH"
 }
 
+# $4 is the launch timestamp, defaulting to now. It matters to anything that
+# prunes: dejima-attach holds off on an entry too young to have a container
+# yet, so a test about pruning has to write one that is old enough.
 write_entry() {
     mkdir -p "$RUNTIME_DIR/dejima/sessions"
     cat > "$RUNTIME_DIR/dejima/sessions/$1" <<EOF
 workspace=/home/someone/myproject
 pane=$2
 label=$3
-started=$(date +%s)
+started=${4:-$(date +%s)}
 EOF
 }
 
@@ -375,12 +378,35 @@ EOF
 @test "--list prunes entries whose container is gone" {
     : > "$CONFIG_DIR/remote.conf"
     stub_docker_run_id ffffffffffffffff
-    write_entry 0123456789abcdef '%1' 'work:2'
+    # Old enough to be past the startup grace - a container that never existed
+    # and a container that has not been created yet look identical to `docker
+    # ps`, and only the age tells them apart.
+    write_entry 0123456789abcdef '%1' 'work:2' $(( $(date +%s) - 86400 ))
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     # Pruned from disk, not merely hidden from the listing.
     [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+}
+
+@test "a session whose container has not started yet is not unregistered" {
+    # bin/dejima registers the session and then builds - an unconditional
+    # `docker compose build claude` plus up to two derived images - before it
+    # ever runs a container, so for that whole span `docker ps` answers "no
+    # such container" for a session that is perfectly alive. Pruning on that
+    # answer removes the entry for good (bin/dejima never rewrites it), which
+    # takes the session out of BOTH front doors, and deletes the marker
+    # directory that the imminent `docker compose run` bind-mounts.
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id ffffffffffffffff
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+    [[ "$output" == *"starting"* ]]
+    [ -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ]
 }
 
 @test "--list marks a session started outside tmux as not attachable" {

@@ -24,6 +24,27 @@ fi
 STATE_DIR="$(remote_state_dir)"
 SESSIONS_DIR="$STATE_DIR/sessions"
 
+# How long after its own started= a registered session may still have no
+# container, before the prune in list_sessions treats that as "gone".
+#
+# Sized against the step that actually holds a launch up: bin/dejima writes
+# the registry entry, then rewrites the settings copy, snapshots the
+# workspace for the audit, runs an UNCONDITIONAL `docker compose build
+# claude`, optionally builds up to two derived images on top of it, and only
+# then reaches `docker compose run`. A cold base build is the Dockerfile's
+# apt and npm layers fetched over the network - minutes, not seconds - and
+# the derived builds add to it, while a warm run reaches the container in
+# seconds and never comes near this window.
+#
+# The two errors are not symmetric, which is why this is generous. Too long
+# only leaves a session that really did die listed until the window passes,
+# and the next listing prunes it. Too short deletes the registry entry of a
+# session that is about to start: bin/dejima never rewrites that entry, so
+# the session is permanently absent from both front doors, and the marker
+# directory deleted with it is the source of a bind mount the imminent
+# `docker compose run` declares.
+STARTUP_GRACE=900
+
 # Parsed, never sourced: this file is host-written, but treating state files
 # as code is the habit this repo doesn't have. Returns nonzero for an entry
 # that can't be read or doesn't parse; callers skip it rather than dying,
@@ -82,10 +103,23 @@ pane_alive() {
     tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"
 }
 
+# True while an entry is young enough that its container may simply not exist
+# YET - see STARTUP_GRACE. Judged against the entry's own started=, since
+# nothing else records when the launch began. An entry that doesn't parse has
+# no age to judge and is not covered: it is pruned as before. read_entry is
+# called again by the caller afterwards; re-reading four lines costs less
+# than restructuring the loop around this one field.
+starting_up() {
+    local now="$2"
+    read_entry "$1" || return 1
+    [ "$(( now - 10#$entry_started ))" -lt "$STARTUP_GRACE" ]
+}
+
 # The registry is a hint, not truth: bin/dejima's EXIT trap doesn't run under
 # SIGKILL or a host crash, so an entry can outlive its session. An entry with
-# no matching container is pruned outright; one whose pane is gone is shown
-# as stale rather than offered for attachment.
+# no matching container - and old enough that it should have had one - is
+# pruned outright; one whose pane is gone is shown as stale rather than
+# offered for attachment.
 list_sessions() {
     local file run_id container state now rc warned=""
     [ -d "$SESSIONS_DIR" ] || return 0
@@ -96,7 +130,14 @@ list_sessions() {
         valid_run_id "$run_id" || continue
         rc=0
         container="$(container_for "$run_id")" || rc=$?
-        if [ "$rc" -eq 1 ]; then
+        if [ "$rc" -eq 1 ] && starting_up "$file" "$now"; then
+            # Registered, but bin/dejima is still building - "not started yet"
+            # is a third answer, and pruning on it would unregister a session
+            # that is about to exist. Listed with the container column saying
+            # so; the recorded pane is the one bin/dejima is building in, so
+            # a session in this state is attachable like any other.
+            container="starting"
+        elif [ "$rc" -eq 1 ]; then
             rm -f "$file"
             # Non-fatal: the marker directory is bind-mounted read-write into
             # the sandbox, so a compromised session can chmod it such that this
@@ -105,8 +146,7 @@ list_sessions() {
             rm -rf "${STATE_DIR:?}/notify/$run_id" \
                 || echo "warning: could not remove the marker directory for $run_id" >&2
             continue
-        fi
-        if [ "$rc" -ne 0 ]; then
+        elif [ "$rc" -ne 0 ]; then
             # An unanswerable question is never a "no": the entry stays, and
             # the container column says the daemon couldn't confirm it.
             container="?"
