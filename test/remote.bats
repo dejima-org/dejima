@@ -1470,7 +1470,7 @@ ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 # resolved the way the script resolves it (readlink -f, so a $BATS_TEST_DIRNAME
 # with a ".." in it does not make this a comparison of two spellings).
 expect_ttyd_argv() {
-    printf '%s\n' --interface 127.0.0.1 --port "$1" --url-arg --writable \
+    printf '%s\n' --interface 127.0.0.1 --port "$1" --check-origin --url-arg --writable \
         "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -1531,6 +1531,11 @@ unit_exec_start() {
     # found" too, and `exec ttyd` with no ttyd says so in bash's words rather
     # than in words that tell an operator what to install.
     [[ "$output" == *"ttyd is not installed"* ]]
+    # And which ttyd: -W/--writable does not exist before 1.7.4 (1.7.3 and
+    # earlier have --readonly and are writable by default), so an older
+    # package makes every start a getopt usage error. An operator reading
+    # "install ttyd" would install exactly that.
+    [[ "$output" == *"1.7.4"* ]]
 }
 
 @test "dejima-ttyd refuses an out-of-range TTYD_PORT rather than launching without one" {
@@ -1542,6 +1547,32 @@ unit_exec_start() {
     # Named, so this cannot pass because ttyd was missing or the config was.
     [[ "$output" == *"TTYD_PORT out of range"* ]]
     [ -z "$(ttyd_log)" ]
+}
+
+@test "ttyd validates the WebSocket origin, and the proxy passes the Host it compares against" {
+    # Without --check-origin ttyd does no origin validation at all (its
+    # protocol.c only calls check_host_origin when the flag is set), and
+    # browsers do not apply the same-origin policy to WebSockets: any page in
+    # the operator's browser could open wss://<front-door>/ws, have the
+    # browser attach the cached Basic credential for that origin, and get the
+    # host shell - no operator interaction beyond visiting the page. auth_basic
+    # cannot stop that, because it is satisfied by the victim's own browser.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    # Executed, not grepped: the flag has to reach ttyd's argv.
+    printf '%s\n' "$(ttyd_log)" | grep -qx -- '--check-origin'
+
+    # ttyd compares the Origin authority against the HOST HEADER, so the flag
+    # is only a guard if the proxy passes the client's Host through. Deleting
+    # this one line would leave --check-origin comparing against 127.0.0.1:port
+    # and refusing every real client - or, worse, quietly changing what is
+    # being compared. The two ship together or not at all.
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
+    [ -f "$ex" ]
+    grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Host[[:space:]]+\$host;' "$ex"
 }
 
 @test "nothing shipped by the front doors binds a routable address" {
@@ -1605,7 +1636,11 @@ unit_exec_start() {
     run grep -cE '^[[:space:]]*listen[[:space:]]+<LAN-IP>:' "$ex"
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
-    run bash -c 'grep -hE "^[[:space:]]*listen[[:space:]]" "$1" | grep -v "<LAN-IP>:"' _ "$ex"
+    # Per listen line, not per file: a SECOND server block - `listen
+    # <LAN-IP>:80;` with no ssl and no auth - satisfies every file-wide grep
+    # here while serving an unauthenticated host shell in the clear.
+    run bash -c 'grep -hE "^[[:space:]]*listen[[:space:]]" "$1" \
+        | grep -vE "<LAN-IP>:[0-9]+[[:space:]]+ssl;"' _ "$ex"
     [ "$status" -ne 0 ]
 }
 
@@ -1636,6 +1671,14 @@ unit_exec_start() {
     grep -qE '^[[:space:]]*auth_basic[[:space:]]' "$ex"
     grep -qE '^[[:space:]]*auth_basic_user_file[[:space:]]' "$ex"
     grep -qE '^[[:space:]]*ssl_certificate[[:space:]]' "$ex"
+    # Counted against the server blocks rather than just found somewhere: auth
+    # is a per-block directive, so one block with it and one without passes
+    # every "is it present" grep and still leaves an open door.
+    local servers auths
+    servers="$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$ex")"
+    auths="$(grep -cE '^[[:space:]]*auth_basic[[:space:]]' "$ex")"
+    [ "$servers" -ge 1 ]
+    [ "$auths" -ge "$servers" ]
     # ttyd is started --writable and with no credential of its own, so nginx
     # is the whole gate. If that ever changes, both halves have to change
     # together rather than one of them drifting.
@@ -1673,6 +1716,9 @@ unit_exec_start() {
 
     run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
     [ "$status" -eq 0 ]
+    # Asserted here rather than further down: every `run` below replaces
+    # $output, and this is a statement about what THIS run printed.
+    [[ "$output" == *"nothing is listening"* ]]
 
     # bin/dejima registers $HOME/.claude/hooks/dejima-notify.sh per session,
     # and ~/.claude/hooks is what gets mounted read-only into the container.
@@ -1707,6 +1753,15 @@ unit_exec_start() {
     [ "$status" -eq 0 ]
     [ ! -e "$FAKE_HOME/.dejima-backup" ]
     [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+
+    # And with one, it may not: re-running the installer after a git pull is
+    # exactly what an operator with a front door already up does, and telling
+    # them nothing is listening is a false statement about their own machine.
+    : > "$CONFIG_DIR/remote.conf"
+    run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"nothing is listening"* ]]
+    [[ "$output" == *"$CONFIG_DIR/remote.conf"* ]]
 }
 
 @test "the systemd units are user units that run the installed scripts and duplicate no configuration" {
@@ -1720,21 +1775,24 @@ unit_exec_start() {
         # name the very things a directive may not set ("do not repeat
         # NTFY_URL here"), and a grep that could not tell the two apart would
         # force those comments out of the file to stay green.
-        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "^(User|Group)="' _ "$f"
+        # A WHITELIST of directive names, not a list of banned ones: a denylist
+        # only ever catches the directives someone thought of, and these units
+        # run a host shell - StandardOutput=file:..., User=, Environment=,
+        # ExecStartPre= are all things that change what runs or where its
+        # output goes. Anything not on this line has to be added deliberately.
+        run bash -c 'grep -vE "^[[:space:]]*([#;]|$)" "$1" \
+            | grep -vxE "\[(Unit|Service|Install)\]" | sed "s/=.*//" | sort -u \
+            | grep -vxE "Description|StartLimitIntervalSec|StartLimitBurst|ExecStart|Restart|RestartSec|WantedBy"' \
+            _ "$f"
         [ "$status" -ne 0 ]
-        # No absolute home - %h is what makes these units the same file for
-        # every operator.
+        # The whitelist covers directive NAMES; the rest of this test is about
+        # their VALUES. No absolute home - %h is what makes these units the
+        # same file for every operator.
         run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "/home/|/root/|/Users/"' _ "$f"
         [ "$status" -ne 0 ]
         # remote.conf is the single source of truth for all of these. A unit
         # that repeated one would drift from the script that reads it.
         run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "TTYD_PORT|NTFY_URL|BASE_URL|--port|--interface"' _ "$f"
-        [ "$status" -ne 0 ]
-        # No environment of their own either. The two tests below run
-        # ExecStart under an environment they build themselves, so an
-        # Environment= line here - an XDG_RUNTIME_DIR pointing somewhere the
-        # markers are not, say - would be invisible to them.
-        run bash -c 'grep -vE "^[[:space:]]*[#;]" "$1" | grep -nE "^(Environment|EnvironmentFile)="' _ "$f"
         [ "$status" -ne 0 ]
     done
 }

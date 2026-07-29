@@ -155,5 +155,14 @@ echo
 echo "Done. Try: $BIN_DIR/dejima ~/some/project"
 echo "(or just 'dejima ~/some/project' once $BIN_DIR is on PATH)"
 echo
-echo "Remote access is available but not configured - nothing is listening."
-echo "See README \"Remote access\" to turn it on."
+# Conditional, because the unconditional version is a false statement to the
+# operator most likely to see it: someone with a front door already up,
+# re-running this after a git pull.
+remote_conf="${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}/remote.conf"
+if [ -f "$remote_conf" ]; then
+    echo "Remote access is configured ($remote_conf); this script did not start or stop anything."
+    echo "See README \"Remote access\"."
+else
+    echo "Remote access is available but not configured - nothing is listening."
+    echo "See README \"Remote access\" to turn it on."
+fi

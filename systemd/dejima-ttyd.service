@@ -32,8 +32,8 @@ RestartSec=5
 # server socket under /tmp/tmux-$UID; ProtectHome= would hide the scripts
 # above and the repo they link to; NoNewPrivileges= would break sudo inside
 # the attached session. What contains this feature is the loopback bind in
-# bin/dejima-ttyd plus authentication in the reverse proxy - see
-# docs/nginx-dejima.conf.example - not unit sandboxing.
+# bin/dejima-ttyd, its --check-origin, and authentication in the reverse
+# proxy - see docs/nginx-dejima.conf.example - not unit sandboxing.
 #
 # No After= either: a user manager has no ordering to offer against the
 # network, and none is needed - the listener is on loopback.

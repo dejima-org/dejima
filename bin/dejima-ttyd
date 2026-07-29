@@ -14,15 +14,27 @@
 # front, bound to one specific LAN address - see
 # docs/nginx-dejima.conf.example.
 #
-# ttyd is given no credential of its own, so nginx is the only authentication
-# there is, and the loopback bind is what makes that safe rather than
-# careless: nothing but a process on this host can open the socket at all.
-# --writable is what makes the terminal a terminal rather than a viewer.
+# ttyd is given no credential of its own, so the reverse proxy is the only
+# thing authenticating a request, and the loopback bind is what makes that
+# safe rather than careless: nothing but a process on this host can open the
+# socket at all. --writable is what makes the terminal a terminal rather than
+# a viewer.
+#
+# --check-origin is the other half of that, and it is not optional. Without
+# it ttyd does no origin validation at all (it only calls check_host_origin
+# when the flag is set), and browsers do not apply the same-origin policy to
+# WebSockets: any page the operator's browser loads could open
+# wss://<front-door>/ws, have the browser attach its cached credential for
+# that origin, and be handed this host shell. Proxy authentication cannot
+# stop that - it is satisfied by the victim's own browser. ttyd compares the
+# Origin authority against the Host header, which is why the nginx example
+# passes Host through unchanged; the two go together.
 #
 # --url-arg lets the client pass ?arg=<run-id>, which is what the notification
 # deep link uses. It reaches dejima-attach as argv, never as a shell word, and
-# anything there that is not --list has to match the run-id shape before it is
-# used as a path component or anything else.
+# anything there that is not --list or the empty string (a bare `?arg=`, which
+# lands on the picker) has to match the run-id shape before it is used as a
+# path component or anything else.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -39,10 +51,12 @@ fi
 # on a line number - true, and useless to an operator who needs to know that
 # the missing piece is a package.
 if ! command -v ttyd >/dev/null 2>&1; then
-    echo "ttyd is not installed - the web front door needs it (e.g. apt install ttyd)." >&2
+    echo "ttyd is not installed - the web front door needs it, 1.7.4 or newer" >&2
+    echo "(-W/--writable arrived in 1.7.4; older builds are writable by default" >&2
+    echo "and reject the flag, so every start would be a usage error)." >&2
     exit 1
 fi
 
 port="$(remote_ttyd_port)"
-exec ttyd --interface 127.0.0.1 --port "$port" --url-arg --writable \
+exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
     "$SCRIPT_DIR/dejima-attach"

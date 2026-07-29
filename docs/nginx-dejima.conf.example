@@ -26,7 +26,14 @@
 #      bin/dejima-ttyd), because it is bound to 127.0.0.1 where only this
 #      host can reach it - this proxy is the only gate in front of it. A
 #      vhost without auth_basic (or something stronger in its place) is an
-#      unauthenticated host shell on your LAN.
+#      unauthenticated host shell on your LAN. Put every listen behind it:
+#      a second server block without auth is the same open door.
+#
+#      Authentication alone does not stop a page in your browser from
+#      opening a WebSocket to this vhost and having the browser attach your
+#      credential to it, which is why bin/dejima-ttyd passes --check-origin.
+#      That check compares the Origin against the Host header, so `Host
+#      $host` below is load-bearing, not tidiness.
 #
 # TLS is not optional either: HTTP Basic sends the password on every request,
 # and the terminal itself carries whatever the session is working on.
@@ -56,6 +63,8 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
+        # ttyd's --check-origin compares the client's Origin against Host.
+        # Drop this line and it compares against 127.0.0.1:<port> instead.
         proxy_set_header Host       $host;
 
         # An attached terminal can sit idle for hours; nginx's default read
