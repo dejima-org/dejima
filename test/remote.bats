@@ -900,3 +900,323 @@ EOF
     [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$LAUNCH_DIR/settings-copy.json")" = "operator-tts.sh" ]
     rm -rf "$PROJ"
 }
+
+# A fake `curl` that records what would have been sent to ntfy: joined, for
+# header greps, and one argument per line, so an argument curl would read as
+# an OPTION rather than as the URL is visible.
+stub_curl() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    cat > "$STUB_DIR/curl" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$STUB_DIR/curl-log"
+printf '%s\n' "\$@" >> "$STUB_DIR/curl-argv"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/curl"
+    PATH="$STUB_DIR:$PATH"
+}
+curl_log() { cat "$STUB_DIR/curl-log" 2>/dev/null; }
+
+marker() {
+    mkdir -p "$RUNTIME_DIR/dejima/notify/$1"
+    : > "$RUNTIME_DIR/dejima/notify/$1/$2"
+}
+
+conf_with_ntfy() {
+    cat > "$CONFIG_DIR/remote.conf" <<'EOF'
+NTFY_URL=https://ntfy.example.invalid/dejima
+BASE_URL=https://dejima.example.invalid
+EOF
+}
+
+@test "a marker produces a push composed entirely from host-side data" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    # The click URL is BASE_URL from remote.conf plus the DIRECTORY NAME, and
+    # the project name comes from the registry's workspace= (host-written by
+    # bin/dejima; write_entry sets it to /home/someone/myproject). Nothing
+    # here is sourced from the marker.
+    [[ "$(curl_log)" == *"Click: https://dejima.example.invalid/?arg=0123456789abcdef"* ]]
+    [[ "$(curl_log)" == *"myproject"* ]]
+    [[ "$(curl_log)" == *"needs input"* ]]
+    # The URL reaches curl as the URL - the last argument, verbatim - and not
+    # as an option (see the option-injection test below).
+    [ "$(tail -1 "$STUB_DIR/curl-argv")" = "https://ntfy.example.invalid/dejima" ]
+    # Consumed, so a rerun doesn't re-push.
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+
+    # The other half of the enum, which is otherwise never exercised.
+    marker 0123456789abcdef done
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$(curl_log)" == *"finished"* ]]
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/done" ]
+}
+
+@test "a marker name outside the enum is never acted on" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    dir="$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    mkdir -p "$dir"
+    # Content is never read, so these are only ever names - and none of them
+    # is in the enum. The hook's own enum constrains nothing here: a session
+    # owns the contents of its bind-mounted marker directory and can create
+    # any name it likes in it, hook or no hook.
+    for name in error 'waiting; curl evil' 'X-Actions' 'waiting.' WAITING done2; do
+        printf 'PAYLOAD' > "$dir/$name"
+    done
+    before="$(ls -A "$dir" | sort)"
+    [ -n "$before" ]
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ -z "$(curl_log)" ]
+    # Not merely un-pushed: untouched. An unrecognized name is never stat'd,
+    # read, or removed, so the whitelist cannot quietly become a filter.
+    [ "$(ls -A "$dir" | sort)" = "$before" ]
+}
+
+@test "marker content never reaches the push" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    # ntfy's X-Actions header makes the phone issue an arbitrary HTTP request
+    # or fire an Android intent - one attacker-chosen header is a confused
+    # deputy inside the operator's LAN, which is why content is never read.
+    printf 'X-Actions: http, pwn, https://evil.example.invalid\n' \
+        > "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    # It really did push - otherwise the two refutations below hold vacuously.
+    [ -n "$(curl_log)" ]
+    [[ "$(curl_log)" != *"evil.example.invalid"* ]]
+    [[ "$(curl_log)" != *"X-Actions"* ]]
+}
+
+@test "a symlinked marker is removed without its target being read or touched" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    secret="$RUNTIME_DIR/host-secret"
+    printf 'HOSTSECRET' > "$secret"
+    ln -s "$secret" "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    # The link is gone, the host file it aimed at is intact, and nothing from
+    # it was sent. rm unlinks a symlink rather than following it; a watcher
+    # that opened the marker instead would be reading an operator-chosen file.
+    [ ! -L "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+    [ -f "$secret" ]
+    [ "$(cat "$secret")" = "HOSTSECRET" ]
+    [ -n "$(curl_log)" ]
+    [[ "$(curl_log)" != *"HOSTSECRET"* ]]
+}
+
+@test "a dangling symlinked marker is consumed rather than left in place forever" {
+    # [ -e ] follows the link and is FALSE for a dangling one, so without the
+    # -L arm a session could leave links a scan never clears - and the target
+    # must still not be created on its behalf.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    ln -s "$RUNTIME_DIR/nothing-here" "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ ! -L "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+    [ ! -e "$RUNTIME_DIR/nothing-here" ]
+    [ -n "$(curl_log)" ]
+}
+
+@test "a marker directory whose name is not a run id is ignored entirely" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    # Beside the marker root, which is where a "../"-shaped name would land if
+    # one were ever joined onto the scan path.
+    mkdir -p "$RUNTIME_DIR/dejima/escape-attempt"
+    : > "$RUNTIME_DIR/dejima/escape-attempt/waiting"
+    for bad in NOTARUNID 0123456789ABCDEF 0123456789abcde 0123456789abcdef0; do
+        mkdir -p "$RUNTIME_DIR/dejima/notify/$bad"
+        : > "$RUNTIME_DIR/dejima/notify/$bad/waiting"
+    done
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ -z "$(curl_log)" ]
+    # And none of them was consumed either.
+    [ -f "$RUNTIME_DIR/dejima/notify/NOTARUNID/waiting" ]
+    [ -f "$RUNTIME_DIR/dejima/escape-attempt/waiting" ]
+}
+
+@test "repeat markers for the same event are debounced" {
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$(curl_log | wc -l)" -eq 1 ]
+    marker 0123456789abcdef waiting
+    DEJIMA_DEBOUNCE_SECONDS=3600 run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ "$(curl_log | wc -l)" -eq 1 ]
+    # Debounced means "not pushed", not "not consumed" - a marker left behind
+    # would re-push the moment the window expired.
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+}
+
+@test "the watcher refuses to start without NTFY_URL" {
+    : > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NTFY_URL"* ]]
+}
+
+@test "the watcher refuses to start at all without remote.conf" {
+    # The opt-in guarantee: with the feature unconfigured nothing here runs,
+    # and in particular no state directory is created.
+    stub_curl
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not configured"* ]]
+    [ ! -d "$RUNTIME_DIR/dejima" ]
+    [ -z "$(curl_log)" ]
+}
+
+@test "a config value curl would read as an option is refused, not passed on" {
+    # valid_remote_value permits a leading '-', which is harmless in a config
+    # file and not harmless in curl's argument list: curl reads "-K/path" as
+    # an OPTION, and -K takes the request's URL (and its output file) from
+    # that path instead - verified against the real curl, which duly connected
+    # to the config file's URL rather than to the one in remote.conf. So a
+    # value that isn't a URL sends the push somewhere the operator never
+    # named. remote.conf is operator-written, which is a reason to refuse a
+    # bad value loudly rather than to assume a good one.
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    printf 'NTFY_URL=-K/tmp/dejima-test-curl-config\n' > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NTFY_URL"* ]]
+    [ -z "$(curl_log)" ]
+
+    # BASE_URL reaches the phone as the Click: target rather than curl's argv,
+    # but it is the same class of value and the same refusal.
+    printf 'NTFY_URL=https://ntfy.example.invalid/t\nBASE_URL=-o/tmp/dejima-test-out\n' \
+        > "$CONFIG_DIR/remote.conf"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"BASE_URL"* ]]
+    [ -z "$(curl_log)" ]
+    # Refused before anything was consumed, so a real marker is still there.
+    [ -f "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+}
+
+@test "the debounce store cannot execute anything through the age arithmetic" {
+    # Same shape as the registry's started=: bash evaluates a non-numeric
+    # value in $(( )) as a VARIABLE NAME and runs any command substitution in
+    # its subscript, and set -u does not catch it because `now` is bound right
+    # there. The debounce directory is host-owned and never mounted, so this
+    # is about not leaving the pattern in the repo - it shipped as a Critical
+    # once already, in bin/dejima-attach.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    mkdir -p "$RUNTIME_DIR/dejima/debounce"
+    canary="$RUNTIME_DIR/PWNED"
+    printf 'now[$(touch %s)]' "$canary" \
+        > "$RUNTIME_DIR/dejima/debounce/0123456789abcdef-waiting"
+    # Bounded, because the failure this pins is not only execution: a bash
+    # arithmetic *error* unwinds to the top level and discards the rest of the
+    # enclosing command, so a --once scan that reaches one never runs its
+    # `exit` and falls into the watch loop. Untimed, that hangs the suite
+    # instead of failing it.
+    run timeout 30 "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ ! -e "$canary" ]
+    # An unparseable stamp reads as "not sent recently": failing the other way
+    # would let one junk file silence a session's notifications for good.
+    [ -n "$(curl_log)" ]
+}
+
+@test "a marker the watcher cannot consume does not silence every other session" {
+    # /run/dejima-notify is bind-mounted read-write, so a session can make its
+    # own marker undeletable - a directory named `waiting` is enough. One scan
+    # covers every run directory, so an rm that is fatal under set -e lets one
+    # compromised sandbox suppress all the others' notifications. The
+    # undeletable one sorts first, so it is reached first.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0123456789abcdef '%1' 'work:2'
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0000000000000000/waiting/not-empty"
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$(curl_log)" == *"?arg=0123456789abcdef"* ]]
+    [[ "$output" == *"warning"* ]]
+    # And the one it could not consume was not pushed either: a marker that
+    # survives would otherwise re-push on every single scan.
+    [[ "$(curl_log)" != *"?arg=0000000000000000"* ]]
+}
+
+@test "an unreadable registry entry does not abort the scan" {
+    # project_of reads the registry with `done < "$file"`, which is fatal
+    # under set -e when the file cannot be opened - and again, one scan covers
+    # every run directory.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0123456789abcdef '%1' 'work:2'
+    chmod 000 "$RUNTIME_DIR/dejima/sessions/0000000000000000"
+    marker 0000000000000000 waiting
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$(curl_log)" == *"?arg=0123456789abcdef"* ]]
+    # The entry it could not read still gets a push, just without a name.
+    [[ "$(curl_log)" == *"?arg=0000000000000000"* ]]
+}
+
+@test "the watcher refuses a state directory that is a symlink" {
+    # Same hazard bin/dejima already refuses: /tmp is the fallback parent when
+    # XDG_RUNTIME_DIR is unset, and `mkdir -p -m 700` only sets the mode of
+    # the leaf it creates, so a planted symlink here would send every mkdir
+    # and every rm below it into someone else's tree.
+    conf_with_ntfy
+    stub_curl
+    elsewhere="$(mktemp -d)"
+    mkdir -p "$elsewhere/notify/0123456789abcdef"
+    : > "$elsewhere/notify/0123456789abcdef/waiting"
+    ln -s "$elsewhere" "$RUNTIME_DIR/dejima"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"symlink"* ]]
+    [ -z "$(curl_log)" ]
+    [ -f "$elsewhere/notify/0123456789abcdef/waiting" ]
+    rm -rf "$elsewhere"
+}
+
+@test "a push still goes out when BASE_URL is not configured" {
+    # BASE_URL is optional - ntfy alone is a complete setup, and it is the
+    # only half that needs to be reachable from the phone. This pins the
+    # otherwise-unexercised branch that composes no Click header at all,
+    # including the empty-array expansion it hands to curl under set -u.
+    printf 'NTFY_URL=https://ntfy.example.invalid/dejima\n' > "$CONFIG_DIR/remote.conf"
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$(curl_log)" == *"myproject"* ]]
+    [[ "$(curl_log)" != *"Click:"* ]]
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
+}

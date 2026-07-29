@@ -1,0 +1,231 @@
+#!/bin/bash
+# Host-side watcher: turns marker files dropped by hooks/dejima-notify.sh
+# into ntfy pushes. Runs as a systemd USER unit on the host - never as root,
+# never inside a container. See README "Remote access".
+#
+# Usage: dejima-notify-watch [--once]
+#   (no argument)  watch until killed - what the systemd unit runs
+#   --once         one scan, then exit
+#
+# This script is the trust boundary. Everything under the marker root is
+# written by a sandboxed session that may be compromised, and the device it
+# ultimately reaches - the operator's phone - is outside the sandbox. The
+# in-container hook's own enum constrains nothing here: a session owns the
+# contents of its bind-mounted marker directory and can create any name it
+# likes in it, hook or no hook. The guarantee rests entirely on this file:
+#
+#   - the marker NAME is the only thing consulted, and only by iterating a
+#     literal enum, so a name outside it is never stat'd, read, or removed
+#   - marker CONTENT is never read, so there is nothing to inject
+#   - names are never interpolated into a command
+#   - `rm -f` unlinks a symlink instead of following it, so a marker aimed at
+#     a host file removes the link and leaves the file alone
+#   - the click URL and every ntfy header are composed from host-side data
+#
+# That last point is what the enum is really for. ntfy's own headers include
+# X-Actions (which can make the phone issue an arbitrary HTTP request or fire
+# an Android intent), X-Attach and X-Icon (which fetch URLs), X-Email and
+# X-Call. A single attacker-controlled header here would turn the phone into
+# a confused deputy inside the operator's network.
+#
+# One scan covers every run directory, so nothing a single session can do to
+# its own markers may abort it: that would let one compromised sandbox silence
+# every other session's notifications.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+if ! remote_enabled; then
+    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "See README \"Remote access\"." >&2
+    exit 1
+fi
+
+NTFY_URL="$(remote_conf_get NTFY_URL)"
+BASE_URL="$(remote_conf_get BASE_URL)"
+if [ -z "$NTFY_URL" ]; then
+    echo "NTFY_URL is not set in $(remote_conf_path) - nothing to push to." >&2
+    exit 1
+fi
+
+# valid_remote_value permits a leading '-', which is harmless in a config file
+# and not harmless in curl's argument list: curl reads "-K/path" as an OPTION,
+# and -K takes the request's URL - and its output file - from that path
+# instead, so a value that isn't a URL sends the push somewhere the operator
+# never named. Requiring an explicit scheme is what makes these URLs rather
+# than arguments; the `--` at the call site is the other half. Widening
+# valid_remote_value instead would be the wrong place: it also guards nginx
+# and the TTYD_PORT, neither of which wants a URL.
+#
+# Refusing rather than sanitizing, because remote.conf is operator-written:
+# a value that can't be used as intended means they got something wrong, and
+# this is the one place they say where their phone notifications go.
+require_url() {
+    case "$2" in
+        http://*|https://*) ;;
+        *)
+            echo "$1 in $(remote_conf_path) must be an http:// or https:// URL: $2" >&2
+            exit 1
+            ;;
+    esac
+}
+require_url NTFY_URL "$NTFY_URL"
+[ -z "$BASE_URL" ] || require_url BASE_URL "$BASE_URL"
+
+STATE_DIR="$(remote_state_dir)"
+NOTIFY_DIR="$STATE_DIR/notify"
+DEBOUNCE_DIR="$STATE_DIR/debounce"
+DEBOUNCE_SECONDS="${DEJIMA_DEBOUNCE_SECONDS:-60}"
+case "$DEBOUNCE_SECONDS" in
+    ''|*[!0-9]*)
+        echo "DEJIMA_DEBOUNCE_SECONDS must be a whole number of seconds: $DEBOUNCE_SECONDS" >&2
+        exit 1
+        ;;
+esac
+
+# Same check bin/dejima makes before creating this, and for the same reason:
+# /tmp is the fallback parent when XDG_RUNTIME_DIR is unset, and
+# `mkdir -p -m 700` only sets the mode of the leaf it creates - a symlink
+# planted here would send every mkdir and every rm below it into someone
+# else's tree. Created rather than required, so the unit can start before the
+# first sandbox has ever run.
+mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || true
+if [ -L "$STATE_DIR" ] || [ ! -d "$STATE_DIR" ] \
+    || [ "$(stat -c %u "$STATE_DIR")" != "$(id -u)" ]; then
+    echo "Refusing to watch: $STATE_DIR is a symlink, or is not a directory owned" >&2
+    echo "by the current user. Remove it, or set XDG_RUNTIME_DIR somewhere else." >&2
+    exit 1
+fi
+mkdir -p -m 700 "$NOTIFY_DIR" "$DEBOUNCE_DIR"
+
+# From the registry (host-written), not from anything the session wrote. Still
+# reduced to a safe charset: the workspace path is operator-chosen, and a
+# newline in it would split a curl -H header.
+project_of() {
+    local run_id="$1" file line raw="" name
+    file="$STATE_DIR/sessions/$run_id"
+    # An entry that can't be opened must degrade to an unnamed push, never to
+    # a failure: one scan covers every run directory, so aborting here would
+    # take every other session's notification down with it. A failed
+    # redirection on `done < "$file"` is fatal under set -e where dejima-attach
+    # calls read_entry - directly - but NOT here, because bash does not inherit
+    # errexit into a command substitution without `shopt -s inherit_errexit`,
+    # and project_of is only ever reached through one. Guarded anyway, so the
+    # function is safe wherever it is called from, and so a chmod'd entry does
+    # not print "Permission denied" on every scan for as long as it exists.
+    if [ -r "$file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                workspace=*) raw="${line#*=}"; break ;;
+            esac
+        done < "$file" || raw=""
+    fi
+    name="$(basename -- "$raw" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+    printf '%s' "${name:-unknown}"
+}
+
+push() {
+    local run_id="$1" event="$2" project title body
+    local -a click=()
+    project="$(project_of "$run_id")"
+    case "$event" in
+        waiting) title="dejima: $project needs input"; body="Session is waiting for you." ;;
+        done)    title="dejima: $project finished";    body="Session has stopped." ;;
+        *) return 0 ;;
+    esac
+    # $run_id here came from the DIRECTORY NAME bin/dejima created and was
+    # shape-validated by valid_run_id - never from marker content.
+    if [ -n "$BASE_URL" ]; then
+        click=(-H "Click: ${BASE_URL%/}/?arg=$run_id")
+    fi
+    # stdout is discarded (ntfy answers with a JSON receipt); stderr is not.
+    # -sS exists precisely to keep transport errors on stderr, and under a
+    # systemd user unit that is the journal, which is where they belong.
+    curl -fsS --max-time 10 --retry 2 \
+        -H "Title: $title" \
+        -H "Priority: default" \
+        "${click[@]}" \
+        -d "$body" \
+        -- "$NTFY_URL" >/dev/null \
+        || echo "dejima-notify-watch: push failed for $run_id/$event" >&2
+}
+
+# Persisted rather than in-memory so --once (and a restarted unit) debounce
+# the same way a long-running process does.
+debounced() {
+    local key="$1" now="$2" last
+    last="$(cat "$DEBOUNCE_DIR/$key" 2>/dev/null || true)"
+    # A non-numeric value in $(( )) is evaluated as a VARIABLE NAME, and any
+    # command substitution in its subscript runs - "now[$(cmd)]" executes cmd.
+    # set -u does not catch it, because `now` is bound right here. Digits
+    # alone still aren't enough either: a leading zero is read as octal, so
+    # 10# forces base 10 (and independently refuses to lex a name).
+    #
+    # The shape check leads because 10# only turns execution into an
+    # arithmetic *error*, and a bash arithmetic error unwinds to the top
+    # level: it discards the rest of the enclosing top-level command, so the
+    # `exit 0` after a --once scan never runs and control falls through into
+    # the watch loop below. Refusing the value keeps that unwind unreachable.
+    #
+    # Junk reads as "not sent recently" rather than as "sent": failing the
+    # other way would let one unparseable file silence a session for good.
+    case "$last" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$(( now - 10#$last ))" -lt "$DEBOUNCE_SECONDS" ]
+}
+
+scan() {
+    local dir run_id event marker now
+    now="$(date +%s)"
+    for dir in "$NOTIFY_DIR"/*; do
+        [ -d "$dir" ] || continue
+        run_id="$(basename -- "$dir")"
+        # Only directories bin/dejima could have created. Anything else is
+        # skipped without being looked into at all.
+        valid_run_id "$run_id" || continue
+        # The enum is iterated, not discovered: a name that isn't one of these
+        # is never stat'd, never read, never removed.
+        for event in waiting done; do
+            marker="$dir/$event"
+            # -e follows the link and is FALSE for a dangling symlink, which a
+            # session can plant as easily as a file; -L catches those so they
+            # are cleaned up too, without their target being created.
+            [ -e "$marker" ] || [ -L "$marker" ] || continue
+            # Consumed before it is acted on, and non-fatally: the marker
+            # directory is bind-mounted read-write, so a session can make its
+            # own marker undeletable (a non-empty directory named `waiting` is
+            # enough), and dying here would silence every OTHER session too.
+            # Skipped rather than pushed anyway, because a marker that
+            # survives would otherwise re-push on every scan from now on.
+            if ! rm -f "$marker"; then
+                echo "dejima-notify-watch: warning: could not consume marker $run_id/$event" >&2
+                continue
+            fi
+            if debounced "$run_id-$event" "$now"; then
+                continue
+            fi
+            printf '%s' "$now" > "$DEBOUNCE_DIR/$run_id-$event"
+            push "$run_id" "$event"
+        done
+    done
+}
+
+if [ "${1:-}" = "--once" ]; then
+    scan
+    exit 0
+fi
+
+# inotify-tools is optional: without it this degrades to a 5s poll rather
+# than failing. The -t 30 timeout also closes the race where a marker lands
+# in a run directory created after the current watch was established.
+while :; do
+    scan
+    if command -v inotifywait >/dev/null 2>&1; then
+        inotifywait -qq -r -t 30 -e create -e moved_to "$NOTIFY_DIR" >/dev/null 2>&1 || true
+    else
+        sleep 5
+    fi
+done
