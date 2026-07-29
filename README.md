@@ -65,6 +65,114 @@ below) — the two aren't both required, pick whichever matches your remote.
 a compatible `/api/v1` surface, so pointing `GITEA_API` at a Forgejo instance
 just works.
 
+## Setup
+
+Every feature's configuration, in one place and in order. Each step links to
+the section that explains *why* it is that way; this section only says what
+to do. Only the first block is required - the rest are independent, so take
+the ones you want and skip the rest.
+
+For remote access, the reading is not optional: one of its steps is a full
+sandbox escape if you get it wrong.
+
+### Core (required)
+
+1. `./install.sh` — symlinks the CLIs into `~/.local/bin` and the hooks into
+   `~/.claude/hooks`. It is idempotent, so re-run it after pulling.
+2. Put `~/.local/bin` on your `PATH` if it isn't already.
+3. Give it a git push credential — `ssh-add` your key for interactive use,
+   or set `SANDBOX_SSH_KEY` to a dedicated deploy key for unattended runs.
+   → [Prerequisites](#prerequisites),
+   [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
+
+That is enough to run `bin/dejima`.
+
+### Gitea/Forgejo PR workflow
+
+Skip this if you only push to GitHub.
+
+1. Export `GITEA_SSH_HOST` (the SSH hostname) and `GITEA_API`
+   (`https://<gitea host>/api/v1`) from your shell profile.
+2. Generate a token — Settings → Applications, scopes `write:repository` and
+   `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
+   → [Prerequisites](#prerequisites)
+
+### Per-project domains and dependencies
+
+Nothing to set up in advance; do this per project, as it turns out to need
+something:
+
+```sh
+dejima-project status ~/myproject     # declared vs approved vs missing
+dejima-project approve ~/myproject    # approve the declared set
+dejima-allow crates.io --project ~/myproject
+dejima-dep add cargo:cargo-nextest --global
+```
+
+Domains apply at the next launch, and `dejima-allow` also patches a running
+session. Dependencies need an image rebuild, so they always land on the next
+one. →
+[Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
+[Adding a domain to a running session](#adding-a-domain-to-a-running-session)
+
+### Log shipping
+
+1. Export `LOKI_URL` pointing at your Loki push endpoint.
+2. Optionally set `SANDBOX_LOG_CONVERSATION=1` to ship transcripts as well —
+   read
+   [Conversation logging (opt-in)](#conversation-logging-opt-in) first, since
+   that ships what you and the model actually say.
+   → [Network request logging](#network-request-logging),
+   [Viewing logs in Grafana](#viewing-logs-in-grafana)
+
+### GitHub push (opt-in)
+
+Per launch, not a persistent setting:
+
+```sh
+ALLOW_GITHUB_PUSH=1 bin/dejima ~/myproject
+```
+
+Pair it with a repo-scoped deploy key in `SANDBOX_SSH_KEY`. Read
+[GitHub push: blocked by default, optional opt-in](#github-push-blocked-by-default-optional-opt-in)
+before turning it on — with a forwarded personal agent this is much broader
+than it looks.
+
+### Remote access (opt-in)
+
+Entirely off until step 1 exists. **Read
+[Remote access](#remote-access) end to end before doing any of this.** Step 2
+is the one that carries the security of the whole feature, and getting it
+wrong still looks like it works.
+
+1. **Create `~/.config/dejima/remote.conf`.** This file is the switch —
+   nothing here runs without it. Set `NTFY_URL`, `BASE_URL`, and `TTYD_PORT`
+   if you want something other than 7681. →
+   [`remote.conf`](#remoteconf)
+2. **Choose the reverse proxy's bind address, on the dejima box itself.** One
+   specific address on its LAN interface. Never the wildcard, never
+   `0.0.0.0`, never a Docker bridge. →
+   [The bind address is the one thing to get right](#the-bind-address-is-the-one-thing-to-get-right),
+   [Picking the address](#picking-the-address)
+3. **SSH front door.** Generate a key that exists only for this, then add one
+   `restrict,pty,command="…/dejima-attach"` line to `authorized_keys` for the
+   same Unix user that runs `bin/dejima`. →
+   [SSH front door](#ssh-front-door)
+4. **Web front door.** Get `ttyd` 1.7.4 or newer, install
+   `systemd/dejima-ttyd.service` as a *user* unit, and put a reverse proxy in
+   front of it adapted from `docs/nginx-dejima.conf.example` — with
+   authentication on every server block, TLS, and
+   `proxy_set_header Host $http_host`. →
+   [Web front door](#web-front-door)
+5. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
+   way, then `loginctl enable-linger "$USER"` so both units survive logout. →
+   [Notifications](#notifications)
+6. **Verify the containment from inside a running sandbox** before relying on
+   any of it. →
+   [Verifying it](#verifying-it)
+
+[Attaching](#attaching) then covers what you get on the other end.
+
 ## Usage
 
 ```sh
@@ -574,13 +682,58 @@ So:
 - `ttyd` is bound to `127.0.0.1` by `bin/dejima-ttyd`, hardcoded, not
   configurable. The container has no route to your host's loopback, so
   nothing but a process on this host can open that socket.
-- The reverse proxy in front of it must bind **one specific address of your
-  LAN interface**. Never the wildcard (a bare `listen 443 ssl;`, which is
-  every interface *including* the bridge gateway), never `0.0.0.0`, and
-  never the bridge gateway address itself. `ip -br addr` lists the
-  candidates, `ss -ltnp` afterwards shows what you actually bound.
+- **The reverse proxy has to run on that same host** - the dejima box, the
+  one your sandboxes start on. That is not a preference, it is what the
+  loopback bind implies: `proxy_pass http://127.0.0.1:<TTYD_PORT>` only
+  resolves to `ttyd` from the same machine. If you already run a proxy on a
+  *different* box, do not point it here - reaching `ttyd` from there would
+  mean binding `ttyd` to a routable address, which is precisely the escape
+  this whole section exists to prevent. Put a second, small proxy on the
+  dejima box instead.
+- That proxy must bind **one specific address, on the dejima box's LAN
+  interface**. Never the wildcard - a bare `listen 443 ssl;` is every
+  interface *including* the Docker bridges - never `0.0.0.0`, and never a
+  bridge address.
 
-Verify it rather than assume it. With a sandbox running, from inside it:
+### Picking the address
+
+`ip -br addr` on the dejima box lists more candidates than you want, because
+Docker adds its own. It looks something like this:
+
+```
+lo               UNKNOWN  127.0.0.1/8 ::1/128
+enp3s0           UP       192.0.2.24/24 <a link-local v6 address>
+docker0          UP       <docker's own subnet>
+br-9f3c1a2b4d5e  UP       <docker's own subnet>
+```
+
+Only the physical LAN interface qualifies - `enp3s0` here; yours may be
+`eth0`, `wlan0`, `enp0s31f6`, or a bond. So `listen 192.0.2.24:443 ssl;`,
+using your own address in place of that one.
+
+Everything else on that list is disqualified, and two of them dangerously
+so. `lo` is where `ttyd` already is. `docker0` and every `br-<hash>` are
+Docker bridges - **these are the addresses a sandbox can reach**, so a proxy
+bound to one is a front door opening inward. If you are unsure which lines
+those are, ask for exactly them:
+
+```sh
+ip -br addr show type bridge   # every address here is disqualified
+```
+
+Cross-check from the other side, too: the address a running sandbox has a
+route to is the one to avoid, and the container will tell you which it is -
+`docker exec <container> ip route | grep default` names it.
+
+Afterwards, `ss -ltnp | grep <TTYD_PORT>` should show `ttyd` on `127.0.0.1`
+only, and `ss -ltnp` on your proxy's port should show the single LAN address
+you chose - not `*` and not `0.0.0.0`.
+
+### Verifying it
+
+Verify rather than assume. With a sandbox running, from inside it (adjust
+`7681` if you changed `TTYD_PORT`, and `443` to whatever port your proxy
+listens on):
 
 ```sh
 # the bridge gateway - the only host address this container can route to
@@ -632,6 +785,28 @@ passed `--readonly`), so an older build rejects the flag and
 too old: Debian bookworm's is 1.7.3 and Ubuntu 22.04's is 1.6.3, neither of
 which has the flag - Ubuntu 24.04's 1.7.4 does. Check with `ttyd --version`,
 and take an upstream release binary if the packaged one is behind.
+
+On Debian there is a middle option: sid packages **1.7.7**, and you can take
+that one package without moving the rest of the system to unstable. sid is
+not a configured source on a stable install, so add it - and pin it *below*
+your normal release, or the next `apt upgrade` follows it:
+
+```sh
+echo 'deb http://deb.debian.org/debian unstable main' \
+    | sudo tee /etc/apt/sources.list.d/sid.list
+
+# without this pin the whole system drifts to unstable
+printf 'Package: *\nPin: release a=unstable\nPin-Priority: 10\n' \
+    | sudo tee /etc/apt/preferences.d/99-sid
+
+sudo apt update
+sudo apt install -t unstable ttyd    # -t overrides the pin, for this package
+```
+
+Read what `apt` proposes before agreeing to it. One package from sid drags
+its libraries along, and if the plan includes `libc6` you are no longer
+taking one package - back out and use an upstream release binary instead.
+`apt_preferences(5)` has the details.
 
 `bin/dejima-ttyd` reads `TTYD_PORT` and launches
 `ttyd --interface 127.0.0.1 --port <port> --check-origin --url-arg --writable dejima-attach`.

@@ -2214,20 +2214,30 @@ readme_section() {
     run bash -c 'printf "%s\n" "$1" | grep -nE "\\\$host([^_a-zA-Z]|$)"' _ "$blocks"
     [ "$status" -ne 0 ]
 
-    # No package-manager one-liner for ttyd. Debian bookworm and Ubuntu 22.04
-    # both package a build older than 1.7.4, so an apt line here is an
-    # instruction that yields a broken front door - and a command in a fenced
-    # block is what gets copied, not the caveat beside it.
-    run bash -c 'printf "%s\n" "$1" | grep -nE "apt(-get)? install.*ttyd"' _ "$blocks"
+    # No bare package-manager one-liner for ttyd. A distro's default suite is
+    # where the too-old builds are - bookworm 1.7.3, Ubuntu 22.04 1.6.3 - so an
+    # untargeted apt line here is an instruction that yields a broken front
+    # door, and a command in a fenced block is what gets copied, not the caveat
+    # beside it. An explicitly release-targeted install (sid packages 1.7.7) is
+    # the one form that says which build you get, so only that is allowed.
+    run bash -c 'printf "%s\n" "$1" | grep -nE "apt(-get)? install .*ttyd" \
+        | grep -vE "install +-t +(unstable|sid) "' _ "$blocks"
     [ "$status" -ne 0 ]
 
+    # And a recipe that adds unstable has to pin it, or it is an instruction to
+    # drag the whole host to sid on the next upgrade.
+    if printf '%s\n' "$blocks" | grep -qE '\bunstable\b|\bsid\b'; then
+        printf '%s\n' "$blocks" | grep -q 'Pin-Priority'
+    fi
+
     # This repo is public, and this section is where an operator's own setup
-    # is most likely to leak in. Every absolute URL has to be loopback or a
-    # name that cannot belong to anyone (RFC 2606). test/static.bats catches
-    # address- and suffix-shaped leaks across the whole README; this catches
-    # a real ntfy topic, which is always a URL.
+    # is most likely to leak in. Every absolute URL has to be loopback, a name
+    # that cannot belong to anyone (RFC 2606), or one of a short list of public
+    # infrastructure hosts nobody could mistake for a personal one.
+    # test/static.bats catches address- and suffix-shaped leaks across the whole
+    # README; this catches a real ntfy topic, which is always a URL.
     run bash -c 'printf "%s\n" "$1" | grep -hoiE "https?://[a-z0-9.:@_-]+" \
-        | grep -viE "^https?://(127\.0\.0\.1(:[0-9]+)?|(www\.)?example\.(com|net|org)|[a-z0-9-]+\.(invalid|example|test))"' \
+        | grep -viE "^https?://(127\.0\.0\.1(:[0-9]+)?|(www\.)?example\.(com|net|org)|[a-z0-9-]+\.(invalid|example|test)|deb\.debian\.org)"' \
         _ "$section"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
