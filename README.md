@@ -1078,7 +1078,7 @@ instead of finding out the hard way:
 
 ```sh
 bats test/               # everything
-bats test/static.bats     # fast, no Docker/build needed
+bats test/static.bats test/project.bats test/remote.bats test/audit.bats  # fast, no Docker/build needed
 SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
 ```
 
@@ -1094,6 +1094,23 @@ enforcement in both directions, GitHub read-only, no working `sudo`/
 `iptables`/`init-firewall.sh` as `node`, capabilities actually stripped
 (not just absent from a `docker exec` that doesn't have them to begin
 with), `ulogd2` unprivileged, and the dynamic-ipset CDN-rotation fix.
+
+The other three need no Docker either. `project.bats` covers the
+declaration/approval split - what `.dejima/` may ask for, what only the host
+can grant, and that the approval store is never mounted. `remote.bats`
+covers everything under "Remote access": `remote.conf` parsing, the session
+registry, and the properties the feature's security rests on - that the
+notification path carries no sandbox-controlled byte, and that no marker
+name outside `waiting`/`done` is ever acted on. `audit.bats` covers
+`bin/dejima-audit`'s own diffing.
+
+One assertion is worth calling out because it can only run for real on a
+Docker host: `runtime.bats` proves that a service bound to the host's
+loopback is unreachable from inside a container while one bound to the
+bridge gateway *is* reachable. The second half is a positive control - it is
+what stops the first from passing in an environment where the container
+simply reaches nothing. That pair is the ttyd front door's whole containment
+argument, so run it before trusting a front door you just set up.
 
 Every mutation in `runtime.bats` (firewall rules, `ipset` entries) happens
 inside the test container's own network namespace, same as any other
@@ -1117,10 +1134,16 @@ likely to collide with a real container you have running.
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
+| `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see "Remote access" |
+| `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
+| `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
-| `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, and `bin/dejima`; not on PATH |
+| `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
+| `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
+| `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
+| `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,
 checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
