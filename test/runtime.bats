@@ -93,6 +93,19 @@ teardown_file() {
 }
 
 teardown() {
+    # Host listeners started by start_host_listener (unset for every other
+    # test - each test re-sources this file in its own shell, so nothing
+    # leaks in from the previous one). Killing them here rather than at the
+    # end of the test body is what makes the teardown unconditional: bats
+    # runs test bodies under errexit, so any failed assertion abandons the
+    # rest of the body, and a kill sitting there would leave a python
+    # process holding a port on the operator's host. teardown runs in the
+    # same shell as the body even after the body aborted, so the PIDs it
+    # set are visible here. An EXIT trap in the body is not the
+    # alternative - it replaces the one bats installs and the run dies
+    # reporting zero executed tests.
+    local pid
+    for pid in ${HOST_LISTENER_PIDS:-}; do kill "$pid" 2>/dev/null || true; done
     docker rm -f "dejima-test-override-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rmi "dejima-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
@@ -788,4 +801,74 @@ EOF
     kill "$PROXY_PID" "$FWD_PID" 2>/dev/null || true
     [ "$status" -eq 0 ]
     [[ "$output" == *"proxy-ok"* ]]
+}
+
+# Starts a host-side TCP listener bound to $1, waits until it accepts a
+# connection, and leaves its port in HOST_LISTENER_PORT. Binding port 0 and
+# reading the port back (the same trick fixtures/fake-anthropic.py uses) is
+# what keeps the test below honest: the kernel only hands out a port nothing
+# else holds, so whatever answers is provably this listener and not some
+# unrelated service that happened to own a hardcoded number. The handler has
+# no do_* methods, so it serves nothing at all - only the accept() matters,
+# and the gateway-bound instance is briefly reachable by every container on
+# this host's bridge. Called plainly, never in a command substitution: it has
+# to append to HOST_LISTENER_PIDS in the caller's shell for teardown to see it.
+start_host_listener() {
+    local bind_addr="$1" port_file="$BATS_TEST_TMPDIR/listener-port-$1"
+    python3 -c 'import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+s = ThreadingHTTPServer((sys.argv[1], 0), BaseHTTPRequestHandler)
+print(s.server_address[1], flush=True)
+s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
+    HOST_LISTENER_PIDS="${HOST_LISTENER_PIDS:-} $!"
+
+    for _ in $(seq 1 50); do [ -s "$port_file" ] && break; sleep 0.1; done
+    HOST_LISTENER_PORT="$(cat "$port_file")"
+    [ -n "$HOST_LISTENER_PORT" ]
+    timeout 5 bash -c "cat < /dev/null > /dev/tcp/$bind_addr/$HOST_LISTENER_PORT"
+}
+
+@test "a host service bound to loopback is unreachable from inside the container, one bound to the bridge gateway is reachable" {
+    # The regression test for the escape path bin/dejima-ttyd's
+    # --interface 127.0.0.1 exists to close. init-firewall.sh deliberately
+    # ACCEPTs OUTPUT to the Docker bridge gateway, and a tmux client attached
+    # through ttyd is a host shell - the prefix key opens a window outside the
+    # container - so a ttyd the sandbox could reach would be a full escape.
+    # Prove the containment property holds rather than trusting the flag.
+    local container host_ip loopback_port gateway_port
+    container="$(container_name)"
+
+    # Derived exactly as init-firewall.sh derives HOST_IP, so this is the one
+    # host address the container's OUTPUT chain accepts at all.
+    host_ip="$(docker exec "$container" sh -c "ip route | grep default | cut -d' ' -f3")"
+    [ -n "$host_ip" ]
+
+    start_host_listener 127.0.0.1
+    loopback_port="$HOST_LISTENER_PORT"
+    start_host_listener "$host_ip"
+    gateway_port="$HOST_LISTENER_PORT"
+
+    # Setup check, from the host's own vantage point: the loopback listener's
+    # port must answer on 127.0.0.1 only. bind(0) on two different addresses
+    # can legally return the same port number, and if it had, the container
+    # probe below would be hitting the gateway listener and failing for a
+    # reason that has nothing to do with containment.
+    run timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    [ "$status" -ne 0 ]
+
+    # Positive control, and the reason the negative one means anything: same
+    # container, same docker exec, same timeout/bash /dev/tcp probe, same
+    # gateway address - only the port differs. Without it a `status -ne 0` is
+    # equally satisfied by docker exec failing (125), bash or timeout missing
+    # from the image (127), or a container that can reach nothing at all, none
+    # of which say anything about loopback.
+    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$gateway_port"
+    [ "$status" -eq 0 ]
+
+    # Deliberately not asserting the exact status. 1 (the host RSTs, since
+    # nothing is bound on the gateway address at this port) is what it should
+    # be, but a host that DROPs on its own docker bridge instead yields 124
+    # from timeout, and that is still containment.
+    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    [ "$status" -ne 0 ]
 }
