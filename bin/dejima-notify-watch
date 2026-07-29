@@ -255,9 +255,11 @@ fi
 # arithmetic), but a --once run that never exits is a bad way to find out.
 [ -z "$ONCE" ] || exit 0
 
-# inotify-tools is optional: without it this degrades to a 5s poll rather
-# than failing. The -t 30 timeout also closes the race where a marker lands
-# in a run directory created after the current watch was established.
+# inotify-tools is optional: without it this degrades to a ~6s poll rather
+# than failing - the 1s floor below plus the 5s fallback sleep, which is the
+# interval a scan actually repeats at. The -t 30 timeout also closes the race
+# where a marker lands in a run directory created after the current watch was
+# established.
 while :; do
     scan
     # A floor under the loop, unconditional and ahead of the wait: inotify

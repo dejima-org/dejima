@@ -47,6 +47,14 @@ if ! remote_enabled; then
     exit 1
 fi
 
+# Read BEFORE the ttyd check below, deliberately: an operator with both a
+# broken remote.conf and no ttyd is otherwise told only about the package,
+# installs it, comes back to the identical failure, and never learns that
+# their config is the other half of it. remote_ttyd_port validates the whole
+# file and names the line that broke it, and a failure here is fatal under
+# set -e on the assignment.
+port="$(remote_ttyd_port)"
+
 # Checked rather than left to exec, whose failure is bash's "ttyd: not found"
 # on a line number - true, and useless to an operator who needs to know that
 # the missing piece is a package.
@@ -57,6 +65,5 @@ if ! command -v ttyd >/dev/null 2>&1; then
     exit 1
 fi
 
-port="$(remote_ttyd_port)"
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
     "$SCRIPT_DIR/dejima-attach"

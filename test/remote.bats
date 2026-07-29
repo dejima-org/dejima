@@ -1673,6 +1673,43 @@ unit_exec_start() {
     [[ "$output" == *"needs it, 1.7.4 or newer"* ]]
 }
 
+@test "dejima-ttyd reports a broken remote.conf before it reports a missing ttyd" {
+    # An operator missing both pieces is otherwise sent to install a package,
+    # after which they hit the identical failure having never been told that
+    # their config is the other half of it. The config error is also the one
+    # they cannot work out for themselves.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
+    # The same isolated PATH the missing-ttyd test uses, so the absence is a
+    # property of this test rather than of whoever runs it.
+    STUB_DIR="$(mktemp -d)"
+    for tool in readlink dirname; do
+        ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
+    done
+    run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TTYD_PORT out of range"* ]]
+    [[ "$output" != *"ttyd is not installed"* ]]
+}
+
+@test "a malformed remote.conf does not take the attach front door down with it" {
+    # dejima-attach reads no VALUE out of remote.conf - to it the file is a
+    # switch, and all it asks is whether it exists - so a bad line cannot
+    # change what it does, and refusing over one would take away the terminal
+    # an operator would fix the file from. The scripts that DO consume a value
+    # refuse, on the same file, which is the contrast the README draws.
+    printf 'GARBAGE LINE WITH NO EQUALS\n' > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    write_entry 0123456789abcdef '' ''
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed line"* ]]
+}
+
 @test "dejima-ttyd refuses an out-of-range TTYD_PORT rather than launching without one" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
@@ -2124,6 +2161,12 @@ readme_section() {
     has -F 'hooks/dejima-notify.sh'
     has -F 'docs/nginx-dejima.conf.example'
     has -F 'systemctl --user enable'
+    # The step that keeps those user units - and the session registry that
+    # lives in the runtime directory they read - alive across a logout. An
+    # operator who skips it has a front door that works only while they hold
+    # an interactive session on the host, which is the case the feature
+    # exists for.
+    has -F 'enable-linger'
     # Derived from what the repo ships: a third unit cannot be added and left
     # undocumented. (Full names, so "dejima-ttyd" alone does not satisfy it.)
     local unit

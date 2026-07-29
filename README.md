@@ -538,9 +538,17 @@ end up in an HTTP header and in a URL handed to a phone.
 
 **A malformed file is a hard failure, not a warning.** The whole file is
 validated on every read, not just the key being asked for: an unknown key, a
-value outside that character set, or a line without an `=` makes every
-remote-access script refuse to start and say which line was wrong. A
-`TTYD_PORT` that isn't a number in 1-65535 is refused the same way.
+value outside that character set, or a line without an `=` makes
+`dejima-ttyd` and `dejima-notify-watch` refuse to start and say which line
+was wrong. A `TTYD_PORT` that isn't a number in 1-65535 is refused the same
+way.
+
+Those are the two scripts that read a *value* out of the file.
+`dejima-attach` and `bin/dejima` do not - to them the file is a switch, and
+all they ask is whether it exists - so neither one parses it and neither
+refuses on a bad line. That is deliberate rather than an oversight: a
+malformed line cannot change what they do, and making the front door refuse
+to open over a typo would take away the terminal you would fix it from.
 
 ```
 # ~/.config/dejima/remote.conf - substitute your own topic and hostname
@@ -697,9 +705,10 @@ systemctl --user enable --now dejima-notify-watch.service
 ```
 
 `inotify-tools` is optional - without `inotifywait` the watcher degrades to
-a five-second poll rather than failing. Repeat markers for the same session
-and event inside 60 seconds are debounced (`DEJIMA_DEBOUNCE_SECONDS`
-overrides that).
+a roughly six-second poll rather than failing (a one-second floor under the
+loop plus a five-second sleep). Repeat markers for the same session and
+event inside 60 seconds are debounced (`DEJIMA_DEBOUNCE_SECONDS` overrides
+that).
 
 One environment gotcha, because it fails silently: the watcher and
 `bin/dejima` both resolve the marker root as `${XDG_RUNTIME_DIR:-/tmp}/dejima`,
@@ -709,6 +718,31 @@ run from a context that has neither - a bare `su`, a cron job, a tmux server
 started before login - writes its markers under `/tmp/dejima` while the unit
 watches `/run/user/<uid>/dejima`, and no push is ever sent, with nothing
 logged to say so. `systemctl --user show-environment` is where to check.
+
+The same directory is why you probably want lingering on:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+Both units here are *user* units. Without lingering they are stopped at
+logout and `/run/user/<uid>` is destroyed with the session, taking the
+session registry and every marker with it - so a sandbox left running in a
+detached tmux session has no front door and sends no notification until you
+log in again. It fails closed rather than open (nothing is left listening
+unguarded), but it fails invisibly, and it is the same `XDG_RUNTIME_DIR`
+that the gotcha above is about.
+
+**The marker directory is a write channel into your runtime tmpfs**, and
+nothing bounds it. `/run/user/<uid>` is RAM-backed and sized at a fraction
+of physical memory, and each session gets its own directory under it
+bind-mounted read-write, so a session that writes into `/run/dejima-notify`
+until it is full degrades your whole login session - D-Bus, the systemd user
+manager - and not just dejima. A session can already fill the workspace
+mount, so this is an increment rather than a new kind of exposure, but a
+RAM-backed filesystem fails harder and sooner than a disk. There is
+deliberately no quota here; `rm -rf` on that run's marker directory (or
+logging out, which discards the tmpfs) is the recovery.
 
 **What a notification contains.** A title of `dejima: <project> needs input`
 (or `dejima: <project> finished`), a fixed one-line body, and - when
