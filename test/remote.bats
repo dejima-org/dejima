@@ -1805,29 +1805,83 @@ unit_exec_start() {
     grep -q '<hostname>' "$REPO_ROOT/docs/nginx-dejima.conf.example"
 }
 
+# One line per server block in the example: its listen line and whether the
+# block authenticates, proxies, refuses, and is the default for its address.
+#
+# Per BLOCK rather than per file, because every property these tests care
+# about is a per-block directive. A file-wide `grep -q auth_basic` passes on a
+# file whose second block has none, and that block is the open door. Braces
+# are counted rather than matched on indentation, so the `location` block
+# nested inside a server doesn't end it early.
+nginx_blocks() {
+    awk '
+        function count(s, ch,   n, i) {
+            n = 0
+            for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == ch) n++
+            return n
+        }
+        !inb && /^[[:space:]]*server[[:space:]]*\{/ {
+            inb = 1; depth = 0
+            listen = "NONE"; auth = 0; pass = 0; reject = 0; def = 0
+        }
+        inb {
+            if ($0 ~ /^[[:space:]]*listen[[:space:]]/)          listen = $0
+            if ($0 ~ /^[[:space:]]*auth_basic[[:space:]]+"/)    auth = 1
+            if ($0 ~ /^[[:space:]]*proxy_pass[[:space:]]/)      pass = 1
+            if ($0 ~ /^[[:space:]]*ssl_reject_handshake[[:space:]]+on;/ ||
+                $0 ~ /^[[:space:]]*return[[:space:]]+444;/)     reject = 1
+            if ($0 ~ /default_server/)                          def = 1
+            depth += count($0, "{") - count($0, "}")
+            if (depth <= 0) {
+                printf "auth=%d pass=%d reject=%d def=%d listen=<%s>\n", \
+                    auth, pass, reject, def, listen
+                inb = 0
+            }
+        }
+    ' "$1"
+}
+
 @test "the nginx example cannot be loaded as-is and never binds every interface" {
-    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example" block n=0
     [ -f "$ex" ]
     grep -q '/path/to/' "$ex"
-    # At least one listen, and no listen line that omits the placeholder
-    # address: a bare `listen 443 ssl;` binds every interface, including the
-    # bridge address the container can reach.
-    run grep -cE '^[[:space:]]*listen[[:space:]]+<LAN-IP>:' "$ex"
-    [ "$status" -eq 0 ]
-    [ "$output" -ge 1 ]
-    # Per listen line, not per file: a SECOND server block - `listen
-    # <LAN-IP>:80;` with no ssl and no auth - satisfies every file-wide grep
-    # here while serving an unauthenticated host shell in the clear.
-    run bash -c 'grep -hE "^[[:space:]]*listen[[:space:]]" "$1" \
-        | grep -vE "<LAN-IP>:[0-9]+[[:space:]]+ssl;"' _ "$ex"
-    [ "$status" -ne 0 ]
-    # And every block has one. A server block with NO listen is not caught by
-    # anything above, and nginx defaults it to *:80 - the wildcard plaintext
-    # bind this whole test exists to forbid.
-    local servers listens
-    servers="$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$ex")"
-    listens="$(grep -cE '^[[:space:]]*listen[[:space:]]' "$ex")"
-    [ "$listens" -ge "$servers" ]
+    while IFS= read -r block; do
+        n=$((n + 1))
+        # Every block, every listen. A bare `listen 443 ssl;` binds every
+        # interface including the bridge address a container can reach, and a
+        # block with NO listen at all is not caught by grepping listen lines -
+        # nginx defaults it to *:80, the same wildcard bind in the clear.
+        [[ "$block" == *"listen=<"*"<LAN-IP>:"* ]] \
+            || { echo "block $n does not listen on the placeholder address: $block" >&2; false; }
+        [[ "$block" == *" ssl"* || "$block" == *" ssl;"* ]] \
+            || { echo "block $n listens without ssl: $block" >&2; false; }
+    done < <(nginx_blocks "$ex")
+    [ "$n" -ge 2 ]
+}
+
+@test "the nginx example refuses every hostname but its own" {
+    local ex="$REPO_ROOT/docs/nginx-dejima.conf.example" block defaults=0
+    [ -f "$ex" ]
+    # nginx serves the DEFAULT server for a listen address whenever the Host
+    # matches no server_name, and with a single block that default IS the
+    # front door - so it answers to every name resolving to that address, the
+    # box's own included, and server_name isolates nothing. The example has to
+    # ship a default that refuses, or the isolation it appears to describe
+    # does not exist.
+    while IFS= read -r block; do
+        case "$block" in
+            *"def=1"*)
+                defaults=$((defaults + 1))
+                # The default block must be the one that serves NOTHING.
+                [[ "$block" == *"reject=1"* ]] \
+                    || { echo "the default server does not refuse: $block" >&2; false; }
+                [[ "$block" == *"pass=0"* ]] \
+                    || { echo "the default server proxies to ttyd: $block" >&2; false; }
+                ;;
+        esac
+    done < <(nginx_blocks "$ex")
+    [ "$defaults" -eq 1 ]
+    grep -qE '^[[:space:]]*server_name[[:space:]]+<hostname>;' "$ex"
 }
 
 @test "the nginx example proxies to the port dejima-ttyd defaults to, over a connection that can idle" {
@@ -1857,16 +1911,28 @@ unit_exec_start() {
     grep -qE '^[[:space:]]*auth_basic[[:space:]]' "$ex"
     grep -qE '^[[:space:]]*auth_basic_user_file[[:space:]]' "$ex"
     grep -qE '^[[:space:]]*ssl_certificate[[:space:]]' "$ex"
-    # Counted against the server blocks rather than just found somewhere: auth
-    # is a per-block directive, so one block with it and one without passes
-    # every "is it present" grep and still leaves an open door.
+    # Judged per block, because auth is a per-block directive: one block with
+    # it and one without passes every "is it present" grep and still leaves an
+    # open door. The rule is about what a block SERVES - anything that can
+    # reach ttyd needs authentication, and a block with none is only allowed
+    # if it serves nothing at all.
     # A realm, not just the directive: `auth_basic off;` IS an auth_basic line
     # and turns authentication off for the block it is in.
-    local servers auths
-    servers="$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$ex")"
-    auths="$(grep -cE '^[[:space:]]*auth_basic[[:space:]]+"' "$ex")"
-    [ "$servers" -ge 1 ]
-    [ "$auths" -ge "$servers" ]
+    local block proxies=0
+    while IFS= read -r block; do
+        case "$block" in
+            *"pass=1"*)
+                proxies=$((proxies + 1))
+                [[ "$block" == *"auth=1"* ]] \
+                    || { echo "a block proxies to ttyd without authentication: $block" >&2; false; }
+                ;;
+            *"auth=0"*)
+                [[ "$block" == *"reject=1"* ]] \
+                    || { echo "a block without authentication serves something: $block" >&2; false; }
+                ;;
+        esac
+    done < <(nginx_blocks "$ex")
+    [ "$proxies" -ge 1 ]
     run grep -nE '^[[:space:]]*auth_basic[[:space:]]+off' "$ex"
     [ "$status" -ne 0 ]
     # ttyd is started --writable and with no credential of its own, so nginx

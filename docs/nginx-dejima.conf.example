@@ -37,9 +37,31 @@
 #      has to be $http_host, which keeps the port, on any listen other
 #      than 443. See the comment on that line.
 #
+#   3. The catch-all below. nginx chooses a server block by SNI/Host, and
+#      when nothing matches it serves the DEFAULT server for that listen
+#      address - which, if the vhost below is the only block on it, is the
+#      vhost below. `server_name` therefore isolates nothing by itself: with
+#      one block, this front door answers to EVERY name that resolves to
+#      this address, the box's own hostname included. What is behind it is a
+#      host shell, so the reject block comes first and takes that role.
+#
 # TLS is not optional either: HTTP Basic sends the password on every request,
 # and the terminal itself carries whatever the session is working on.
 # ---------------------------------------------------------------------------
+
+# Refuses every name that is not the vhost below. Without it, `server_name`
+# is decorative and any hostname pointed at this address reaches the shell.
+#
+# If you ALREADY have a default_server on this address:port, don't add a
+# second - nginx refuses to start ("duplicate default server") - just make
+# sure the existing one doesn't fall through to the block below.
+server {
+    listen <LAN-IP>:443 ssl default_server;
+    # Refuses at the TLS layer, so it needs no certificate of its own
+    # (nginx 1.19.4+). On older nginx, give this block the same certificate
+    # as the vhost below and `return 444;` instead.
+    ssl_reject_handshake on;
+}
 
 server {
     # One specific address. Not the wildcard form, not the Docker bridge.

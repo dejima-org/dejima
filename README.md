@@ -161,8 +161,10 @@ wrong still looks like it works.
 4. **Web front door.** Get `ttyd` 1.7.4 or newer, install
    `systemd/dejima-ttyd.service` as a *user* unit, and put a reverse proxy in
    front of it adapted from `docs/nginx-dejima.conf.example` — with
-   authentication on every server block, TLS, and
-   `proxy_set_header Host $http_host`. →
+   authentication on every server block, TLS, a `default_server` that
+   refuses every other hostname, and
+   `proxy_set_header Host $http_host`. Make sure the name you pick actually
+   resolves to this box and your certificate covers it. →
    [Web front door](#web-front-door)
 5. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
    way, then `loginctl enable-linger "$USER"` so both units survive logout. →
@@ -846,6 +848,15 @@ and forgotten. What matters in it:
   credential of its own, because the loopback bind means only this host can
   reach it - the proxy is the entire gate. A block without `auth_basic` is
   an unauthenticated host shell on your network.
+- **A `default_server` that refuses.** nginx picks a server block by
+  SNI/`Host`, and when nothing matches it serves the **default** for that
+  listen address - which, if the front door is the only block on it, is the
+  front door. `server_name` on its own therefore isolates nothing: the vhost
+  answers to *every* name that resolves to that address, including the box's
+  own hostname. The example ships a first block that is `default_server` and
+  does nothing but `ssl_reject_handshake on;`, so only the name you chose
+  gets through. If you already have a default server on that address, keep
+  the one you have - just make sure it doesn't fall through to this vhost.
 - **TLS.** HTTP Basic sends the password on every request, and the terminal
   itself carries whatever the session is working on.
 - **`proxy_set_header Host $http_host;`** — `$http_host`, not `$host`.
