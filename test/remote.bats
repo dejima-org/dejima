@@ -547,6 +547,62 @@ start_tmux() {
     [[ "$output" == *"attachable"* ]]
 }
 
+# The picker is a human view; --list is a machine interface, and three things
+# read it that way at once - the picker itself splits those rows on tabs to
+# build its columns, ttyd feeds a run id from them back in through --url-arg,
+# and the README documents them as scriptable. Colour in list_sessions would
+# break all three, and no other test here can see it: bats never gives the
+# script a terminal, which is the condition the colour is gated on. `script`
+# supplies one.
+@test "colour reaches the picker but never --list" {
+    : > "$CONFIG_DIR/remote.conf"
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    run script -qec "'$REPO_ROOT/bin/dejima-attach' --list" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" != *$'\033'* ]]
+    # Still tab-separated, so the shape the other readers rely on is intact
+    # rather than merely uncoloured.
+    [[ "$output" == *$'\t'"work:1"$'\t'* ]]
+
+    run script -qec "echo q | '$REPO_ROOT/bin/dejima-attach'" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033'* ]]
+    [[ "$output" == *"dejima"* ]]
+
+    # NO_COLOR is honoured on that same terminal, and the box-drawing glyphs
+    # ride the same switch - so the fallback is plain in both senses.
+    run script -qec "NO_COLOR=1 sh -c 'echo q | \"$REPO_ROOT/bin/dejima-attach\"'" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" != *$'\033'* ]]
+    [[ "$output" == *"dejima | live sessions"* ]]
+}
+
+# Provenance, pinned offline. Upstream's color.table is the authority, but a
+# test cannot go and fetch it, so the name->hex half is transcribed from it
+# here. The half that catches a typo is checked rather than transcribed: every
+# escape is decoded back to a hex and compared against the one written beside
+# it, so a value edited in one place and not the other fails here instead of
+# shipping under the name "gruvbox".
+@test "the picker's palette is gruvbox, by upstream's own values" {
+    local -A gruvbox=(
+        [bright_orange]=fe8019  [light1]=ebdbb2        [gray_245]=928374
+        [dark4]=7c6f64          [dark2]=504945         [bright_green]=b8bb26
+        [bright_yellow]=fabd2f  [bright_red]=fb4934    [bright_blue]=83a598
+    )
+    local seen=0 r g b name hex
+    while read -r r g b name hex; do
+        seen=$((seen + 1))
+        [ "${gruvbox[$name]:-unknown}" = "$hex" ]
+        [ "$(printf '%02x%02x%02x' "$r" "$g" "$b")" = "$hex" ]
+    done < <(sed -n \
+        "s/.*38;2;\([0-9]*\);\([0-9]*\);\([0-9]*\)m'.*# \([a-z_0-9]*\) *#\([0-9a-f]*\).*/\1 \2 \3 \4 \5/p" \
+        "$REPO_ROOT/bin/dejima-attach")
+    [ "$seen" -eq "${#gruvbox[@]}" ]
+}
+
 @test "attaching creates a grouped session on the requested window and disposes of it on detach" {
     # The positive direction, which is where every interesting tmux mistake
     # lives: an invalid set-option target, or setting destroy-unattached while
