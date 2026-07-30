@@ -173,7 +173,9 @@ wrong still looks like it works.
 5. **If you will read it on a phone**, take the `sub_filter` viewport line
    from the example config too. `ttyd` ships no viewport meta, so without it
    the mobile view is unreadably small and will not reflow. →
-   [Reading it on a phone](#reading-it-on-a-phone)
+   [Reading it on a phone](#reading-it-on-a-phone). Typing from one has its
+   own gotcha, which nothing here can fix. →
+   [Typing on a phone](#typing-on-a-phone)
 6. **If another reverse proxy sits in front of this one**, it needs SNI, a
    single literal `Host`, the upgrade headers and its own long read timeout —
    and it changes the threat model. →
@@ -683,6 +685,20 @@ TTYD_PORT=7681
 # TTYD_FONT_SIZE=20   # optional, and applies to the desktop too
 ```
 
+**Editing this file changes nothing until the services restart.** Every value
+is read once, at process start - `dejima-ttyd` reads `TTYD_PORT` and
+`TTYD_FONT_SIZE` and then `exec`s `ttyd` with them baked into its argv. So:
+
+```sh
+systemctl --user restart dejima-ttyd.service
+systemctl --user restart dejima-notify-watch.service   # if NTFY_URL changed
+pgrep -a ttyd    # confirm the argv is what you just configured
+```
+
+Skipping this is quiet rather than loud: nothing warns, and the front door
+keeps serving with the old settings, which reads as "the setting had no
+effect" rather than as "the process is older than the file".
+
 ### The bind address is the one thing to get right
 
 This is the step that carries the whole feature's security, and the only one
@@ -939,21 +955,52 @@ the way past. `docs/nginx-dejima.conf.example` ships it:
 sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
 sub_filter_once on;
 proxy_set_header Accept-Encoding "";
+add_header Cache-Control "no-store" always;
 ```
 
 Now the browser lays out at the device's real width, xterm.js fits an honest
 column count to it, and rotating the phone reflows properly. Desktop
 browsers ignore `width=device-width`, so nothing changes there.
 
-Two things that will waste your time if you skip them:
+Three things that will waste your time if you skip them:
 
-- Your nginx needs the sub module. A missing one is a config error at
-  reload, not a silent no-op - confirm with
-  `nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module`. Debian's `nginx-light`
-  is built without it; `nginx-core`, `nginx-full` and `nginx-extras` have it.
+- Your nginx needs the sub module, and a missing one fails *quietly*. Check
+  for it up front, and validate with **`nginx -t`** rather than trusting the
+  reload - a reload whose config does not parse leaves the *old* config
+  running while `systemctl reload nginx` still reports success, so an unknown
+  `sub_filter` directive looks from the outside exactly like a directive that
+  ran and did nothing.
+
+  ```sh
+  /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
+  sudo /usr/sbin/nginx -t
+  ```
+
+  The path is spelled out because Debian and Ubuntu install nginx to
+  `/usr/sbin`, which is on root's `PATH` and not on yours - a bare `nginx -V`
+  answers `command not found` on a box that is running nginx perfectly well.
+  Debian's `nginx-light` is built without the module; `nginx-core`,
+  `nginx-full` and `nginx-extras` have it.
 - `sub_filter` cannot rewrite a compressed response body and passes it
   through untouched, which looks exactly like the tag not working. Clearing
   `Accept-Encoding` toward the upstream is what stops that.
+- **Your phone may already be holding the un-injected page.** `ttyd` sends it
+  with no `Cache-Control`, no `ETag` and no `Last-Modified`, and a response
+  with neither freshness information nor a validator is cacheable for as long
+  as the browser feels like it. Fine while the body is served verbatim; a trap
+  once the proxy rewrites it, because the stale copy renders forever and the
+  injection reads as broken long after it works. `add_header Cache-Control
+  "no-store" always;` closes it going forward - to check *right now*, load the
+  front door in a private tab, which bypasses the cache without clearing
+  anything else.
+
+Confirm it server-side before blaming the browser, or the other way round -
+the first 220 bytes of the response settle it, and the tag should sit ahead
+of `<meta charset>`:
+
+```sh
+curl -sk -u USER:PASS https://<front-door>/ | head -c 220; echo
+```
 
 If the text is still smaller than you want once the layout is honest, set
 `TTYD_FONT_SIZE` in `remote.conf` (8-72). Be aware of what it costs:
@@ -964,6 +1011,42 @@ give a phone one size and the desktop another. A larger size also means
 fewer columns, and because attaching shares the window with your desktop
 session, tmux resizes that window to whichever client used it last. Start by
 fixing the viewport and only reach for this if you still need it.
+
+### Typing on a phone
+
+Text you already typed reappears a batch at a time, sometimes cascading into
+another batch. Backspacing clears it; a few characters later it happens
+again.
+
+**It is the keyboard's autocorrect**, and two things locate it there. The
+duplicated characters are real input you can backspace over rather than a
+redraw artifact, and the WebSocket runs over TCP, which cannot deliver the
+same bytes twice - so the browser is emitting them. And it reproduces on
+demand: a long run of digits never duplicates, while ordinary words duplicate
+on every correction the keyboard makes - `fix` to `fox`, `lets` to `let's`.
+When a soft keyboard *replaces* a span it has already committed, xterm.js
+re-sends the whole contents of its hidden input element instead of the
+difference, so the entire line replays.
+
+xterm.js already asks the keyboard not to do this - it sets `autocorrect`,
+`autocapitalize` and `spellcheck` to off on that element as it creates it -
+and Android ignores all three. This is a general `ttyd`/xterm.js interaction
+with predictive keyboards, and there is no lever here, in the proxy or in
+`dejima-ttyd`, that reaches it.
+
+So use a keyboard with nothing to correct against. **Unexpected Keyboard**
+(F-Droid or Play Store) was written for Termux users and fits well: its word
+suggestions need a dictionary you download yourself, so a fresh install has
+nothing to autocorrect with, and Ctrl, Alt, Esc, Tab, the arrows and the
+function keys are all real keys, reached by swiping a key toward the corner
+the symbol is printed in. That second half matters more than the bug does -
+without Ctrl there is no tmux prefix, and Esc and the arrows are hard to do
+without in anything interactive. Android's keyboard switcher makes it a
+per-session choice rather than a replacement for the keyboard you use for
+everything else.
+
+Turning autocorrect off in the keyboard you already have fixes it too, at the
+cost of losing the correction everywhere else.
 
 ### Behind another reverse proxy
 
