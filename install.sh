@@ -141,8 +141,8 @@ link_bin dejima-allow
 link_bin dejima-dep
 link_bin dejima-project
 
-# Remote access (opt-in, see README). All three are inert without
-# ~/.config/dejima/remote.conf - they refuse to run at all - so linking them
+# Remote access (opt-in, see docs/remote-access.md). All three are inert
+# without ~/.config/dejima/remote.conf - they refuse to run at all - so linking
 # unconditionally adds no front door and costs nothing. The user units in
 # systemd/ are deliberately NOT copied or enabled here: standing up a front
 # door is an explicit operator decision, and this script never touches
@@ -166,8 +166,8 @@ source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
 remote_conf="$(remote_conf_path)"
 if [ -f "$remote_conf" ]; then
     echo "Remote access is configured ($remote_conf); this script did not start or stop anything."
-    echo "See README \"Remote access\"."
+    echo "See docs/remote-access.md."
 else
     echo "Remote access is available but not configured - nothing is listening."
-    echo "See README \"Remote access\" to turn it on."
+    echo "See docs/remote-access.md to turn it on."
 fi

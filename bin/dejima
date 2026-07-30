@@ -414,7 +414,7 @@ fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
-# bin/dejima-anthropic-proxy and README "Security notes"), mount an
+# bin/dejima-anthropic-proxy and docs/security.md), mount an
 # empty file over ~/.claude/.credentials.json and an empty read-only
 # directory over ~/.claude/.credentials-proxy-tmp (the proxy's write-back
 # staging directory - the parent ~/.claude mount must stay read-write, so
@@ -466,7 +466,7 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
 
-# Optional remote access (see README "Remote access"). Entirely skipped
+# Optional remote access (see docs/remote-access.md). Entirely skipped
 # unless ~/.config/dejima/remote.conf exists - with it absent nothing below
 # runs, no state is created, and the compose invocation is exactly what it
 # was before this feature existed.

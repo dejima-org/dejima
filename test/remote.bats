@@ -2333,55 +2333,51 @@ nginx_blocks() {
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
 }
 
-# The body of a "## <name>" section, up to the next same-level heading. Every
-# documentation assertion below runs against this rather than the whole file:
-# a string that only has to appear *somewhere* in a 900-line README is
-# satisfied by an unrelated section, and would keep passing after the section
-# it was meant to check was deleted.
-readme_section() {
-    awk -v want="## $1" '
-        $0 == want { inside = 1; next }
-        inside && /^## / { exit }
-        inside
-    ' "$REPO_ROOT/README.md"
+# The whole doc this feature is documented in. It used to be one "## Remote
+# access" section awk'd out of the README, and the carving was the point: a
+# string that only has to appear *somewhere* in a 900-line README is satisfied
+# by an unrelated section. Its own file gives that for free.
+remote_doc() {
+    cat "$REPO_ROOT/docs/remote-access.md"
 }
 
-@test "the README section the front doors point readers at exists under the name they use" {
-    # bin/dejima-ttyd, install.sh and four more end their diagnostics with
-    # `See README "Remote access"`. Nothing else in the repo notices when one
-    # side of that is renamed: the scripts still run, the README still reads
-    # fine, and the operator who most needs the section is sent nowhere. The
-    # name is READ OUT of the script rather than written here twice, so a
-    # rename on the code side fails this test instead of quietly passing it.
+@test "the doc the front doors point readers at exists at the path they name" {
+    # bin/dejima-ttyd, install.sh and five more end their diagnostics with
+    # `See docs/remote-access.md`. Nothing else in the repo notices when one
+    # side of that moves: the scripts still run, the doc still reads fine, and
+    # the operator who most needs it is sent nowhere. The path is READ OUT of
+    # the script rather than written here twice, so a rename on the code side
+    # fails this test instead of quietly passing it.
     #
-    # Normalized before matching, because the reference is not written the
-    # same way twice: dejima-ttyd carries it as a plain comment, install.sh
-    # and dejima-attach escape both quotes inside an echo, and the notify
-    # hook's wraps across two comment lines. Dropping backslashes, joining
-    # lines and squashing '#' and runs of spaces makes all three the same
-    # string without making the pattern itself lax.
-    ref() { tr -d '\\' < "$1" | tr '\n' ' ' | sed 's/#/ /g; s/  */ /g'; }
-    local name
-    name="$(ref "$REPO_ROOT/bin/dejima-ttyd" | grep -m1 -oE 'README "[^"]+"' \
-        | sed 's/^README "//; s/"$//')"
-    [ -n "$name" ]
-    grep -qxF "## $name" "$REPO_ROOT/README.md"
+    # Normalized before matching, because the reference is not written the same
+    # way twice: dejima-ttyd carries it on one comment line, while
+    # dejima-attach's and the notify hook's wrap across two. Joining lines and
+    # squashing '#' and runs of spaces makes all three the same string without
+    # making the pattern itself lax.
+    ref() { tr '\n' ' ' < "$1" | sed 's/#/ /g; s/  */ /g'; }
+    local doc
+    doc="$(ref "$REPO_ROOT/bin/dejima-ttyd" | grep -m1 -oE 'docs/[a-z-]+\.md')"
+    [ -n "$doc" ]
+    [ -f "$REPO_ROOT/$doc" ]
+    # Reachable from the README too, not only from the scripts: the section it
+    # was extracted from is now a stub whose one job is to link here.
+    grep -qF "($doc)" "$REPO_ROOT/README.md"
 
     # And every other file that points at this feature points at the SAME
-    # name - one renamed pointer is as dangling as one renamed heading.
+    # path - one stale pointer is as dangling as one moved file.
     local f
     for f in bin/dejima-attach bin/dejima-ttyd bin/dejima-notify-watch \
              bin/dejima bin/dejima-project-lib.sh hooks/dejima-notify.sh install.sh; do
-        ref "$REPO_ROOT/$f" | grep -qF "README \"$name\"" || {
-            echo "$f does not point at README \"$name\"" >&2
+        ref "$REPO_ROOT/$f" | grep -qF "$doc" || {
+            echo "$f does not point at $doc" >&2
             false
         }
     done
 }
 
-@test "the README documents every remote access setup step" {
+@test "docs/remote-access.md documents every remote access setup step" {
     local section
-    section="$(readme_section 'Remote access')"
+    section="$(remote_doc)"
     [ -n "$section" ]
     # has <-F|-E> <pattern>. Fails the test on the first missing item, naming
     # it - a bare grep chain reports only a line number. The pattern goes
@@ -2389,7 +2385,7 @@ readme_section() {
     # flag, which grep would otherwise try to interpret as its own.
     has() {
         printf '%s\n' "$section" | grep -q "$1" -e "$2" || {
-            echo "README \"Remote access\" is missing: $2" >&2
+            echo "docs/remote-access.md is missing: $2" >&2
             return 1
         }
     }
@@ -2467,15 +2463,15 @@ readme_section() {
     has -F '?arg='
 }
 
-@test "the README's remote access section repeats no advice that would break or unbolt the front door" {
+@test "docs/remote-access.md repeats no advice that would break or unbolt the front door" {
     local section
-    section="$(readme_section 'Remote access')"
+    section="$(remote_doc)"
     [ -n "$section" ]
 
-    # Both checks below run against the section's FENCED BLOCKS only - what a
-    # reader copies out. Applied to the whole section they would forbid the
-    # prose that explains why each is wrong, which is the opposite of what
-    # this section needs to say.
+    # Both checks below run against the doc's FENCED BLOCKS only - what a
+    # reader copies out. Applied to the whole doc they would forbid the prose
+    # that explains why each is wrong, which is the opposite of what this doc
+    # needs to say.
     local blocks
     blocks="$(printf '%s\n' "$section" | awk '/^```/ { inblock = !inblock; next } inblock')"
     [ -n "$blocks" ]
@@ -2484,8 +2480,8 @@ readme_section() {
     # setup: nginx's $host has the port stripped, ttyd keeps the port in what
     # --check-origin compares unless it is 80 or 443, and a vhost on any
     # other port then refuses every WebSocket while serving the page fine.
-    # docs/nginx-dejima.conf.example is already guarded against it; the
-    # README is the other place the line gets copied from.
+    # docs/nginx-dejima.conf.example is already guarded against it; this doc
+    # is the other place the line gets copied from.
     run bash -c 'printf "%s\n" "$1" | grep -nE "\\\$host([^_a-zA-Z]|$)"' _ "$blocks"
     [ "$status" -ne 0 ]
 
@@ -2520,12 +2516,12 @@ readme_section() {
         printf '%s\n' "$blocks" | grep -qE 'systemctl +mask.*ttyd'
     fi
 
-    # This repo is public, and this section is where an operator's own setup
-    # is most likely to leak in. Every absolute URL has to be loopback, a name
+    # This repo is public, and this doc is where an operator's own setup is
+    # most likely to leak in. Every absolute URL has to be loopback, a name
     # that cannot belong to anyone (RFC 2606), or one of a short list of public
     # infrastructure hosts nobody could mistake for a personal one.
-    # test/static.bats catches address- and suffix-shaped leaks across the whole
-    # README; this catches a real ntfy topic, which is always a URL.
+    # test/static.bats catches address- and suffix-shaped leaks across the
+    # README and docs/; this catches a real ntfy topic, which is always a URL.
     run bash -c 'printf "%s\n" "$1" | grep -hoiE "https?://[a-z0-9.:@_-]+" \
         | grep -viE "^https?://(127\.0\.0\.1(:[0-9]+)?|(www\.)?example\.(com|net|org)|[a-z0-9-]+\.(invalid|example|test)|deb\.debian\.org)"' \
         _ "$section"

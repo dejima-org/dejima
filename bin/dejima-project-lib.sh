@@ -244,7 +244,7 @@ generate_derived_dockerfile() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote access (opt-in). See README "Remote access".
+# Remote access (opt-in). See docs/remote-access.md.
 #
 # The mere existence of remote.conf is the switch: with it absent, every code
 # path this feature adds is skipped and bin/dejima builds exactly the
