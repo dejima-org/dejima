@@ -250,6 +250,15 @@ Both take `--body-file FILE` (or `-` for stdin) as well as `--body`. Prefer it
 for anything with an apostrophe, a backtick or a code fence in it — a body
 passed on a command line has to survive shell quoting first.
 
+Inside the sandbox there's a second reason, and it argues for a real file over
+a heredoc. `deny-dangerous-bash.sh` matches patterns anywhere in the Bash
+command string, and it has no way to tell an instruction from prose that
+merely mentions one — so a PR or issue body that discusses restarting a host,
+or quotes a destructive command it is warning about, gets the whole call
+blocked. Writing the body to a file first keeps that text out of the command
+string entirely. A heredoc doesn't: the body is still part of the command the
+hook reads, so it solves the quoting problem but not this one.
+
 ### Using a different editor/application
 
 ```sh
