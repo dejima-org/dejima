@@ -188,12 +188,44 @@ fi
 
 SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 
+# Initialized here, before the trap below is installed, so cleanup() never
+# observes a nonempty value it didn't itself set - e.g. an operator's
+# environment happening to export a variable of one of these exact names.
+# With remote access off (or on an early exit before the remote-access block
+# below ever runs), `rm -rf "$DEJIMA_NOTIFY_DIR"` against an inherited value
+# would be a data loss bug, not just a no-op - and several `exit 1` paths
+# between here and that block would otherwise fire the trap while these
+# still held whatever came in from the environment (same class of concern as
+# the credential-proxy variables further down, pre-initialized the same way,
+# just earlier here since the trap is installed sooner). Every name cleanup()
+# removes but does not itself create belongs here, not just the remote-access
+# ones: the three below are assigned only inside conditional blocks (an nvim
+# config being present, dependencies being approved), so an ordinary run with
+# neither would otherwise carry an inherited value all the way to the trap -
+# and SANDBOX_DERIVED_CONTEXT is one of the `rm -rf` arguments.
+DEJIMA_NOTIFY_DIR=""
+DEJIMA_SESSION_FILE=""
+SANDBOX_REMOTE_SETTINGS_TMP=""
+SANDBOX_NVIM_LOCKFILE=""
+SANDBOX_DERIVED_DOCKERFILE=""
+SANDBOX_DERIVED_CONTEXT=""
+
 cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
     rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
+    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}"
+    # The one removal here a session can make fail, and the last command of an
+    # EXIT trap: the marker directory is bind-mounted read-write, so a session
+    # can leave it undeletable (an unwritable subdirectory is enough), and
+    # under set -e a failing command in an EXIT trap REPLACES the shell's exit
+    # status - so without this a compromised session could report 1 in place
+    # of Claude Code's real exit code. Same guard, for the same reason, as
+    # dejima-attach's prune and dejima-notify-watch's marker consumption.
+    rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
+        || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
 }
 trap cleanup EXIT
 
@@ -433,6 +465,126 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+
+# Optional remote access (see README "Remote access"). Entirely skipped
+# unless ~/.config/dejima/remote.conf exists - with it absent nothing below
+# runs, no state is created, and the compose invocation is exactly what it
+# was before this feature existed.
+if remote_enabled; then
+    DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
+    DEJIMA_STATE_DIR="$(remote_state_dir)"
+
+    # The state dir's parent (e.g. /tmp, when XDG_RUNTIME_DIR is unset - the
+    # common case for exactly the non-systemd ssh sessions this feature
+    # targets) is world-writable, and `mkdir -p -m 700` only applies MODE to
+    # the leaf it creates - an already-existing path here (a symlink an
+    # attacker pre-created, or a directory some other user owns) is left as
+    # is. Since the notify dir created under it is bind-mounted read-write
+    # into the container and later `rm -rf`'d by the EXIT trap, following a
+    # planted symlink would hand a compromised session (or the trap itself)
+    # access to an attacker-chosen path. Create it, then verify it's a real
+    # directory we own and not a symlink before trusting it - refuse rather
+    # than proceed on anything else. Once this check passes, everything
+    # created below it (sessions/, notify/, notify/<run-id>) is safe: mode
+    # 700 here means no other user can plant anything inside it afterward.
+    mkdir -p -m 700 "$DEJIMA_STATE_DIR" 2>/dev/null || true
+    if [ -L "$DEJIMA_STATE_DIR" ] || [ ! -d "$DEJIMA_STATE_DIR" ] \
+        || [ "$(stat -c %u "$DEJIMA_STATE_DIR")" != "$(id -u)" ]; then
+        echo "Refusing remote access: $DEJIMA_STATE_DIR exists and is not a plain" >&2
+        echo "directory owned by the current user (or is a symlink). This could be a" >&2
+        echo "symlink attack via a shared /tmp - remove it, or set XDG_RUNTIME_DIR to" >&2
+        echo "somewhere else, and retry." >&2
+        exit 1
+    fi
+    chmod 700 "$DEJIMA_STATE_DIR"
+
+    mkdir -p -m 700 "$DEJIMA_STATE_DIR/sessions" "$DEJIMA_STATE_DIR/notify"
+    DEJIMA_SESSION_FILE="$DEJIMA_STATE_DIR/sessions/$DEJIMA_RUN_ID"
+    DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
+    mkdir -p -m 700 "$DEJIMA_NOTIFY_DIR"
+
+    # $TMUX_PANE is set by tmux in the launching shell. Empty when the
+    # sandbox wasn't started from tmux: the session is still registered, just
+    # listed as not-attachable, rather than silently omitted.
+    dejima_tmux_label=""
+    if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+        dejima_tmux_label="$(tmux display-message -p -t "$TMUX_PANE" \
+            '#{session_name}:#{window_index}' 2>/dev/null || true)"
+    fi
+
+    # A newline in either value would inject an extra key=value line into the
+    # flat registry entry below - e.g. a fabricated `pane=` line inside a
+    # crafted label, which the last-match-wins parser (see dejima-attach)
+    # would honor over the real one, redirecting an operator to an
+    # attacker-chosen pane. Refuse outright rather than sanitize: a value
+    # that can't be represented safely here is the same class of problem as
+    # a corrupt approval store elsewhere in this repo.
+    case "$WORKSPACE_DIR" in
+        *$'\n'*)
+            echo "Refusing remote access: workspace path contains a newline: $WORKSPACE_DIR" >&2
+            exit 1
+            ;;
+    esac
+    case "$dejima_tmux_label" in
+        *$'\n'*)
+            echo "Refusing remote access: tmux session/window label contains a newline." >&2
+            exit 1
+            ;;
+    esac
+    # $TMUX_PANE comes from the launching shell's environment, so it is the
+    # one value here that is taken verbatim rather than derived. It is written
+    # second of the four lines below, so an injected line lands ahead of
+    # label= and started= and would lose the parser's last-match-wins race to
+    # the real ones - but it would WIN against the pane= it is part of, which
+    # is the field deciding which pane an operator gets attached to. Refusing
+    # the newline outright is what makes that independent of printf ordering.
+    case "${TMUX_PANE:-}" in
+        *$'\n'*)
+            echo "Refusing remote access: \$TMUX_PANE contains a newline." >&2
+            exit 1
+            ;;
+    esac
+
+    # Flat key=value, like the rest of the host-side store: no jq dependency
+    # here, and nothing that reads it ever sources it.
+    {
+        printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        printf 'pane=%s\n' "${TMUX_PANE:-}"
+        printf 'label=%s\n' "$dejima_tmux_label"
+        printf 'started=%s\n' "$(date +%s)"
+    } > "$DEJIMA_SESSION_FILE"
+
+    # This run's OWN marker directory is the only thing mounted in - never
+    # its parent - so a compromised session can write markers for itself and
+    # for nothing else. The registry is never mounted at all: dejima-attach
+    # trusts it to decide which pane to attach an operator to, so a session
+    # able to rewrite it could redirect them.
+    #
+    # -e alongside -v here: this array is passed straight to `docker compose
+    # run`, where both are valid flags.
+    extra_mounts+=(-v "$DEJIMA_NOTIFY_DIR:/run/dejima-notify")
+    extra_mounts+=(-e "DEJIMA_NOTIFY_DIR=/run/dejima-notify")
+    # Lets the host correlate this run to its container via `docker inspect`,
+    # so the container never needs write access to the registry to report its
+    # own ID.
+    extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
+
+    # The notify hook is registered per session, into the generated copy from
+    # above and nowhere else: registering it in the operator's real
+    # settings.json would run it for every sandbox and for the host's own
+    # Claude Code, which share that file, when it is only meaningful for a
+    # session that has a marker directory. $SANDBOX_SETTINGS_FILE is
+    # already a throwaway mktemp copy, so this rewrite cannot reach the
+    # operator's real settings.json; the copy is mounted read-only, so the
+    # session cannot unregister itself either. $HOME is left unexpanded for
+    # Claude Code to resolve at hook-run time - inside the container, not
+    # here - matching the convention install.sh already uses.
+    SANDBOX_REMOTE_SETTINGS_TMP="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
+    jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
+      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+        "$SANDBOX_SETTINGS_FILE" > "$SANDBOX_REMOTE_SETTINGS_TMP"
+    mv "$SANDBOX_REMOTE_SETTINGS_TMP" "$SANDBOX_SETTINGS_FILE"
+fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything this session changed (advisory - see bin/dejima-audit).

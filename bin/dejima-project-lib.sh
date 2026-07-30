@@ -242,3 +242,104 @@ generate_derived_dockerfile() {
     printf 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n'
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# Remote access (opt-in). See README "Remote access".
+#
+# The mere existence of remote.conf is the switch: with it absent, every code
+# path this feature adds is skipped and bin/dejima builds exactly the
+# invocation it built before the feature existed. Same "unset means skipped
+# entirely" shape LOKI_URL already has.
+# ---------------------------------------------------------------------------
+
+remote_conf_path() {
+    printf '%s/remote.conf' "$(config_root)"
+}
+
+remote_enabled() {
+    [ -f "$(remote_conf_path)" ]
+}
+
+valid_remote_key() {
+    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT|TTYD_FONT_SIZE)$ ]]
+}
+
+# Deliberately narrow. These values end up in a curl -H header, an nginx
+# comparison, and a URL handed to a phone - anything shell-active, any
+# whitespace, and anything that could split a header must not survive.
+valid_remote_value() {
+    [[ "$1" =~ ^[A-Za-z0-9:/._~?=%@+-]*$ ]]
+}
+
+# A run ID as bin/dejima generates it. Shared with dejima-attach and
+# dejima-notify-watch, both of which take one from an untrusted direction
+# (ttyd's --url-arg; a directory name under the marker root).
+valid_run_id() {
+    [[ "$1" =~ ^[0-9a-f]{16}$ ]]
+}
+
+remote_state_dir() {
+    printf '%s/dejima' "${XDG_RUNTIME_DIR:-/tmp}"
+}
+
+# remote_conf_get <key>
+# Prints the value, or nothing when the file doesn't set it. Validates the
+# WHOLE file on every read, not just the requested key: a remote.conf that
+# doesn't parse means the operator got something wrong, and this feature's
+# security properties depend on its values - so refuse rather than proceed,
+# the same way approved_entries does for the approval store.
+remote_conf_get() {
+    local want="$1" conf line key value found=""
+    valid_remote_key "$want" || { echo "unknown remote.conf key: $want" >&2; return 1; }
+    conf="$(remote_conf_path)"
+    [ -f "$conf" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in
+            ''|'#'*) continue ;;
+            *=*) ;;
+            *) echo "malformed line in $conf: $line" >&2; return 1 ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        if ! valid_remote_key "$key"; then
+            echo "unknown key in $conf: $key" >&2
+            return 1
+        fi
+        if ! valid_remote_value "$value"; then
+            echo "invalid value for $key in $conf: $value" >&2
+            return 1
+        fi
+        [ "$key" = "$want" ] && found="$value"
+    done < "$conf"
+    printf '%s' "$found"
+}
+
+remote_ttyd_port() {
+    local port
+    port="$(remote_conf_get TTYD_PORT)" || return 1
+    port="${port:-7681}"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo "TTYD_PORT out of range in $(remote_conf_path): $port" >&2
+        return 1
+    fi
+    printf '%s' "$port"
+}
+
+# Empty when unset, which is the signal to pass no -t at all and leave ttyd on
+# its own default. Bounded rather than merely numeric: this reaches ttyd as
+# argv, and a value large enough to make one glyph wider than the viewport
+# leaves a terminal that can render nothing at all - reported as "the front
+# door is broken", with the cause three files away. 8 is already small on a
+# phone; 72 is already absurd on a desktop.
+remote_ttyd_font_size() {
+    local size
+    size="$(remote_conf_get TTYD_FONT_SIZE)" || return 1
+    [ -n "$size" ] || return 0
+    if [[ ! "$size" =~ ^[0-9]+$ ]] || [ "$size" -lt 8 ] || [ "$size" -gt 72 ]; then
+        echo "TTYD_FONT_SIZE must be 8-72 in $(remote_conf_path): $size" >&2
+        return 1
+    fi
+    printf '%s' "$size"
+}

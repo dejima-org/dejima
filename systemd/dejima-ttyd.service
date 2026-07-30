@@ -1,0 +1,42 @@
+# User unit for the dejima web front door. Not enabled by install.sh -
+# standing up a front door is an explicit operator decision:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/dejima-ttyd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now dejima-ttyd.service
+#
+# It does nothing useful until ~/.config/dejima/remote.conf exists; without
+# it dejima-ttyd exits 1 and the restart limit below stops the unit instead
+# of retrying forever.
+[Unit]
+Description=dejima remote session terminal (ttyd)
+# A missing or malformed remote.conf fails every start identically, so give
+# up visibly (systemctl --user status says why) rather than restarting for
+# the life of the login session.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# The bind address and the port both come from bin/dejima-ttyd, which reads
+# remote.conf - do not repeat either of them here, or the two will drift.
+# %h, not an absolute path: this file is the same for every operator.
+ExecStart=%h/.local/bin/dejima-ttyd
+Restart=on-failure
+RestartSec=5
+
+# Deliberately unhardened, which is worth stating rather than leaving as an
+# omission: this unit exists to hand out a host shell (ttyd -> dejima-attach
+# -> a tmux client on the operator's own server), so the usual directives
+# would break it rather than contain it. PrivateTmp= would hide the tmux
+# server socket under /tmp/tmux-$UID; ProtectHome= would hide the scripts
+# above and the repo they link to; NoNewPrivileges= would break sudo inside
+# the attached session. What contains this feature is the loopback bind in
+# bin/dejima-ttyd, its --check-origin, and authentication in the reverse
+# proxy - see docs/nginx-dejima.conf.example - not unit sandboxing.
+#
+# No After= either: a user manager has no ordering to offer against the
+# network, and none is needed - the listener is on loopback.
+
+[Install]
+WantedBy=default.target

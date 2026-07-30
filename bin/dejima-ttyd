@@ -1,0 +1,121 @@
+#!/bin/bash
+# Launches ttyd with dejima-attach as its command, reading TTYD_PORT from
+# remote.conf so the port has exactly one source of truth (the systemd unit
+# deliberately does not repeat it). Started by systemd/dejima-ttyd.service.
+# See README "Remote access".
+#
+# --interface 127.0.0.1 is a security requirement, not a preference.
+# docker/init-firewall.sh:187 accepts container OUTPUT to the default-route
+# address - the Docker bridge gateway, i.e. the host - and attaching tmux
+# gives a HOST shell (the prefix key opens a new window outside the
+# container). A listener on any address the container can route to would hand
+# a compromised session its own escape hatch. Loopback is not one of those
+# addresses: the container has no route to the host's 127.0.0.1. Put nginx in
+# front, bound to one specific LAN address - see
+# docs/nginx-dejima.conf.example.
+#
+# ttyd is given no credential of its own, so the reverse proxy is the only
+# thing authenticating a request, and the loopback bind is what makes that
+# safe rather than careless: nothing but a process on this host can open the
+# socket at all. --writable is what makes the terminal a terminal rather than
+# a viewer.
+#
+# --check-origin is the other half of that, and it is not optional. Without
+# it ttyd does no origin validation at all (it only calls check_host_origin
+# when the flag is set), and browsers do not apply the same-origin policy to
+# WebSockets: any page the operator's browser loads could open
+# wss://<front-door>/ws, have the browser attach its cached credential for
+# that origin, and be handed this host shell. Proxy authentication cannot
+# stop that - it is satisfied by the victim's own browser. ttyd compares the
+# Origin authority against the Host header, which is why the nginx example
+# passes Host through unchanged; the two go together.
+#
+# --url-arg lets the client pass ?arg=<run-id>, which is what the notification
+# deep link uses. It reaches dejima-attach as argv, never as a shell word, and
+# anything there that is not --list or the empty string (a bare `?arg=`, which
+# lands on the picker) has to match the run-id shape before it is used as a
+# path component or anything else.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+if ! remote_enabled; then
+    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "See README \"Remote access\"." >&2
+    exit 1
+fi
+
+# Read BEFORE the ttyd check below, deliberately: an operator with both a
+# broken remote.conf and no ttyd is otherwise told only about the package,
+# installs it, comes back to the identical failure, and never learns that
+# their config is the other half of it. remote_ttyd_port validates the whole
+# file and names the line that broke it, and a failure here is fatal under
+# set -e on the assignment.
+port="$(remote_ttyd_port)"
+
+# Optional, and applied to EVERY client - ttyd 1.7.7 takes client options only
+# at launch (the URL-query override that would allow a per-client size landed
+# after that release), so there is no way to give a phone one size and a
+# desktop another from here. Left unset, ttyd keeps its own default.
+#
+# It is the smaller half of the mobile fix, not the fix: ttyd's page carries no
+# viewport meta, so a phone lays it out at a virtual desktop width and scales
+# the result down - a bigger font scales down with everything else. The nginx
+# example injects the meta; see docs/nginx-dejima.conf.example.
+font_size="$(remote_ttyd_font_size)"
+
+# Checked rather than left to exec, whose failure is bash's "ttyd: not found"
+# on a line number - true, and useless to an operator who needs to know that
+# the missing piece is a package.
+if ! command -v ttyd >/dev/null 2>&1; then
+    echo "ttyd is not installed - the web front door needs it, 1.7.4 or newer" >&2
+    echo "(-W/--writable arrived in 1.7.4; older builds are writable by default" >&2
+    echo "and reject the flag, so every start would be a usage error)." >&2
+    exit 1
+fi
+
+# The distro's own ttyd package ships an ENABLED system service that runs
+# `login` and, having no --interface of its own, binds every interface - the
+# bridge address a sandbox can route to included. Installing ttyd to set this
+# feature up is therefore enough to open a host login prompt to the sandbox,
+# on this very port, before any of this runs.
+#
+# It also takes the port. Binding the loopback address below while another
+# process already holds that port on every interface fails with EADDRINUSE, so
+# this unit dies at every start while the reverse proxy in front of it happily
+# proxies to whatever DID get the port. The operator sees the password prompt
+# they configured and then a host login shell, and nothing in that path looks
+# broken.
+#
+# So refuse, and say which. Left to exec, the whole failure is ttyd's one-line
+# bind error in a unit nobody is watching.
+if command -v ss >/dev/null 2>&1; then
+    listeners="$(ss -ltnH "sport = :$port" 2>/dev/null || true)"
+    if [ -n "$listeners" ]; then
+        echo "Something is already listening on port $port:" >&2
+        echo "$listeners" >&2
+        echo >&2
+        echo "The web front door cannot start, and until that listener is gone the" >&2
+        echo "reverse proxy in front of this port serves IT, not dejima." >&2
+        echo >&2
+        echo "The usual cause is the distro's own ttyd service, which is enabled on" >&2
+        echo "install and runs 'login' on every interface - reachable from inside a" >&2
+        echo "sandbox. Check and disable it:" >&2
+        echo >&2
+        echo "  systemctl status ttyd.service" >&2
+        echo "  sudo systemctl disable --now ttyd.service" >&2
+        echo "  sudo systemctl mask ttyd.service" >&2
+        echo >&2
+        echo "See README \"Remote access\"." >&2
+        exit 1
+    fi
+fi
+
+font_opt=()
+[ -z "$font_size" ] || font_opt=(-t "fontSize=$font_size")
+
+exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
+    ${font_opt[@]+"${font_opt[@]}"} \
+    "$SCRIPT_DIR/dejima-attach"

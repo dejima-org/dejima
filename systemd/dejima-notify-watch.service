@@ -1,0 +1,52 @@
+# User unit for the host-side notification watcher. Not enabled by
+# install.sh - pushing to a phone is an explicit operator decision:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/dejima-notify-watch.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now dejima-notify-watch.service
+#
+# It does nothing useful until ~/.config/dejima/remote.conf exists and sets
+# NTFY_URL; without that dejima-notify-watch exits 1 and the restart limit
+# below stops the unit instead of retrying forever.
+#
+# This unit must be a USER unit, and its environment is load-bearing: both
+# this watcher and bin/dejima resolve the marker root as
+# ${XDG_RUNTIME_DIR:-/tmp}/dejima, so the two agree only when they agree on
+# XDG_RUNTIME_DIR. systemd sets it for every user unit; a login shell gets it
+# from pam_systemd. If bin/dejima is ever run from a context that has no
+# XDG_RUNTIME_DIR (a bare `su`, a cron job, a tmux server started before
+# login), it writes its markers under /tmp/dejima while this unit watches
+# /run/user/$UID/dejima, and no notification is ever pushed - with nothing
+# logged anywhere to say so. `systemctl --user show-environment` is where to
+# check that they match.
+[Unit]
+Description=dejima notification watcher (marker files to ntfy)
+# A missing remote.conf or NTFY_URL fails every start identically, so give up
+# visibly rather than restarting for the life of the login session. A failed
+# push is not a failed start: the watcher warns and carries on, so a network
+# that is not up yet costs nothing here.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# NTFY_URL, BASE_URL and the marker root all come from remote.conf, read by
+# the script - do not repeat any of them here, or the two will drift.
+# %h, not an absolute path: this file is the same for every operator.
+ExecStart=%h/.local/bin/dejima-notify-watch
+Restart=on-failure
+RestartSec=5
+
+# Unhardened on purpose, and worth stating rather than leaving as an
+# omission: the unit next door (dejima-ttyd) deliberately hands out a shell
+# with this same uid's full privileges, so sandboxing this one would raise
+# the cost without lowering the exposure. What makes the watcher safe is in
+# the script - it consults marker NAMES against a literal enum, never their
+# contents, and composes every byte it sends from host-side data.
+#
+# No After= either: a user manager has no ordering to offer against the
+# network, and none is needed - a push that cannot go out is warned about,
+# not fatal.
+
+[Install]
+WantedBy=default.target

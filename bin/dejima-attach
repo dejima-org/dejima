@@ -1,0 +1,358 @@
+#!/bin/bash
+# List live dejima sandbox sessions and attach to one. This is the shared
+# core behind both remote front doors: it runs as a forced SSH command
+# (restrict,pty,command="...") and as ttyd's command. See README "Remote
+# access".
+#
+# Usage: dejima-attach [run-id|--list]
+#   (no argument)  numbered picker, attaches to the choice
+#   run-id         attach directly - what a notification deep link and ttyd's
+#                  --url-arg produce
+#   --list         one tab-separated row per live session, for scripting
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+if ! remote_enabled; then
+    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "See README \"Remote access\"." >&2
+    exit 1
+fi
+
+STATE_DIR="$(remote_state_dir)"
+SESSIONS_DIR="$STATE_DIR/sessions"
+
+# How long after its own started= a registered session may still have no
+# container, before the prune in list_sessions treats that as "gone".
+#
+# Sized against the step that actually holds a launch up: bin/dejima writes
+# the registry entry, then rewrites the settings copy, snapshots the
+# workspace for the audit, runs an UNCONDITIONAL `docker compose build
+# claude`, optionally builds up to two derived images on top of it, and only
+# then reaches `docker compose run`. A cold base build is the Dockerfile's
+# apt and npm layers fetched over the network - minutes, not seconds - and
+# the derived builds add to it, while a warm run reaches the container in
+# seconds and never comes near this window.
+#
+# The two errors are not symmetric, which is why this is generous. Too long
+# only leaves a session that really did die listed until the window passes,
+# and the next listing prunes it. Too short deletes the registry entry of a
+# session that is about to start: bin/dejima never rewrites that entry, so
+# the session is permanently absent from both front doors, and the marker
+# directory deleted with it is the source of a bind mount the imminent
+# `docker compose run` declares.
+STARTUP_GRACE=900
+
+# Parsed, never sourced: this file is host-written, but treating state files
+# as code is the habit this repo doesn't have. Returns nonzero for an entry
+# that can't be read or doesn't parse; callers skip it rather than dying,
+# since one bad entry must not hide every other live session.
+read_entry() {
+    local file="$1" line
+    entry_workspace=""; entry_pane=""; entry_label=""; entry_started=""
+    [ -r "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            workspace=*) entry_workspace="${line#*=}" ;;
+            pane=*)      entry_pane="${line#*=}" ;;
+            label=*)     entry_label="${line#*=}" ;;
+            started=*)   entry_started="${line#*=}" ;;
+        esac
+    done < "$file" || return 1
+    # started is the one field that reaches an arithmetic context, where a
+    # non-numeric value is evaluated as a *variable name* - so "started=x[$(cmd)]"
+    # executes cmd, and set -u doesn't catch it when the name is already bound.
+    # Refuse the entry instead of arithmetic-evaluating anything from a file.
+    # (Digits alone aren't enough for the arithmetic itself - see the 10# below.)
+    case "$entry_started" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+}
+
+# The container that reports this run ID. bin/dejima passes DEJIMA_RUN_ID in
+# as env precisely so this correlation is possible without the container
+# having any write access to the registry.
+#
+# Exit status distinguishes "no such container" (1) from "couldn't ask" (2):
+# the caller prunes on the former, and pruning on the latter would permanently
+# unregister every running sandbox the moment dockerd happens to be restarting.
+container_for() {
+    local run_id="$1" names name env unasked=""
+    names="$(docker ps --filter "label=com.docker.compose.project=dejima" \
+                       --filter "status=running" --format '{{.Names}}' 2>/dev/null)" || return 2
+    for name in $names; do
+        # Captured rather than piped straight into grep: a pipeline reports
+        # only grep's status, which would turn "inspect couldn't answer for
+        # this container" into "this isn't the one" - and one such container
+        # anywhere in the list would prune an unrelated live session.
+        env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null)" \
+            || { unasked=1; continue; }
+        if printf '%s\n' "$env" | grep -qxF "DEJIMA_RUN_ID=$run_id"; then
+            printf '%s' "$name"
+            return 0
+        fi
+    done
+    [ -z "$unasked" ] || return 2
+    return 1
+}
+
+pane_alive() {
+    [ -n "$1" ] || return 1
+    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"
+}
+
+# Does session $1 actually hold pane $2? The only question that separates the
+# session we mean from one that merely carries its name. -s enumerates every
+# pane of every window in the session, and pane ids are never reused within a
+# server, so a match cannot be some later pane wearing an old id. pipefail
+# makes an unanswerable list-panes a "no", which is the safe direction.
+group_holds_pane() {
+    tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null | grep -qxF "$2"
+}
+
+# True while an entry is young enough that its container may simply not exist
+# YET - see STARTUP_GRACE. Judged against the entry's own started=, since
+# nothing else records when the launch began. An entry that doesn't parse has
+# no age to judge and is not covered: it is pruned as before. read_entry is
+# called again by the caller afterwards; re-reading four lines costs less
+# than restructuring the loop around this one field.
+starting_up() {
+    local now="$2"
+    read_entry "$1" || return 1
+    [ "$(( now - 10#$entry_started ))" -lt "$STARTUP_GRACE" ]
+}
+
+# The registry is a hint, not truth: bin/dejima's EXIT trap doesn't run under
+# SIGKILL or a host crash, so an entry can outlive its session. An entry with
+# no matching container - and old enough that it should have had one - is
+# pruned outright; one whose pane is gone is shown as stale rather than
+# offered for attachment.
+list_sessions() {
+    local file run_id container state now rc warned=""
+    [ -d "$SESSIONS_DIR" ] || return 0
+    now="$(date +%s)"
+    for file in "$SESSIONS_DIR"/*; do
+        [ -f "$file" ] || continue
+        run_id="$(basename "$file")"
+        valid_run_id "$run_id" || continue
+        rc=0
+        container="$(container_for "$run_id")" || rc=$?
+        if [ "$rc" -eq 1 ] && starting_up "$file" "$now"; then
+            # Registered, but bin/dejima is still building - "not started yet"
+            # is a third answer, and pruning on it would unregister a session
+            # that is about to exist. Listed with the container column saying
+            # so; the recorded pane is the one bin/dejima is building in, so
+            # a session in this state is attachable like any other.
+            container="starting"
+        elif [ "$rc" -eq 1 ]; then
+            rm -f "$file"
+            # dejima-notify-watch keys its debounce stamps by run id too, and
+            # nothing else ever removes them - without this, every session
+            # leaves two behind for the life of the login session. Unguarded,
+            # like the rm above and unlike the rm -rf below: the debounce
+            # directory is host-owned and is never mounted into a sandbox.
+            rm -f "$STATE_DIR/debounce/$run_id-waiting" "$STATE_DIR/debounce/$run_id-done"
+            # Non-fatal: the marker directory is bind-mounted read-write into
+            # the sandbox, so a compromised session can chmod it such that this
+            # rm fails - and a failure here under set -e would abort the whole
+            # listing, letting that session deny the operator the front door.
+            rm -rf "${STATE_DIR:?}/notify/$run_id" \
+                || echo "warning: could not remove the marker directory for $run_id" >&2
+            continue
+        elif [ "$rc" -ne 0 ]; then
+            # An unanswerable question is never a "no": the entry stays, and
+            # the container column says the daemon couldn't confirm it.
+            container="?"
+            [ -n "$warned" ] || echo "warning: could not query docker - sessions listed unverified." >&2
+            warned=1
+        fi
+        if ! read_entry "$file"; then
+            echo "warning: skipping unreadable or malformed registry entry: $file" >&2
+            continue
+        fi
+        if [ -z "$entry_pane" ]; then
+            state="no-tmux"
+        elif pane_alive "$entry_pane"; then
+            state="attachable"
+        else
+            state="stale"
+        fi
+        printf '%s\t%s\t%s\t%dm\t%s\t%s\n' \
+            "$run_id" "${entry_label:-?}" "$(basename "$entry_workspace")" \
+            "$(( (now - 10#$entry_started) / 60 ))" "$state" "${container:0:12}"
+    done
+}
+
+# Attaches through a GROUPED session rather than the operator's own. Grouped
+# sessions share windows but track their own current window, so a phone can
+# sit on a different sandbox than the desktop, and destroy-unattached disposes
+# of the throwaway on detach.
+#
+# Nothing here sets window-size, deliberately: keeping the desktop from being
+# resized down to phone dimensions is what tmux's own default (latest, since
+# 3.1) already does, and the option's only scopes are the window - which a
+# grouped session SHARES with the operator's own, so setting it there
+# permanently overwrites their choice, with nothing to restore it afterwards -
+# and global. An operator who deliberately set smallest keeps it.
+attach() {
+    local run_id="$1" file group win base target
+    file="$SESSIONS_DIR/$run_id"
+    [ -f "$file" ] || { echo "No such session: $run_id" >&2; exit 1; }
+    if ! read_entry "$file"; then
+        echo "Session $run_id has an unreadable or malformed registry entry." >&2
+        exit 1
+    fi
+    if [ -z "$entry_pane" ]; then
+        echo "Session $run_id was not started from tmux - nothing to attach to." >&2
+        exit 1
+    fi
+    if ! pane_alive "$entry_pane"; then
+        echo "Session $run_id is stale - its tmux pane is gone." >&2
+        exit 1
+    fi
+    group="dejima-$run_id"
+    # Both values come from the same live pane, in one round trip. Taking the
+    # session name from the recorded label instead would follow a name rather
+    # than the sandbox: an operator renaming sessions is enough to point it at
+    # an unrelated session that has since taken the old name.
+    #
+    # The name is a starting point, never a guarantee. It is frequently
+    # ANOTHER remote client's throwaway group (tmux reports whichever session
+    # holding the window is most recent, and every grouped session here is
+    # newer than the operator's own), and those carry destroy-unattached - so
+    # the base can be made to stop existing on demand by anyone holding a
+    # second connection. That is why the session created from it is verified
+    # below instead of trusted: `new-session -t` does not fail on a name that
+    # matches nothing, it silently creates a fresh UNGROUPED session, which
+    # for a remote client is a plain host shell with no sandbox in it.
+    #
+    # display-message prints nothing and still exits 0 for a target that no
+    # longer exists, so an empty result means the pane went away between the
+    # check above and here. That case is caught by the verification below too;
+    # bailing early just avoids creating a junk session to immediately kill,
+    # and says what actually happened.
+    target="$(tmux display-message -p -t "$entry_pane" '#{session_name}:#{window_index}' 2>/dev/null || true)"
+    # Session names may contain ':', window indexes can't.
+    base="${target%:*}"
+    win="${target##*:}"
+    if [ -z "$base" ] || [ -z "$win" ]; then
+        echo "Session $run_id is stale - its tmux pane went away." >&2
+        exit 1
+    fi
+    if tmux has-session -t "=$group" 2>/dev/null; then
+        # Verified exactly like the session created below, and for the same
+        # reason: nothing here created this one, so carrying the name is not
+        # evidence of holding the sandbox. Reachable only as debris - a
+        # dejima-<run-id> that exists but no longer contains the pane - and
+        # anyone able to create that name already has a host shell, so this is
+        # about landing in the right window rather than about containment.
+        # Refused rather than killed: destroying a session this script did not
+        # create is not its call, and the message names the one to look at.
+        if ! group_holds_pane "$group" "$entry_pane"; then
+            echo "Session $run_id: the existing tmux session $group does not hold its pane." >&2
+            echo "Remove it (tmux kill-session -t '=$group') and attach again." >&2
+            exit 1
+        fi
+        # Select within the GROUP, not via the pane id directly: the latter
+        # would move the operator's own session's current window too.
+        tmux select-window -t "=$group:$win"
+        # Set here too, not just on the session we create: the option is
+        # per-session state, so a group that ever reached this point without it
+        # would keep outliving its client on every later attach.
+        exec tmux attach-session -t "=$group" \; set-option destroy-unattached on
+    fi
+    # Created DETACHED first so the result can be inspected before a client
+    # ever sees it: whatever tmux gave us has to actually contain the sandbox
+    # pane, or it is a session tmux invented from a name that stopped existing
+    # while we were looking at it. Anything else is killed rather than handed
+    # over. ("="-anchored, so a name can only ever resolve exactly - an
+    # unanchored target prefix/fnmatch-matches some other session.)
+    tmux new-session -d -t "=$base" -s "$group"
+    # Detached, it now outlives every failure below, and a session leaked that
+    # way never gets destroy-unattached set on it, so it sits on the host for
+    # good. The trap only ever names a session this call just created:
+    # new-session fails on a duplicate name before we reach it.
+    # ("="-anchored also so it can never mean "the current session", which is
+    # what an empty target means to kill-session.)
+    #
+    # The name is baked in here rather than read at exit: $group is local, and
+    # a trap body runs after the function's locals are gone, where set -u
+    # would abort it and leak the session it exists to remove.
+    trap "tmux kill-session -t '=$group' 2>/dev/null || true" EXIT
+    if ! group_holds_pane "$group" "$entry_pane"; then
+        echo "Session $run_id is stale - the tmux session holding its pane went away." >&2
+        exit 1
+    fi
+    tmux select-window -t "=$group:$win"
+    # destroy-unattached has to be set by the same command that attaches:
+    # setting it while the session is still detached makes the server reap the
+    # session before the attach lands.
+    #
+    # Deliberately not exec'd, unlike the branch above, which creates nothing:
+    # attaching is the step most likely to fail on a remote client's terms -
+    # no terminal for `ssh -T`, or a $TERM the host has no entry for, both of
+    # which the client picks - and an exec leaves no shell behind to clean up
+    # the session we just made. Detaching normally returns 0 and disarms the
+    # trap; the session then goes away by destroy-unattached, not by us.
+    tmux attach-session -t "=$group" \; set-option destroy-unattached on
+    trap - EXIT
+}
+
+picker() {
+    local -a ids=() lines=()
+    local line i choice
+    while IFS= read -r line; do
+        ids+=("${line%%$'\t'*}")
+        lines+=("$line")
+    done < <(list_sessions)
+    if [ "${#ids[@]}" -eq 0 ]; then
+        echo "No live dejima sessions."
+        exit 0
+    fi
+    echo "Live dejima sessions:"
+    for i in "${!lines[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "$(printf '%s' "${lines[$i]}" | cut -f2-)"
+    done
+    # Numbered rather than arrow-driven: phone soft keyboards handle digits
+    # far better than arrow keys, and this is the phone's entry point.
+    printf 'Attach to [1-%d, q to quit]: ' "${#ids[@]}"
+    read -r choice
+    case "$choice" in
+        q|Q|'') exit 0 ;;
+        *[!0-9]*) echo "Not a number." >&2; exit 1 ;;
+    esac
+    # Normalized to base 10 once, here, because the range check and the
+    # subscript below do not read a number the same way: `[` is POSIX test and
+    # decimal-only, while $(( )) reads a leading zero as OCTAL. Without this,
+    # "010" - which a phone keypad makes easy to type - passes the check as 10
+    # and indexes as 8, and the caller is attached to a DIFFERENT session than
+    # the one they picked, with nothing printed to say so.
+    #
+    # It fixes the two ugly shapes as well. "09" is a value here rather than
+    # the "invalid octal constant" arithmetic error it is to $(( )); and a
+    # number past int64 wraps to one the range check can answer for, where
+    # `[ 99999999999999999999999 -gt 11 ]` instead exits 2 with "integer
+    # expression expected" - which makes the `if` false, so "Out of range."
+    # is never printed and the subscript below dies on an unbound element.
+    choice="$((10#$choice))"
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#ids[@]}" ]; then
+        echo "Out of range." >&2
+        exit 1
+    fi
+    attach "${ids[$((choice - 1))]}"
+}
+
+case "${1:-}" in
+    '')      picker ;;
+    --list)  list_sessions ;;
+    *)
+        # This argument arrives from ttyd's --url-arg, i.e. from whoever can
+        # reach the web front door. Validate its shape before it is used as a
+        # path component or anything else.
+        valid_run_id "$1" || { echo "Invalid session id." >&2; exit 1; }
+        [ -f "$SESSIONS_DIR/$1" ] || { echo "No such session: $1" >&2; exit 1; }
+        attach "$1"
+        ;;
+esac

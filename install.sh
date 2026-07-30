@@ -1,10 +1,13 @@
 #!/bin/bash
 # Idempotent installer for dejima. Symlinks this repo's hooks into
 # ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
-# bin/dejima, bin/dejima-allow, bin/dejima-dep and
-# bin/dejima-project on PATH. Safe to re-run -
-# every step is a no-op if already done, and every change is printed as it
-# happens.
+# bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project and the
+# opt-in remote-access scripts on PATH. Safe to re-run - every step is a
+# no-op if already done, and every change is printed as it happens.
+#
+# It never enables anything: the remote-access scripts do nothing without
+# ~/.config/dejima/remote.conf, and the user units in systemd/ are left for
+# the operator to install by hand.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,6 +53,13 @@ link_hook() {
 
 link_hook sandbox-context.sh
 link_hook git-push-guard.sh
+
+# Linked so it exists at a stable path for the read-only ~/.claude/hooks
+# mount, but deliberately NOT passed to register_hook below: bin/dejima
+# registers it per session, into a throwaway settings copy, and only when
+# remote access is configured. Registering it here would fire it for every
+# unsandboxed host session too, where it has no marker directory to write to.
+link_hook dejima-notify.sh
 
 # deny-dangerous-bash.sh is a general (non-sandbox-gated) hook that may
 # already be owned by another install (e.g. dotfiles) - only claim it if
@@ -130,7 +140,34 @@ link_bin dejima
 link_bin dejima-allow
 link_bin dejima-dep
 link_bin dejima-project
+
+# Remote access (opt-in, see README). All three are inert without
+# ~/.config/dejima/remote.conf - they refuse to run at all - so linking them
+# unconditionally adds no front door and costs nothing. The user units in
+# systemd/ are deliberately NOT copied or enabled here: standing up a front
+# door is an explicit operator decision, and this script never touches
+# systemd.
+link_bin dejima-attach
+link_bin dejima-ttyd
+link_bin dejima-notify-watch
 echo
 
 echo "Done. Try: $BIN_DIR/dejima ~/some/project"
 echo "(or just 'dejima ~/some/project' once $BIN_DIR is on PATH)"
+echo
+# Conditional, because the unconditional version is a false statement to the
+# operator most likely to see it: someone with a front door already up,
+# re-running this after a git pull.
+# From the library rather than spelled out again here: the config root has
+# one definition (config_root, which honours DEJIMA_CONFIG_DIR) and a second
+# copy of it would drift without anything noticing.
+# shellcheck source=bin/dejima-project-lib.sh
+source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
+remote_conf="$(remote_conf_path)"
+if [ -f "$remote_conf" ]; then
+    echo "Remote access is configured ($remote_conf); this script did not start or stop anything."
+    echo "See README \"Remote access\"."
+else
+    echo "Remote access is available but not configured - nothing is listening."
+    echo "See README \"Remote access\" to turn it on."
+fi

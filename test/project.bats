@@ -162,8 +162,8 @@ EOF
 }
 
 @test "project_slug matches the log-shipper project-key rule" {
-    run bash -c 'source "$1"; project_slug "/home/brad/my-proj"' _ "$LIB"
-    [ "$output" = "-home-brad-my-proj" ]
+    run bash -c 'source "$1"; project_slug "/home/someone/my-proj"' _ "$LIB"
+    [ "$output" = "-home-someone-my-proj" ]
 }
 
 @test "ensure_project_store creates the store and records the real path" {
