@@ -24,9 +24,12 @@ fi
 STATE_DIR="$(remote_state_dir)"
 SESSIONS_DIR="$STATE_DIR/sessions"
 
-# gruvbox dark, by the same semantic names the operator's own Claude Code
-# theme uses (dotfiles config/claude/themes/gruvbox.json), so a palette change
-# has one obvious place to happen.
+# gruvbox dark. Every value below is upstream's, tagged with the name of the
+# color.table row it came from:
+# https://github.com/gruvbox-community/gruvbox-contrib/blob/master/color.table
+# Carrying the name and not just the hex is the point - a palette this widely
+# known is one almost nobody has memorised to six digits, so a wrong value is
+# only catchable by reading if there is something to check it against.
 #
 # Truecolor only, and deliberately not paired with a 256-colour table: a
 # terminal without it - or tmux without `Tc` - approximates 38;2 to its own
@@ -40,15 +43,15 @@ SESSIONS_DIR="$STATE_DIR/sessions"
 # assertions see the same bare words either way.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
     C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
-    C_BADGE=$'\033[38;2;254;128;25m'      # #fe8019 - the wordmark
-    C_TEXT=$'\033[38;2;235;219;178m'      # #ebdbb2
-    C_MUTED=$'\033[38;2;146;131;116m'     # #928374
-    C_SUBTLE=$'\033[38;2;124;111;100m'    # #7c6f64
-    C_RULE=$'\033[38;2;80;73;69m'         # #504945 - separator
-    C_OK=$'\033[38;2;184;187;38m'         # #b8bb26 - success
-    C_WARN=$'\033[38;2;250;189;47m'       # #fabd2f - warning
-    C_ERR=$'\033[38;2;251;73;52m'         # #fb4934 - error
-    C_LINK=$'\033[38;2;131;165;152m'      # #83a598
+    C_BADGE=$'\033[38;2;254;128;25m'    # bright_orange #fe8019, the wordmark
+    C_TEXT=$'\033[38;2;235;219;178m'    # light1        #ebdbb2
+    C_MUTED=$'\033[38;2;146;131;116m'   # gray_245      #928374
+    C_SUBTLE=$'\033[38;2;124;111;100m'  # dark4         #7c6f64
+    C_RULE=$'\033[38;2;80;73;69m'       # dark2         #504945, separator
+    C_OK=$'\033[38;2;184;187;38m'       # bright_green  #b8bb26, success
+    C_WARN=$'\033[38;2;250;189;47m'     # bright_yellow #fabd2f, warning
+    C_ERR=$'\033[38;2;251;73;52m'       # bright_red    #fb4934, error
+    C_LINK=$'\033[38;2;131;165;152m'    # bright_blue   #83a598
     GLYPH_BAR='▏'; GLYPH_DOT='●'
     # A literal rather than a repeat of GLYPH_RULE: `tr` is byte-oriented and
     # would shred a 3-byte box-drawing character, and every alternative costs
