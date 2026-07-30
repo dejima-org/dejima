@@ -270,7 +270,8 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
   npx playwright install chromium
 
 # Copy and set up firewall + DNS-proxy + entrypoint scripts, the gitea-pr
-# helper from this repo's bin/ directory, and the claude wrapper that pins
+# and gitea-issue helpers from this repo's bin/ directory, and the claude
+# wrapper that pins
 # --dangerously-skip-permissions. The launched application itself
 # (SANDBOX_CMD, default `claude`) and any editor config for it are supplied
 # at runtime, not baked into the image - see docker-compose.yml/entrypoint.sh.
@@ -285,9 +286,10 @@ COPY docker/entrypoint.sh /usr/local/bin/
 COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
 COPY docker/claude-wrapper.sh /usr/local/bin/claude
 COPY bin/gitea-pr /usr/local/bin/gitea-pr
+COPY bin/gitea-issue /usr/local/bin/gitea-issue
 
 USER root
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/gitea-pr /usr/local/bin/claude && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/gitea-pr /usr/local/bin/gitea-issue /usr/local/bin/claude && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall

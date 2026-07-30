@@ -13,11 +13,12 @@ one can't happen.
 - `--dangerously-skip-permissions` removes your chance to review tool calls
   before they run. Only point this at trusted repositories.
 - The mounted project itself has **no write protection**. `deny-dangerous-
-  bash.sh` and `git-push-guard.sh` are regex pattern-matching on the literal
-  Bash command string - a fast-fail guard against an overeager agent doing
-  something obviously destructive, not a boundary against one that's
-  actively trying to get around them (a different scripting language, an
-  encoded command, editing `.git/config` directly all sail right through).
+  bash.sh`, `git-push-guard.sh` and `gitea-merge-guard.sh` are regex
+  pattern-matching on the literal Bash command string - a fast-fail guard
+  against an overeager agent doing something obviously destructive, not a
+  boundary against one that's actively trying to get around them (a
+  different scripting language, an encoded command, editing `.git/config`
+  directly all sail right through).
   Nothing here stops a compromised or badly-instructed session from
   modifying or deleting the real working copy it's mounted against.
 - That same read-write access to the mounted project is also a

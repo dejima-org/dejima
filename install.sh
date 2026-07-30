@@ -53,6 +53,7 @@ link_hook() {
 
 link_hook sandbox-context.sh
 link_hook git-push-guard.sh
+link_hook gitea-merge-guard.sh
 
 # Linked so it exists at a stable path for the read-only ~/.claude/hooks
 # mount, but deliberately NOT passed to register_hook below: bin/dejima
@@ -100,6 +101,8 @@ register_hook SessionStart "startup|resume|clear|compact" sandbox-context.sh \
     "injects sandbox context on session start"
 register_hook PreToolUse Bash git-push-guard.sh \
     "blocks pushes outside the allowed host(s)/branches"
+register_hook PreToolUse Bash gitea-merge-guard.sh \
+    "blocks 'gitea-pr merge' inside the sandbox"
 register_hook PreToolUse Bash deny-dangerous-bash.sh \
     "blocks obviously destructive Bash commands"
 echo

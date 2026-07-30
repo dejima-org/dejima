@@ -1,0 +1,255 @@
+#!/bin/bash
+# Read and write Gitea issues from a shell - the issue-side counterpart to
+# gitea-pr, and deliberately its twin rather than its sibling: both are
+# copied into the sandbox image as single self-contained files, and gitea-pr
+# also lives in a dotfiles checkout, so a shared library would be a third
+# thing to keep in step across three places. The duplicated config/token/curl
+# preamble is pinned in both files by test/static.bats instead.
+set -euo pipefail
+
+GITEA_TOKEN_FILE="${GITEA_TOKEN_FILE:-$HOME/.config/gitea/token}"
+
+function usage() {
+    echo "Usage: gitea-issue list [--state open|closed|all] [--limit N]"
+    echo "       gitea-issue view NUMBER"
+    echo "       gitea-issue create --title TITLE [--body BODY | --body-file FILE]"
+    echo "       gitea-issue comment NUMBER (--body BODY | --body-file FILE)"
+    echo "       gitea-issue close NUMBER"
+    echo "       gitea-issue reopen NUMBER"
+    echo ""
+    echo "--body-file reads the body from FILE, or from stdin when FILE is '-'."
+    echo "Prefer it over --body for anything with quotes, backticks or newlines."
+    echo ""
+    echo "Requires GITEA_SSH_HOST and GITEA_API set in the environment (e.g. in" \
+         "your shell profile), and a token at $GITEA_TOKEN_FILE (or GITEA_TOKEN" \
+         "set for this invocation only)."
+}
+
+function require_config() {
+    if [ -z "${GITEA_SSH_HOST:-}" ]; then
+        echo "GITEA_SSH_HOST is not set. Add 'export GITEA_SSH_HOST=<gitea ssh hostname>'" \
+             "(e.g. gitea.example.com) to ~/.profile.local" >&2
+        exit 1
+    fi
+    if [ -z "${GITEA_API:-}" ]; then
+        echo "GITEA_API is not set. Add 'export GITEA_API=https://<gitea host>/api/v1'" \
+             "(e.g. https://gitea.example.com/api/v1) to ~/.profile.local" >&2
+        exit 1
+    fi
+}
+
+function require_token() {
+    if [ -z "${GITEA_TOKEN:-}" ] && [ -f "$GITEA_TOKEN_FILE" ]; then
+        GITEA_TOKEN=$(<"$GITEA_TOKEN_FILE")
+    fi
+    if [ -z "${GITEA_TOKEN:-}" ]; then
+        echo "No Gitea token found. Generate one in the Gitea web UI" \
+             "(Settings > Applications, scopes write:repository + write:issue)" \
+             "and save it to $GITEA_TOKEN_FILE (chmod 600), or set GITEA_TOKEN" \
+             "in the environment for this invocation only." >&2
+        exit 1
+    fi
+}
+
+# Feeds the auth header to curl as a config on stdin rather than as an
+# argument. Command lines are world-readable through /proc, so `-H
+# "Authorization: token $GITEA_TOKEN"` exposes the token to every other
+# process on the host for as long as the request runs - and to anything that
+# scrapes `ps` output, including the agents this repo exists to sandbox.
+# printf is a bash builtin, so the token never lands in another argv.
+function gitea_api() {
+    printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" |
+        curl -sS -w '\n%{http_code}' -K - "$@"
+}
+
+# Splits gitea_api's combined output into the globals `json` and `http_code`
+# and fails with the body on any non-2xx. Every call site did this by hand in
+# gitea-pr; there are six of them here, and six hand-rolled copies is where
+# one of them quietly stops checking.
+function api_or_die() {
+    local what="$1"; shift
+    local response
+    response=$(gitea_api "$@")
+    http_code=$(echo "$response" | tail -1)
+    json=$(echo "$response" | sed '$d')
+    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+        echo "Failed to $what (HTTP $http_code):" >&2
+        echo "$json" >&2
+        exit 1
+    fi
+}
+
+# Reads a body from a file, or from stdin for '-'. The point is to keep prose
+# out of argv: a body composed on a command line has to survive shell quoting,
+# and the things that break it - an apostrophe, a backtick, a $ - are exactly
+# what English and code fences are made of. A file (or a heredoc into '-') has
+# no such layer.
+function read_body_file() {
+    local file="$1"
+    if [ "$file" = "-" ]; then
+        cat
+        return
+    fi
+    if [ ! -f "$file" ]; then
+        echo "No such body file: $file" >&2
+        exit 1
+    fi
+    cat "$file"
+}
+
+function gitea_owner_repo() {
+    local remote_url host owner_repo
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo "No 'origin' remote found in this repository" >&2
+        exit 1
+    }
+    host=$(echo "$remote_url" | sed -E 's#^[^@]+@([^:]+):.*#\1#')
+    if [ "$host" != "$GITEA_SSH_HOST" ]; then
+        echo "origin remote ($remote_url) is not on $GITEA_SSH_HOST; gitea-issue only supports this host" >&2
+        exit 1
+    fi
+    owner_repo=$(echo "$remote_url" | sed -E 's#^[^@]+@[^:]+:##; s#\.git$##')
+    echo "$owner_repo"
+}
+
+function require_number() {
+    if ! [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+        echo "Expected an issue number, got '${1:-}'" >&2
+        exit 1
+    fi
+}
+
+# Sets `body` from --body/--body-file, rejecting both. Shared by create and
+# comment so the two cannot drift into disagreeing about which one wins.
+function parse_body_args() {
+    body=""
+    local body_file=""
+    parsed_title=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --title) parsed_title="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --body-file) body_file="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+        esac
+    done
+    # Rejected rather than ranked: silently preferring one would make a caller
+    # that passed both ship a body it didn't mean to.
+    if [ -n "$body" ] && [ -n "$body_file" ]; then
+        echo "Pass --body or --body-file, not both" >&2
+        exit 1
+    fi
+    if [ -n "$body_file" ]; then
+        body="$(read_body_file "$body_file")"
+    fi
+}
+
+if [ "$#" -lt 1 ]; then
+    usage
+    exit 1
+fi
+
+subcommand="$1"
+shift
+
+case "$subcommand" in
+    list|view|create|comment|close|reopen)
+        require_config
+        require_token
+        owner_repo=$(gitea_owner_repo)
+        owner="${owner_repo%%/*}"
+        repo="${owner_repo##*/}"
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
+
+issues_api="${GITEA_API}/repos/${owner}/${repo}/issues"
+
+case "$subcommand" in
+    list)
+        state="open"
+        limit="30"
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --state) state="$2"; shift 2 ;;
+                --limit) limit="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+            esac
+        done
+        case "$state" in
+            open|closed|all) ;;
+            *) echo "--state must be open, closed or all" >&2; exit 1 ;;
+        esac
+        if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+            echo "--limit must be a number" >&2
+            exit 1
+        fi
+
+        # type=issues is load-bearing: Gitea's issues endpoint returns pull
+        # requests too, since a PR *is* an issue with a branch attached.
+        # Without it every open PR shows up here as an issue, which reads as
+        # a work list that is quietly twice as long as the real one.
+        api_or_die "list issues" \
+            "${issues_api}?state=${state}&type=issues&limit=${limit}"
+        echo "$json" | jq -r '.[] | "#\(.number)\t[\(.state)]\t\(.title)\t(\(.comments) comments)"'
+        ;;
+    view)
+        require_number "${1:-}"
+        number="$1"
+
+        api_or_die "fetch issue #${number}" "${issues_api}/${number}"
+        echo "$json" | jq -r '"#\(.number) [\(.state)] \(.title)\n[\(.user.login) @ \(.created_at)]\n\(.body // "(no description)")\n"'
+
+        echo "=== Comments ==="
+        api_or_die "fetch comments for issue #${number}" "${issues_api}/${number}/comments"
+        echo "$json" | jq -r '.[] | "[\(.user.login) @ \(.created_at)]\n\(.body)\n"'
+        ;;
+    create)
+        parse_body_args "$@"
+        if [ -z "$parsed_title" ]; then
+            echo "gitea-issue create requires --title" >&2
+            exit 1
+        fi
+        body="**Filed by LLM agent**
+
+${body}"
+
+        api_or_die "create issue" -X POST "$issues_api" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg title "$parsed_title" --arg body "$body" \
+                '{title: $title, body: $body}')"
+        echo "$json" | jq -r '.html_url'
+        ;;
+    comment)
+        require_number "${1:-}"
+        number="$1"
+        shift
+        parse_body_args "$@"
+        if [ -z "$body" ]; then
+            echo "gitea-issue comment requires --body or --body-file" >&2
+            exit 1
+        fi
+        body="**Comment by LLM agent**
+
+${body}"
+
+        api_or_die "comment on issue #${number}" -X POST "${issues_api}/${number}/comments" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body "$body" '{body: $body}')"
+        echo "$json" | jq -r '.html_url'
+        ;;
+    close|reopen)
+        require_number "${1:-}"
+        number="$1"
+        new_state="closed"
+        [ "$subcommand" = "reopen" ] && new_state="open"
+
+        api_or_die "${subcommand} issue #${number}" -X PATCH "${issues_api}/${number}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg state "$new_state" '{state: $state}')"
+        echo "$json" | jq -r '"#\(.number) is now \(.state): \(.html_url)"'
+        ;;
+esac

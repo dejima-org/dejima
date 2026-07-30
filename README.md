@@ -240,7 +240,15 @@ editor setup at all.
 
 Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
-to pull review feedback, feed it back in, repeat.
+to pull review feedback, feed it back in, repeat. Merging is yours — see
+`gitea-merge-guard.sh` below. `gitea-issue` is on `PATH` too, for the work
+that gets deferred rather than done: `list`, `view`, `create`, `comment`,
+`close` and `reopen`, so a problem found mid-session becomes a ticket instead
+of a footnote on an unrelated PR.
+
+Both take `--body-file FILE` (or `-` for stdin) as well as `--body`. Prefer it
+for anything with an apostrophe, a backtick or a code fence in it — a body
+passed on a command line has to survive shell quoting first.
 
 ### Using a different editor/application
 
@@ -386,6 +394,17 @@ shell access and could in principle edit `.git/config` to route around it.
 GitHub push is blocked by default too (see "GitHub push" below) unless
 `ALLOW_GITHUB_PUSH=1` is set. For a real guarantee against pushes to
 main/master, use branch protection on the remote itself.
+
+`gitea-merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
+`gitea-pr merge` inside the sandbox. It's the API-side counterpart to the rule
+above: a merge puts a branch on `main` without ever performing a push, so
+`git-push-guard.sh` never sees it. A hook is handed a command rather than a
+conversation, so it can't tell an instructed merge from an unprompted one —
+which is why it's scoped to the sandbox rather than applied everywhere. On the
+host it does nothing, and you can still ask an agent to merge. The same
+fast-fail caveat applies with more force than usual here: the session has the
+Gitea token in its environment and could call the merge endpoint with `curl`
+directly. Branch protection on the remote is the real guarantee.
 
 `sandbox-context.sh` also tells the agent the actual workflow to follow: do
 new work in a `git worktree` under the mounted project (e.g.
@@ -736,7 +755,7 @@ likely to collide with a real container you have running.
 
 | File | Purpose |
 | --- | --- |
-| `docker/Dockerfile` | Base image, dev tools, nvim, Claude Code + wrapper, `gitea-pr` |
+| `docker/Dockerfile` | Base image, dev tools, nvim, Claude Code + wrapper, `gitea-pr`/`gitea-issue` |
 | `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
@@ -748,10 +767,13 @@ likely to collide with a real container you have running.
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
+| `hooks/gitea-merge-guard.sh` | `PreToolUse` hook: blocks `gitea-pr merge` in the sandbox — merging is a human decision |
 | `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see [docs/remote-access.md](docs/remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
+| `bin/gitea-pr` | Create a PR, read its comments, merge it; baked into the image so the sandbox can open PRs |
+| `bin/gitea-issue` | List, view, create, comment on, close and reopen Gitea issues; also baked into the image |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
