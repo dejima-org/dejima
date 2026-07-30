@@ -1241,6 +1241,11 @@ run-id argument attaches directly, which is what the deep link and `ttyd`'s
 `--url-arg` produce. Rows carry the run id, the tmux label, the workspace
 name, the session's age, its state, and the container id.
 
+The picker is coloured (gruvbox) when stdout is a terminal that says it can
+show it; `NO_COLOR=1` or a `dumb` `$TERM` turns that off, along with the
+box-drawing glyphs. `--list` is never coloured, terminal or not - the picker
+parses those rows itself and the README calls them scriptable.
+
 Three states, from a registry `bin/dejima` writes on launch and removes on
 exit:
 

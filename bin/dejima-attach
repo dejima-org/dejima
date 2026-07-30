@@ -24,6 +24,71 @@ fi
 STATE_DIR="$(remote_state_dir)"
 SESSIONS_DIR="$STATE_DIR/sessions"
 
+# gruvbox dark, by the same semantic names the operator's own Claude Code
+# theme uses (dotfiles config/claude/themes/gruvbox.json), so a palette change
+# has one obvious place to happen.
+#
+# Truecolor only, and deliberately not paired with a 256-colour table: a
+# terminal without it - or tmux without `Tc` - approximates 38;2 to its own
+# nearest colour rather than printing the escape, so the fallback already
+# exists one layer down and a second palette here would only duplicate it.
+#
+# Everything below is empty unless stdout is a terminal that says it can show
+# colour, which is what keeps --list clean: it is a machine interface (ttyd's
+# --url-arg feeds run ids back in, and the README documents the rows as
+# scriptable), and it is also how the bats suite reads this script, so its
+# assertions see the same bare words either way.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
+    C_BADGE=$'\033[38;2;254;128;25m'      # #fe8019 - the wordmark
+    C_TEXT=$'\033[38;2;235;219;178m'      # #ebdbb2
+    C_MUTED=$'\033[38;2;146;131;116m'     # #928374
+    C_SUBTLE=$'\033[38;2;124;111;100m'    # #7c6f64
+    C_RULE=$'\033[38;2;80;73;69m'         # #504945 - separator
+    C_OK=$'\033[38;2;184;187;38m'         # #b8bb26 - success
+    C_WARN=$'\033[38;2;250;189;47m'       # #fabd2f - warning
+    C_ERR=$'\033[38;2;251;73;52m'         # #fb4934 - error
+    C_LINK=$'\033[38;2;131;165;152m'      # #83a598
+    GLYPH_BAR='▏'; GLYPH_DOT='●'
+    # A literal rather than a repeat of GLYPH_RULE: `tr` is byte-oriented and
+    # would shred a 3-byte box-drawing character, and every alternative costs
+    # a loop or a subshell to draw a fixed line. Both are the width of the
+    # heading they sit under ("dejima | live sessions"), and are next to it so
+    # they stay that way.
+    RULE_LINE='──────────────────────'
+else
+    C_OFF=""; C_BOLD=""; C_BADGE=""; C_TEXT=""; C_MUTED=""; C_SUBTLE=""
+    C_RULE=""; C_OK=""; C_WARN=""; C_ERR=""; C_LINK=""
+    # Glyphs ride the same switch rather than a separate UTF-8 probe. Not
+    # because no-colour implies no-UTF-8, but because the two terminals this
+    # has to stay readable on - a $TERM the host has no entry for, and a pipe -
+    # are exactly the ones that mangle box drawing, and one flag is easier to
+    # reason about than two.
+    GLYPH_BAR='|'; GLYPH_DOT='*'
+    RULE_LINE='----------------------'
+fi
+
+# Narrow deliberately. The phone is this script's main front door, and the
+# rule underlines the heading instead of spanning the table because the
+# table's width follows the longest project name - a rule that chased it would
+# wrap on a phone exactly when the rows did.
+banner() {
+    printf '\n  %s%sdejima%s %s%s%s %slive sessions%s\n' \
+        "$C_BOLD" "$C_BADGE" "$C_OFF" "$C_SUBTLE" "$GLYPH_BAR" "$C_OFF" \
+        "$C_MUTED" "$C_OFF"
+    printf '  %s%s%s\n\n' "$C_RULE" "$RULE_LINE" "$C_OFF"
+}
+
+# Coloured by meaning, not by name: attachable is the one an operator wants to
+# find, and stale/no-tmux are the two that will refuse if picked.
+state_color() {
+    case "$1" in
+        attachable) printf '%s' "$C_OK" ;;
+        stale)      printf '%s' "$C_ERR" ;;
+        *)          printf '%s' "$C_WARN" ;;
+    esac
+}
+
 # How long after its own started= a registered session may still have no
 # container, before the prune in list_sessions treats that as "gone".
 #
@@ -301,23 +366,46 @@ attach() {
 }
 
 picker() {
-    local -a ids=() lines=()
-    local line i choice
-    while IFS= read -r line; do
-        ids+=("${line%%$'\t'*}")
-        lines+=("$line")
+    local -a ids=() labels=() projects=() ages=() states=() containers=()
+    local i choice run_id label project age state container
+    local w_label=0 w_project=0 w_age=0 w_state=0
+    # Split on tabs only, so a space in a project name stays part of one field.
+    # The columns are measured on the way in because they are padded to the
+    # widest value rather than to a guess: a project name is a directory name,
+    # and a fixed width either truncates a long one or indents every short one
+    # off the right edge of a phone.
+    while IFS=$'\t' read -r run_id label project age state container; do
+        ids+=("$run_id"); labels+=("$label"); projects+=("$project")
+        ages+=("$age"); states+=("$state"); containers+=("$container")
+        [ "${#label}" -le "$w_label" ] || w_label="${#label}"
+        [ "${#project}" -le "$w_project" ] || w_project="${#project}"
+        [ "${#age}" -le "$w_age" ] || w_age="${#age}"
+        [ "${#state}" -le "$w_state" ] || w_state="${#state}"
     done < <(list_sessions)
+    banner
     if [ "${#ids[@]}" -eq 0 ]; then
-        echo "No live dejima sessions."
+        printf '  %sNo live sessions.%s\n\n' "$C_MUTED" "$C_OFF"
         exit 0
     fi
-    echo "Live dejima sessions:"
-    for i in "${!lines[@]}"; do
-        printf '  %d) %s\n' "$((i + 1))" "$(printf '%s' "${lines[$i]}" | cut -f2-)"
+    # The container column stays, and last, because it is not decoration: it
+    # reads "starting" for a session bin/dejima is still building and "?" when
+    # docker could not be asked at all, and dropping it would make either one
+    # look like an ordinary attachable session.
+    for i in "${!ids[@]}"; do
+        local sc; sc="$(state_color "${states[$i]}")"
+        printf '  %s%2d%s  %s%s%s %s%-*s%s  %s%-*s%s  %s%*s%s  %s%-*s%s  %s%s%s\n' \
+            "$C_WARN" "$((i + 1))" "$C_OFF" \
+            "$sc" "$GLYPH_DOT" "$C_OFF" \
+            "$C_BOLD$C_TEXT" "$w_project" "${projects[$i]}" "$C_OFF" \
+            "$C_LINK" "$w_label" "${labels[$i]}" "$C_OFF" \
+            "$C_MUTED" "$w_age" "${ages[$i]}" "$C_OFF" \
+            "$sc" "$w_state" "${states[$i]}" "$C_OFF" \
+            "$C_SUBTLE" "${containers[$i]}" "$C_OFF"
     done
     # Numbered rather than arrow-driven: phone soft keyboards handle digits
     # far better than arrow keys, and this is the phone's entry point.
-    printf 'Attach to [1-%d, q to quit]: ' "${#ids[@]}"
+    printf '\n  %sattach to%s %s[1-%d, q to quit]%s: ' \
+        "$C_MUTED" "$C_OFF" "$C_TEXT" "${#ids[@]}" "$C_OFF"
     read -r choice
     case "$choice" in
         q|Q|'') exit 0 ;;
