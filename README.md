@@ -173,7 +173,9 @@ wrong still looks like it works.
 5. **If you will read it on a phone**, take the `sub_filter` viewport line
    from the example config too. `ttyd` ships no viewport meta, so without it
    the mobile view is unreadably small and will not reflow. →
-   [Reading it on a phone](#reading-it-on-a-phone)
+   [Reading it on a phone](#reading-it-on-a-phone). Typing from one has its
+   own gotcha, which nothing here can fix. →
+   [Typing on a phone](#typing-on-a-phone)
 6. **If another reverse proxy sits in front of this one**, it needs SNI, a
    single literal `Host`, the upgrade headers and its own long read timeout —
    and it changes the threat model. →
@@ -1009,6 +1011,42 @@ give a phone one size and the desktop another. A larger size also means
 fewer columns, and because attaching shares the window with your desktop
 session, tmux resizes that window to whichever client used it last. Start by
 fixing the viewport and only reach for this if you still need it.
+
+### Typing on a phone
+
+Text you already typed reappears a batch at a time, sometimes cascading into
+another batch. Backspacing clears it; a few characters later it happens
+again.
+
+**It is the keyboard's autocorrect**, and two things locate it there. The
+duplicated characters are real input you can backspace over rather than a
+redraw artifact, and the WebSocket runs over TCP, which cannot deliver the
+same bytes twice - so the browser is emitting them. And it reproduces on
+demand: a long run of digits never duplicates, while ordinary words duplicate
+on every correction the keyboard makes - `fix` to `fox`, `lets` to `let's`.
+When a soft keyboard *replaces* a span it has already committed, xterm.js
+re-sends the whole contents of its hidden input element instead of the
+difference, so the entire line replays.
+
+xterm.js already asks the keyboard not to do this - it sets `autocorrect`,
+`autocapitalize` and `spellcheck` to off on that element as it creates it -
+and Android ignores all three. This is a general `ttyd`/xterm.js interaction
+with predictive keyboards, and there is no lever here, in the proxy or in
+`dejima-ttyd`, that reaches it.
+
+So use a keyboard with nothing to correct against. **Unexpected Keyboard**
+(F-Droid or Play Store) was written for Termux users and fits well: its word
+suggestions need a dictionary you download yourself, so a fresh install has
+nothing to autocorrect with, and Ctrl, Alt, Esc, Tab, the arrows and the
+function keys are all real keys, reached by swiping a key toward the corner
+the symbol is printed in. That second half matters more than the bug does -
+without Ctrl there is no tmux prefix, and Esc and the arrows are hard to do
+without in anything interactive. Android's keyboard switcher makes it a
+per-session choice rather than a replacement for the keyboard you use for
+everything else.
+
+Turning autocorrect off in the keyboard you already have fixes it too, at the
+cost of losing the correction everywhere else.
 
 ### Behind another reverse proxy
 
