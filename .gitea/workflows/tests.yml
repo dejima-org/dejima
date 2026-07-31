@@ -11,12 +11,12 @@ name: tests
 on:
   pull_request:
 
-# A PR that gets three pushes in a minute should run the third, not all three.
-# Keyed on the ref rather than the SHA so a new push supersedes the run it
-# just made obsolete.
-concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+# No `concurrency:` block. Gitea does not implement one - the word appears
+# nowhere in its actions models or services as of 1.25 - so writing it here
+# would only claim a cancellation that never happens. It doesn't: pushing
+# twice in a minute left the superseded run going and queued the new one
+# behind it. On a single-capacity runner, expect a backlog rather than a
+# supersede, and cancel the stale run by hand if it is in the way.
 
 jobs:
   fast:
@@ -110,4 +110,19 @@ jobs:
           }
 
       - uses: actions/checkout@v4
+
+      # The build dominates this job, and inside setup_file it is a `docker
+      # build -q` that prints nothing at all - so tens of minutes of ordinary
+      # building is indistinguishable from a hang, which is exactly how it
+      # read the first time this ran here. Hoisted out, it gets its own
+      # progress output and its own duration in the run summary.
+      #
+      # SKIP_BUILD below then reuses this image rather than skipping a build.
+      # The image is still built fresh from this commit, so the property the
+      # test file defaults to - never assert against a stale image - holds.
+      - name: Build the sandbox image
+        run: docker build -t dejima:latest -f docker/Dockerfile .
+
       - run: bats test/runtime.bats
+        env:
+          SKIP_BUILD: 1
