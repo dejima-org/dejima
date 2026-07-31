@@ -186,6 +186,26 @@ jobs:
       - run: bats test/runtime.bats
         env:
           SKIP_BUILD: 1
+          # Every container this suite starts fetches GitHub's IP ranges from
+          # api.github.com/meta in init-firewall.sh, and unauthenticated that
+          # endpoint allows 60 requests an hour per source IP - shared with
+          # everything else on this runner host. Thirteen starts per run means
+          # two runs an hour exhausts it, after which containers fail to boot
+          # and tests fail on the quota rather than on anything they assert.
+          #
+          # This became reachable when the build got fast: at ~48 minutes a
+          # run the starts were spread thin enough to stay under, and at ~4
+          # minutes they are not. Any token authenticates the fetch and raises
+          # the ceiling to 5000/hour; /meta is public data and needs no scopes
+          # at all, so the secret behind this should be a fine-grained PAT
+          # with no permissions and no repository access - not a token that
+          # can do anything else. It reaches `gh auth setup-git` inside the
+          # containers, so a scope granted here is a scope handed to every
+          # sandbox the suite starts.
+          #
+          # Unset is fine and the suite still runs - it just spends the
+          # anonymous quota, so expect the failure above on a busy day.
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
           # runtime.bats builds fixtures on disk - ssh keys, statusline
           # scripts, .claude.json copies, a proxy socket - and bind-mounts
           # them into containers it starts. Those containers are siblings of
