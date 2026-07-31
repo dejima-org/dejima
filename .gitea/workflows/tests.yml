@@ -29,9 +29,15 @@ jobs:
       - name: Install test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bats jq python3 socat ca-certificates
+          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates
       - uses: actions/checkout@v4
-      - run: bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats
+      # As an ordinary user, not root. One test leaves a directory mode 500 and
+      # asserts that the CLI's rm -rf refuses it and says so; root walks
+      # through that on CAP_DAC_OVERRIDE and the test fails for a reason that
+      # has nothing to do with what it checks. Nobody runs these CLIs as root.
+      - run: |
+          chown -R node:node .
+          su node -c 'bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
 
   runtime:
     runs-on: ubuntu-latest
@@ -63,7 +69,7 @@ jobs:
       - name: Install test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bats jq python3 socat ca-certificates curl
+          apt-get install -y --no-install-recommends bats jq python3 ca-certificates curl
           # The CLI only - the daemon is the host's, reached over the socket
           # above. Debian ships no docker-cli package (docker.io drags in a
           # daemon this job would never start), so take the static binary.
