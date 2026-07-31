@@ -205,6 +205,11 @@ SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 
 cleanup() {
+    # The audit below is the last writer relative to this guarded tail, not
+    # end-to-end: the unguarded rm calls right after this point are all
+    # host-mktemp'd paths, not session-writable, so a genuine failure there
+    # is not session-triggerable - but a future reader should not assume the
+    # whole function is exception-safe under set -e.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi

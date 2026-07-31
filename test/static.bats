@@ -541,7 +541,12 @@ setup() {
 @test "the exit-time audit is the last thing that writes to the terminal" {
     audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    marker_line=$(grep -n 'could not remove the marker directory' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ -n "$marker_line" ]
     [ "$audit_line" -lt "$trap_line" ]
+    # Not just "inside cleanup()" but after the one line in it a session can
+    # deliberately provoke to print - the actual last-writer invariant.
+    [ "$marker_line" -lt "$audit_line" ]
     run grep -c 'could not remove the marker directory' "$REPO_ROOT/bin/dejima"
     [ "$output" -eq 1 ]
 }

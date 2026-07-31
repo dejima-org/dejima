@@ -19,6 +19,15 @@ teardown() {
     if [ -n "${TMUX_DIR:-}" ]; then
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
     fi
+    # Safety net for tests that temporarily swap out the real bin/dejima-
+    # audit: each such test restores it itself right after `run`, before any
+    # assertion that could short-circuit the test body, but this catches the
+    # case anyway if something in between still managed to abort first.
+    if [ -n "${AUDIT_BACKUP:-}" ] && [ -f "$AUDIT_BACKUP" ]; then
+        cp "$AUDIT_BACKUP" "$REPO_ROOT/bin/dejima-audit"
+        chmod +x "$REPO_ROOT/bin/dejima-audit"
+        rm -f "$AUDIT_BACKUP"
+    fi
     rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
         ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
 }
@@ -292,6 +301,65 @@ EOF
     total_lines=$(printf '%s\n' "$output" | wc -l)
     [ "$verdict_line" -eq "$total_lines" ]
     chmod -R u+rwX "$RUNTIME_DIR"
+    rm -rf "$PROJ"
+}
+
+@test "the container's real exit code survives an exit-time audit invocation that itself fails" {
+    # The brief's central question: cleanup() now calls dejima-audit compare
+    # from the EXIT trap tail, guarded with || true specifically so that a
+    # failing audit invocation cannot replace the shell's own exit status
+    # under set -e. Prove it directly rather than by reasoning alone: swap
+    # in an audit binary that exits nonzero, and confirm bin/dejima still
+    # reports the container's own distinctive exit code (5 - neither 0, nor
+    # 1, nor the audit stub's own failure code of 3).
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    [ "$arg" = run ] && exit 5
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
+    AUDIT_BACKUP="$(mktemp)"
+    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
+    printf '#!/bin/bash\nexit 3\n' > "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    run launch "$PROJ"
+    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    rm -f "$AUDIT_BACKUP"
+    [ "$status" -eq 5 ]
+    rm -rf "$PROJ"
+}
+
+@test "the container's real exit code survives an exit-time audit invocation that does not exist" {
+    # Same guarantee, second failure mode named by the brief: the audit
+    # binary missing entirely (a broken install, a bad upgrade) makes the
+    # shell's own exec fail with 127 at that point in cleanup() - still
+    # guarded by the same || true, so it must not surface as bin/dejima's
+    # reported exit code either.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    [ "$arg" = run ] && exit 5
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
+    AUDIT_BACKUP="$(mktemp)"
+    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
+    rm -f "$AUDIT_REAL"
+    run launch "$PROJ"
+    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    rm -f "$AUDIT_BACKUP"
+    [ "$status" -eq 5 ]
     rm -rf "$PROJ"
 }
 
