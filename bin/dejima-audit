@@ -206,21 +206,21 @@ case "$cmd" in
                            echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
             echo "dejima audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
-        findings=()
+        crit=(); warn=(); info=()
         # config diffs: added/changed lines present in new but not old
         while IFS= read -r line; do
             key="${line%%=*}"
             key_nopfx="${key#worktree:}"
             if is_exec_key "$key_nopfx"; then
-                findings+=("COMMAND-EXECUTION git config: $line")
+                crit+=("COMMAND-EXECUTION git config: $line")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
-                    '!'*) findings+=("COMMAND-EXECUTION git alias: $line") ;;
-                    *)    findings+=("changed git config: $line") ;;
+                    '!'*) crit+=("COMMAND-EXECUTION git alias: $line") ;;
+                    *)    warn+=("changed git config: $line") ;;
                 esac
             else
-                findings+=("changed git config: $line")
+                warn+=("changed git config: $line")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
@@ -230,8 +230,9 @@ case "$cmd" in
         # so each changed path is reported once)
         while IFS= read -r line; do
             case "$(path_severity "$line")" in
-                CRITICAL) findings+=("HOST-CODE-EXECUTION workspace file: $line") ;;
-                *)        findings+=("changed workspace file: $line") ;;
+                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
+                WARNING)  warn+=("changed workspace file: $line") ;;
+                *)        info+=("changed workspace file: $line") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
@@ -246,7 +247,7 @@ case "$cmd" in
             case "$slug" in
                 "$current_slug"|"$current_slug"-*) continue ;;
             esac
-            findings+=("CROSS-PROJECT history/memory write: $slug")
+            warn+=("CROSS-PROJECT history/memory write: $slug")
         done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
                           <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )
 
@@ -256,7 +257,7 @@ case "$cmd" in
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         while IFS= read -r line; do
-            findings+=("TCB (sandbox self) modified: $line")
+            crit+=("TCB (sandbox self) modified: $line")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -267,22 +268,35 @@ case "$cmd" in
         # strongly as COMMAND-EXECUTION/TCB above: this is unsandboxed host
         # code execution, not just a config change.
         while IFS= read -r line; do
-            findings+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $line")
+            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $line")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"
-        [ "${#findings[@]}" -eq 0 ] && exit 0
+        total=$(( ${#crit[@]} + ${#warn[@]} + ${#info[@]} ))
+        if [ "$total" -eq 0 ]; then
+            exit 0
+        fi
 
+        # Ascending severity: the operator reads bottom-up from their shell
+        # prompt, so whatever prints LAST is what actually gets seen. INFO
+        # collapses to a count - it exists to be counted, not read.
         {
             echo ""
             echo "================================================================"
-            echo " dejima: this session changed host-persistence surfaces"
-            echo " in $ws"
-            echo " Review these BEFORE running 'git' or 'claude' in that repo:"
+            echo " dejima: this session changed host-persistence surfaces in"
+            echo " $ws"
             echo "----------------------------------------------------------------"
-            printf '  - %s\n' "${findings[@]}"
+            if [ "${#info[@]}" -gt 0 ]; then
+                echo "  ${#info[@]} routine file change(s) - not listed"
+            fi
+            if [ "${#warn[@]}" -gt 0 ]; then
+                printf '  - %s\n' "${warn[@]}"
+            fi
+            if [ "${#crit[@]}" -gt 0 ]; then
+                printf '  ! %s\n' "${crit[@]}"
+            fi
             echo "================================================================"
         } >&2
         exit 0

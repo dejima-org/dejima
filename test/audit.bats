@@ -278,3 +278,23 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *"CLAUDE.md"* ]]
     [[ "$output" != *"HOST-CODE-EXECUTION"* ]]
 }
+
+@test "prints CRITICAL findings after WARNING findings" {
+    snap
+    mkdir -p "$WS/.claude"; echo 'x' > "$WS/.claude/CLAUDE.md"
+    echo 'export X=1' > "$WS/.envrc"
+    run cmp_
+    crit_line=$(printf '%s\n' "$output" | grep -n "HOST-CODE-EXECUTION" | head -1 | cut -d: -f1)
+    warn_line=$(printf '%s\n' "$output" | grep -n "CLAUDE.md" | head -1 | cut -d: -f1)
+    [ "$crit_line" -gt "$warn_line" ]
+}
+
+@test "collapses INFO findings to a single counted line" {
+    snap
+    git -C "$WS" config user.name a
+    for i in 1 2 3 4 5; do echo "$i" > "$WS/note$i.txt"; done
+    mkdir -p "$WS/.claude"
+    for i in 1 2 3 4 5 6 7 8; do echo "$i" > "$WS/.claude/t$i.md"; done
+    run cmp_
+    [ "$(printf '%s\n' "$output" | grep -c 't[0-9]\.md')" -le 8 ]
+}
