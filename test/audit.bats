@@ -571,17 +571,49 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
                                              # so the report must stay eviction-protected
 }
 
-@test "an approved finding for a since-deleted path writes an empty-sha entry that never suppresses" {
+@test "ack refuses to approve a finding whose path no longer exists, and the CRITICAL suffix survives" {
+    # A since-deleted path has no content left to pin a `safe` approval to -
+    # writing one anyway (the old behaviour) produced a baseline entry
+    # baseline_suppresses() can never match (its own empty-sha guard rejects
+    # it as malformed), so the surface stayed permanently unsuppressible -
+    # while `a` still advanced crit_acked and let the report shed its
+    # -CRITICAL.txt protection for good. Refusing outright keeps both the
+    # baseline and the report's protection honest.
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
     rm -f "$WS/.envrc"   # gone by the time ack runs
     run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"recorded 1 acknowledgement"* ]]
-    grep -q '^safe \.envrc $' "$BASEDIR/$slug"   # trailing space: id recorded, sha empty
-    echo 'export X=1' > "$WS/.envrc"             # recreate with real content
+    [[ "$output" == *"cannot approve: .envrc no longer exists"* ]]
+    [[ "$output" == *"nothing recorded"* ]]
+    [ ! -f "$BASEDIR/$slug" ]                    # nothing written to the baseline at all
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" == *"-CRITICAL.txt"* ]]         # unacknowledged CRITICAL keeps its protection
+}
+
+@test "a workspace path containing its own ': ' cannot hijack ack's id derivation" {
+    # Trigger (a) of CRITICAL 1: id="${body##*: }" took everything after the
+    # LAST ": " in body, so a CRITICAL path containing a literal ": " (a
+    # perfectly legal filename byte sequence) yielded the wrong id - here the
+    # old code would derive "decoy" instead of the real path, so approving it
+    # would baseline an id that can never match the real finding while still
+    # letting the report shed -CRITICAL.txt.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    mkdir -p "$WS/.git/hooks"
+    printf '#!/bin/sh\necho pwned\n' > "$WS/.git/hooks/pre-commit: decoy"
     run cmp_
-    [[ "$output" == *".envrc"* ]]                # empty-sha baseline entry cannot match a real hash
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+    [[ "$output" == *".git/hooks/pre-commit: decoy"* ]]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe \.git/hooks/pre-commit: decoy ' "$BASEDIR/$slug"
+    ! grep -q '^safe decoy ' "$BASEDIR/$slug"
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" != *"-CRITICAL.txt"* ]]         # correctly acked: suffix dropped
+    run cmp_
+    [[ "$output" != *"pre-commit: decoy"* ]]     # ...and the id round-trips through baseline_suppresses
 }
 
 # --- Task 8b: every CRITICAL finding type must be acknowledgeable, not just

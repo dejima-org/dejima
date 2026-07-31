@@ -553,16 +553,27 @@ case "$cmd" in
             # finding whose body matches none of these (currently only
             # CROSS-PROJECT) has no id to record, so it's shown but not
             # offered a/s.
+            #
+            # The id itself must then be recovered with a shortest-prefix
+            # strip of that same fixed label (`${body#LABEL}`), never
+            # `${body##*: }`: the latter strips up to the LAST ": " in the
+            # whole string, and a workspace-controlled path can itself
+            # contain a literal ": " (e.g. ".git/hooks/pre-commit: decoy"),
+            # which would truncate the derived id to everything after that
+            # planted separator - the case match being anchored doesn't
+            # protect the extraction that follows it.
             ackable=0; id=""
             case "$body" in
-                "HOST-CODE-EXECUTION workspace file: "*|"changed workspace file: "*)
-                    ackable=1; id="${body##*: }" ;;
+                "HOST-CODE-EXECUTION workspace file: "*)
+                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }" ;;
+                "changed workspace file: "*)
+                    ackable=1; id="${body#changed workspace file: }" ;;
                 "COMMAND-EXECUTION git config: "*|"COMMAND-EXECUTION git alias: "*)
                     ackable=1; cfgline="${body#*: }"; id="gitconfig:${cfgline%%=*}" ;;
-                "HOST-CODE-EXECUTION statusline.sh changed"*)
-                    ackable=1; id="statusline:${body##*: }" ;;
+                "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "*)
+                    ackable=1; id="statusline:${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }" ;;
                 "TCB (sandbox self) modified: "*)
-                    ackable=1; id="tcb:${body##*: }" ;;
+                    ackable=1; id="tcb:${body#TCB (sandbox self) modified: }" ;;
                 *) ackable=0 ;;
             esac
             # Defence in depth: even an anchored arm above should never
@@ -596,8 +607,23 @@ case "$cmd" in
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
                     else
                         sha="$(current_sha_for_id "$id")"
-                        pending+=("safe $id $sha")
-                        [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
+                        if [ -z "$sha" ]; then
+                            # Nothing left to pin the approval to: current_sha_for_id
+                            # returning empty means $id no longer exists (deleted
+                            # between compare and ack, or - for gitconfig - the key
+                            # was unset). Writing `safe <id> ` anyway would record a
+                            # baseline entry baseline_suppresses() can never match
+                            # (its own empty-sha guard rejects it as malformed), so
+                            # the surface would stay permanently unsuppressible -
+                            # while still advancing crit_acked and letting a CRITICAL
+                            # report shed its -CRITICAL.txt protection. Refuse
+                            # instead: record nothing, and leave the report's
+                            # protection exactly as it was.
+                            echo "  cannot approve: $id no longer exists"
+                        else
+                            pending+=("safe $id $sha")
+                            [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
+                        fi
                     fi
                     ;;
                 *) ;;
