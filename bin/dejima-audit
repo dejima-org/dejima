@@ -37,6 +37,15 @@ CRIT_CAP=10
 # moderately - overflow here is ordinary, not an alarm.
 WARN_CAP=5
 
+AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
+# Retention is a security property, not housekeeping. With one overwritten
+# report, a session that plants something needs only to talk the operator
+# into a restart for the next clean exit to erase the evidence - and
+# suggesting a restart is an entirely ordinary thing to suggest.
+AUDIT_KEEP="${DEJIMA_AUDIT_KEEP:-10}"
+
+ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+
 # git config keys whose values run a command on the next git invocation, or
 # (include.path/includeif.*.path) indirect to another config file that could
 # set one - key names are case-insensitive in git, so match on a lowercased
@@ -264,7 +273,7 @@ case "$cmd" in
         # projects diffs: a write to another project's ~/.claude/projects
         # slug during this session (transcript/memory-poisoning surface).
         # "self" = current workspace's own slug or a worktree child of it.
-        current_slug="$(printf '%s' "$ws" | sed 's/[^a-zA-Z0-9]/-/g')"
+        current_slug="$(ws_slug "$ws")"
         while IFS= read -r line; do
             slug="${line%%$'\t'*}"
             case "$slug" in
@@ -302,6 +311,31 @@ case "$cmd" in
             exit 0
         fi
 
+        report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
+        if mkdir -p "$report_dir" 2>/dev/null; then
+            if [ "${#crit[@]}" -gt 0 ]; then
+                report="$report_dir/$(date +%Y-%m-%d-%H%M%S)-CRITICAL.txt"
+            else
+                report="$report_dir/$(date +%Y-%m-%d-%H%M%S).txt"
+            fi
+            {
+                echo "dejima audit report for $(sanitize "$ws")"
+                [ "${#crit[@]}" -gt 0 ] && printf 'CRITICAL %s\n' "${crit[@]}"
+                [ "${#warn[@]}" -gt 0 ] && printf 'WARNING  %s\n' "${warn[@]}"
+                [ "${#info[@]}" -gt 0 ] && printf 'INFO     %s\n' "${info[@]}"
+            } > "$report" 2>/dev/null || true
+
+            # Oldest-first, but only clean reports are evictable: a report
+            # still carrying an unacknowledged CRITICAL is retained past the
+            # cap, so flushing one out cannot be achieved by inducing runs.
+            # `ack` renames it to drop the suffix, which makes it evictable.
+            while [ "$(find "$report_dir" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | wc -l)" -gt "$AUDIT_KEEP" ]; do
+                oldest="$(find "$report_dir" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | sort | head -1)"
+                [ -n "$oldest" ] || break
+                rm -f "$oldest"
+            done
+        fi
+
         # Ascending severity: the operator reads bottom-up from their shell
         # prompt, so whatever prints LAST is what actually gets seen. INFO
         # collapses to a count - it exists to be counted, not read.
@@ -337,8 +371,15 @@ case "$cmd" in
         } >&2
         exit 0
         ;;
+    show)
+        report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
+        newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        cat "$newest"
+        exit 0
+        ;;
     *)
-        echo "usage: dejima-audit {snapshot|compare} <workspace> <state-file>" >&2
+        echo "usage: dejima-audit {snapshot|compare|show|ack} <workspace> [state-file]" >&2
         exit 2
         ;;
 esac

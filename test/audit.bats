@@ -14,8 +14,9 @@ setup() {
     CURRENT_SLUG="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     STATUSLINE_DIR="$(mktemp -d)"
     export DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
+    AUDITDIR="$(mktemp -d)"; export DEJIMA_AUDIT_DIR="$AUDITDIR"
 }
-teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; }
+teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; rm -rf "$AUDITDIR"; }
 
 snap() { "$AUDIT" snapshot "$WS" "$STATE"; }
 cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
@@ -366,4 +367,57 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [[ "$output" != *$'\033'* ]]
     [[ "$output" == *".claude/evil"* ]]
+}
+
+@test "writes a timestamped report file containing the full finding list" {
+    snap
+    mkdir -p "$WS/.claude"; echo 'x' > "$WS/.claude/CLAUDE.md"
+    cmp_ >/dev/null 2>&1
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "cat '$AUDITDIR/$slug'/*.txt"
+    [[ "$output" == *"CLAUDE.md"* ]]
+}
+
+@test "names a report carrying critical findings so rotation can spare it" {
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    cmp_ >/dev/null 2>&1
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" == *"-CRITICAL.txt"* ]]
+}
+
+@test "rotation keeps DEJIMA_AUDIT_KEEP clean reports" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$AUDITDIR/$slug"
+    for i in $(seq 1 12); do
+        touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"
+    done
+    snap; git -C "$WS" config user.name changed
+    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
+    run bash -c "ls '$AUDITDIR/$slug' | wc -l"
+    [ "$output" -le 10 ]
+}
+
+@test "rotation never evicts an unacknowledged CRITICAL report on age" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$AUDITDIR/$slug"
+    touch "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt"
+    for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    snap; git -C "$WS" config user.name changed
+    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
+    # rotation actually ran: 12 planted clean reports + this run's own, trimmed to KEEP
+    clean_n="$(find "$AUDITDIR/$slug" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | wc -l)"
+    [ "$clean_n" -le 10 ]
+    # ...and the unacknowledged CRITICAL report survived it
+    [ -f "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt" ]
+}
+
+@test "show prints the newest report" {
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    cmp_ >/dev/null 2>&1
+    run "$AUDIT" show "$WS"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
 }
