@@ -363,6 +363,41 @@ EOF
     rm -rf "$PROJ"
 }
 
+@test "an undeletable entry in SANDBOX_GITCONFIG_DIR does not abort the exit trap or eat the real exit code" {
+    # CRITICAL 2: SANDBOX_GITCONFIG_DIR is bind-mounted read-write into the
+    # container (docker-compose.yml, no :ro), unconditionally for every
+    # session - unlike the notify marker directory above, this one exists
+    # whether or not remote access is even configured. A session can leave
+    # an undeletable subdirectory in it, making the host-side `rm -rf` fail;
+    # before the `|| true` guard, that failure would abort cleanup()'s EXIT
+    # trap right there under set -e, so dejima-audit compare never runs and
+    # bin/dejima would report 1 in place of the container's real exit code.
+    # Prove both halves survive together: the audit still runs (a workspace
+    # change it plants is still reported) and the container's own
+    # distinctive exit code (7 - neither 0 nor 1) comes through unchanged.
+    stub_launch
+    cat > "$LAUNCH_DIR/docker" <<EOF
+#!/bin/bash
+echo "\$SANDBOX_GITCONFIG_DIR" > "$LAUNCH_DIR/gitconfig-dir-path"
+mkdir -p "\$SANDBOX_GITCONFIG_DIR/undeletable"
+: > "\$SANDBOX_GITCONFIG_DIR/undeletable/file"
+chmod 500 "\$SANDBOX_GITCONFIG_DIR/undeletable"
+echo '{}' > "\$SANDBOX_TEST_WS/.mcp.json"
+exit 7
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    export SANDBOX_TEST_WS="$PROJ"
+    run launch "$PROJ"
+    unset SANDBOX_TEST_WS
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"HOST-CODE-EXECUTION workspace file: .mcp.json"* ]]
+    gitconfig_dir="$(cat "$LAUNCH_DIR/gitconfig-dir-path")"
+    [ -n "$gitconfig_dir" ]
+    [ -d "$gitconfig_dir" ]   # left behind, not removed - the guard doesn't pretend it succeeded
+    chmod -R u+rwX "$gitconfig_dir"
+    rm -rf "$gitconfig_dir" "$PROJ"
+}
+
 @test "a sandbox started outside tmux records an empty pane rather than being skipped" {
     stub_launch
     : > "$CONFIG_DIR/remote.conf"
