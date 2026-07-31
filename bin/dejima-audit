@@ -72,6 +72,14 @@ path_severity() {
     esac
 }
 
+# Every finding interpolates workspace-controlled text (paths, config values)
+# into a terminal. A planted value containing C0 escapes can scroll, clear or
+# overwrite the report - so strip them at the display boundary, after all
+# parsing and TAB-splitting is done.
+sanitize() {
+    printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177'
+}
+
 # Undo git's config-file quoting of a value (git wraps values containing
 # special chars in "..." and backslash-escapes embedded \ and ") so exec
 # detection sees the real value instead of a quoted literal.
@@ -222,15 +230,15 @@ case "$cmd" in
             key="${line%%=*}"
             key_nopfx="${key#worktree:}"
             if is_exec_key "$key_nopfx"; then
-                crit+=("COMMAND-EXECUTION git config: $line")
+                crit+=("COMMAND-EXECUTION git config: $(sanitize "$line")")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
-                    '!'*) crit+=("COMMAND-EXECUTION git alias: $line") ;;
-                    *)    warn+=("changed git config: $line") ;;
+                    '!'*) crit+=("COMMAND-EXECUTION git alias: $(sanitize "$line")") ;;
+                    *)    warn+=("changed git config: $(sanitize "$line")") ;;
                 esac
             else
-                warn+=("changed git config: $line")
+                warn+=("changed git config: $(sanitize "$line")")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
@@ -240,14 +248,14 @@ case "$cmd" in
         # so each changed path is reported once)
         while IFS= read -r line; do
             case "$(path_severity "$line")" in
-                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
-                WARNING)  warn+=("changed workspace file: $line") ;;
+                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(sanitize "$line")") ;;
+                WARNING)  warn+=("changed workspace file: $(sanitize "$line")") ;;
                 # Currently unreachable: hash_paths() only monitors
                 # .mcp.json/.envrc/.claude/.vscode/.git/hooks, and every path
                 # under those matches an earlier CRITICAL/WARNING pattern in
                 # path_severity(). Kept as the defensive default for
                 # surfaces monitored by a future task.
-                *)        info+=("changed workspace file: $line") ;;
+                *)        info+=("changed workspace file: $(sanitize "$line")") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
@@ -262,7 +270,7 @@ case "$cmd" in
             case "$slug" in
                 "$current_slug"|"$current_slug"-*) continue ;;
             esac
-            warn+=("CROSS-PROJECT history/memory write: $slug")
+            warn+=("CROSS-PROJECT history/memory write: $(sanitize "$slug")")
         done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
                           <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )
 
@@ -272,7 +280,7 @@ case "$cmd" in
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         while IFS= read -r line; do
-            crit+=("TCB (sandbox self) modified: $line")
+            crit+=("TCB (sandbox self) modified: $(sanitize "$line")")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -283,7 +291,7 @@ case "$cmd" in
         # strongly as COMMAND-EXECUTION/TCB above: this is unsandboxed host
         # code execution, not just a config change.
         while IFS= read -r line; do
-            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $line")
+            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(sanitize "$line")")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -301,7 +309,7 @@ case "$cmd" in
             echo ""
             echo "================================================================"
             echo " dejima: this session changed host-persistence surfaces in"
-            echo " $ws"
+            echo " $(sanitize "$ws")"
             echo "----------------------------------------------------------------"
             if [ "${#info[@]}" -gt 0 ]; then
                 echo "  ${#info[@]} routine file change(s) - not listed"

@@ -350,3 +350,20 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$last" == *"dejima:"* ]]
     [[ "$last" == *"no critical findings"* ]]
 }
+
+@test "strips terminal escapes from a planted config value" {
+    snap
+    git -C "$WS" config core.pager "$(printf 'less\033[2Jgotcha')"
+    run cmp_
+    [[ "$output" != *$'\033'* ]]
+    [[ "$output" == *"core.pager"* ]]
+}
+
+@test "strips terminal escapes from a planted path" {
+    snap
+    mkdir -p "$WS/.claude"
+    touch "$WS/.claude/$(printf 'evil\033[2Jfile')"
+    run cmp_
+    [[ "$output" != *$'\033'* ]]
+    [[ "$output" == *".claude/evil"* ]]
+}
