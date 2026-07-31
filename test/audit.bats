@@ -29,15 +29,25 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$output" = "" ]
 }
 
-@test "compare against an existing-but-never-snapshotted state file skips instead of flagging everything" {
+@test "compare against an existing-but-never-snapshotted state file skips silently instead of flagging everything" {
     # bin/dejima's cleanup() runs on every exit, including one before
     # `snapshot` ever ran (e.g. a startup abort) - its mktemp'd state file
     # exists but is empty in that case, same as $STATE here before snap() is
     # ever called. Compare must treat that the same as a missing file, not
     # diff real content against nothing and manufacture a finding for
-    # everything already present.
+    # everything already present. This is the routine case on every
+    # pre-snapshot fatal exit, so it must stay silent - the "skipping"
+    # message would otherwise bury the real error that was the operator's
+    # last line.
     git -C "$WS" config core.hooksPath /tmp/evil
     run cmp_
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "compare against a genuinely missing state file path prints a skip notice" {
+    git -C "$WS" config core.hooksPath /tmp/evil
+    run "$AUDIT" compare "$WS" "$STATE.does-not-exist" 2>&1
     [ "$status" -eq 0 ]
     [[ "$output" == *"no snapshot to compare against, skipping"* ]]
     [[ "$output" != *"core.hooksPath"* ]]
@@ -406,6 +416,15 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *".claude/evil"* ]]
 }
 
+@test "strips a bidi override from a planted path instead of letting it visually reverse the report" {
+    snap
+    mkdir -p "$WS/.claude"
+    touch "$WS/.claude/$(printf 'evil%sfile' $'\xe2\x80\xae')"
+    run cmp_
+    [[ "$output" != *$'\xe2\x80\xae'* ]]
+    [[ "$output" == *".claude/evilfile"* ]]
+}
+
 @test "writes a timestamped report file containing the full finding list" {
     snap
     mkdir -p "$WS/.claude"; echo 'x' > "$WS/.claude/CLAUDE.md"
@@ -448,6 +467,18 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$clean_n" -le 10 ]
     # ...and the unacknowledged CRITICAL report survived it
     [ -f "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt" ]
+}
+
+@test "rotation gives up instead of spinning forever when the report dir is unwritable" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$AUDITDIR/$slug"
+    for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    snap; git -C "$WS" config user.name changed
+    chmod 500 "$AUDITDIR/$slug"
+    run timeout 5 env DEJIMA_AUDIT_KEEP=10 "$AUDIT" compare "$WS" "$STATE"
+    result="$status"
+    chmod 700 "$AUDITDIR/$slug"
+    [ "$result" -ne 124 ]
 }
 
 @test "show prints the newest report" {
@@ -547,10 +578,17 @@ REPORT
 
 @test "ack refuses to spam a CRITICAL surface" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
-    run bash -c "printf 's\nq\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"cannot"* ]]
-    ! grep -q '^spam .envrc' "$BASEDIR/$slug" 2>/dev/null
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"
+    cmp_ >/dev/null 2>&1
+    # 's' on the CRITICAL .envrc finding, then 'a' on the WARNING one that
+    # follows it - so $BASEDIR/$slug is guaranteed to exist afterward and the
+    # negative grep below can't pass vacuously against a missing file.
+    run bash -c "printf 's\na\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."* ]]
+    [ -f "$BASEDIR/$slug" ]
+    ! grep -q '^spam \.envrc' "$BASEDIR/$slug"
 }
 
 @test "ack records a safe entry and clears the CRITICAL report marker" {
@@ -797,8 +835,13 @@ REPORT
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     snap
     git -C "$WS" config core.hooksPath /tmp/evil
+    mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"
     cmp_ >/dev/null 2>&1
-    run bash -c "printf 's\nq\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"cannot"* ]]
-    ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug" 2>/dev/null
+    # 's' on the CRITICAL gitconfig finding, then 'a' on the WARNING one that
+    # follows it - so $BASEDIR/$slug is guaranteed to exist afterward and the
+    # negative grep below can't pass vacuously against a missing file.
+    run bash -c "printf 's\na\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."* ]]
+    [ -f "$BASEDIR/$slug" ]
+    ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug"
 }
