@@ -12,8 +12,8 @@
 # stdin, no network. The host-side watcher composes the whole notification
 # from host data, so not one byte from inside the sandbox reaches the
 # operator's phone. Anything more expressive here would be an injection
-# channel into a device that sits outside the sandbox - see README "Remote
-# access" on why the phone is the thing being protected.
+# channel into a device that sits outside the sandbox - see
+# docs/remote-access.md on why the phone is the thing being protected.
 set -euo pipefail
 
 # A whitelist, not a filter: an unrecognized event creates nothing at all.

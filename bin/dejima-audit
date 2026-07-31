@@ -5,7 +5,7 @@
 # would execute or load OUTSIDE the sandbox: git config keys that run a
 # command on the next `git`, and content under .claude/ / .mcp.json /
 # .envrc / .vscode/ / .git/hooks/. Read the report before running `git` or
-# `claude` in that repo again. See README "Security notes".
+# `claude` in that repo again. See docs/security.md.
 set -uo pipefail
 
 cmd="${1:-}"; ws="${2:-}"; state="${3:-}"

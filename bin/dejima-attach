@@ -1,8 +1,8 @@
 #!/bin/bash
 # List live dejima sandbox sessions and attach to one. This is the shared
 # core behind both remote front doors: it runs as a forced SSH command
-# (restrict,pty,command="...") and as ttyd's command. See README "Remote
-# access".
+# (restrict,pty,command="...") and as ttyd's command. See
+# docs/remote-access.md.
 #
 # Usage: dejima-attach [run-id|--list]
 #   (no argument)  numbered picker, attaches to the choice

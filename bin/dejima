@@ -139,12 +139,6 @@ fi
 SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/dejima/shared}"
 mkdir -p "$SANDBOX_SHARE_DIR"
 
-# ~/.claude/CLAUDE.md (carried into the container) tells agents to write
-# specs to ~/specs/ rather than a project-local path - make sure that
-# actually exists before it's bind-mounted, for a fresh machine that hasn't
-# used the convention yet.
-mkdir -p "$HOME/specs"
-
 # skills/commands/agents/output-styles overlays (see docker-compose.yml) can
 # only apply if the source dirs exist - pre-create them so a host that has
 # never used one still gets the read-only overlay instead of a writable gap.
@@ -414,7 +408,7 @@ fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
-# bin/dejima-anthropic-proxy and README "Security notes"), mount an
+# bin/dejima-anthropic-proxy and docs/security.md), mount an
 # empty file over ~/.claude/.credentials.json and an empty read-only
 # directory over ~/.claude/.credentials-proxy-tmp (the proxy's write-back
 # staging directory - the parent ~/.claude mount must stay read-write, so
@@ -466,7 +460,7 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
 
-# Optional remote access (see README "Remote access"). Entirely skipped
+# Optional remote access (see docs/remote-access.md). Entirely skipped
 # unless ~/.config/dejima/remote.conf exists - with it absent nothing below
 # runs, no state is created, and the compose invocation is exactly what it
 # was before this feature existed.
