@@ -758,6 +758,12 @@ bats test/static.bats test/project.bats test/remote.bats test/audit.bats  # fast
 SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
 ```
 
+`.gitea/workflows/tests.yml` runs all of it on every pull request and on every
+push to one, `runtime.bats` included. That job needs two things from the
+runner that an ordinary one doesn't — the host's Docker socket and the host
+network namespace — and it checks for both up front rather than failing
+obscurely partway through; the file says why each is needed.
+
 `static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
 `ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
 `~/.claude` read-only overlay lines are present, `dejima-allow`
