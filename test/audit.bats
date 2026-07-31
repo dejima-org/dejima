@@ -330,3 +330,23 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     overflow=$(printf '%s\n' "$output" | grep -n '^  + ' | head -1 | cut -d: -f1)
     [ "$overflow" -gt "$last_warn" ]
 }
+
+@test "the last line of the report is the verdict, not a border" {
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    run cmp_
+    last=$(printf '%s\n' "$output" | grep -v '^$' | tail -1)
+    [[ "$last" != *"====="* ]]
+    [[ "$last" == *"dejima:"* ]]
+    [[ "$last" == *"1 CRITICAL"* ]]
+}
+
+@test "the verdict line reports no critical findings when only WARNING-tier changes exist" {
+    snap
+    mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"
+    run cmp_
+    last=$(printf '%s\n' "$output" | grep -v '^$' | tail -1)
+    [[ "$last" != *"====="* ]]
+    [[ "$last" == *"dejima:"* ]]
+    [[ "$last" == *"no critical findings"* ]]
+}

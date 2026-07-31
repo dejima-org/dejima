@@ -319,7 +319,13 @@ case "$cmd" in
                     echo "  !! ${#crit[@]} critical findings in one session is ABNORMAL."
                 fi
             fi
-            echo "================================================================"
+            echo "----------------------------------------------------------------"
+            if [ "${#crit[@]}" -gt 0 ]; then
+                echo "         Review BEFORE the next 'git' or 'claude' in that repo."
+                echo " dejima: ${#crit[@]} CRITICAL - code that will run on your host."
+            else
+                echo " dejima: no critical findings; ${#warn[@]} change(s) to review."
+            fi
         } >&2
         exit 0
         ;;
