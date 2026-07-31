@@ -459,6 +459,33 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *".envrc"* ]]
 }
 
+@test "ack presents a stale unacknowledged CRITICAL report before a newer clean one" {
+    # IMPORTANT 3: `ack` used to pick the newest report overall (sort | tail
+    # -1), so a stale *-CRITICAL.txt sitting behind a newer clean report was
+    # unreachable through `ack` at all - the operator has no remedy but to
+    # keep pressing [c] past the startup warning, which is exactly the
+    # failure this feature exists to eliminate.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    echo 'export X=1' > "$WS/.envrc"   # real content, so the approval succeeds
+    report_dir="$AUDITDIR/$slug"; mkdir -p "$report_dir"
+    cat > "$report_dir/2020-01-01-000000-CRITICAL.txt" <<REPORT
+dejima audit report for $WS
+CRITICAL HOST-CODE-EXECUTION workspace file: .envrc
+REPORT
+    cat > "$report_dir/2026-01-01-000001.txt" <<REPORT
+dejima audit report for $WS
+WARNING  changed workspace file: .vscode/settings.json
+REPORT
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]           # presented the stale CRITICAL report...
+    [[ "$output" != *"settings.json"* ]]    # ...not the newer clean one
+    grep -q '^safe \.envrc ' "$BASEDIR/$slug"
+    [ ! -f "$report_dir/2020-01-01-000000-CRITICAL.txt" ]  # cleared: suffix dropped
+    [ -f "$report_dir/2020-01-01-000000.txt" ]
+    [ -f "$report_dir/2026-01-01-000001.txt" ]              # the newer report is untouched
+}
+
 @test "a spam-listed path is not listed in the report" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$WS/.claude"; echo 'a' > "$WS/.claude/CLAUDE.md"; snap

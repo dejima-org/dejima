@@ -496,7 +496,17 @@ case "$cmd" in
     ack)
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
-        newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+        # Oldest unacknowledged CRITICAL report first, not the newest report
+        # overall: a stale *-CRITICAL.txt sitting behind a newer clean
+        # report would otherwise never be reachable through `ack` at all (a
+        # plain `sort | tail -1` over every *.txt always prefers the newer
+        # one) - the startup warning in bin/dejima would keep firing on it
+        # forever with no way to clear it except pressing on past it, the
+        # exact failure this whole feature exists to stop. Still variable-
+        # named `newest` below for the rest of this case arm even when it
+        # isn't - renaming would ripple through every reference to it.
+        newest="$(find "$report_dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
+        [ -n "$newest" ] || newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
         [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
 
         # Accumulate in memory and write once at the end: an ack interrupted
