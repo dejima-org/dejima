@@ -1,12 +1,45 @@
 # dejima
 
-Runs Claude Code inside a firewalled Docker container with
+Runs a coding agent — Claude Code by default, or whatever command you point
+it at — inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
-auto-accepted), against a project bind-mounted from the host. Inspired by
+auto-accepted), against a project bind-mounted from the host. The agent gets
+to work without stopping to ask; the container is what makes that a
+reasonable trade rather than a reckless one.
+
+Around that core is most of what running an agent unattended actually takes:
+
+- **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
+  list does not connect, and the agent is told so rather than left to guess.
+- **Credentials that stay on the host.** Your Anthropic OAuth credential
+  never enters the container — a host-side proxy holds it and the container
+  gets a placeholder. Your SSH key doesn't either; the container sees an
+  agent socket, never the key.
+- **Per-project declaration and approval.** A project declares the domains
+  and dependencies it needs in `.dejima/`. Declaring is not granting: the
+  approval is a separate decision you make on the host, by hand, and the
+  approval store is never mounted where a session could reach it.
+- **A PR workflow.** `gitea-pr` lets a session open pull requests against
+  Gitea or Forgejo and pull review feedback back in, on a token scoped for
+  exactly that.
+- **Logging.** Every DNS lookup and rejected connection, shipped to Loki —
+  and, opt-in, the session transcript alongside them.
+- **Remote access, opt-in and off by default.** Attach to a live session
+  from a terminal or a browser, with a push notification when it wants you.
+- **Guard rails inside the session.** Hooks refuse obviously destructive
+  commands and pushes to anywhere but the allowed remote. These are
+  fast-fail guards against an overeager agent, not a boundary against a
+  hostile one — the container is the boundary.
+- **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins
+  and git identity carry over; uid, home directory and project path match on
+  both sides, so a session's transcript is readable from the host afterward.
+- **An exit-time audit** of the host surfaces a session could have written
+  to, so a change to your git config or `~/.claude` gets surfaced instead of
+  just happening.
+
+Originally inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-reworked to run via `docker compose` directly and extended with a `gitea-pr`
-helper for opening/iterating on PRs against Gitea or Forgejo, plus an
-optional editor-driven workflow in place of bare Claude Code (see "Usage").
+reworked to run via `docker compose` directly and grown well past it since.
 
 This repo only holds the tooling — it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
@@ -86,7 +119,7 @@ sandbox escape if you get it wrong.
    → [Prerequisites](#prerequisites),
    [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
 
-That is enough to run `bin/dejima`.
+That is enough to run `dejima`.
 
 ### Gitea/Forgejo PR workflow
 
@@ -131,7 +164,7 @@ one. →
 Per launch, not a persistent setting:
 
 ```sh
-ALLOW_GITHUB_PUSH=1 bin/dejima ~/myproject
+ALLOW_GITHUB_PUSH=1 dejima ~/myproject
 ```
 
 Pair it with a repo-scoped deploy key in `SANDBOX_SSH_KEY`. Read
@@ -157,7 +190,7 @@ getting it wrong still looks like it works.
    [Picking the address](docs/remote-access.md#picking-the-address)
 3. **SSH front door.** Generate a key that exists only for this, then add one
    `restrict,pty,command="…/dejima-attach"` line to `authorized_keys` for the
-   same Unix user that runs `bin/dejima`. →
+   same Unix user that runs `dejima`. →
    [SSH front door](docs/remote-access.md#ssh-front-door)
 4. **Web front door.** Get `ttyd` 1.7.4 or newer. If it came from a distro
    package, `systemctl disable --now ttyd.service` **and** `mask` it first —
@@ -191,9 +224,13 @@ getting it wrong still looks like it works.
 
 ## Usage
 
+Run `./install.sh` first — it symlinks the CLIs into `~/.local/bin` and the
+hooks into `~/.claude/hooks`, and everything below assumes those are on your
+`PATH`. See [Setup](#setup) for the rest of the first-run steps.
+
 ```sh
-bin/dejima                        # sandbox the current directory
-bin/dejima ~/repos/some-project
+dejima                        # sandbox the current directory
+dejima ~/repos/some-project
 ```
 
 By default the container's entry point is bare `claude` (always running with
@@ -208,7 +245,7 @@ to pull review feedback, feed it back in, repeat.
 ### Using a different editor/application
 
 ```sh
-SANDBOX_CMD=nvim bin/dejima ~/repos/some-project
+SANDBOX_CMD=nvim dejima ~/repos/some-project
 ```
 
 Runs unconfigured unless you also set `SANDBOX_NVIM_CONFIG` to a real config
@@ -218,7 +255,7 @@ don't fail on a read-only filesystem; nothing else in the config is
 writable):
 
 ```sh
-SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim bin/dejima ~/repos/some-project
+SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim dejima ~/repos/some-project
 ```
 
 Set both in your shell profile if you use this mode regularly.
@@ -228,7 +265,7 @@ path (a helper script in a dotfiles `bin/`, say), bring it in with
 `SANDBOX_EXTRA_MOUNTS` (colon-separated, mounted read-only at the same path):
 
 ```sh
-SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin bin/dejima ~/repos/some-project
+SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin dejima ~/repos/some-project
 ```
 
 ## Config parity with your host Claude Code setup
@@ -254,7 +291,7 @@ The container's own user matches yours exactly — username, uid, gid, and
 home directory (see `Dockerfile`) — so `$HOME`-relative paths (dotfiles,
 Claude Code's plugin bookkeeping) resolve the same on both sides. Defaults to
 `node`/1000/1000/`/home/node` if you build the image directly instead of via
-`bin/dejima`. Images are tagged per-user (`dejima:<username>`)
+`dejima`. Images are tagged per-user (`dejima:<username>`)
 so concurrent builds on a shared machine don't clobber each other.
 
 Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
@@ -283,7 +320,7 @@ the public half as a Gitea deploy key scoped to just the repos that need
 push access, then:
 
 ```sh
-SANDBOX_SSH_KEY=~/.ssh/dejima_ed25519 bin/dejima ~/repos/some-project
+SANDBOX_SSH_KEY=~/.ssh/dejima_ed25519 dejima ~/repos/some-project
 ```
 
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
@@ -300,9 +337,12 @@ from the project mount, for passing files (screenshots, temp scripts) in and
 out of a session without touching the actual checkout. Persists across
 sessions since it's a real directory, not a container volume.
 
-`~/specs` is also bind-mounted read-write at the fixed host path `~/specs`
-(not configurable) — makes the global `CLAUDE.md` convention of writing specs
-there actually persist, instead of vanishing with the container.
+It's also the answer if your own `CLAUDE.md` tells agents to put something at
+a fixed host path — design docs, scratch notes, anything meant to outlive the
+session but stay out of the project checkout. Point that convention at
+`~/shared` (or set `SANDBOX_SHARE_DIR` to wherever you keep it) rather than
+expecting some other host directory to be present in the container: this is
+the only writable host path mounted besides the project itself.
 
 ## Testing frontend changes
 
@@ -313,7 +353,7 @@ or per-project `npm install playwright` needed.
 `localhost`/loopback traffic never goes through the egress firewall, so a
 project's own dev server needs no firewall changes. A real external site
 needs to be on the allowlist like any other network use
-(`bin/dejima-allow <domain>` for a running session, add
+(`dejima-allow <domain>` for a running session, add
 `--global`/`--project <path>` to persist it) — the firewall applies to the
 browser's traffic exactly like `curl`/`git`.
 
@@ -371,7 +411,7 @@ default:
 - whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
-Everything else is rejected. Run `bin/dejima-allow <domain> --global`
+Everything else is rejected. Run `dejima-allow <domain> --global`
 (or `--project <path>` for one project) to allow more permanently (e.g.
 `crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable the
 firewall entirely (debugging only).
@@ -403,8 +443,8 @@ Approved domains only take effect at container start. For a domain a
 sandbox — it has no privilege to do this itself):
 
 ```sh
-bin/dejima-allow crates.io                # this session only
-bin/dejima-allow crates.io --global       # + persist for every project
+dejima-allow crates.io                # this session only
+dejima-allow crates.io --global       # + persist for every project
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -596,7 +636,7 @@ GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
 push destination (the no-direct-to-main rule still applies):
 
 ```sh
-ALLOW_GITHUB_PUSH=1 bin/dejima ~/repos/some-project
+ALLOW_GITHUB_PUSH=1 dejima ~/repos/some-project
 ```
 
 **Read this before turning it on.** Whether a push actually succeeds depends
@@ -617,7 +657,7 @@ make HTTPS push possible independent of `ALLOW_GITHUB_PUSH`, so don't use
 one.
 
 `ALLOW_GITHUB_PUSH` is a per-launch variable, not a persistent toggle — it
-only affects the one `bin/dejima` invocation it's set for.
+only affects the one `dejima` invocation it's set for.
 
 ## Remote access
 
@@ -657,7 +697,7 @@ SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
 
 `static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
 `ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
-`~/.claude` read-only overlay lines are present, `bin/dejima-allow`
+`~/.claude` read-only overlay lines are present, `dejima-allow`
 rejects a malicious domain argument. `runtime.bats` builds the image, boots
 a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
 env var makes it stop just short of execing `$SANDBOX_CMD`, so the suite can attach

@@ -4,7 +4,7 @@
 
 **Opt-in, and entirely off until you create one file.** Nothing here runs and
 no front door exists unless `~/.config/dejima/remote.conf` is present. With
-it absent, `bin/dejima` builds exactly the `docker compose` invocation it
+it absent, `dejima` builds exactly the `docker compose` invocation it
 built before this feature existed, no session state is written, no
 notification hook is registered, and `dejima-attach`, `dejima-ttyd` and
 `dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
@@ -53,7 +53,7 @@ glyph wider than the viewport renders a terminal that shows nothing, which
 reads as a broken front door rather than as a typo three files away.
 
 Those are the two scripts that read a *value* out of the file.
-`dejima-attach` and `bin/dejima` do not - to them the file is a switch, and
+`dejima-attach` and `dejima` do not - to them the file is a switch, and
 all they ask is whether it exists - so neither one parses it and neither
 refuses on a bad line. That is deliberate rather than an oversight: a
 malformed line cannot change what they do, and making the front door refuse
@@ -95,7 +95,7 @@ escape hatch.**
 
 So:
 
-- `ttyd` is bound to `127.0.0.1` by `bin/dejima-ttyd`, hardcoded, not
+- `ttyd` is bound to `127.0.0.1` by `dejima-ttyd`, hardcoded, not
   configurable. The container has no route to your host's loopback, so
   nothing but a process on this host can open that socket.
 - **The reverse proxy has to run on that same host** - the dejima box, the
@@ -189,7 +189,7 @@ else; `pty` adds back the one thing a terminal needs; `command=` runs
 sends is interpreted as a command, so this needs no client-side
 "run this on connect" support - any plain SSH app lands on the picker.
 
-It has to be the **same Unix user** that runs `bin/dejima`: tmux sockets are
+It has to be the **same Unix user** that runs `dejima`: tmux sockets are
 per-user, and `dejima-attach` talks to the tmux server of whoever runs it.
 Options are per-key, so your normal key still gets a normal shell - worth
 confirming both after you add the line.
@@ -199,7 +199,7 @@ confirming both after you add the line.
 Needs `ttyd` **1.7.4 or newer**. `-W`/`--writable` arrived in 1.7.4, which
 inverted the old default (before it, the terminal was writable unless you
 passed `--readonly`), so an older build rejects the flag and
-`bin/dejima-ttyd` fails at every start. Your distro's package may well be
+`dejima-ttyd` fails at every start. Your distro's package may well be
 too old: Debian bookworm's is 1.7.3 and Ubuntu 22.04's is 1.6.3, neither of
 which has the flag - Ubuntu 24.04's 1.7.4 does. Check with `ttyd --version`,
 and take an upstream release binary if the packaged one is behind.
@@ -249,13 +249,13 @@ sudo systemctl disable --now ttyd.service
 sudo systemctl mask ttyd.service           # so reinstalling cannot revive it
 ```
 
-`bin/dejima-ttyd` refuses to start when anything already holds its port and
+`dejima-ttyd` refuses to start when anything already holds its port and
 names this as the likely cause, rather than leaving you with `ttyd`'s
 one-line bind error in a unit nobody is watching. That is a diagnostic, not a
 fix: the listener is there from the moment the package lands, whether or not
 you ever run `dejima-ttyd`.
 
-`bin/dejima-ttyd` reads `TTYD_PORT` and launches
+`dejima-ttyd` reads `TTYD_PORT` and launches
 `ttyd --interface 127.0.0.1 --port <port> --check-origin --url-arg --writable dejima-attach`.
 Two of those are load-bearing:
 
@@ -488,7 +488,7 @@ what the outer proxy sends.
 
 ## Notifications
 
-`bin/dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
+`dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
 `Stop` hook for a remote-enabled session - into the throwaway settings copy
 it already generates for that session, never into your real
 `~/.claude/settings.json`, which every sandbox's copy derives from and your
@@ -513,9 +513,9 @@ event inside 60 seconds are debounced (`DEJIMA_DEBOUNCE_SECONDS` overrides
 that).
 
 One environment gotcha, because it fails silently: the watcher and
-`bin/dejima` both resolve the marker root as `${XDG_RUNTIME_DIR:-/tmp}/dejima`,
+`dejima` both resolve the marker root as `${XDG_RUNTIME_DIR:-/tmp}/dejima`,
 so they only meet when they agree on `XDG_RUNTIME_DIR`. systemd sets it for
-user units and a login shell gets it from pam_systemd, but a `bin/dejima`
+user units and a login shell gets it from pam_systemd, but a `dejima`
 run from a context that has neither - a bare `su`, a cron job, a tmux server
 started before login - writes its markers under `/tmp/dejima` while the unit
 watches `/run/user/<uid>/dejima`, and no push is ever sent, with nothing
@@ -563,7 +563,7 @@ The guarantee for that is host-side, and it is worth being precise about
 where it lives. The in-container hook's `waiting|done` whitelist is **not**
 it - a compromised session owns its own bind-mounted marker directory and
 can create any file name in it, hook or no hook. What holds is
-`bin/dejima-notify-watch`: it iterates a literal two-name enum rather than
+`dejima-notify-watch`: it iterates a literal two-name enum rather than
 reading the directory, so a name outside it is never stat'd, read or
 removed; it never reads marker *content*; and it consumes markers with
 `rm -f`, which unlinks a symlink instead of following it. Every byte it
@@ -579,7 +579,7 @@ nothing at all. Walk them from the inside out; each step tells you whether
 the next one is worth checking.
 
 1. **Is the session registered?** Inside the sandbox, `echo $DEJIMA_RUN_ID`
-   and `echo $DEJIMA_NOTIFY_DIR`. Both empty means `bin/dejima` started this
+   and `echo $DEJIMA_NOTIFY_DIR`. Both empty means `dejima` started this
    container with remote access off - `remote.conf` did not exist at launch,
    and no later change affects a session already running.
 2. **Is the hook registered?** The `Notification` and `Stop` entries live in
@@ -628,7 +628,7 @@ show it; `NO_COLOR=1` or a `dumb` `$TERM` turns that off, along with the
 box-drawing glyphs. `--list` is never coloured, terminal or not - the picker
 parses those rows itself and the README calls them scriptable.
 
-Three states, from a registry `bin/dejima` writes on launch and removes on
+Three states, from a registry `dejima` writes on launch and removes on
 exit:
 
 - `attachable` - a live tmux pane to join.

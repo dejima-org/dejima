@@ -11,8 +11,9 @@ ENV TZ="$TZ"
 ARG CLAUDE_CODE_VERSION=latest
 
 # Install basic development tools, iptables/ipset (for the egress firewall),
-# openssh-client (for git-over-ssh and agent forwarding), and the toolchain
-# nvim's plugin config (config/nvim, telescope/treesitter/mason) expects.
+# openssh-client (for git-over-ssh and agent forwarding), and the toolchain a
+# typical nvim plugin set (telescope/treesitter/mason) expects, since
+# SANDBOX_NVIM_CONFIG can point a session's editor at one.
 #
 # Deliberately NOT installing bubblewrap/socat: those exist to let Claude
 # Code's own internal per-command sandboxing (~/.claude/settings.json's
@@ -59,8 +60,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && ln -s "$(command -v fdfind)" /usr/local/bin/fd
 
 # cowsay/cowthink/fortune install to /usr/games on Debian, which isn't on
-# PATH by default - config/nvim's start-screen header (plugins/ui.lua) shells
-# out to them by bare name. Set via ENV (not a profile.d script) so it's
+# PATH by default - nvim start-screen plugins commonly shell out to them by
+# bare name for a dashboard header. Set via ENV (not a profile.d script) so it's
 # picked up by every process unconditionally, including nvim's non-login
 # subprocess spawns, which wouldn't source /etc/profile.d.
 ENV PATH=/usr/games:$PATH

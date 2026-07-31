@@ -99,14 +99,21 @@ one can't happen.
   capability set), not VM-level isolation - no gVisor/Firecracker or
   similar. It shares the host kernel, so a container-escape vulnerability
   would defeat every other control described here at once.
-- Everything in this document has been verified by hand, at a point in
-  time - there's no automated test suite re-checking these properties on
-  every change, so a future edit could silently reintroduce a gap. This has
-  already happened once in this file's own history (a missing `ipset`
-  dedup flag broke firewall startup entirely, twice, on two different
-  ipsets, before being caught).
+- Most of what this document asserts is re-checked by the `test/` suite on
+  every change - over 300 bats tests across six files, and `runtime.bats`
+  builds the image and asserts against a real running container rather than
+  a mock: IPv6 blocked, a non-allowlisted domain refused by the DNS proxy
+  and a non-allowlisted destination unreachable, `node` unable to re-run
+  `init-firewall.sh` to widen the allowlist, no working `sudo`. Coverage is
+  not the same as completeness, though. The reasoning in this document is
+  judgement rather than assertions, nothing tests it, and a property nobody
+  thought to write a test for can still regress quietly. A missing `ipset`
+  dedup flag broke firewall startup entirely - twice, on two different
+  ipsets - before anyone caught it; there is a test asserting every
+  `ipset add` is duplicate-safe now, which is the pattern to expect. Each
+  of these tests exists because something was got wrong first.
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
-  enters the container. `bin/dejima` starts a host-side proxy
+  enters the container. `dejima` starts a host-side proxy
   (`bin/dejima-anthropic-proxy`) on a per-session unix socket,
   mounts an empty file over `.credentials.json` (the parent `~/.claude`
   mount stays read-write, so a single-file mask is the mechanism), and
@@ -136,7 +143,7 @@ one can't happen.
   loaded into a later host session, so without this a compromised session
   could plant a backdoored hook - including by unlinking one of
   `install.sh`'s hook symlinks and dropping a plain file in its place, since
-  the dynamic per-target mounts `bin/dejima` adds at launch only
+  the dynamic per-target mounts `dejima` adds at launch only
   protect symlink targets that resolve *outside* `~/.claude`, never this
   directory itself - rewrite `CLAUDE.md` with injected instructions, tamper
   with plugin code, or drop a malicious skill/command/agent/output-style
@@ -144,7 +151,7 @@ one can't happen.
   the next time Claude Code starts there, turning a single compromised
   sandbox session into persistent host compromise. `skills/`, `commands/`,
   `agents/`, and `output-styles/` may not exist yet on a given host, so
-  `bin/dejima` pre-creates them at launch (empty is fine) - a
+  `dejima` pre-creates them at launch (empty is fine) - a
   read-only overlay only applies to a directory that already exists, and
   without pre-creation a compromised session could create the directory
   itself first, then populate it, before the overlay ever had something to
@@ -155,7 +162,7 @@ one can't happen.
   step with whatever new config surfaces Claude Code adds.
 - `~/.claude/statusline.sh` (referenced by `settings.json`'s
   `statusLine.command` and executed on the host) is bind-mounted onto
-  itself read-only by `bin/dejima`, for the same reason as the
+  itself read-only by `dejima`, for the same reason as the
   list above - to stop a compromised session from unlinking it and dropping
   its own script in its place. **Confirmed against a live container**
   (`test/runtime.bats`'s statusline.sh tests): this reliably blocks
@@ -181,7 +188,7 @@ one can't happen.
   even completes, and a read-only file makes that **hang** instead of
   failing cleanly (confirmed against a real read-only copy of this file -
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
-  Instead, `bin/dejima` generates a throwaway copy of the file at
+  Instead, `dejima` generates a throwaway copy of the file at
   launch (seeded from the real file, same "generate a sandbox-specific
   file on the host" pattern as the generated `settings.json` copy above)
   and mounts *that* read-write in its place; the copy is discarded,
@@ -255,7 +262,7 @@ one can't happen.
   at `/root/...`, not under the sandbox user's own home, specifically so
   that user (which the session actually runs as) has no path to read the
   raw key material - only the agent socket it's loaded into.
-- The gitconfig copy `bin/dejima` generates (see that mount's
+- The gitconfig copy `dejima` generates (see that mount's
   comment in `docker-compose.yml`) carries over whatever's in your real
   `~/.gitconfig` verbatim. If yours has inline credentials (a
   `[credential]` token, a `url.<token@>.insteadOf` rewrite, a
@@ -282,11 +289,11 @@ one can't happen.
   line-oriented parser (`approved_entries` in
   `bin/dejima-project-lib.sh`), never sourced or executed, and are
   written only by the CLIs (`dejima-allow`, `dejima-dep`,
-  `dejima-project`) a human runs on the host. `bin/dejima`
+  `dejima-project`) a human runs on the host. `dejima`
   warns at launch whenever the resolved store path — default or overridden
   via `DEJIMA_CONFIG_DIR` — lands under the mounted workspace,
   rather than silently trusting it.
-- When the mounted workspace *is* this repo itself, `bin/dejima`
+- When the mounted workspace *is* this repo itself, `dejima`
   warns at launch that the repo's own trusted computing base - `bin/`,
   `hooks/`, `docker/`, `install.sh` (also `test/`, per the
   exit-time audit's exact TCB path list above) - is writable for the
@@ -294,5 +301,5 @@ one can't happen.
   per above), and that the exit-time audit will report any changes to it.
   That's a warning and a post-hoc report, not a block: a compromised
   session can still edit those files during the run, and whatever it
-  changes takes effect the *next* time `bin/dejima` itself runs,
+  changes takes effect the *next* time `dejima` itself runs,
   not the current one.

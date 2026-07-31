@@ -6,8 +6,7 @@
 # real OAuth access token from ~/.claude/.credentials.json, so the credential
 # itself never enters the container. It also owns token refresh: rotated
 # tokens are written back to the real host file atomically, keeping
-# host-side sessions logged in. See docs/security.md and
-# ~/specs/2026-07-24-dejima-credential-proxy-design.md.
+# host-side sessions logged in. See docs/security.md.
 import argparse
 import http.client
 import json

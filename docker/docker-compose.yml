@@ -78,7 +78,7 @@ services:
       # "xterm", dropping 256-color and any extended-keys terminfo bits),
       # not whatever the host's actual terminal/tmux session is using.
       # Forward the real value so nvim negotiates key sequences (e.g. the
-      # Ctrl-H/Backspace disambiguation config/tmux.conf sets up) against
+      # Ctrl-H/Backspace disambiguation a tmux config may set up) against
       # the terminfo entry the rest of the chain actually expects.
       TERM: ${TERM:-xterm-256color}
       # Host-side credential proxy (see bin/dejima and README
@@ -152,13 +152,6 @@ services:
       # session's changes (e.g. a malicious mcpServers entry) from ever
       # reaching the real file.
       - ${SANDBOX_CLAUDE_JSON_FILE:?set by bin/dejima}:${HOME}/.claude.json
-      # ~/.claude/CLAUDE.md (mounted above) tells agents to write specs to
-      # ~/specs/ rather than a project-local path - that instruction is
-      # already in effect inside the container (CLAUDE.md carries over), so
-      # the directory it points at needs to actually exist and be writable
-      # here too, or an agent following it just writes into an ephemeral
-      # path inside the container that vanishes with the session.
-      - ${HOME}/specs:${HOME}/specs
       # Global git identity (user.name/user.email) - a throwaway copy of it,
       # in its own directory rather than a single file bind-mounted at
       # ~/.gitconfig: entrypoint.sh's `gh auth setup-git` writes a

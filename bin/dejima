@@ -139,12 +139,6 @@ fi
 SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/dejima/shared}"
 mkdir -p "$SANDBOX_SHARE_DIR"
 
-# ~/.claude/CLAUDE.md (carried into the container) tells agents to write
-# specs to ~/specs/ rather than a project-local path - make sure that
-# actually exists before it's bind-mounted, for a fresh machine that hasn't
-# used the convention yet.
-mkdir -p "$HOME/specs"
-
 # skills/commands/agents/output-styles overlays (see docker-compose.yml) can
 # only apply if the source dirs exist - pre-create them so a host that has
 # never used one still gets the read-only overlay instead of a writable gap.
