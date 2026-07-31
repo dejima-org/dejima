@@ -169,13 +169,22 @@ What this means:
   project. ~/shared is also a real, persistent host directory (not part of
   the project) - use it to hand the user a file (a screenshot, a temp
   script) without touching the project checkout, or to pick up something
-  they left there for you. Everything else in the container besides
-  ~/.claude is disposable: installed system packages, anything outside the
-  mounted paths, and the container itself go away when this run ends.
+  they left there for you. ~/.claude is bind-mounted too, so this session's
+  transcript and its project memory outlive the container - the work is
+  recoverable on the host with the \`--resume\` command at the end of this
+  briefing. Everything else is disposable: installed system packages,
+  anything outside the mounted paths, and the container itself go away when
+  this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, GitHub read-only, the configured Gitea host, plus anything
   approved via dejima-allow). Requests to anything else will simply
-  fail to connect. If a task needs one more domain and nothing else, that's
+  fail to connect. That restriction is not only a limit on your reach: it
+  is also what bounds where a prompt injection or a compromised dependency
+  in this session could send the user's code or fetch its next instruction
+  from. You cannot audit yourself for that from the inside, so the
+  allowlist is load-bearing for you too, not just for the host - working
+  around it would give up that protection, not merely lift the one limit
+  it appears to. If a task needs one more domain and nothing else, that's
   a quick fix, not a reason to stop: tell the user to run
   \`bin/dejima-allow <domain> --container $container_id\` (add
   \`--global\` to persist it past this session) from a terminal outside the
@@ -194,10 +203,9 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   \`git worktree add .worktrees/<branch> -b <branch>\` run from the project
   root - never \`../<branch>\` or any other path outside it, including
   anywhere under \$HOME. Only the exact directory bind-mounted into this
-  container is backed by real storage on the host; everything else,
-  including what looks like the project's own parent directory, is
-  container-local and silently disappears when the session ends - a
-  worktree created there is real work that just gets thrown away. Add
+  container is backed by real storage on the host - what looks like the
+  project's own parent directory is not, so a worktree created there is
+  real work that just gets thrown away. Add
   \`.worktrees/\` to \`.git/info/exclude\` (not \`.gitignore\` - this is
   sandbox-local, not something to commit) so it doesn't clutter \`git
   status\` for the user's real checkout.
