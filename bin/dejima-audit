@@ -232,6 +232,11 @@ case "$cmd" in
             case "$(path_severity "$line")" in
                 CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
                 WARNING)  warn+=("changed workspace file: $line") ;;
+                # Currently unreachable: hash_paths() only monitors
+                # .mcp.json/.envrc/.claude/.vscode/.git/hooks, and every path
+                # under those matches an earlier CRITICAL/WARNING pattern in
+                # path_severity(). Kept as the defensive default for
+                # surfaces monitored by a future task.
                 *)        info+=("changed workspace file: $line") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
