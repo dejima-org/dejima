@@ -49,6 +49,48 @@ setup() {
     grep -qE '^\s*ENV\s+NODE_PATH=' "$SANDBOX_DIR/Dockerfile"
 }
 
+# One awk pass rather than a grep chain: a filtering grep exits 1 when it
+# discards every line, which here is the "nothing wrong" case, so the chain
+# would report its own success as a failure. Comment lines are skipped - one
+# of them quotes, verbatim, the invocation the second test bans.
+@test "every build-time download in the Dockerfile retries rather than dying on one blip" {
+    # These fetches all sit below the SANDBOX_* ARGs, so any build overriding
+    # one of those - test/runtime.bats' first test, or simply a host whose uid
+    # isn't 1000 - invalidates the cache and re-runs every one of them. The
+    # odds that matter are then the odds of *any* of them blipping, not of a
+    # particular one, and a single-shot fetch turns that into a dead build.
+    local unguarded
+    unguarded=$(awk '
+        /^[[:space:]]*#/ { next }
+        /wget/ && !/--tries=[0-9]/ { print FNR": "$0 }
+        /curl/ && !/--retry [0-9]/ { print FNR": "$0 }
+    ' "$SANDBOX_DIR/Dockerfile")
+    [ -z "$unguarded" ] || {
+        echo "these downloads have no retry flags:" >&2
+        echo "$unguarded" >&2
+        false
+    }
+}
+
+@test "the zsh installer runs from a file, so a failed download fails the build" {
+    # Upstream documents `sh -c "$(wget -O- ...)"`. In that form a failed
+    # download substitutes to an empty string and `sh -c ""` exits 0, so the
+    # build goes green having installed nothing - the kind of failure that
+    # only surfaces later, as a shell that is inexplicably unconfigured.
+    local substituted
+    substituted=$(awk '
+        /^[[:space:]]*#/ { next }
+        /sh -c "\$\((wget|curl)/ { print FNR": "$0 }
+    ' "$SANDBOX_DIR/Dockerfile")
+    [ -z "$substituted" ] || {
+        echo "a failed download here would exit 0 and install nothing:" >&2
+        echo "$substituted" >&2
+        false
+    }
+    grep -q -- '-O /tmp/zsh-in-docker.sh' "$SANDBOX_DIR/Dockerfile"
+    grep -qE '^\s*sh /tmp/zsh-in-docker.sh' "$SANDBOX_DIR/Dockerfile"
+}
+
 @test "every ipset add in init-firewall.sh is duplicate-safe" {
     # Same bug class that broke firewall startup twice (718f6b7, a86fefc):
     # ipset add without -exist errors on a duplicate entry, and set -e turns
