@@ -296,3 +296,37 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *".vscode/settings.json"* ]]
     [[ "$output" != *"HOST-CODE-EXECUTION"*".vscode/settings.json"* ]]
 }
+
+@test "caps the CRITICAL block at 10 entries" {
+    mkdir -p "$WS/.git/hooks"; snap
+    for i in $(seq 1 40); do echo "#!/bin/sh" > "$WS/.git/hooks/h$i"; done
+    run cmp_
+    [ "$(printf '%s\n' "$output" | grep -c '^  ! ')" -le 10 ]
+}
+
+@test "overflow past the CRITICAL cap prints below the list and reads as an alarm" {
+    mkdir -p "$WS/.git/hooks"; snap
+    for i in $(seq 1 40); do echo "#!/bin/sh" > "$WS/.git/hooks/h$i"; done
+    run cmp_
+    [[ "$output" == *"ABNORMAL"* ]]
+    last_crit=$(printf '%s\n' "$output" | grep -n '^  ! ' | tail -1 | cut -d: -f1)
+    overflow=$(printf '%s\n' "$output" | grep -n "ABNORMAL" | head -1 | cut -d: -f1)
+    [ "$overflow" -gt "$last_crit" ]
+}
+
+@test "caps the WARNING block at 5 entries" {
+    mkdir -p "$WS/.vscode"; snap
+    for i in $(seq 1 20); do echo x > "$WS/.vscode/f$i"; done
+    run cmp_
+    [ "$(printf '%s\n' "$output" | grep -c '^  - ')" -le 5 ]
+}
+
+@test "overflow past the WARNING cap prints a counted line below the list" {
+    mkdir -p "$WS/.vscode"; snap
+    for i in $(seq 1 20); do echo x > "$WS/.vscode/f$i"; done
+    run cmp_
+    [[ "$output" == *"further change(s) not shown."* ]]
+    last_warn=$(printf '%s\n' "$output" | grep -n '^  - ' | tail -1 | cut -d: -f1)
+    overflow=$(printf '%s\n' "$output" | grep -n '^  + ' | head -1 | cut -d: -f1)
+    [ "$overflow" -gt "$last_warn" ]
+}

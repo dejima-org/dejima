@@ -27,6 +27,16 @@ STATUSLINE_PATH="${DEJIMA_AUDIT_STATUSLINE:-$HOME/.claude/statusline.sh}"
 # this repo (a self-mounted session). Overridable for tests.
 AUDIT_REPO_ROOT="${DEJIMA_AUDIT_REPO_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 
+# Fixed, not configurable: a predictable report shape is worth more than
+# tunability, and >10 CRITICAL findings is an anomaly rather than a display
+# problem (an ordinary session produces zero).
+CRIT_CAP=10
+# WARNING is where volume actually lands: the INFO path in path_severity()
+# below is currently unreachable, so every high-volume workspace-file change
+# classifies as WARNING instead of collapsing into an INFO count. Capped
+# moderately - overflow here is ordinary, not an alarm.
+WARN_CAP=5
+
 # git config keys whose values run a command on the next git invocation, or
 # (include.path/includeif.*.path) indirect to another config file that could
 # set one - key names are case-insensitive in git, so match on a lowercased
@@ -297,10 +307,17 @@ case "$cmd" in
                 echo "  ${#info[@]} routine file change(s) - not listed"
             fi
             if [ "${#warn[@]}" -gt 0 ]; then
-                printf '  - %s\n' "${warn[@]}"
+                printf '  - %s\n' "${warn[@]:0:$WARN_CAP}"
+                if [ "${#warn[@]}" -gt "$WARN_CAP" ]; then
+                    echo "  + $(( ${#warn[@]} - WARN_CAP )) further change(s) not shown."
+                fi
             fi
             if [ "${#crit[@]}" -gt 0 ]; then
-                printf '  ! %s\n' "${crit[@]}"
+                printf '  ! %s\n' "${crit[@]:0:$CRIT_CAP}"
+                if [ "${#crit[@]}" -gt "$CRIT_CAP" ]; then
+                    echo "  !! $(( ${#crit[@]} - CRIT_CAP )) FURTHER CRITICAL FINDINGS NOT SHOWN."
+                    echo "  !! ${#crit[@]} critical findings in one session is ABNORMAL."
+                fi
             fi
             echo "================================================================"
         } >&2
