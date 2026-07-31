@@ -37,28 +37,28 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: node:20-bookworm
-      # Two things this job needs that an ordinary job container doesn't have.
+      # Deliberately no `volumes:` and no `options: --network host` here. Both
+      # of the things this job needs beyond an ordinary one are settled by the
+      # runner, not by this file, and asking for them here does nothing:
       #
-      # The docker socket, because runtime.bats builds the image and runs
-      # containers. act_runner already mounts it in by default (config.yaml's
-      # container.docker_host has to be set to "-" to stop it), so this is
-      # belt-and-braces - but it only takes effect if that socket path is in
-      # the runner's container.valid_volumes, which defaults to empty and
-      # rejects every volume a workflow asks for. The preflight step below
-      # says so out loud rather than letting the suite fail obscurely.
+      # The docker socket, for building the image and running containers,
+      # act_runner binds in by itself - GetBindsAndMounts appends
+      # /var/run/docker.sock unless container.docker_host is set to "-", and
+      # it adds that same path to valid_volumes on the way past. Requesting it
+      # again here would at best duplicate a bind that already exists.
       #
-      # The host network namespace, because of one specific test:
-      # "a host service bound to loopback is unreachable from inside the
+      # The host network namespace has to come from container.network: host in
+      # act_runner's config.yaml. Gitea's act fork ignores --network in a
+      # workflow's container options outright (it logs "--network and --net in
+      # the options will be ignored" and then overwrites NetworkMode), so this
+      # is not something the repo can ask for. It is needed because of one
+      # test: "a host service bound to loopback is unreachable from inside the
       # container, one bound to the bridge gateway is reachable". Its positive
       # control has bats itself bind a listener to the test network's bridge
-      # gateway address. That address belongs to a host interface, so a
-      # process in any other netns cannot bind it - the control would fail for
-      # a reason that has nothing to do with what the test asserts. That test
-      # is the containment argument for the ttyd front door, so it is not one
-      # to skip in CI.
-      options: --network host
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
+      # gateway address, which lives on a host interface and cannot be bound
+      # from any other netns - the control would fail for a reason that has
+      # nothing to do with what the test asserts. That test is the containment
+      # argument for the ttyd front door, so it is not one to skip in CI.
     steps:
       - name: Install test dependencies
         run: |
@@ -79,14 +79,15 @@ jobs:
         run: |
           docker info >/dev/null 2>&1 || {
             echo "No Docker daemon reachable from this job." >&2
-            echo "In act_runner's config.yaml: leave container.docker_host unset (\"-\" disables the passthrough)," >&2
-            echo "and add /var/run/docker.sock to container.valid_volumes." >&2
+            echo "In act_runner's config.yaml, container.docker_host must not be \"-\" - that is the" >&2
+            echo "one value that stops the socket being mounted into job containers." >&2
             exit 1
           }
           ip -o addr show 2>/dev/null | grep -q ' docker0 ' || {
             echo "This job is not in the host network namespace - docker0 is not visible." >&2
             echo "The bridge-gateway test cannot pass here. Set container.network: host in" >&2
-            echo "act_runner's config.yaml, or allow the workflow's --network host option." >&2
+            echo "act_runner's config.yaml (and make sure CONFIG_FILE points the runner at" >&2
+            echo "that file - without it the config is not read at all)." >&2
             exit 1
           }
 
