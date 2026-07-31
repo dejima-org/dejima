@@ -47,7 +47,19 @@ jobs:
           su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
 
   runtime:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest, unlike the job above. This one only works on a runner
+    # configured for it - host network namespace, the Docker socket, and the
+    # shared volume below - and none of that is anything the workflow can ask
+    # for. On a generic runner it fails the preflight check outright.
+    #
+    # ubuntu-latest is a label every runner carries, so which one picked this
+    # up was a coin flip, and a re-run that happened to land on an unconfigured
+    # runner failed on a repo that had not changed. A label only the configured
+    # runner has makes that unrepresentable rather than merely diagnosable: no
+    # runner matching it means this job queues instead of running somewhere it
+    # cannot work. The fast job stays on ubuntu-latest, because it genuinely
+    # does run anywhere.
+    runs-on: dejima-runtime
     container:
       image: node:20-bookworm
       # One volume, and it is load-bearing - see TMPDIR on the bats step for
