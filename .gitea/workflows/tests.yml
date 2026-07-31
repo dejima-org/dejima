@@ -89,7 +89,12 @@ jobs:
             echo "one value that stops the socket being mounted into job containers." >&2
             exit 1
           }
-          ip -o addr show 2>/dev/null | grep -q ' docker0 ' || {
+          # Read sysfs rather than shell out to `ip`: /sys/class/net is
+          # per-netns and always there, while iproute2 is not in this image.
+          # The first version of this check ran `ip -o addr show 2>/dev/null`,
+          # which turned "the tool is missing" into "the host netns is
+          # missing" - a check against obscure failures failing obscurely.
+          [ -e /sys/class/net/docker0 ] || {
             echo "This job is not in the host network namespace - docker0 is not visible." >&2
             echo "The bridge-gateway test cannot pass here. Set container.network: host in" >&2
             echo "act_runner's config.yaml (and make sure CONFIG_FILE points the runner at" >&2
