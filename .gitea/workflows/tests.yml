@@ -35,9 +35,16 @@ jobs:
       # asserts that the CLI's rm -rf refuses it and says so; root walks
       # through that on CAP_DAC_OVERRIDE and the test fails for a reason that
       # has nothing to do with what it checks. Nobody runs these CLIs as root.
+      #
+      # TERM because the job container has none, and six tests drive a real pty
+      # through `script`: the picker drops colour on TERM=dumb by design, and
+      # tmux will not start a client for a terminal it has no entry for, so
+      # they fail on the terminal rather than on anything they mean to check.
+      # xterm-256color ships in ncurses-base, which is Essential - nothing to
+      # install. Set on the command rather than in env: so it survives su.
       - run: |
           chown -R node:node .
-          su node -c 'bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
+          su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
 
   runtime:
     runs-on: ubuntu-latest
