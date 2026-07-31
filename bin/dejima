@@ -52,17 +52,22 @@ if [ -n "$PROJECT_STORE" ]; then
     ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
 
-# The approval store is only out of the container's reach while it isn't
-# inside the mounted workspace - same class of warning as the self-mounted
-# repo TCB warning below.
-case "$(config_root)/" in
-    "$WORKSPACE_DIR"/*)
-        echo "Warning: the approval store ($(config_root)) is inside the mounted" >&2
-        echo "workspace this session - both the global approvals and every" >&2
-        echo "project's under it are writable from inside the sandbox, so they" >&2
-        echo "are no longer out of reach. Review them after this session." >&2
-        ;;
-esac
+# The approval store, and the exit-audit's own report/baseline stores, are
+# only out of the container's reach while none of them are inside the
+# mounted workspace - same class of warning as the self-mounted repo TCB
+# warning below.
+AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
+BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+for store in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR"; do
+    case "$store/" in
+        "$WORKSPACE_DIR"/*)
+            echo "Warning: the approval store ($store) is inside the mounted" >&2
+            echo "workspace this session - both the global approvals and every" >&2
+            echo "project's under it are writable from inside the sandbox, so they" >&2
+            echo "are no longer out of reach. Review them after this session." >&2
+            ;;
+    esac
+done
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then

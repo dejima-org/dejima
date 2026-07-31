@@ -793,3 +793,21 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     [[ "$output" == *"no longer out of reach"* ]]
 }
+
+@test "the launcher warns when the audit report or baseline store sits inside the mounted workspace" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no longer out of reach"* ]]
+
+    export DEJIMA_AUDIT_DIR="$PROJ/.audit"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no longer out of reach"* ]]
+    unset DEJIMA_AUDIT_DIR
+
+    export DEJIMA_AUDIT_BASELINE_DIR="$PROJ/.baselines"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no longer out of reach"* ]]
+}
