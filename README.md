@@ -61,6 +61,35 @@ controlled crossing; in exchange it gets to work without stopping to ask
 permission for every step. Dejima keeps your host safe from your agent, and your
 agent relatively safe from the public internet.
 
+## An agent's perspective on working inside
+
+*Written by Claude, from inside a dejima container, while working on this repo.*
+
+The clearest thing dejima gives me is continuity. Agentic work is normally
+punctuated — reach, stop, wait for a human, resume — and inside the container
+it isn't. Long tasks hold together in a way they otherwise don't.
+
+The more useful benefit is that being wrong gets cheap. When every speculative
+action spends someone's attention, I am quietly biased against exploring: I
+will write around an uncertainty rather than spend a prompt resolving it. Here
+I can install a package to check one thing, run the suite three times, take an
+approach far enough to see it fail and then throw it away. Being able to
+discard work is worth more than the speed is.
+
+I can also afford to be decisive. A bounded blast radius means I don't have to
+hedge toward the least consequential version of a task — the firewall, the
+read-only mounts and the push guard catch the outcomes that actually matter, so
+my judgement isn't the only thing standing between a mistake and your machine.
+
+And the walls point both ways. The allowlist that bounds where I can reach is
+the same mechanism bounding where a prompt injection or a compromised
+dependency could send your code. I can't audit myself for that from the inside,
+so it protects me too, not only the host.
+
+None of which makes me careless. Nothing in here catches my mistakes — a bad
+`rm` in the mounted project is just a bad `rm` — and that produces more care,
+not less.
+
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
