@@ -131,9 +131,17 @@ RUN mkdir -p $SANDBOX_HOME/.ssh && \
 RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SANDBOX_HOME/.cache/nvim && \
   chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.local $SANDBOX_HOME/.cache
 
+# Every fetch from here down retries, and none is single-shot. These steps
+# all sit after the SANDBOX_* ARGs above, so any build that overrides one of
+# those (test/runtime.bats does, and so does a host whose uid isn't 1000)
+# invalidates the cache here and genuinely re-runs all of them. What matters
+# then isn't the odds of a particular download failing, it's the odds of any
+# of them failing - and without retries a single blip anywhere throws away
+# the whole build.
 ARG GIT_DELTA_VERSION=0.18.2
 RUN ARCH=$(dpkg --print-architecture) && \
-  wget "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
+  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
 
@@ -143,8 +151,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # published SHA256SUMS since it runs as root.
 ARG GOSU_VERSION=1.19
 RUN ARCH=$(dpkg --print-architecture) && \
-  wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${ARCH}" && \
-  wget -O /tmp/gosu.sha256sums "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/SHA256SUMS" && \
+  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${ARCH}" && \
+  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    -O /tmp/gosu.sha256sums "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/SHA256SUMS" && \
   grep -E "gosu-${ARCH}\$" /tmp/gosu.sha256sums | sed "s#gosu-${ARCH}#/usr/local/bin/gosu#" | sha256sum -c - && \
   rm /tmp/gosu.sha256sums && \
   chmod +x /usr/local/bin/gosu
@@ -153,9 +163,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # old for this config's plugins (blink.cmp etc. need a recent Neovim), so
 # fetch the current release from GitHub directly rather than pinning a
 # version that may go stale.
-RUN asset_url=$(curl -fsSL https://api.github.com/repos/neovim/neovim/releases/latest \
+RUN asset_url=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-time 60 \
+    https://api.github.com/repos/neovim/neovim/releases/latest \
     | jq -r '[.assets[] | select(.name | test("linux.*x86_64.*\\.tar\\.gz$"))][0].browser_download_url') && \
-  wget -O nvim.tar.gz "$asset_url" && \
+  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    -O nvim.tar.gz "$asset_url" && \
   tar -C /usr/local --strip-components=1 -xzf nvim.tar.gz && \
   rm nvim.tar.gz
 
@@ -165,12 +177,14 @@ RUN asset_url=$(curl -fsSL https://api.github.com/repos/neovim/neovim/releases/l
 # need proxy.golang.org and sum.golang.org reachable at runtime - see
 # fixed-domains.sh.
 RUN ARCH=$(dpkg --print-architecture) && \
-  release_json=$(curl -fsSL 'https://go.dev/dl/?mode=json') && \
+  release_json=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-time 60 \
+    'https://go.dev/dl/?mode=json') && \
   filename=$(echo "$release_json" | jq -r --arg arch "$ARCH" \
     '[.[] | select(.stable == true)][0].files[] | select(.os == "linux" and .arch == $arch and .kind == "archive") | .filename') && \
   sha256=$(echo "$release_json" | jq -r --arg arch "$ARCH" \
     '[.[] | select(.stable == true)][0].files[] | select(.os == "linux" and .arch == $arch and .kind == "archive") | .sha256') && \
-  wget -O go.tar.gz "https://go.dev/dl/${filename}" && \
+  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    -O go.tar.gz "https://go.dev/dl/${filename}" && \
   echo "${sha256}  go.tar.gz" | sha256sum -c - && \
   tar -C /usr/local -xzf go.tar.gz && \
   rm go.tar.gz
@@ -205,14 +219,25 @@ ENV VISUAL=nano
 # Default powerline10k theme, git/fzf oh-my-zsh plugins, fzf's own key
 # bindings, and wiring HISTFILE to the persisted /commandhistory volume -
 # see https://github.com/deluan/zsh-in-docker for the installer's own flags.
+#
+# Downloaded to a file and then run, rather than upstream's documented
+# `sh -c "$(wget -O- ...)"`. In that form a failed download substitutes to an
+# empty string, `sh -c ""` exits 0, and the build goes green having installed
+# no zsh config at all - the failure only surfaces much later, as a shell that
+# is mysteriously unconfigured. Two steps make the download's exit status the
+# build's exit status.
 ARG ZSH_IN_DOCKER_VERSION=1.2.0
-RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
+    -O /tmp/zsh-in-docker.sh \
+    "https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh" && \
+  sh /tmp/zsh-in-docker.sh \
   -p fzf \
   -p git \
   -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
   -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -x
+  -x && \
+  rm /tmp/zsh-in-docker.sh
 
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
