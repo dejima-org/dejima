@@ -1,0 +1,94 @@
+# Runs the bats suite on every pull request and on every push to one.
+# `pull_request` fires on opened/reopened/synchronize, and synchronize is the
+# push-to-an-open-PR event, so both are covered without listing types.
+#
+# Split in two because the halves cost wildly different amounts: everything
+# except runtime.bats is seconds and needs nothing but a shell, while
+# runtime.bats builds the image and boots real containers. Splitting means a
+# typo in a doc test doesn't wait on a full image build to tell you.
+name: tests
+
+on:
+  pull_request:
+
+# A PR that gets three pushes in a minute should run the third, not all three.
+# Keyed on the ref rather than the SHA so a new push supersedes the run it
+# just made obsolete.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    container:
+      # Debian bookworm plus a node binary - node is what actions/checkout
+      # needs to run at all, and apt-get is what everything below needs.
+      image: node:20-bookworm
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats jq python3 socat ca-certificates
+      - uses: actions/checkout@v4
+      - run: bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats
+
+  runtime:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20-bookworm
+      # Two things this job needs that an ordinary job container doesn't have.
+      #
+      # The docker socket, because runtime.bats builds the image and runs
+      # containers. act_runner already mounts it in by default (config.yaml's
+      # container.docker_host has to be set to "-" to stop it), so this is
+      # belt-and-braces - but it only takes effect if that socket path is in
+      # the runner's container.valid_volumes, which defaults to empty and
+      # rejects every volume a workflow asks for. The preflight step below
+      # says so out loud rather than letting the suite fail obscurely.
+      #
+      # The host network namespace, because of one specific test:
+      # "a host service bound to loopback is unreachable from inside the
+      # container, one bound to the bridge gateway is reachable". Its positive
+      # control has bats itself bind a listener to the test network's bridge
+      # gateway address. That address belongs to a host interface, so a
+      # process in any other netns cannot bind it - the control would fail for
+      # a reason that has nothing to do with what the test asserts. That test
+      # is the containment argument for the ttyd front door, so it is not one
+      # to skip in CI.
+      options: --network host
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats jq python3 socat ca-certificates curl
+          # The CLI only - the daemon is the host's, reached over the socket
+          # above. Debian ships no docker-cli package (docker.io drags in a
+          # daemon this job would never start), so take the static binary.
+          curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
+            | tar -xzC /usr/local/bin --strip-components=1 docker/docker
+        env:
+          DOCKER_CLI_VERSION: 27.5.1
+
+      # Fails here, with the fix in the message, rather than thirty tests deep
+      # in a suite that cannot work. Both of these are runner configuration,
+      # not anything a change to this repo can cause.
+      - name: Check the runner actually granted Docker and the host netns
+        run: |
+          docker info >/dev/null 2>&1 || {
+            echo "No Docker daemon reachable from this job." >&2
+            echo "In act_runner's config.yaml: leave container.docker_host unset (\"-\" disables the passthrough)," >&2
+            echo "and add /var/run/docker.sock to container.valid_volumes." >&2
+            exit 1
+          }
+          ip -o addr show 2>/dev/null | grep -q ' docker0 ' || {
+            echo "This job is not in the host network namespace - docker0 is not visible." >&2
+            echo "The bridge-gateway test cannot pass here. Set container.network: host in" >&2
+            echo "act_runner's config.yaml, or allow the workflow's --network host option." >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@v4
+      - run: bats test/runtime.bats
