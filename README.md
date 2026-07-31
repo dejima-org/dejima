@@ -19,15 +19,17 @@ Around that core is most of what running an agent unattended actually takes:
   and dependencies it needs in `.dejima/`. Declaring is not granting: the
   approval is a separate decision you make on the host, by hand, and the
   approval store is never mounted where a session could reach it.
-- **A PR workflow.** `gitea-pr` lets a session open pull requests against
-  Gitea or Forgejo and pull review feedback back in, on a token scoped for
-  exactly that.
+- **A PR and issue workflow.** `gitea-pr` and `gitea-issue` let a session
+  open pull requests and issues against Gitea or Forgejo and pull review
+  feedback back in, on a token scoped for exactly that. Merging stays a
+  human decision, made outside the sandbox.
 - **Logging.** Every DNS lookup and rejected connection, shipped to Loki —
   and, opt-in, the session transcript alongside them.
 - **Remote access, opt-in and off by default.** Attach to a live session
   from a terminal or a browser, with a push notification when it wants you.
 - **Guard rails inside the session.** Hooks refuse obviously destructive
-  commands and pushes to anywhere but the allowed remote. These are
+  commands, pushes to anywhere but the allowed remote, and merging a PR from
+  inside the sandbox. These are
   fast-fail guards against an overeager agent, not a boundary against a
   hostile one — the container is the boundary.
 - **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins
