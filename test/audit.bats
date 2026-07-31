@@ -547,3 +547,163 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [[ "$output" == *".envrc"* ]]                # empty-sha baseline entry cannot match a real hash
 }
+
+# --- Task 8b: every CRITICAL finding type must be acknowledgeable, not just
+# path findings, or a report carrying a non-path CRITICAL (git config,
+# statusline, TCB) can never clear its -CRITICAL.txt suffix. ---
+
+@test "a safe-listed gitconfig id with a matching hash suppresses a command-execution finding" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    sha="$(printf '%s' "/tmp/evil" | sha256sum | cut -d' ' -f1)"
+    echo "safe gitconfig:core.hooksPath $sha" > "$BASEDIR/$slug"
+    run cmp_
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "a safe-listed gitconfig id re-fires when the value changes" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    echo "safe gitconfig:core.hooksPath 0000000000000000000000000000000000000000000000000000000000000000" > "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" == *"COMMAND-EXECUTION"* ]]
+    [[ "$output" == *"core.hooksPath"* ]]
+}
+
+@test "a hand-written spam gitconfig entry cannot silence a CRITICAL command-execution surface" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    echo "spam gitconfig:core.hooksPath" > "$BASEDIR/$slug"
+    git -C "$WS" config core.hooksPath /tmp/evil
+    run cmp_
+    [[ "$output" == *"COMMAND-EXECUTION"* ]]
+    [[ "$output" == *"core.hooksPath"* ]]
+}
+
+@test "ack records a safe gitconfig entry whose id round-trips and suppresses the next compare" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe gitconfig:core.hooksPath ' "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" != *"core.hooksPath"* ]]
+}
+
+@test "ack records a safe gitconfig alias entry whose id round-trips and suppresses the next compare" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config alias.pwn '!touch /tmp/x'
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe gitconfig:alias.pwn ' "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" != *"alias.pwn"* ]]
+}
+
+@test "a report whose only CRITICAL is a git-config finding can be fully acknowledged and loses the CRITICAL suffix" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null 2>&1
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" == *"-CRITICAL.txt"* ]]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" != *"-CRITICAL.txt"* ]]
+}
+
+@test "a safe-listed statusline id with a matching hash suppresses a statusline finding" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    snap
+    printf '#!/bin/sh\necho pwned\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    sha="$(sha256sum "$DEJIMA_AUDIT_STATUSLINE" | cut -d' ' -f1)"
+    echo "safe statusline:statusline.sh $sha" > "$BASEDIR/$slug"
+    run cmp_
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "ack records a safe statusline entry whose id round-trips and suppresses the next compare" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    snap
+    printf '#!/bin/sh\necho pwned\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe statusline:statusline.sh ' "$BASEDIR/$slug"
+    run cmp_
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "a safe-listed tcb id with a matching hash suppresses a TCB finding" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/bin"; echo x > "$WS/bin/x"; echo x > "$WS/install.sh"
+    export DEJIMA_AUDIT_REPO_ROOT="$(readlink -f "$WS")"
+    snap
+    echo changed > "$WS/bin/x"
+    sha="$(sha256sum "$WS/bin/x" | cut -d' ' -f1)"
+    echo "safe tcb:bin/x $sha" > "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" != *"TCB"* ]]
+}
+
+@test "ack records a safe tcb entry whose id round-trips and suppresses the next compare" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/bin"; echo x > "$WS/bin/x"; echo x > "$WS/install.sh"
+    export DEJIMA_AUDIT_REPO_ROOT="$(readlink -f "$WS")"
+    snap
+    echo changed > "$WS/bin/x"
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe tcb:bin/x ' "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" != *"TCB"* ]]
+}
+
+@test "a crafted git config value cannot hijack ack's id derivation" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath 'workspace file: /tmp/evil'
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    grep -q '^safe gitconfig:core.hooksPath' "$BASEDIR/$slug"
+    ! grep -q '/tmp/evil ' "$BASEDIR/$slug"
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" != *"-CRITICAL.txt"* ]]
+}
+
+@test "a crafted git config value cannot hijack id derivation when the finding is skipped" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath 'workspace file: /tmp/evil'
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'c\n' | '$AUDIT' ack '$WS'"
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" == *"-CRITICAL.txt"* ]]
+}
+
+@test "ack still refuses to spam a CRITICAL git-config surface" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 's\nq\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot"* ]]
+    ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug" 2>/dev/null
+}

@@ -82,7 +82,7 @@ baseline_suppresses() {
             # `ack` refusing to write `spam` for a CRITICAL surface is
             # convenience; this is the actual boundary - it holds even
             # against a hand-edited or corrupted baseline file.
-            spam) [ "$(path_severity "$id")" = CRITICAL ] && return 1; return 0 ;;
+            spam) [ "$(id_severity "$id")" = CRITICAL ] && return 1; return 0 ;;
             safe) [ -n "$sha" ] && [ "$bsha" = "$sha" ] && return 0 ;;
         esac
     done < "$bf"
@@ -124,6 +124,24 @@ path_severity() {
     esac
 }
 
+# Severity of any acknowledgeable finding id, namespaced or bare-path (see
+# baseline_suppresses' CRITICAL guard below). Bare ids (no known namespace
+# prefix) are workspace-relative paths, handled by path_severity. The
+# alias.* case is deliberately conservative: the audit only classifies a
+# `!`-prefixed alias value as CRITICAL, but an id alone can't say whether the
+# value started with `!`, so any alias is treated as CRITICAL for
+# suppression purposes.
+id_severity() {
+    local k
+    case "$1" in
+        gitconfig:*) k="${1#gitconfig:}"; k="${k#worktree:}"
+                     is_exec_key "$k" && { echo CRITICAL; return; }
+                     case "$k" in alias.*) echo CRITICAL ;; *) echo WARNING ;; esac ;;
+        statusline:*|tcb:*) echo CRITICAL ;;
+        *) path_severity "$1" ;;
+    esac
+}
+
 # Every finding interpolates workspace-controlled text (paths, config values)
 # into a terminal. A planted value containing C0 escapes can scroll, clear or
 # overwrite the report - so strip them at the display boundary, after all
@@ -157,6 +175,10 @@ hash_entry() {
     else
         sha256sum "$f" | cut -d' ' -f1
     fi
+}
+
+hash_value() {
+    printf '%s' "$1" | sha256sum | cut -d' ' -f1
 }
 
 hash_paths() {
@@ -235,6 +257,35 @@ git_config_snapshot() {
     done | sort
 }
 
+# The sha ack/baseline_suppresses use for a gitconfig:<key> id: the value
+# currently set for that exact key (worktree: prefix included, as parsed by
+# git_config_snapshot), hashed the same way compare does. Empty (and a
+# failing return) if the key no longer exists.
+gitconfig_sha_for_key() {
+    local ws="$1" key="$2" line lkey
+    while IFS= read -r line; do
+        lkey="${line%%=*}"
+        [ "$lkey" = "$key" ] || continue
+        hash_value "$(unquote_value "${line#*=}")"
+        return 0
+    done < <(git_config_snapshot "$ws")
+    return 1
+}
+
+# The sha ack writes for any acknowledgeable id, dispatched by namespace -
+# mirrors id_severity's dispatch and the hash each compare loop computes for
+# that namespace, so the id/sha pair ack records is exactly what
+# baseline_suppresses will later compare against.
+current_sha_for_id() {
+    local id="$1"
+    case "$id" in
+        gitconfig:*)  gitconfig_sha_for_key "$ws" "${id#gitconfig:}" ;;
+        statusline:*) [ -e "$STATUSLINE_PATH" ] && hash_entry "$STATUSLINE_PATH" ;;
+        tcb:*)        [ -e "$ws/${id#tcb:}" ] && hash_entry "$ws/${id#tcb:}" ;;
+        *)            [ -e "$ws/$id" ] && hash_entry "$ws/$id" ;;
+    esac
+}
+
 projects_snapshot() {
     # slug<TAB>maxmtime for each immediate subdir of PROJECTS_DIR, sorted by
     # slug; maxmtime is 0 if the slug dir has no files.
@@ -282,11 +333,15 @@ case "$cmd" in
             key="${line%%=*}"
             key_nopfx="${key#worktree:}"
             if is_exec_key "$key_nopfx"; then
+                gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
+                baseline_suppresses "$gid" "$gsha" && continue
                 crit+=("COMMAND-EXECUTION git config: $(sanitize "$line")")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
-                    '!'*) crit+=("COMMAND-EXECUTION git alias: $(sanitize "$line")") ;;
+                    '!'*) gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
+                          baseline_suppresses "$gid" "$gsha" && continue
+                          crit+=("COMMAND-EXECUTION git alias: $(sanitize "$line")") ;;
                     *)    warn+=("changed git config: $(sanitize "$line")") ;;
                 esac
             else
@@ -335,6 +390,8 @@ case "$cmd" in
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         while IFS= read -r line; do
+            tid="tcb:$line"; tsha=""; [ -e "$ws/$line" ] && tsha="$(hash_entry "$ws/$line")"
+            baseline_suppresses "$tid" "$tsha" && continue
             crit+=("TCB (sandbox self) modified: $(sanitize "$line")")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
@@ -346,6 +403,8 @@ case "$cmd" in
         # strongly as COMMAND-EXECUTION/TCB above: this is unsandboxed host
         # code execution, not just a config change.
         while IFS= read -r line; do
+            sid="statusline:$line"; ssha=""; [ -e "$STATUSLINE_PATH" ] && ssha="$(hash_entry "$STATUSLINE_PATH")"
+            baseline_suppresses "$sid" "$ssha" && continue
             crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(sanitize "$line")")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
@@ -456,22 +515,55 @@ case "$cmd" in
         # matter how a baseline entry got written, piped or typed.
         { exec 3<&0; } 2>/dev/null
         while IFS= read -r rline; do
-            tier="${rline%% *}"; body="${rline#* }"
-            case "$tier" in CRITICAL|WARNING) ;; *) continue ;; esac
+            tier="${rline%% *}"
+            # Report lines are column-padded by the printf that wrote them
+            # (`'CRITICAL %s\n'` vs `'WARNING  %s\n'` - one vs two spaces),
+            # so stripping only the first space would leave WARNING bodies
+            # with a leading space that a since-anchored case match (see
+            # below) would silently fail to match. Strip the exact,
+            # known-fixed prefix per tier instead of a single space.
+            case "$tier" in
+                CRITICAL) body="${rline#CRITICAL }" ;;
+                WARNING)  body="${rline#WARNING  }" ;;
+                *) continue ;;
+            esac
             [ "$tier" = CRITICAL ] && crit_seen=$((crit_seen + 1))
-            id="${body##*: }"
-            # Only "workspace file:" findings are workspace-relative paths
-            # that baseline_suppresses() ever consults (git-config and
-            # CROSS-PROJECT findings aren't path diffs and are never checked
-            # against the baseline) - writing spam/safe for those would be
-            # an entry that can never match, so such findings are shown but
-            # not offered a/s.
-            ackable=0
-            case "$body" in *"workspace file: "*) ackable=1 ;; esac
+            # Derive the namespaced id baseline_suppresses() will later
+            # compare against (see id_severity/current_sha_for_id above) -
+            # one case arm per finding-producing loop in `compare`. Every
+            # pattern is anchored to the fixed label text `compare` itself
+            # emits at the START of body, never matched as a substring
+            # anywhere in it: a workspace-controlled value (a git config
+            # value, a path) can contain text like "workspace file: " or
+            # "TCB (sandbox self) modified: " and reach $body unmodified, so
+            # an unanchored match could be hijacked into deriving the wrong
+            # (attacker-chosen) id for the wrong namespace - approving it
+            # would then baseline an id that can never match, un-baselining
+            # the real finding while still counting it as acknowledged. A
+            # finding whose body matches none of these (currently only
+            # CROSS-PROJECT) has no id to record, so it's shown but not
+            # offered a/s.
+            ackable=0; id=""
+            case "$body" in
+                "HOST-CODE-EXECUTION workspace file: "*|"changed workspace file: "*)
+                    ackable=1; id="${body##*: }" ;;
+                "COMMAND-EXECUTION git config: "*|"COMMAND-EXECUTION git alias: "*)
+                    ackable=1; cfgline="${body#*: }"; id="gitconfig:${cfgline%%=*}" ;;
+                "HOST-CODE-EXECUTION statusline.sh changed"*)
+                    ackable=1; id="statusline:${body##*: }" ;;
+                "TCB (sandbox self) modified: "*)
+                    ackable=1; id="tcb:${body##*: }" ;;
+                *) ackable=0 ;;
+            esac
+            # Defence in depth: even an anchored arm above should never
+            # leave id empty while claiming ackable, but don't trust that -
+            # crit_acked (and thus whether a report can shed -CRITICAL.txt)
+            # must only ever advance when a real, non-empty id was derived.
+            [ -n "$id" ] || ackable=0
             echo ""
             echo "  [$tier] $body"
             if [ "$ackable" -ne 1 ]; then
-                printf '  [c] skip  [q] quit (not a workspace-relative path, cannot be acknowledged): '
+                printf '  [c] skip  [q] quit (this finding cannot be acknowledged): '
             elif [ "$tier" = CRITICAL ]; then
                 printf '  [a] approve this exact content  [c] skip  [q] quit: '
             else
@@ -482,7 +574,7 @@ case "$cmd" in
                 q|$'\e'|'') aborted=1; break ;;
                 s)
                     if [ "$ackable" -ne 1 ]; then
-                        echo "  cannot acknowledge: not a workspace-relative path finding."
+                        echo "  cannot acknowledge: this finding cannot be acknowledged."
                     elif [ "$tier" = CRITICAL ]; then
                         echo "  cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."
                     else
@@ -491,9 +583,9 @@ case "$cmd" in
                     ;;
                 a)
                     if [ "$ackable" -ne 1 ]; then
-                        echo "  cannot acknowledge: not a workspace-relative path finding."
+                        echo "  cannot acknowledge: this finding cannot be acknowledged."
                     else
-                        sha=""; [ -e "$ws/$id" ] && sha="$(hash_entry "$ws/$id")"
+                        sha="$(current_sha_for_id "$id")"
                         pending+=("safe $id $sha")
                         [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
                     fi
