@@ -89,8 +89,28 @@ jobs:
           # daemon this job would never start), so take the static binary.
           curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
             | tar -xzC /usr/local/bin --strip-components=1 docker/docker
+          # buildx ships separately from that tarball, and `docker build` picks
+          # the builder by whether this plugin is present: with it, BuildKit;
+          # without it, the legacy builder, which creates, commits and removes a
+          # real container per instruction. That cost ~10s x 56 steps here - more
+          # of the build than the downloads and compiles it was wrapping.
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-$(dpkg --print-architecture)"
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+          # Because that choice is silent, check it rather than assume it. A
+          # download that returned an error page instead of a binary still
+          # chmods fine, and the only symptom would be the slow builds this is
+          # meant to fix - which look like nothing being wrong.
+          docker buildx version || {
+            echo "The buildx plugin did not load, so docker build would quietly use the" >&2
+            echo "legacy builder instead of BuildKit. Check the download URL above still" >&2
+            echo "resolves for this architecture." >&2
+            exit 1
+          }
         env:
           DOCKER_CLI_VERSION: 27.5.1
+          BUILDX_VERSION: 0.36.0
 
       # Fails here, with the fix in the message, rather than thirty tests deep
       # in a suite that cannot work. Both of these are runner configuration,
