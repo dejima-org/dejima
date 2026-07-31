@@ -358,13 +358,85 @@ setup() {
     grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
 }
 
-@test "gitea-pr never passes the token as a command-line argument" {
+@test "neither gitea CLI passes the token as a command-line argument" {
     # /proc makes argv world-readable, so a token in a curl invocation is
     # visible to every other process for the life of the request - and this
     # runs alongside agents that read process listings.
-    run grep -n 'curl.*Authorization: token' "$REPO_ROOT/bin/gitea-pr"
-    [ "$status" -ne 0 ]
-    grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/bin/gitea-pr"
+    #
+    # Both files, because they are deliberate copies of each other rather
+    # than a shared library (see bin/gitea-issue's header for why), and a
+    # duplicated security property is exactly the kind that drifts.
+    local f
+    for f in bin/gitea-pr bin/gitea-issue; do
+        run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
+        [ "$status" -ne 0 ]
+        grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
+    done
+}
+
+@test "both gitea CLIs take a body from a file, and refuse to guess between two" {
+    # Prose on a command line has to survive shell quoting, and an
+    # apostrophe or a backtick is the common case, not the edge one. A body
+    # that arrives via a file never enters argv at all.
+    local f
+    for f in bin/gitea-pr bin/gitea-issue; do
+        grep -q -- '--body-file' "$REPO_ROOT/$f"
+        # '-' means stdin, so a heredoc works without a temp file.
+        grep -q 'file" = "-"' "$REPO_ROOT/$f"
+        # Passing both is an error rather than a precedence rule: silently
+        # picking one ships a body the caller did not mean to send.
+        grep -q 'not both' "$REPO_ROOT/$f"
+    done
+}
+
+@test "gitea-issue list asks for issues only, never pull requests" {
+    # Gitea's issues endpoint returns PRs too - a PR is an issue with a
+    # branch attached - so without type=issues every open PR shows up as an
+    # issue and the work list reads as twice as long as it is.
+    grep -q 'type=issues' "$REPO_ROOT/bin/gitea-issue"
+}
+
+@test "gitea-issue is installed into the image alongside gitea-pr" {
+    grep -qx 'COPY bin/gitea-issue /usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
+    # Copied without the executable bit surviving is the failure that only
+    # shows up at runtime, so the chmod list is checked too.
+    grep -q 'chmod +x .*/usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "gitea-merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
+    local hook="$REPO_ROOT/hooks/gitea-merge-guard.sh"
+    local payload
+
+    # Blocked in the sandbox, including path-qualified - /usr/local/bin is
+    # where the image puts it, so a bare-name-only pattern would miss the
+    # form an agent reaching past PATH would type.
+    local cmd
+    for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24'; do
+        payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"gitea-merge-guard.sh"* ]]
+    done
+
+    # The other verbs are the whole point of the tool and must pass through.
+    for cmd in 'gitea-pr create --title x' 'gitea-pr comments 24' 'gitea-issue close 14'; do
+        payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        [ "$status" -eq 0 ]
+    done
+
+    # Outside the sandbox it does nothing at all: an operator at a host shell
+    # can still be asked to merge, which is what the CLAUDE.md rule allows.
+    # env -u rather than DEJIMA= because the image sets DEJIMA=1 globally, so
+    # a test running inside dejima would otherwise assert against itself.
+    payload=$(jq -n '{tool_input: {command: "gitea-pr merge 24"}}')
+    run bash -c "printf '%s' \"\$1\" | env -u DEJIMA bash '$hook'" _ "$payload"
+    [ "$status" -eq 0 ]
+}
+
+@test "install.sh links and registers the gitea merge guard" {
+    grep -qx 'link_hook gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
+    grep -q 'register_hook PreToolUse Bash gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
 }
 
 @test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {

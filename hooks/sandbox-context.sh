@@ -214,6 +214,18 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   push regardless), and never push directly to main/master, on any remote.
   A \`git-push-guard.sh\` hook enforces both as a backstop, but treat them
   as the actual workflow to follow, not just a filter to route around.
+  Merging is the operator's call, not yours - a \`gitea-merge-guard.sh\`
+  hook blocks it here. Report the PR URL and stop.
+- Write PR and issue bodies to a file and pass \`--body-file FILE\`, rather
+  than \`--body "..."\` or a heredoc. Both of those put the entire body into
+  the Bash command string, where \`deny-dangerous-bash.sh\` reads it - and
+  that hook matches its patterns anywhere in the string, with no way to tell
+  an instruction from prose that merely mentions one. A body describing a
+  crash, a restart, or a destructive command it is warning about will get
+  the call blocked, which looks like a broken tool rather than what it is.
+  Writing the file first keeps the prose out of the command entirely.
+  \`gitea-issue\` (list/view/create/comment/close/reopen) takes the same
+  flag, for recording a problem you found but aren't fixing.
 
 If a task genuinely needs something else the sandbox can't provide -
 broader network access than a domain or two, host-level or system changes,
