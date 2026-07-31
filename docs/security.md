@@ -67,7 +67,12 @@ one can't happen.
   space") - that hand-off path stays unaudited - and its coverage is a
   fixed list of known Claude Code config surfaces, not a general integrity
   check, so a future config surface this list hasn't been taught about yet
-  would go unreported.
+  would go unreported. **Its diff is time-windowed, not session-attributed:**
+  a finding means one of these paths changed while the session was running,
+  not that the session made the change. A concurrent dejima or Claude Code
+  session, another host process, or you editing the same files by hand
+  during the run all land in the same diff and get reported identically -
+  the tool has no way to tell them apart.
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted read-only, unlike the other `~/.claude` overlays above -
   deliberately. Scoping a read-only overlay to "the current project's slug"
@@ -87,7 +92,13 @@ one can't happen.
   that project's newest doesn't advance the max and goes unflagged. A
   read-only mount for `projects/` remains a possible future option if
   Claude Code is confirmed to fail cleanly (not hang, as `~/.claude.json`
-  did) when a write to it is blocked.
+  did) when a write to it is blocked. This is also the sharpest case of
+  the time-window caveat above: `~/.claude/projects` is a single
+  directory shared by *every* Claude Code session on the host, not scoped
+  to the one being audited, so an entirely innocent concurrent session
+  working on some unrelated project can produce a `CROSS-PROJECT` finding
+  here that reads like the audited session poisoned another project's
+  history - it didn't, it just happened to be running at the same time.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level

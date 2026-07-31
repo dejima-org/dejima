@@ -961,6 +961,21 @@ EOF
     grep -q 'dejima-dep add cargo:cargo-nextest --global' "$REPO_ROOT/README.md"
 }
 
+@test "README documents that the exit-time audit's findings are not attributed to the session" {
+    # Presence-only grep - it confirms the caveat sentence exists in the
+    # Security notes teaser, not that the linked docs/security.md
+    # explanation it points readers to is itself correct or complete.
+    grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
+}
+
+@test "docs/security.md documents the ~/.claude/projects cross-session false-positive case" {
+    # Presence-only grep, same caveat as above: confirms the specific
+    # ~/.claude/projects wording landed, not that the surrounding
+    # reasoning is sound.
+    grep -q 'CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
+    grep -q 'directory shared by' "$REPO_ROOT/docs/security.md"
+}
+
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]

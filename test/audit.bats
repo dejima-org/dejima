@@ -347,6 +347,28 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$overflow" -gt "$last_warn" ]
 }
 
+@test "the terminal header states what changed while the session ran, not what the session changed" {
+    # The diff covers the whole session window regardless of source
+    # (concurrent sessions, the operator's own edits, background tools),
+    # so the header must not claim the session itself made the change.
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    run cmp_
+    [[ "$output" == *"host-persistence surfaces changed in"* ]]
+    [[ "$output" == *"while this session ran"* ]]
+    [[ "$output" != *"this session changed"* ]]
+}
+
+@test "the report file explains that concurrent sessions and operator edits land in the same diff" {
+    snap
+    mkdir -p "$WS/.claude"; echo 'x' > "$WS/.claude/CLAUDE.md"
+    cmp_ >/dev/null 2>&1
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "cat '$AUDITDIR/$slug'/*.txt"
+    [[ "$output" == *"not necessarily because"* ]]
+    [[ "$output" == *"concurrent"* ]]
+}
+
 @test "the last line of the report is the verdict, not a border" {
     snap
     echo 'export X=1' > "$WS/.envrc"

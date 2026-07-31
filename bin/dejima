@@ -598,7 +598,7 @@ if remote_enabled; then
 fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
-# anything this session changed (advisory - see bin/dejima-audit).
+# anything that changed while this session ran (advisory - see bin/dejima-audit).
 "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
