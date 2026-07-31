@@ -471,3 +471,79 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [[ "$output" == *".vscode/settings.json"* ]]
 }
+
+@test "ack writes nothing to the baseline when the operator quits" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]           # ack ran and presented the finding
+    [[ "$output" == *"nothing recorded"* ]] # ...and reported that it wrote nothing
+    [ ! -f "$BASEDIR/$slug" ]               # ...and in fact wrote nothing
+}
+
+@test "ack refuses to spam a CRITICAL surface" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 's\nq\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot"* ]]
+    ! grep -q '^spam .envrc' "$BASEDIR/$slug" 2>/dev/null
+}
+
+@test "ack records a safe entry and clears the CRITICAL report marker" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    grep -q '^safe .envrc' "$BASEDIR/$slug"
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" != *"-CRITICAL.txt"* ]]
+}
+
+@test "ack does not write an unmatchable entry for a non-path finding" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; git -C "$WS" config user.name changed; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot"* ]]
+    [ ! -f "$BASEDIR/$slug" ]
+}
+
+@test "an ack-approved finding is suppressed on the next compare (id round-trips through the baseline)" {
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]  # ack ran and wrote the entry
+    run cmp_
+    [[ "$output" != *".envrc"* ]]                       # ...and it round-trips
+}
+
+@test "the CRITICAL suffix survives when a CRITICAL finding is skipped but a WARNING is approved" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    echo 'export X=1' > "$WS/.envrc"                                  # CRITICAL
+    mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"   # WARNING
+    cmp_ >/dev/null 2>&1
+    # Report order is CRITICAL block then WARNING block, so the first key
+    # answers the .envrc CRITICAL finding and the second answers the
+    # .vscode/settings.json WARNING finding.
+    run bash -c "printf 'c\na\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]           # ack ran and presented the CRITICAL finding
+    [[ "$output" == *"settings.json"* ]]    # ...and the WARNING finding
+    grep -q '^safe .vscode/settings.json' "$BASEDIR/$slug"   # the approval was recorded
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" == *"-CRITICAL.txt"* ]]    # but the CRITICAL finding was skipped, not approved,
+                                             # so the report must stay eviction-protected
+}
+
+@test "an approved finding for a since-deleted path writes an empty-sha entry that never suppresses" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    rm -f "$WS/.envrc"   # gone by the time ack runs
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe \.envrc $' "$BASEDIR/$slug"   # trailing space: id recorded, sha empty
+    echo 'export X=1' > "$WS/.envrc"             # recreate with real content
+    run cmp_
+    [[ "$output" == *".envrc"* ]]                # empty-sha baseline entry cannot match a real hash
+}

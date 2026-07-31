@@ -424,6 +424,101 @@ case "$cmd" in
         cat "$newest"
         exit 0
         ;;
+    ack)
+        report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
+        bf="$BASELINE_DIR/$(ws_slug "$ws")"
+        newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+
+        # Accumulate in memory and write once at the end: an ack interrupted
+        # partway (q/Esc/EOF/Ctrl-C) must not leave a CRITICAL surface
+        # silently approved, so every abort path discards everything rather
+        # than half-writing.
+        pending=(); aborted=0
+        # crit_seen/crit_acked gate the -CRITICAL.txt rename below: it must
+        # fire only when every CRITICAL finding in THIS report was actually
+        # approved, not merely when the operator approved something. A
+        # report mixing an unacknowledged CRITICAL with an approved WARNING
+        # (or a non-path CRITICAL, which can never be "approved" - see
+        # ackable below) must keep its suffix and stay eviction-protected.
+        crit_seen=0; crit_acked=0
+        # The loop below reads report lines on its own stdin (`< "$newest"`),
+        # so operator keystrokes are read from fd 3 - a copy of the script's
+        # original stdin taken before that redirection - rather than
+        # /dev/tty (which has nothing to open under piped test input; a
+        # bare `read` on fd 0 would otherwise be consuming the very report
+        # lines the loop is iterating). In real use fd 3 is still the
+        # operator's terminal, since that's what an interactive shell hands
+        # a foreground command as fd 0. Piping into `ack` therefore drives
+        # approvals in both test and real use through the same code path -
+        # safe, because the read-time CRITICAL guard in baseline_suppresses()
+        # (a `spam` entry can never silence a CRITICAL surface) holds no
+        # matter how a baseline entry got written, piped or typed.
+        { exec 3<&0; } 2>/dev/null
+        while IFS= read -r rline; do
+            tier="${rline%% *}"; body="${rline#* }"
+            case "$tier" in CRITICAL|WARNING) ;; *) continue ;; esac
+            [ "$tier" = CRITICAL ] && crit_seen=$((crit_seen + 1))
+            id="${body##*: }"
+            # Only "workspace file:" findings are workspace-relative paths
+            # that baseline_suppresses() ever consults (git-config and
+            # CROSS-PROJECT findings aren't path diffs and are never checked
+            # against the baseline) - writing spam/safe for those would be
+            # an entry that can never match, so such findings are shown but
+            # not offered a/s.
+            ackable=0
+            case "$body" in *"workspace file: "*) ackable=1 ;; esac
+            echo ""
+            echo "  [$tier] $body"
+            if [ "$ackable" -ne 1 ]; then
+                printf '  [c] skip  [q] quit (not a workspace-relative path, cannot be acknowledged): '
+            elif [ "$tier" = CRITICAL ]; then
+                printf '  [a] approve this exact content  [c] skip  [q] quit: '
+            else
+                printf '  [a] approve  [s] always ignore  [c] skip  [q] quit: '
+            fi
+            { read -r key <&3; } 2>/dev/null || { aborted=1; break; }
+            case "$key" in
+                q|$'\e'|'') aborted=1; break ;;
+                s)
+                    if [ "$ackable" -ne 1 ]; then
+                        echo "  cannot acknowledge: not a workspace-relative path finding."
+                    elif [ "$tier" = CRITICAL ]; then
+                        echo "  cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."
+                    else
+                        pending+=("spam $id")
+                    fi
+                    ;;
+                a)
+                    if [ "$ackable" -ne 1 ]; then
+                        echo "  cannot acknowledge: not a workspace-relative path finding."
+                    else
+                        sha=""; [ -e "$ws/$id" ] && sha="$(hash_entry "$ws/$id")"
+                        pending+=("safe $id $sha")
+                        [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
+                    fi
+                    ;;
+                *) ;;
+            esac
+        done < "$newest"
+
+        if [ "$aborted" -eq 1 ] || [ "${#pending[@]}" -eq 0 ]; then
+            echo ""; echo "dejima audit: nothing recorded."
+            exit 0
+        fi
+        mkdir -p "$BASELINE_DIR"
+        printf '%s\n' "${pending[@]}" >> "$bf"
+        # Only rename off -CRITICAL.txt (making the report evictable by
+        # rotation) when every CRITICAL finding this report carried was
+        # actually approved - not just when something was approved.
+        if [ "$crit_seen" -gt 0 ] && [ "$crit_acked" -eq "$crit_seen" ]; then
+            case "$newest" in
+                *-CRITICAL.txt) mv "$newest" "${newest%-CRITICAL.txt}.txt" ;;
+            esac
+        fi
+        echo ""; echo "dejima audit: recorded ${#pending[@]} acknowledgement(s) in $bf"
+        exit 0
+        ;;
     *)
         echo "usage: dejima-audit {snapshot|compare|show|ack} <workspace> [state-file]" >&2
         exit 2
