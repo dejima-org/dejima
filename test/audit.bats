@@ -91,7 +91,7 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     echo '{}' > "$WS/.mcp.json"; snap
     echo '{"mcpServers":{}}' > "$WS/.mcp.json"
     run cmp_
-    count="$(printf '%s\n' "$output" | grep -c 'changed workspace file:.*\.mcp\.json')"
+    count="$(printf '%s\n' "$output" | grep -c 'workspace file:.*\.mcp\.json')"
     [ "$count" -eq 1 ]
 }
 
@@ -240,4 +240,41 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
+}
+
+@test "flags .envrc as host code execution, not a plain file change" {
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "flags .claude/settings.local.json as host code execution" {
+    snap
+    mkdir -p "$WS/.claude"; echo '{}' > "$WS/.claude/settings.local.json"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+}
+
+@test "flags .mcp.json as host code execution" {
+    echo '{}' > "$WS/.mcp.json"; snap
+    echo '{"a":1}' > "$WS/.mcp.json"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+}
+
+@test "flags .vscode/tasks.json as host code execution" {
+    snap
+    mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/tasks.json"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+}
+
+@test "does not flag an ordinary .claude file as host code execution" {
+    snap
+    mkdir -p "$WS/.claude"; echo 'notes' > "$WS/.claude/CLAUDE.md"
+    run cmp_
+    [[ "$output" == *"CLAUDE.md"* ]]
+    [[ "$output" != *"HOST-CODE-EXECUTION"* ]]
 }

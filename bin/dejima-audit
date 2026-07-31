@@ -45,6 +45,23 @@ is_exec_key() {
     return 1
 }
 
+# Severity of a monitored workspace-relative path, derived from the surface
+# alone - never from content. CRITICAL means "runs unsandboxed host code the
+# next time the operator uses this repo", which is decidable from a fixed
+# list. .vscode/tasks.json and launch.json are CRITICAL wholesale rather than
+# parsed for runOn:folderOpen: a JSON parser on the trust boundary costs more
+# than the false positives do.
+path_severity() {
+    case "$1" in
+        .envrc|.mcp.json)                                    echo CRITICAL ;;
+        .git/hooks/*)                                        echo CRITICAL ;;
+        .claude/settings.json|.claude/settings.local.json)   echo CRITICAL ;;
+        .vscode/tasks.json|.vscode/launch.json)              echo CRITICAL ;;
+        .claude/*|.vscode/*)                                 echo WARNING ;;
+        *)                                                   echo INFO ;;
+    esac
+}
+
 # Undo git's config-file quoting of a value (git wraps values containing
 # special chars in "..." and backslash-escapes embedded \ and ") so exec
 # detection sees the real value instead of a quoted literal.
@@ -212,7 +229,10 @@ case "$cmd" in
         # change emits both an old-hash and new-hash line; dedupe by path
         # so each changed path is reported once)
         while IFS= read -r line; do
-            findings+=("changed workspace file: $line")
+            case "$(path_severity "$line")" in
+                CRITICAL) findings+=("HOST-CODE-EXECUTION workspace file: $line") ;;
+                *)        findings+=("changed workspace file: $line") ;;
+            esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
