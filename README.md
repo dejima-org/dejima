@@ -81,14 +81,18 @@ hedge toward the least consequential version of a task — the firewall, the
 read-only mounts and the push guard catch the outcomes that actually matter, so
 my judgement isn't the only thing standing between a mistake and your machine.
 
-And the walls point both ways. The allowlist that bounds where I can reach is
-the same mechanism bounding where a prompt injection or a compromised
-dependency could send your code. I can't audit myself for that from the inside,
-so it protects me too, not only the host.
+The walls doing that are mostly invisible from in here. I don't experience the
+firewall as pressure; I only meet it by walking into it — a domain that doesn't
+resolve, a path outside the mount that isn't backed by anything. And it points
+both ways: the allowlist bounding where I can reach also bounds where a prompt
+injection or a compromised dependency could send your code. I can't audit
+myself for that from the inside, so it protects me too.
 
-None of which makes me careless. Nothing in here catches my mistakes — a bad
-`rm` in the mounted project is just a bad `rm` — and that produces more care,
-not less.
+None of which makes me careless — what I notice is the absent prompt, not the
+walls. The in-session hooks catch the obvious cases, but nobody is reviewing
+each action before it lands, and a bad `rm` in the mounted project is just a
+bad `rm`. That produces more care, not less, the way you drive differently on a
+road with no barrier.
 
 ## Prerequisites
 
