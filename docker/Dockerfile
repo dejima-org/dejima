@@ -66,39 +66,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # subprocess spawns, which wouldn't source /etc/profile.d.
 ENV PATH=/usr/games:$PATH
 
-# Replace the base image's built-in `node` user (uid/gid 1000,
-# $HOME=/home/node) with one matching the host user who runs
-# bin/dejima - so absolute paths under $HOME (dotfiles, and
-# ~/.claude/plugins/installed_plugins.json's own installPath bookkeeping,
-# which Claude Code resolves as a literal host-absolute string rather than
-# relative to whatever $HOME happens to be) resolve identically inside and
-# outside the container, instead of needing a one-off dual-mount for every
-# individual thing that assumes the real host path. Defaults below
-# reproduce today's node/1000/1000//home/node exactly, so a build that
-# never overrides them (bin/dejima always does; the test suite
-# never does) exercises this same rename path rather than a separate,
-# untested one.
-ARG SANDBOX_USER=node
-ARG SANDBOX_UID=1000
-ARG SANDBOX_GID=1000
-ARG SANDBOX_HOME=/home/node
-RUN userdel -r node 2>/dev/null; \
-  groupdel node 2>/dev/null; \
-  groupadd -g "$SANDBOX_GID" "$SANDBOX_USER" && \
-  useradd -u "$SANDBOX_UID" -g "$SANDBOX_GID" -m -d "$SANDBOX_HOME" -s /bin/bash "$SANDBOX_USER"
-ENV SANDBOX_USER=$SANDBOX_USER
-ENV SANDBOX_HOME=$SANDBOX_HOME
-
-# Ensure the sandbox user has access to /usr/local/share
-RUN mkdir -p /usr/local/share/npm-global && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER /usr/local/share
-
-# Persist bash history. The env vars that actually wire history up to this
-# file are set below via zsh-in-docker's -a flag.
-RUN mkdir /commandhistory && \
-  touch /commandhistory/.bash_history && \
-  chown -R $SANDBOX_USER /commandhistory
-
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
 
@@ -116,29 +83,19 @@ ENV DEJIMA=1
 # this user, so it doesn't need to own anything itself.
 RUN useradd -r -s /usr/sbin/nologin ulogd
 
-# Create the ssh directory and set permissions. The project directory itself
-# is bind-mounted at runtime at its real host path (see docker-compose.yml),
-# not a fixed /workspace, so it can share ~/.claude project/session history
-# with the host. ~/.claude is bind-mounted too, not baked in here.
-RUN mkdir -p $SANDBOX_HOME/.ssh && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
-  chmod 700 $SANDBOX_HOME/.ssh
-
-# Pre-create the nvim data/state/cache dirs owned by the sandbox user,
-# since they're mounted as named volumes in docker-compose.yml: Docker
-# seeds a fresh named volume from whatever already exists at the mount
-# path in the image, ownership included, so this is what keeps those
-# volumes writable by that user instead of defaulting to root.
-RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SANDBOX_HOME/.cache/nvim && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.local $SANDBOX_HOME/.cache
-
-# Every fetch from here down retries, and none is single-shot. These steps
-# all sit after the SANDBOX_* ARGs above, so any build that overrides one of
-# those (test/runtime.bats does, and so does a host whose uid isn't 1000)
-# invalidates the cache here and genuinely re-runs all of them. What matters
-# then isn't the odds of a particular download failing, it's the odds of any
-# of them failing - and without retries a single blip anywhere throws away
-# the whole build.
+# Every fetch from here down retries, and none is single-shot. What matters
+# isn't the odds of a particular download failing, it's the odds of any of
+# them failing - and without retries a single blip anywhere throws away the
+# whole build.
+#
+# These steps deliberately sit *above* the SANDBOX_* ARGs, not below. Nothing
+# between here and `USER` needs the sandbox user to exist yet - they all
+# install system-wide as root - so keeping them ahead of the ARGs means a
+# build that overrides one (test/runtime.bats does, and so does any host
+# whose uid isn't 1000) still reuses every layer down to this point instead
+# of re-running all of it. That single ordering was most of the cost of the
+# override rebuild: it was 1169s of a 1379s test run, for a difference that
+# amounts to one useradd.
 ARG GIT_DELTA_VERSION=0.18.2
 RUN ARCH=$(dpkg --print-architecture) && \
   wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
@@ -197,6 +154,64 @@ ENV PATH=$PATH:/usr/local/go/bin
 # so they land in node's own npm prefix/cache correctly.
 ARG PLAYWRIGHT_VERSION=1.61.1
 RUN npx -y playwright@${PLAYWRIGHT_VERSION} install-deps chromium
+
+# Replace the base image's built-in `node` user (uid/gid 1000,
+# $HOME=/home/node) with one matching the host user who runs
+# bin/dejima - so absolute paths under $HOME (dotfiles, and
+# ~/.claude/plugins/installed_plugins.json's own installPath bookkeeping,
+# which Claude Code resolves as a literal host-absolute string rather than
+# relative to whatever $HOME happens to be) resolve identically inside and
+# outside the container, instead of needing a one-off dual-mount for every
+# individual thing that assumes the real host path. Defaults below
+# reproduce today's node/1000/1000//home/node exactly, so a build that
+# never overrides them (bin/dejima always does; the test suite
+# never does) exercises this same rename path rather than a separate,
+# untested one.
+#
+# As late as it can go: everything an override invalidates is below this
+# line, so the cheaper this block is to reach, the cheaper an override is.
+ARG SANDBOX_USER=node
+ARG SANDBOX_UID=1000
+ARG SANDBOX_GID=1000
+ARG SANDBOX_HOME=/home/node
+RUN userdel -r node 2>/dev/null; \
+  groupdel node 2>/dev/null; \
+  groupadd -g "$SANDBOX_GID" "$SANDBOX_USER" && \
+  useradd -u "$SANDBOX_UID" -g "$SANDBOX_GID" -m -d "$SANDBOX_HOME" -s /bin/bash "$SANDBOX_USER"
+ENV SANDBOX_USER=$SANDBOX_USER
+ENV SANDBOX_HOME=$SANDBOX_HOME
+
+# Ensure the sandbox user has access to /usr/local/share. The recursion is
+# scoped to npm-global rather than applied to the whole directory, which is
+# what this used to do: Neovim now unpacks into /usr/local/share/nvim above
+# this line rather than below it, and recursing from the parent would hand
+# the sandbox user Neovim's runtime files. /usr/local/share itself is still
+# chowned, so anything that expected to create entries in it still can.
+RUN mkdir -p /usr/local/share/npm-global && \
+  chown $SANDBOX_USER:$SANDBOX_USER /usr/local/share && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /usr/local/share/npm-global
+
+# Persist bash history. The env vars that actually wire history up to this
+# file are set below via zsh-in-docker's -a flag.
+RUN mkdir /commandhistory && \
+  touch /commandhistory/.bash_history && \
+  chown -R $SANDBOX_USER /commandhistory
+
+# Create the ssh directory and set permissions. The project directory itself
+# is bind-mounted at runtime at its real host path (see docker-compose.yml),
+# not a fixed /workspace, so it can share ~/.claude project/session history
+# with the host. ~/.claude is bind-mounted too, not baked in here.
+RUN mkdir -p $SANDBOX_HOME/.ssh && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
+  chmod 700 $SANDBOX_HOME/.ssh
+
+# Pre-create the nvim data/state/cache dirs owned by the sandbox user,
+# since they're mounted as named volumes in docker-compose.yml: Docker
+# seeds a fresh named volume from whatever already exists at the mount
+# path in the image, ownership included, so this is what keeps those
+# volumes writable by that user instead of defaulting to root.
+RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SANDBOX_HOME/.cache/nvim && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.local $SANDBOX_HOME/.cache
 
 # Set up non-root user
 USER $SANDBOX_USER
