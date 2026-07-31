@@ -50,9 +50,16 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: node:20-bookworm
-      # Deliberately no `volumes:` and no `options: --network host` here. Both
-      # of the things this job needs beyond an ordinary one are settled by the
-      # runner, not by this file, and asking for them here does nothing:
+      # One volume, and it is load-bearing - see TMPDIR on the bats step for
+      # what it is for. It has to be listed in container.valid_volumes in
+      # act_runner's config.yaml too: a volume this file asks for and the
+      # runner has not been told to allow does not arrive.
+      volumes:
+        - /tmp/dejima-ci:/tmp/dejima-ci
+      # Nothing else, though - no `options: --network host`, and no request
+      # for the docker socket. Both of the other things this job needs beyond
+      # an ordinary one are settled by the runner, not by this file, and
+      # asking for them here does nothing:
       #
       # The docker socket, for building the image and running containers,
       # act_runner binds in by itself - GetBindsAndMounts appends
@@ -88,7 +95,7 @@ jobs:
       # Fails here, with the fix in the message, rather than thirty tests deep
       # in a suite that cannot work. Both of these are runner configuration,
       # not anything a change to this repo can cause.
-      - name: Check the runner actually granted Docker and the host netns
+      - name: Check the runner granted Docker, the host netns, and a shared /tmp
         run: |
           docker info >/dev/null 2>&1 || {
             echo "No Docker daemon reachable from this job." >&2
@@ -106,6 +113,27 @@ jobs:
             echo "The bridge-gateway test cannot pass here. Set container.network: host in" >&2
             echo "act_runner's config.yaml (and make sure CONFIG_FILE points the runner at" >&2
             echo "that file - without it the config is not read at all)." >&2
+            exit 1
+          }
+          # Probe the shared directory the same way the suite will use it:
+          # write a file in here, read it back through the host daemon. If it
+          # is not really shared, the daemon invents an empty directory for
+          # the mount rather than refusing it, and the probe comes back empty
+          # - which is exactly how all of runtime.bats would fail. Reuses
+          # this job's own image, so there is nothing to pull.
+          mkdir -p /tmp/dejima-ci
+          # bats only clears its own tmpdir on a normal exit, so fixtures
+          # from a killed run would otherwise pile up on the host forever.
+          # `find -delete` rather than a glob: it covers dotfiles, doesn't
+          # misfire on an empty directory, and still fails loudly.
+          find /tmp/dejima-ci -mindepth 1 -delete
+          echo shared-ok > /tmp/dejima-ci/probe
+          probe=$(docker run --rm -v /tmp/dejima-ci/probe:/probe:ro node:20-bookworm cat /probe 2>/dev/null || true)
+          [ "$probe" = shared-ok ] || {
+            echo "/tmp/dejima-ci is not shared with the host - the probe read back empty." >&2
+            echo "Add it to container.valid_volumes in act_runner's config.yaml. Without" >&2
+            echo "that the runner drops the volume this job asks for, and every fixture" >&2
+            echo "mount in runtime.bats silently becomes an empty directory instead." >&2
             exit 1
           }
 
@@ -126,3 +154,19 @@ jobs:
       - run: bats test/runtime.bats
         env:
           SKIP_BUILD: 1
+          # runtime.bats builds fixtures on disk - ssh keys, statusline
+          # scripts, .claude.json copies, a proxy socket - and bind-mounts
+          # them into containers it starts. Those containers are siblings of
+          # this one rather than children: the host daemon creates them, over
+          # the socket, so it resolves every -v source against the host's
+          # filesystem and not this container's. A fixture at a path that
+          # exists only in here therefore does not resolve - and Docker's
+          # answer to a missing bind source is not an error, it is to create
+          # an empty directory and mount that. Seven tests failed that way,
+          # and an eighth passed while being just as broken, because an empty
+          # read-only directory satisfies exactly what it asserts.
+          #
+          # Pointing TMPDIR at the shared mount puts `mktemp -d` and bats'
+          # own BATS_*_TMPDIR on paths that mean the same thing on both sides
+          # of the socket, which is all any of those mounts need.
+          TMPDIR: /tmp/dejima-ci
