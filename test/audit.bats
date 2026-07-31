@@ -15,8 +15,9 @@ setup() {
     STATUSLINE_DIR="$(mktemp -d)"
     export DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
     AUDITDIR="$(mktemp -d)"; export DEJIMA_AUDIT_DIR="$AUDITDIR"
+    BASEDIR="$(mktemp -d)"; export DEJIMA_AUDIT_BASELINE_DIR="$BASEDIR"
 }
-teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; rm -rf "$AUDITDIR"; }
+teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; rm -rf "$AUDITDIR"; rm -rf "$BASEDIR"; }
 
 snap() { "$AUDIT" snapshot "$WS" "$STATE"; }
 cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
@@ -420,4 +421,53 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run "$AUDIT" show "$WS"
     [ "$status" -eq 0 ]
     [[ "$output" == *".envrc"* ]]
+}
+
+@test "a spam-listed path is not listed in the report" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/.claude"; echo 'a' > "$WS/.claude/CLAUDE.md"; snap
+    echo "spam .claude/CLAUDE.md" > "$BASEDIR/$slug"
+    echo 'b' > "$WS/.claude/CLAUDE.md"
+    run cmp_
+    [[ "$output" != *"CLAUDE.md"* ]]
+}
+
+@test "a safe-listed path with a matching hash is suppressed" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    sha="$(sha256sum "$WS/.envrc" | cut -d' ' -f1)"
+    echo "safe .envrc $sha" > "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" != *".envrc"* ]]
+}
+
+@test "a safe-listed path re-fires at full severity when its hash changes" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    echo "safe .envrc 0000000000000000000000000000000000000000000000000000000000000000" > "$BASEDIR/$slug"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "a hand-written spam entry cannot silence a CRITICAL surface" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap
+    echo "spam .envrc" > "$BASEDIR/$slug"
+    echo 'export X=1' > "$WS/.envrc"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "a baseline id containing a space does not suppress a different real path" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/.vscode"
+    echo 'a' > "$WS/.vscode/settings.json"; snap
+    printf 'spam .vscode/settings.json old\n' > "$BASEDIR/$slug"
+    echo 'b' > "$WS/.vscode/settings.json"
+    run cmp_
+    [[ "$output" == *".vscode/settings.json"* ]]
 }

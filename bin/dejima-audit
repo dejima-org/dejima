@@ -46,6 +46,49 @@ AUDIT_KEEP="${DEJIMA_AUDIT_KEEP:-10}"
 
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
+BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+
+# Two acknowledgement forms, deliberately distinct:
+#   spam <id>         - this changes routinely; count it, never list it.
+#                       Refused for CRITICAL surfaces (see `ack`).
+#   safe <id> <sha>   - this exact content is approved; anything else
+#                       re-fires at full severity. The only form permitted
+#                       for CRITICAL, so approving a hook today does not
+#                       approve a different hook tomorrow.
+baseline_suppresses() {
+    local id="$1" sha="$2" bf verb rest bid bsha
+    bf="$BASELINE_DIR/$(ws_slug "$ws")"
+    [ -f "$bf" ] || return 1
+    while read -r verb rest; do
+        case "$verb" in ''|'#'*) continue ;; esac
+        # An id may itself contain spaces (e.g. "file 2.md"), so it can't be
+        # split off with a fixed field count - a naive `read verb id sha`
+        # would truncate such an id at its first space and could then
+        # collide with a shorter, unrelated real path of that truncated
+        # name, silently suppressing a finding no one acknowledged. spam has
+        # no trailing sha field, so its id is everything after the verb;
+        # safe's sha is fixed-position-last, so its id is recovered by
+        # stripping the last whitespace-separated field from the right.
+        case "$verb" in
+            spam) bid="$rest"; bsha="" ;;
+            safe) case "$rest" in
+                      *' '*) bsha="${rest##* }"; bid="${rest% *}" ;;
+                      *)     continue ;;   # malformed: no sha field
+                  esac ;;
+            *)    continue ;;              # unknown verb
+        esac
+        [ "$bid" = "$id" ] || continue
+        case "$verb" in
+            # `ack` refusing to write `spam` for a CRITICAL surface is
+            # convenience; this is the actual boundary - it holds even
+            # against a hand-edited or corrupted baseline file.
+            spam) [ "$(path_severity "$id")" = CRITICAL ] && return 1; return 0 ;;
+            safe) [ -n "$sha" ] && [ "$bsha" = "$sha" ] && return 0 ;;
+        esac
+    done < "$bf"
+    return 1
+}
+
 # git config keys whose values run a command on the next git invocation, or
 # (include.path/includeif.*.path) indirect to another config file that could
 # set one - key names are case-insensitive in git, so match on a lowercased
@@ -256,6 +299,9 @@ case "$cmd" in
         # change emits both an old-hash and new-hash line; dedupe by path
         # so each changed path is reported once)
         while IFS= read -r line; do
+            cur_sha=""
+            [ -e "$ws/$line" ] && cur_sha="$(hash_entry "$ws/$line")"
+            baseline_suppresses "$line" "$cur_sha" && continue
             case "$(path_severity "$line")" in
                 CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(sanitize "$line")") ;;
                 WARNING)  warn+=("changed workspace file: $(sanitize "$line")") ;;
