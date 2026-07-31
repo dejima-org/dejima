@@ -248,6 +248,53 @@ EOF
     rm -rf "$PROJ"
 }
 
+@test "the exit-time audit still fires and prints after a forced marker-directory removal failure, without eating the real exit code" {
+    # Task 10: cleanup() now runs the exit-time audit after the marker-
+    # directory removal, structurally, so the operator's bottom-up read of
+    # the terminal always lands on the verdict. Stack this session's own
+    # provokable print (the marker-directory warning above) with a real
+    # workspace change and a distinct container exit code, and check all
+    # three survive together: the warning prints, the audit's report prints
+    # strictly after it, and the container's own exit code (not 1, not the
+    # audit's own status) is what bin/dejima reports.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in
+        *:/run/dejima-notify)
+            dir="${arg%:/run/dejima-notify}"
+            mkdir -p "$dir/undeletable"
+            : > "$dir/undeletable/file"
+            chmod 500 "$dir/undeletable"
+            echo '{}' > "$SANDBOX_TEST_WS/.mcp.json"
+            exit 5
+            ;;
+    esac
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    export SANDBOX_TEST_WS="$PROJ"
+    run launch "$PROJ"
+    unset SANDBOX_TEST_WS
+    [ "$status" -eq 5 ]
+    marker_line=$(printf '%s\n' "$output" | grep -n 'could not remove the marker directory' | head -1 | cut -d: -f1)
+    audit_line=$(printf '%s\n' "$output" | grep -n 'HOST-CODE-EXECUTION workspace file: \.mcp\.json' | head -1 | cut -d: -f1)
+    verdict_line=$(printf '%s\n' "$output" | grep -n 'CRITICAL - code that will run on your host' | head -1 | cut -d: -f1)
+    [ -n "$marker_line" ]
+    [ -n "$audit_line" ]
+    [ -n "$verdict_line" ]
+    [ "$marker_line" -lt "$audit_line" ]
+    # The verdict is the true last line of everything bin/dejima printed -
+    # not just after the marker warning, but after every other line too.
+    total_lines=$(printf '%s\n' "$output" | wc -l)
+    [ "$verdict_line" -eq "$total_lines" ]
+    chmod -R u+rwX "$RUNTIME_DIR"
+    rm -rf "$PROJ"
+}
+
 @test "a sandbox started outside tmux records an empty pane rather than being skipped" {
     stub_launch
     : > "$CONFIG_DIR/remote.conf"

@@ -516,16 +516,34 @@ setup() {
 }
 
 @test "bin/dejima's exit-time audit still runs when the container run fails or is interrupted" {
-    local run_line
+    local run_line trap_line
     run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$run_line" ]
-    # The compose invocation must not be a bare command under set -e - a
-    # nonzero/interrupted exit there would otherwise abort the script before
-    # the audit compare and exit below ever run.
+    [ -n "$trap_line" ]
+    # cleanup() is installed as the EXIT trap before the compose run, so it
+    # fires - and runs the audit - on every exit from the run below,
+    # including a nonzero/interrupted one under set -e that would otherwise
+    # abort the script before a bare audit call placed after the run ever
+    # ran.
+    [ "$trap_line" -lt "$run_line" ]
+    sed -n "1,${trap_line}p" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
+    # The compose invocation must not itself be a bare command under set -e
+    # either - a nonzero/interrupted exit there would otherwise skip the
+    # credential-proxy check and the propagated exit code below it.
     grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/dejima")
     sed -n "1,${run_line}p" "$REPO_ROOT/bin/dejima" | grep -q 'compose_status=0'
-    tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
     tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q 'exit "\$compose_status"'
+}
+
+# --- Task 10: the exit-time audit is the structural last writer ---
+
+@test "the exit-time audit is the last thing that writes to the terminal" {
+    audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ "$audit_line" -lt "$trap_line" ]
+    run grep -c 'could not remove the marker directory' "$REPO_ROOT/bin/dejima"
+    [ "$output" -eq 1 ]
 }
 
 @test "credential proxy is on by default, gated only by SANDBOX_CREDENTIAL_PROXY=0" {

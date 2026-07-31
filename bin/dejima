@@ -208,18 +208,30 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
     rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}"
-    # The one removal here a session can make fail, and the last command of an
-    # EXIT trap: the marker directory is bind-mounted read-write, so a session
-    # can leave it undeletable (an unwritable subdirectory is enough), and
-    # under set -e a failing command in an EXIT trap REPLACES the shell's exit
-    # status - so without this a compromised session could report 1 in place
-    # of Claude Code's real exit code. Same guard, for the same reason, as
+    # The one removal here a session can make fail, and (before the audit
+    # below was moved in) the last command of an EXIT trap: the marker
+    # directory is bind-mounted read-write, so a session can leave it
+    # undeletable (an unwritable subdirectory is enough), and under set -e a
+    # failing command in an EXIT trap REPLACES the shell's exit status - so
+    # without this a compromised session could report 1 in place of Claude
+    # Code's real exit code. Same guard, for the same reason, as
     # dejima-attach's prune and dejima-notify-watch's marker consumption.
     rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
         || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
+    # Last writer, structurally: the operator reads bottom-up from their
+    # shell prompt, so anything printed after the verdict pushes it out of
+    # view. The marker-directory warning above is the one line a session can
+    # deliberately provoke, so the audit runs after it, not before - and gets
+    # the same set -e guard for the same reason: a failing audit invocation
+    # must not replace Claude Code's real exit status either. SANDBOX_AUDIT_
+    # STATE is dropped from the rm -f above and freed only after compare has
+    # read it, so this function's own cleanup can't race the audit that
+    # needs it - and its removal is guarded too, so it stays truly last.
+    "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
 
@@ -636,8 +648,10 @@ export SANDBOX_IMAGE
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
 # Ctrl-C returning 130 - would otherwise abort the script here, skipping the
-# audit entirely). Capture the status explicitly so the advisory audit runs
-# on every exit path, then propagate the real container exit code unchanged.
+# credential-proxy check below it). Capture the status explicitly, then
+# propagate the real container exit code unchanged - the exit-time audit
+# itself now runs unconditionally from cleanup(), not because of this
+# capture.
 # Unacknowledged CRITICAL findings from earlier runs, re-presented here
 # because exit-time output can be ignored exactly once, permanently. This is
 # host-side and stays host-side: it must never be routed into the session's
@@ -674,5 +688,4 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PR
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2
 fi
-"$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 exit "$compose_status"

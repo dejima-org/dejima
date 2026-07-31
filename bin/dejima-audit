@@ -319,7 +319,14 @@ case "$cmd" in
         exit 0
         ;;
     compare)
-        [ -f "$state" ] || { echo "dejima audit: no snapshot to compare against, skipping." >&2; exit 0; }
+        # -s, not -f: cleanup() (bin/dejima) now runs this from the EXIT
+        # trap, which fires on early exits too - before the workspace's
+        # mktemp'd state file has ever been written to by `snapshot`. Such a
+        # file exists but is empty, and treating "exists" as "has a
+        # snapshot" would diff the real current state against nothing,
+        # manufacturing a finding for every monitored surface already
+        # present. Empty is the same as absent here.
+        [ -s "$state" ] || { echo "dejima audit: no snapshot to compare against, skipping." >&2; exit 0; }
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
                            echo "### projects";  projects_snapshot "$PROJECTS_DIR";

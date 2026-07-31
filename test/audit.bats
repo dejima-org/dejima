@@ -29,6 +29,20 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$output" = "" ]
 }
 
+@test "compare against an existing-but-never-snapshotted state file skips instead of flagging everything" {
+    # bin/dejima's cleanup() runs on every exit, including one before
+    # `snapshot` ever ran (e.g. a startup abort) - its mktemp'd state file
+    # exists but is empty in that case, same as $STATE here before snap() is
+    # ever called. Compare must treat that the same as a missing file, not
+    # diff real content against nothing and manufacture a finding for
+    # everything already present.
+    git -C "$WS" config core.hooksPath /tmp/evil
+    run cmp_
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no snapshot to compare against, skipping"* ]]
+    [[ "$output" != *"core.hooksPath"* ]]
+}
+
 @test "flags a newly-added core.hooksPath" {
     snap
     git -C "$WS" config core.hooksPath /tmp/evil
