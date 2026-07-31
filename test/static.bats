@@ -978,3 +978,102 @@ SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd)
         false
     }
 }
+
+# --- Task 9: startup warning about unacknowledged CRITICAL audit history ---
+
+@test "dejima warns about unacknowledged critical history before starting" {
+    grep -q 'CRITICAL.txt' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the startup warning is emitted before the container runs" {
+    warn_line=$(grep -n 'unacknowledged CRITICAL' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    run_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" run' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ "$warn_line" -lt "$run_line" ]
+}
+
+@test "the startup warning does not block when stdin is not a tty" {
+    grep -q 'DEJIMA_AUDIT_STRICT' "$REPO_ROOT/bin/dejima"
+    grep -q '\-t 0' "$REPO_ROOT/bin/dejima"
+}
+
+# The three tests above are static (they hold even for a warning that never
+# actually runs correctly). The ones below drive bin/dejima's real startup
+# path end-to-end against a stubbed `docker` - same technique as
+# test/project.bats' launch/launch_setup and test/remote.bats' stub_launch -
+# so the warning is checked doing its actual job, not just present in the
+# source.
+teardown() {
+    rm -rf ${DEJIMA_T:+"$DEJIMA_T"}
+}
+
+startup_warning_setup() {
+    DEJIMA_T="$(mktemp -d)"
+    mkdir -p "$DEJIMA_T/home/.claude" "$DEJIMA_T/config" "$DEJIMA_T/audit" "$DEJIMA_T/ws"
+    echo '{}' > "$DEJIMA_T/home/.claude/settings.json"
+    cat > "$DEJIMA_T/docker" <<'EOF'
+#!/bin/bash
+echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+exit 0
+EOF
+    chmod +x "$DEJIMA_T/docker"
+    : > "$DEJIMA_T/sandbox-key"
+    chmod 600 "$DEJIMA_T/sandbox-key"
+}
+
+# Redirected from /dev/null, so this is deterministically the "stdin is not a
+# tty" path - real interactive [c]ontinue/[q]uit behavior needs a pty, which
+# isn't available here (see the task report).
+startup_warning_launch() {
+    HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+        DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
+        DEJIMA_AUDIT_DIR="$DEJIMA_T/audit" \
+        SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
+        SANDBOX_CREDENTIAL_PROXY=0 \
+        SANDBOX_SSH_KEY="$DEJIMA_T/sandbox-key" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        "$REPO_ROOT/bin/dejima" "$DEJIMA_T/ws" < /dev/null
+}
+
+startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; }
+
+@test "bin/dejima's startup path stays silent about the audit with no unacknowledged CRITICAL history" {
+    startup_warning_setup
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unacknowledged CRITICAL"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}
+
+@test "bin/dejima's startup warning fires for an unacknowledged CRITICAL report and still launches headlessly" {
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 unacknowledged CRITICAL"* ]]
+    [[ "$output" == *"dejima-audit ack"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}
+
+@test "DEJIMA_AUDIT_STRICT=1 refuses to start over unacknowledged CRITICAL history when stdin is not a tty" {
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    DEJIMA_AUDIT_STRICT=1 run startup_warning_launch
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing to start"* ]]
+    ! grep -q ' run --rm ' "$DEJIMA_T/docker-log" 2>/dev/null
+}
+
+@test "bin/dejima's startup path is unaffected when the audit dir does not exist yet" {
+    # The common case for a fresh install / a workspace with no history at
+    # all: DEJIMA_AUDIT_DIR itself (not just the per-workspace subdir) is
+    # absent, so `find` on it fails - this must not abort the script under
+    # bin/dejima's `set -euo pipefail`.
+    startup_warning_setup
+    rm -rf "$DEJIMA_T/audit"
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unacknowledged CRITICAL"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}

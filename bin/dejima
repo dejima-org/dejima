@@ -638,6 +638,36 @@ export SANDBOX_IMAGE
 # Ctrl-C returning 130 - would otherwise abort the script here, skipping the
 # audit entirely). Capture the status explicitly so the advisory audit runs
 # on every exit path, then propagate the real container exit code unchanged.
+# Unacknowledged CRITICAL findings from earlier runs, re-presented here
+# because exit-time output can be ignored exactly once, permanently. This is
+# host-side and stays host-side: it must never be routed into the session's
+# context, which would make it a cross-session persistence channel.
+audit_slug="$(printf '%s' "$WORKSPACE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
+audit_reports="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}/$audit_slug"
+# `|| true`: a workspace with no history yet (the common case - nothing has
+# ever run against it, or every past finding is already acknowledged) has no
+# audit_reports directory at all, and find on a missing path exits nonzero -
+# which, combined with pipefail, would otherwise abort this script here for
+# every ordinary launch.
+pending_crit="$(find "$audit_reports" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort)" || true
+if [ -n "$pending_crit" ]; then
+    n="$(printf '%s\n' "$pending_crit" | wc -l)"
+    echo "" >&2
+    echo "  dejima: $n unacknowledged CRITICAL finding(s) in this workspace" >&2
+    printf '%s\n' "$pending_crit" | sed 's#.*/##; s#-CRITICAL\.txt$##; s#^#          from run #' >&2
+    echo "          Review with: dejima-audit ack \"$WORKSPACE_DIR\"" >&2
+    if [ -t 0 ]; then
+        printf '          [c] continue  [q] quit: ' >&2
+        read -r reply || reply=q
+        case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
+    elif [ "${DEJIMA_AUDIT_STRICT:-0}" = "1" ]; then
+        echo "          DEJIMA_AUDIT_STRICT=1 and stdin is not a tty - refusing to start." >&2
+        exit 1
+    else
+        echo "          (not a tty - continuing; set DEJIMA_AUDIT_STRICT=1 to refuse)" >&2
+    fi
+fi
+
 compose_status=0
 docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
