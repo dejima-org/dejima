@@ -169,6 +169,50 @@ jobs:
             exit 1
           }
 
+      # The token raises the api.github.com/meta ceiling from 60 requests an
+      # hour to 5000, and nothing about a run looks different when it stops
+      # doing that. A misspelled secret name, a revoked token and an expiry a
+      # year from now all present identically: green for a while, then
+      # containers failing to boot in init-firewall.sh - which reads as a
+      # regression in the firewall rather than as a lapsed credential. So ask
+      # the API what the ceiling actually is, rather than checking that a
+      # variable is non-empty and assuming the rest.
+      - name: Check the GitHub ranges lookup is authenticated
+        env:
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+        run: |
+          # Not a failure. Without the secret the suite still runs, it just
+          # spends the anonymous quota - which is the right default for a
+          # fork, and only a problem once runs get frequent.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No GH_META_TOKEN secret is configured, so GitHub's IP ranges will be"
+            echo "fetched anonymously: 60 requests an hour for this entire runner host,"
+            echo "against thirteen container starts per run. Fine occasionally, and on a"
+            echo "busy day the containers stop booting instead. See issue #37."
+            exit 0
+          fi
+          # No -f. A rejected token still answers with the header this reads,
+          # and the anonymous ceiling it reports is a far better diagnostic
+          # than curl exiting silently on the 401.
+          limit=$(curl -sI --connect-timeout 10 -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/meta | tr -d '\r' \
+            | awk -F': ' 'tolower($1)=="x-ratelimit-limit" {print $2}')
+          if [ -z "$limit" ]; then
+            echo "No x-ratelimit-limit came back from api.github.com/meta at all, so the" >&2
+            echo "request itself did not complete. This one is about reachability from" >&2
+            echo "the runner, not about the token." >&2
+            exit 1
+          fi
+          if [ "$limit" -lt 5000 ]; then
+            echo "GH_META_TOKEN is set, but GitHub reports a ceiling of $limit/hour - that" >&2
+            echo "is the anonymous quota, so the token is not being accepted. Expired or" >&2
+            echo "revoked is the likely cause; a wrong secret name would have arrived" >&2
+            echo "empty and been reported above instead. Replace it with a fine-grained" >&2
+            echo "PAT with no permissions - /meta is public data and needs none." >&2
+            exit 1
+          fi
+          echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
+
       - uses: actions/checkout@v4
 
       # The build dominates this job, and inside setup_file it is a `docker
