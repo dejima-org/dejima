@@ -1156,3 +1156,41 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [[ "$output" != *"unacknowledged CRITICAL"* ]]
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }
+
+@test "entrypoint terminates TLS for api.anthropic.com on loopback by default" {
+    # The transport is normalized in exactly one place so the forwarder, the
+    # cert generation, and the readiness probe cannot disagree about which
+    # mode this session is in.
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
+    # CN alone is not enough - Node verifies the SAN.
+    grep -q 'subjectAltName=DNS:api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'CN=api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'NODE_EXTRA_CA_CERTS' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "entrypoint aborts when the forwarder never binds" {
+    # A silent timeout would leave api.anthropic.com pointed at a loopback
+    # port with nothing behind it - every API call then fails with a
+    # connection error that gives no hint where it came from.
+    grep -q 'the credential-proxy forwarder never bound' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT=loopback' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "the hosts entry is written only when the proxy is actually running" {
+    # Under SANDBOX_CREDENTIAL_PROXY=0 there is no listener on :443, so a
+    # hosts entry would black-hole the real API - which is why this cannot be
+    # a compose extra_hosts entry. It must sit inside the proxy-socket guard.
+    local guard body
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ -n "$guard" ]
+    body=$(grep -n '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ "$body" -gt "$guard" ]
+}
+
+@test "openssl is installed explicitly, not relied on transitively" {
+    # entrypoint.sh generates the terminator's cert at startup; a transitive
+    # dependency dropping out of the base image would break the credential
+    # path at runtime rather than at build time.
+    grep -qE '^\s+openssl \\$' "$SANDBOX_DIR/Dockerfile"
+}

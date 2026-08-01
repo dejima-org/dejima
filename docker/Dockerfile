@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   dnsutils \
   aggregate \
   jq \
+  openssl \
   dnsmasq \
   ulogd2 \
   ulogd2-json \

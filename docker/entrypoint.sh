@@ -99,11 +99,51 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
-# Loopback bridge for the host-side credential proxy (see bin/dejima
-# and bin/dejima-anthropic-proxy): Claude Code talks HTTP to
-# 127.0.0.1:18300, the forwarder pipes bytes into the bind-mounted unix
-# socket. Only started when this session actually has a proxy socket.
+# TCP front door for the host-side credential proxy (see bin/dejima and
+# bin/dejima-anthropic-proxy): the proxy listens on a bind-mounted unix
+# socket, and anthropic-proxy-forwarder.js pipes bytes into it. Only started
+# when this session actually has a proxy socket.
+#
+# In the default tls transport, api.anthropic.com is pointed at loopback here
+# and the forwarder terminates TLS for it, so Claude Code runs with no
+# ANTHROPIC_BASE_URL and no placeholder token - it is indistinguishable from a
+# stock install, which is the whole point (see docs/security.md). The hosts
+# entry deliberately lives inside this guard rather than in compose's
+# extra_hosts: under SANDBOX_CREDENTIAL_PROXY=0 nothing listens on :443, and
+# an unconditional entry would black-hole the real API on exactly the path
+# that has to keep working.
+SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
+export SANDBOX_ANTHROPIC_TRANSPORT
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
+    forwarder_port=18300
+    if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "tls" ]; then
+        forwarder_port=443
+        # Generated here, in the container, rather than on the host: the key
+        # never touches host disk and there is no host state to clean up. It
+        # is readable by the sandbox user because the forwarder stays
+        # unprivileged - and worthless to anyone else, since the only thing
+        # that trusts this anchor is this container, which is already reading
+        # that traffic in the clear.
+        tls_dir=/etc/dejima-anthropic-tls
+        mkdir -p "$tls_dir"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \
+            -subj "/CN=api.anthropic.com" \
+            -addext "subjectAltName=DNS:api.anthropic.com" 2>/dev/null
+        chown "$SANDBOX_USER" "$tls_dir/key.pem" "$tls_dir/cert.pem"
+        chmod 600 "$tls_dir/key.pem"
+        chmod 644 "$tls_dir/cert.pem"
+        export SANDBOX_ANTHROPIC_TLS_CERT="$tls_dir/cert.pem"
+        export SANDBOX_ANTHROPIC_TLS_KEY="$tls_dir/key.pem"
+        # /etc/hosts wins over DNS in getaddrinfo, so this bypasses the DNS
+        # proxy entirely - which is why fixed-domains.sh no longer needs to
+        # allowlist the name at all.
+        echo "127.0.0.1 api.anthropic.com" >> /etc/hosts
+        # The trust anchor for the cert above. NODE_EXTRA_CA_CERTS rather than
+        # the system store: it needs no update-ca-certificates run, and it is
+        # the single most ordinary variable a corporate environment sets.
+        export NODE_EXTRA_CA_CERTS="$tls_dir/cert.pem"
+    fi
     gosu "$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js &
     # Node's own startup (V8 init, module load, then finally binding the
     # listen socket) isn't instant - without this wait, a request that
@@ -111,10 +151,24 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     # immediate check; in principle also a very fast-starting real client)
     # can race ahead of the bind and see a connection refused. Bash's own
     # /dev/tcp is enough to probe this without a curl/nc dependency.
+    forwarder_bound=0
     for _ in $(seq 1 50); do
-        (exec 3<>/dev/tcp/127.0.0.1/18300) 2>/dev/null && exec 3>&- && break
+        (exec 3<>/dev/tcp/127.0.0.1/$forwarder_port) 2>/dev/null && exec 3>&- && forwarder_bound=1 && break
         sleep 0.1
     done
+    # Loud, not silent. bin/dejima already refuses to launch when the
+    # host-side proxy fails to start, for the same reason: every quiet
+    # fallback from here either exposes the credential or, in tls mode, sends
+    # API traffic to a loopback port nothing is listening on and produces a
+    # connection error nobody can trace back to this.
+    if [ "$forwarder_bound" != "1" ]; then
+        echo "FATAL: the credential-proxy forwarder never bound 127.0.0.1:$forwarder_port." >&2
+        echo "Not starting the session - API traffic would have no working path to the" >&2
+        echo "host-side proxy. Re-run with SANDBOX_ANTHROPIC_TRANSPORT=loopback, or with" >&2
+        echo "SANDBOX_CREDENTIAL_PROXY=0 to launch without the proxy (the real OAuth" >&2
+        echo "credential is then mounted into the container)." >&2
+        exit 1
+    fi
 fi
 
 # Compose can't conditionally omit an env entry, so these arrive as empty
