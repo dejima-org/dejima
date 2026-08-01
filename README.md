@@ -746,8 +746,9 @@ on a phone, running behind another reverse proxy, notifications, and attaching.
 ## Security notes
 
 What this sandbox does and does not protect you from - the containment
-boundary, what a compromised session can still reach, and the deliberate
-trade-offs behind `--dangerously-skip-permissions`.
+boundary, what a compromised session can still reach, the deliberate
+trade-offs behind `--dangerously-skip-permissions`, and why the exit-time
+audit's findings are a time window, not a verdict on who caused them.
 
 **→ [docs/security.md](docs/security.md)**
 

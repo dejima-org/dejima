@@ -19,6 +19,15 @@ teardown() {
     if [ -n "${TMUX_DIR:-}" ]; then
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
     fi
+    # Safety net for tests that temporarily swap out the real bin/dejima-
+    # audit: each such test restores it itself right after `run`, before any
+    # assertion that could short-circuit the test body, but this catches the
+    # case anyway if something in between still managed to abort first.
+    if [ -n "${AUDIT_BACKUP:-}" ] && [ -f "$AUDIT_BACKUP" ]; then
+        cp "$AUDIT_BACKUP" "$REPO_ROOT/bin/dejima-audit"
+        chmod +x "$REPO_ROOT/bin/dejima-audit"
+        rm -f "$AUDIT_BACKUP"
+    fi
     rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
         ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
 }
@@ -246,6 +255,147 @@ EOF
     # teardown's rm -rf would inherit the same refusal.
     chmod -R u+rwX "$RUNTIME_DIR"
     rm -rf "$PROJ"
+}
+
+@test "the exit-time audit still fires and prints after a forced marker-directory removal failure, without eating the real exit code" {
+    # Task 10: cleanup() now runs the exit-time audit after the marker-
+    # directory removal, structurally, so the operator's bottom-up read of
+    # the terminal always lands on the verdict. Stack this session's own
+    # provokable print (the marker-directory warning above) with a real
+    # workspace change and a distinct container exit code, and check all
+    # three survive together: the warning prints, the audit's report prints
+    # strictly after it, and the container's own exit code (not 1, not the
+    # audit's own status) is what bin/dejima reports.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in
+        *:/run/dejima-notify)
+            dir="${arg%:/run/dejima-notify}"
+            mkdir -p "$dir/undeletable"
+            : > "$dir/undeletable/file"
+            chmod 500 "$dir/undeletable"
+            echo '{}' > "$SANDBOX_TEST_WS/.mcp.json"
+            exit 5
+            ;;
+    esac
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    export SANDBOX_TEST_WS="$PROJ"
+    run launch "$PROJ"
+    unset SANDBOX_TEST_WS
+    [ "$status" -eq 5 ]
+    marker_line=$(printf '%s\n' "$output" | grep -n 'could not remove the marker directory' | head -1 | cut -d: -f1)
+    audit_line=$(printf '%s\n' "$output" | grep -n 'HOST-CODE-EXECUTION workspace file: \.mcp\.json' | head -1 | cut -d: -f1)
+    verdict_line=$(printf '%s\n' "$output" | grep -n 'CRITICAL - code that will run on your host' | head -1 | cut -d: -f1)
+    [ -n "$marker_line" ]
+    [ -n "$audit_line" ]
+    [ -n "$verdict_line" ]
+    [ "$marker_line" -lt "$audit_line" ]
+    # The verdict is the true last line of everything bin/dejima printed -
+    # not just after the marker warning, but after every other line too.
+    total_lines=$(printf '%s\n' "$output" | wc -l)
+    [ "$verdict_line" -eq "$total_lines" ]
+    chmod -R u+rwX "$RUNTIME_DIR"
+    rm -rf "$PROJ"
+}
+
+@test "the container's real exit code survives an exit-time audit invocation that itself fails" {
+    # The brief's central question: cleanup() now calls dejima-audit compare
+    # from the EXIT trap tail, guarded with || true specifically so that a
+    # failing audit invocation cannot replace the shell's own exit status
+    # under set -e. Prove it directly rather than by reasoning alone: swap
+    # in an audit binary that exits nonzero, and confirm bin/dejima still
+    # reports the container's own distinctive exit code (5 - neither 0, nor
+    # 1, nor the audit stub's own failure code of 3).
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    [ "$arg" = run ] && exit 5
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
+    AUDIT_BACKUP="$(mktemp)"
+    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
+    printf '#!/bin/bash\nexit 3\n' > "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    run launch "$PROJ"
+    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    rm -f "$AUDIT_BACKUP"
+    [ "$status" -eq 5 ]
+    rm -rf "$PROJ"
+}
+
+@test "the container's real exit code survives an exit-time audit invocation that does not exist" {
+    # Same guarantee, second failure mode named by the brief: the audit
+    # binary missing entirely (a broken install, a bad upgrade) makes the
+    # shell's own exec fail with 127 at that point in cleanup() - still
+    # guarded by the same || true, so it must not surface as bin/dejima's
+    # reported exit code either.
+    stub_launch
+    : > "$CONFIG_DIR/remote.conf"
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    [ "$arg" = run ] && exit 5
+done
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
+    AUDIT_BACKUP="$(mktemp)"
+    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
+    rm -f "$AUDIT_REAL"
+    run launch "$PROJ"
+    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
+    chmod +x "$AUDIT_REAL"
+    rm -f "$AUDIT_BACKUP"
+    [ "$status" -eq 5 ]
+    rm -rf "$PROJ"
+}
+
+@test "an undeletable entry in SANDBOX_GITCONFIG_DIR does not abort the exit trap or eat the real exit code" {
+    # CRITICAL 2: SANDBOX_GITCONFIG_DIR is bind-mounted read-write into the
+    # container (docker-compose.yml, no :ro), unconditionally for every
+    # session - unlike the notify marker directory above, this one exists
+    # whether or not remote access is even configured. A session can leave
+    # an undeletable subdirectory in it, making the host-side `rm -rf` fail;
+    # before the `|| true` guard, that failure would abort cleanup()'s EXIT
+    # trap right there under set -e, so dejima-audit compare never runs and
+    # bin/dejima would report 1 in place of the container's real exit code.
+    # Prove both halves survive together: the audit still runs (a workspace
+    # change it plants is still reported) and the container's own
+    # distinctive exit code (7 - neither 0 nor 1) comes through unchanged.
+    stub_launch
+    cat > "$LAUNCH_DIR/docker" <<EOF
+#!/bin/bash
+echo "\$SANDBOX_GITCONFIG_DIR" > "$LAUNCH_DIR/gitconfig-dir-path"
+mkdir -p "\$SANDBOX_GITCONFIG_DIR/undeletable"
+: > "\$SANDBOX_GITCONFIG_DIR/undeletable/file"
+chmod 500 "\$SANDBOX_GITCONFIG_DIR/undeletable"
+echo '{}' > "\$SANDBOX_TEST_WS/.mcp.json"
+exit 7
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    export SANDBOX_TEST_WS="$PROJ"
+    run launch "$PROJ"
+    unset SANDBOX_TEST_WS
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"HOST-CODE-EXECUTION workspace file: .mcp.json"* ]]
+    gitconfig_dir="$(cat "$LAUNCH_DIR/gitconfig-dir-path")"
+    [ -n "$gitconfig_dir" ]
+    [ -d "$gitconfig_dir" ]   # left behind, not removed - the guard doesn't pretend it succeeded
+    chmod -R u+rwX "$gitconfig_dir"
+    rm -rf "$gitconfig_dir" "$PROJ"
 }
 
 @test "a sandbox started outside tmux records an empty pane rather than being skipped" {

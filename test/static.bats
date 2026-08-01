@@ -173,6 +173,34 @@ setup() {
     grep -q 'mktemp -d.*gitconfig' "$REPO_ROOT/bin/dejima"
 }
 
+@test "every name cleanup() dereferences is bound by the time the EXIT trap can fire" {
+    # bin/dejima runs under `set -u`, and a failing command in an EXIT trap
+    # replaces the shell's exit status - so an unbound name in cleanup()
+    # aborts the trap partway, before it reaches the audit that is
+    # deliberately its last act. Structural, not behavioral: the window
+    # between `trap cleanup EXIT` and a later assignment holds only comments
+    # today, so nothing can currently exit inside it (a failed `VAR="$(...)"`
+    # still binds VAR to the empty string before set -e fires). This guards
+    # the invariant against the edit that puts something exitable there.
+    #
+    # A name is satisfied by EITHER a first assignment above the trap OR a
+    # `${NAME:-}` form somewhere in cleanup() - the latter covers the bare
+    # uses that sit inside their own `[ -n "${NAME:-}" ]` guard.
+    d="$REPO_ROOT/bin/dejima"
+    trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    [ -n "$trap_line" ]
+    body="$(sed -n '/^cleanup() {/,/^}/p' "$d")"
+    [ -n "$body" ]
+    for v in $(printf '%s\n' "$body" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' \
+                   | tr -d '${}' | sort -u); do
+        printf '%s\n' "$body" | grep -q "\${$v:-" && continue
+        asg="$(grep -nE "^[[:space:]]*(export )?$v=" "$d" | head -1 | cut -d: -f1)"
+        [ -n "$asg" ] || { echo "cleanup() uses \$$v, never assigned at all"; false; }
+        [ "$asg" -lt "$trap_line" ] \
+            || { echo "cleanup() uses \$$v unguarded, first assigned at line $asg, after the trap at $trap_line"; false; }
+    done
+}
+
 @test "docker-compose.yml never hardcodes /home/node - the container home is host-parametrized" {
     # ${HOME:-/home/node} (the SANDBOX_HOME build arg's own default value,
     # mirroring the Dockerfile's default) is the one legitimate exception -
@@ -529,16 +557,39 @@ setup() {
 }
 
 @test "bin/dejima's exit-time audit still runs when the container run fails or is interrupted" {
-    local run_line
+    local run_line trap_line
     run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$run_line" ]
-    # The compose invocation must not be a bare command under set -e - a
-    # nonzero/interrupted exit there would otherwise abort the script before
-    # the audit compare and exit below ever run.
+    [ -n "$trap_line" ]
+    # cleanup() is installed as the EXIT trap before the compose run, so it
+    # fires - and runs the audit - on every exit from the run below,
+    # including a nonzero/interrupted one under set -e that would otherwise
+    # abort the script before a bare audit call placed after the run ever
+    # ran.
+    [ "$trap_line" -lt "$run_line" ]
+    sed -n "1,${trap_line}p" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
+    # The compose invocation must not itself be a bare command under set -e
+    # either - a nonzero/interrupted exit there would otherwise skip the
+    # credential-proxy check and the propagated exit code below it.
     grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/dejima")
     sed -n "1,${run_line}p" "$REPO_ROOT/bin/dejima" | grep -q 'compose_status=0'
-    tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
     tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q 'exit "\$compose_status"'
+}
+
+# --- Task 10: the exit-time audit is the structural last writer ---
+
+@test "the exit-time audit is the last thing that writes to the terminal" {
+    audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    marker_line=$(grep -n 'could not remove the marker directory' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ -n "$marker_line" ]
+    [ "$audit_line" -lt "$trap_line" ]
+    # Not just "inside cleanup()" but after the one line in it a session can
+    # deliberately provoke to print - the actual last-writer invariant.
+    [ "$marker_line" -lt "$audit_line" ]
+    run grep -c 'could not remove the marker directory' "$REPO_ROOT/bin/dejima"
+    [ "$output" -eq 1 ]
 }
 
 @test "credential proxy is on by default, gated only by SANDBOX_CREDENTIAL_PROXY=0" {
@@ -951,6 +1002,21 @@ EOF
     grep -q 'dejima-dep add cargo:cargo-nextest --global' "$REPO_ROOT/README.md"
 }
 
+@test "README documents that the exit-time audit's findings are not attributed to the session" {
+    # Presence-only grep - it confirms the caveat sentence exists in the
+    # Security notes teaser, not that the linked docs/security.md
+    # explanation it points readers to is itself correct or complete.
+    grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
+}
+
+@test "docs/security.md documents the ~/.claude/projects cross-session false-positive case" {
+    # Presence-only grep, same caveat as above: confirms the specific
+    # ~/.claude/projects wording landed, not that the surrounding
+    # reasoning is sound.
+    grep -q 'CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
+    grep -q 'directory shared by' "$REPO_ROOT/docs/security.md"
+}
+
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]
@@ -990,4 +1056,103 @@ SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd .gitea)
         echo "$output" >&2
         false
     }
+}
+
+# --- Task 9: startup warning about unacknowledged CRITICAL audit history ---
+
+@test "dejima warns about unacknowledged critical history before starting" {
+    grep -q 'CRITICAL.txt' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the startup warning is emitted before the container runs" {
+    warn_line=$(grep -n 'unacknowledged CRITICAL' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    run_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" run' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ "$warn_line" -lt "$run_line" ]
+}
+
+@test "the startup warning does not block when stdin is not a tty" {
+    grep -q 'DEJIMA_AUDIT_STRICT' "$REPO_ROOT/bin/dejima"
+    grep -q '\-t 0' "$REPO_ROOT/bin/dejima"
+}
+
+# The three tests above are static (they hold even for a warning that never
+# actually runs correctly). The ones below drive bin/dejima's real startup
+# path end-to-end against a stubbed `docker` - same technique as
+# test/project.bats' launch/launch_setup and test/remote.bats' stub_launch -
+# so the warning is checked doing its actual job, not just present in the
+# source.
+teardown() {
+    rm -rf ${DEJIMA_T:+"$DEJIMA_T"}
+}
+
+startup_warning_setup() {
+    DEJIMA_T="$(mktemp -d)"
+    mkdir -p "$DEJIMA_T/home/.claude" "$DEJIMA_T/config" "$DEJIMA_T/audit" "$DEJIMA_T/ws"
+    echo '{}' > "$DEJIMA_T/home/.claude/settings.json"
+    cat > "$DEJIMA_T/docker" <<'EOF'
+#!/bin/bash
+echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+exit 0
+EOF
+    chmod +x "$DEJIMA_T/docker"
+    : > "$DEJIMA_T/sandbox-key"
+    chmod 600 "$DEJIMA_T/sandbox-key"
+}
+
+# Redirected from /dev/null, so this is deterministically the "stdin is not a
+# tty" path - real interactive [c]ontinue/[q]uit behavior needs a pty, which
+# isn't available here (see the task report).
+startup_warning_launch() {
+    HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+        DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
+        DEJIMA_AUDIT_DIR="$DEJIMA_T/audit" \
+        SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
+        SANDBOX_CREDENTIAL_PROXY=0 \
+        SANDBOX_SSH_KEY="$DEJIMA_T/sandbox-key" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        "$REPO_ROOT/bin/dejima" "$DEJIMA_T/ws" < /dev/null
+}
+
+startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; }
+
+@test "bin/dejima's startup path stays silent about the audit with no unacknowledged CRITICAL history" {
+    startup_warning_setup
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unacknowledged CRITICAL"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}
+
+@test "bin/dejima's startup warning fires for an unacknowledged CRITICAL report and still launches headlessly" {
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 unacknowledged CRITICAL"* ]]
+    [[ "$output" == *"dejima-audit ack"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}
+
+@test "DEJIMA_AUDIT_STRICT=1 refuses to start over unacknowledged CRITICAL history when stdin is not a tty" {
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    DEJIMA_AUDIT_STRICT=1 run startup_warning_launch
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing to start"* ]]
+    ! grep -q ' run --rm ' "$DEJIMA_T/docker-log" 2>/dev/null
+}
+
+@test "bin/dejima's startup path is unaffected when the audit dir does not exist yet" {
+    # The common case for a fresh install / a workspace with no history at
+    # all: DEJIMA_AUDIT_DIR itself (not just the per-workspace subdir) is
+    # absent, so `find` on it fails - this must not abort the script under
+    # bin/dejima's `set -euo pipefail`.
+    startup_warning_setup
+    rm -rf "$DEJIMA_T/audit"
+    run startup_warning_launch
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unacknowledged CRITICAL"* ]]
+    grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }

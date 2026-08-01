@@ -52,17 +52,36 @@ if [ -n "$PROJECT_STORE" ]; then
     ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
 
-# The approval store is only out of the container's reach while it isn't
-# inside the mounted workspace - same class of warning as the self-mounted
-# repo TCB warning below.
-case "$(config_root)/" in
-    "$WORKSPACE_DIR"/*)
-        echo "Warning: the approval store ($(config_root)) is inside the mounted" >&2
-        echo "workspace this session - both the global approvals and every" >&2
-        echo "project's under it are writable from inside the sandbox, so they" >&2
-        echo "are no longer out of reach. Review them after this session." >&2
-        ;;
-esac
+# The approval store, and the exit-audit's own report/baseline stores, are
+# only out of the container's reach while none of them are inside the
+# mounted workspace - same class of warning as the self-mounted repo TCB
+# warning below.
+AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
+BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+# The three stores fail in three different ways once they are reachable, and
+# an operator who sees this needs to know which one they are looking at - so
+# each states its own consequence rather than sharing one text. Consequence
+# lines are hand-wrapped by the caller and printed one per argument.
+warn_if_inside_workspace() {
+    local what="$1" store="$2"; shift 2
+    case "$store/" in
+        "$WORKSPACE_DIR"/*) ;;
+        *) return 0 ;;
+    esac
+    echo "Warning: the $what ($store) is inside the mounted" >&2
+    echo "workspace this session, writable from inside the sandbox:" >&2
+    printf '  %s\n' "$@" >&2
+    echo "Review it after this session." >&2
+}
+warn_if_inside_workspace "approval store" "$(config_root)" \
+    "the global approvals and every project's under it can be edited," \
+    "so a session can approve its own domains and dependencies."
+warn_if_inside_workspace "audit report store" "$AUDIT_DIR" \
+    "a session can delete the exit-time reports of earlier runs," \
+    "including unacknowledged CRITICAL ones it is named in."
+warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
+    "a session can write its own acknowledgements, suppressing the" \
+    "findings it would otherwise produce here from every later report."
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
@@ -205,21 +224,51 @@ SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 
 cleanup() {
+    # Every rm below is guarded with `|| true`: under set -e, a failing
+    # command in an EXIT trap replaces the shell's own exit status, so none
+    # of these may be allowed to abort the trap partway through. Most of
+    # these paths are host-mktemp'd and not session-writable, so a genuine
+    # failure there would be surprising - but SANDBOX_GITCONFIG_DIR is not:
+    # it's bind-mounted read-write into the container (see
+    # docker-compose.yml), so a session can leave an undeletable entry
+    # inside it (e.g. an unwritable subdirectory) and make its `rm -rf`
+    # fail, same hazard and same guard as the marker-directory removal
+    # further down.
+    #
+    # SANDBOX_GITCONFIG_DIR additionally carries a `:-` default because it is
+    # the one name here first assigned BELOW `trap cleanup EXIT` rather than
+    # above it. Nothing in that window can exit today (it holds only
+    # comments, and a failed `VAR="$(mktemp -d)"` still binds VAR to the
+    # empty string before set -e fires), so this is the invariant every other
+    # name here already keeps, not a live fix - see the static test.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "$SANDBOX_AUDIT_STATE" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}"
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}"
-    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}"
-    # The one removal here a session can make fail, and the last command of an
-    # EXIT trap: the marker directory is bind-mounted read-write, so a session
-    # can leave it undeletable (an unwritable subdirectory is enough), and
-    # under set -e a failing command in an EXIT trap REPLACES the shell's exit
-    # status - so without this a compromised session could report 1 in place
-    # of Claude Code's real exit code. Same guard, for the same reason, as
-    # dejima-attach's prune and dejima-notify-watch's marker consumption.
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
+    # Unlike the silent `|| true` guards above, this removal (and, before
+    # the audit below was moved in, the last command of an EXIT trap) warns
+    # out loud when it fails: the marker directory is bind-mounted
+    # read-write, so a session can leave it undeletable (an unwritable
+    # subdirectory is enough), and under set -e a failing command in an EXIT
+    # trap REPLACES the shell's exit status - so without this a compromised
+    # session could report 1 in place of Claude Code's real exit code. Same
+    # guard, for the same reason, as dejima-attach's prune and
+    # dejima-notify-watch's marker consumption.
     rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
         || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
+    # Last writer, structurally: the operator reads bottom-up from their
+    # shell prompt, so anything printed after the verdict pushes it out of
+    # view. The marker-directory warning above is the one line a session can
+    # deliberately provoke, so the audit runs after it, not before - and gets
+    # the same set -e guard for the same reason: a failing audit invocation
+    # must not replace Claude Code's real exit status either. SANDBOX_AUDIT_
+    # STATE is dropped from the rm -f above and freed only after compare has
+    # read it, so this function's own cleanup can't race the audit that
+    # needs it - and its removal is guarded too, so it stays truly last.
+    "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
 
@@ -581,7 +630,7 @@ if remote_enabled; then
 fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
-# anything this session changed (advisory - see bin/dejima-audit).
+# anything that changed while this session ran (advisory - see bin/dejima-audit).
 "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
@@ -636,13 +685,44 @@ export SANDBOX_IMAGE
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
 # Ctrl-C returning 130 - would otherwise abort the script here, skipping the
-# audit entirely). Capture the status explicitly so the advisory audit runs
-# on every exit path, then propagate the real container exit code unchanged.
+# credential-proxy check below it). Capture the status explicitly, then
+# propagate the real container exit code unchanged - the exit-time audit
+# itself now runs unconditionally from cleanup(), not because of this
+# capture.
+# Unacknowledged CRITICAL findings from earlier runs, re-presented here
+# because exit-time output can be ignored exactly once, permanently. This is
+# host-side and stays host-side: it must never be routed into the session's
+# context, which would make it a cross-session persistence channel.
+audit_slug="$(printf '%s' "$WORKSPACE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
+audit_reports="$AUDIT_DIR/$audit_slug"
+# `|| true`: a workspace with no history yet (the common case - nothing has
+# ever run against it, or every past finding is already acknowledged) has no
+# audit_reports directory at all, and find on a missing path exits nonzero -
+# which, combined with pipefail, would otherwise abort this script here for
+# every ordinary launch.
+pending_crit="$(find "$audit_reports" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort)" || true
+if [ -n "$pending_crit" ]; then
+    n="$(printf '%s\n' "$pending_crit" | wc -l)"
+    echo "" >&2
+    echo "  dejima: $n unacknowledged CRITICAL finding(s) in this workspace" >&2
+    printf '%s\n' "$pending_crit" | sed 's#.*/##; s#-CRITICAL\.txt$##; s#^#          from run #' >&2
+    echo "          Review with: dejima-audit ack \"$WORKSPACE_DIR\"" >&2
+    if [ -t 0 ]; then
+        printf '          [c] continue  [q] quit: ' >&2
+        read -r reply || reply=q
+        case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
+    elif [ "${DEJIMA_AUDIT_STRICT:-0}" = "1" ]; then
+        echo "          DEJIMA_AUDIT_STRICT=1 and stdin is not a tty - refusing to start." >&2
+        exit 1
+    else
+        echo "          (not a tty - continuing; set DEJIMA_AUDIT_STRICT=1 to refuse)" >&2
+    fi
+fi
+
 compose_status=0
 docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2
 fi
-"$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
 exit "$compose_status"

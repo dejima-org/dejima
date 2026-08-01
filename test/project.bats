@@ -784,12 +784,37 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"no longer out of reach"* ]]
+    [[ "$output" != *"writable from inside the sandbox"* ]]
 
     # Same project, but with the store somewhere the session can rewrite it.
     export DEJIMA_CONFIG_DIR="$PROJ/.config/dejima"
     "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no longer out of reach"* ]]
+    [[ "$output" == *"the approval store"* ]]
+    [[ "$output" == *"approve its own domains and dependencies"* ]]
+}
+
+@test "the launcher warns when the audit report or baseline store sits inside the mounted workspace" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"writable from inside the sandbox"* ]]
+
+    export DEJIMA_AUDIT_DIR="$PROJ/.audit"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the audit report store"* ]]
+    [[ "$output" == *"delete the exit-time reports of earlier runs"* ]]
+    # Right alarm, right consequence: these three stores used to share the
+    # approval store's text verbatim, so the audit store described a hazard
+    # that was not the one it has.
+    [[ "$output" != *"the approval store"* ]]
+    unset DEJIMA_AUDIT_DIR
+
+    export DEJIMA_AUDIT_BASELINE_DIR="$PROJ/.baselines"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the audit baseline store"* ]]
+    [[ "$output" == *"write its own acknowledgements"* ]]
 }
