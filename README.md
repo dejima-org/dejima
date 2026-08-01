@@ -124,6 +124,7 @@ Everything else is optional, depending on which workflow(s) you want:
 | `SANDBOX_LOG_CONVERSATION` | `0` | opt-in: also ship session transcripts to Loki (needs `LOKI_URL`) — see "Conversation logging (opt-in)" below |
 | `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
 | `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
+| `SANDBOX_ANTHROPIC_TRANSPORT` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
 
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
@@ -482,8 +483,8 @@ default:
 - `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` (npm and
   mason's Python-based LSP tools), `release-assets.githubusercontent.com`
   (GitHub release assets, a separate CDN from github.com's own IPs),
-  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums),
-  `api.anthropic.com`
+  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums);
+  `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
 - whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 

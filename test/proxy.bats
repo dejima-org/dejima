@@ -68,6 +68,99 @@ teardown() {
     [[ "$beta" == *"oauth-2025-04-20"* ]]
 }
 
+@test "the client's header block reaches upstream with its own casing and order" {
+    # The container half of this sandbox exists to make the session look like
+    # a stock install. If the proxy rewrote the request into CPython's house
+    # style on its way out, that fingerprint would simply move from the client
+    # to the wire, where the API sees it instead. Sent in a deliberately
+    # un-CPython shape: mixed casing, and a header after the one the proxy has
+    # to rewrite, so a rewrite that reorders shows up here.
+    start_proxy
+    run pcurl -H "Content-Type: application/json" -H "Anthropic-Version: 2023-06-01" \
+        -H "X-Stainless-Lang: js" -d '{}' http://proxy/v1/messages
+    [ "$status" -eq 0 ]
+    names="$(jq -r '.header_lines[][0]' <<<"$output")"
+    grep -qx 'Content-Type' <<<"$names"
+    grep -qx 'Anthropic-Version' <<<"$names"
+    grep -qx 'X-Stainless-Lang' <<<"$names"
+    # Position, not just presence: Authorization keeps the slot curl gave it,
+    # ahead of the three above, rather than being appended after them.
+    auth_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("authorization")' <<<"$output")"
+    type_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("content-type")' <<<"$output")"
+    [ "$auth_at" -lt "$type_at" ]
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+}
+
+@test "no Accept-Encoding is invented for a client that sent none" {
+    # http.client's putrequest() adds `Accept-Encoding: identity` whenever the
+    # caller passed none - a CPython tell that no browser or Node client
+    # sends. curl sends no accept-encoding unless asked, so upstream must see
+    # none at all.
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase | select(. == "accept-encoding")] | length' <<<"$output")" = "0" ]
+    # ...and a client that does send one keeps its own value, unaltered.
+    run pcurl -H "Accept-Encoding: gzip, deflate" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers["accept-encoding"]' <<<"$output")" = "gzip, deflate" ]
+}
+
+@test "repeated headers survive as repeats instead of collapsing to the last" {
+    # Rebuilding the block through a dict silently keeps only the last value.
+    start_proxy
+    run pcurl -H "X-Dup: one" -H "X-Dup: two" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[] | select(.[0] | ascii_downcase == "x-dup") | .[1]] | join("|")' <<<"$output")" = "one|two" ]
+}
+
+@test "the injected token is sent once even when the client repeats its placeholder" {
+    # The replacement is per-header-name, not per-occurrence: a duplicated
+    # Authorization must not become two copies of the real token.
+    start_proxy
+    run curl -s --unix-socket "$SOCK" -H "Authorization: Bearer $PLACEHOLDER" \
+        -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[] | select(.[0] | ascii_downcase == "authorization")] | length' <<<"$output")" = "1" ]
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+    [[ "$output" != *"$PLACEHOLDER"* ]]
+}
+
+@test "an anthropic-beta that already carries the OAuth value is forwarded untouched" {
+    # Re-joining a list that needs no change would normalize the client's
+    # spacing - the same class of tell as the casing. This is the common case
+    # in the tls transport, where Claude Code sends the header itself.
+    start_proxy
+    run pcurl -H "anthropic-beta: oauth-2025-04-20, context-1m-2025-08-07" \
+        -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers["anthropic-beta"]' <<<"$output")" = "oauth-2025-04-20, context-1m-2025-08-07" ]
+}
+
+@test "a bodyless request gains no Content-Length the client never sent" {
+    start_proxy
+    run pcurl http://proxy/v1/models
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase | select(. == "content-length")] | length' <<<"$output")" = "0" ]
+}
+
+@test "a chunked request is de-framed into a Content-Length upstream" {
+    # The proxy has to buffer to inject the token, so chunked framing cannot
+    # survive - but the length it declares must match what it forwards, and
+    # the hop-by-hop Transfer-Encoding must not travel with it.
+    start_proxy
+    run curl -s --unix-socket "$SOCK" -H "Transfer-Encoding: chunked" \
+        -H "Authorization: Bearer $PLACEHOLDER" \
+        -d '{"hello":1}' http://proxy/v1/messages
+    [ "$(jq -r '.body' <<<"$output")" = '{"hello":1}' ]
+    [ "$(jq -r '.headers["content-length"]' <<<"$output")" = "11" ]
+    [ "$(jq -r '.headers["transfer-encoding"] // "absent"' <<<"$output")" = "absent" ]
+}
+
+@test "Host is rewritten for the upstream, in place" {
+    # It must name the upstream, not the socket the container reached - but it
+    # is replaced where the client put it rather than dropped and re-added,
+    # which is what keeps the rest of the block in order.
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.host' <<<"$output")" = "127.0.0.1:$PORT" ]
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase] | index("host")' <<<"$output")" = "0" ]
+}
+
 @test "passes upstream status and body through unchanged" {
     start_proxy
     run bash -c 'curl -s -o "$1/body" -w "%{http_code}" --unix-socket "$2" http://proxy/status-503' _ "$TD" "$SOCK"
@@ -184,6 +277,7 @@ teardown() {
 @test "forwarder bridges TCP to the proxy's unix socket" {
     start_proxy
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
+        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
@@ -241,4 +335,81 @@ PYEOF
     [ "$output" = "200" ]
     run cat "$TD/stderr"
     [[ "$output" != *"501"* ]]
+}
+
+# The forwarder is the container-side half of the chain. In tls mode it
+# terminates TLS for api.anthropic.com on loopback so Claude Code needs no
+# ANTHROPIC_BASE_URL at all, then pipes raw bytes into the same unix socket
+# the loopback mode uses - the host proxy cannot tell the two apart.
+start_forwarder() {  # start_forwarder <transport> <port>; extra env passes through
+    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" \
+    SANDBOX_ANTHROPIC_TRANSPORT="$1" \
+    SANDBOX_ANTHROPIC_PROXY_PORT="$2" \
+    SANDBOX_ANTHROPIC_TLS_CERT="$TD/cert.pem" \
+    SANDBOX_ANTHROPIC_TLS_KEY="$TD/key.pem" \
+        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" 2>"$TD/fwd-stderr" &
+    FWD_PID=$!
+    for _ in $(seq 1 50); do
+        (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+make_cert() {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -keyout "$TD/key.pem" -out "$TD/cert.pem" \
+        -subj "/CN=api.anthropic.com" \
+        -addext "subjectAltName=DNS:api.anthropic.com" >/dev/null 2>&1
+}
+
+@test "forwarder tls mode: https to api.anthropic.com reaches the proxy, which injects the real token" {
+    make_cert
+    start_proxy
+    start_forwarder tls 18443
+    # --resolve is what stands in for the container's /etc/hosts entry: the
+    # name must really be api.anthropic.com for certificate verification to
+    # be a meaningful check, not a hostname the test picked to be easy.
+    run curl -s --cacert "$TD/cert.pem" \
+        --resolve "api.anthropic.com:18443:127.0.0.1" \
+        -X POST "https://api.anthropic.com:18443/v1/messages" -d '{}'
+    kill "$FWD_PID" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
+    # No Authorization header was sent at all - the proxy supplied it. This is
+    # the auth fingerprint closing: no placeholder token in the container.
+    [[ "$output" != *"$PLACEHOLDER"* ]]
+}
+
+@test "forwarder tls mode pins ALPN to http/1.1 so the client cannot negotiate h2" {
+    # The upstream is a Python http.server, which speaks only HTTP/1.1: an h2
+    # negotiation would deliver frames it cannot parse, and the byte pipe has
+    # no HTTP awareness to catch it.
+    make_cert
+    start_proxy
+    start_forwarder tls 18444
+    run openssl s_client -connect 127.0.0.1:18444 -alpn h2,http/1.1 \
+        -servername api.anthropic.com -CAfile "$TD/cert.pem" </dev/null
+    kill "$FWD_PID" 2>/dev/null || true
+    [[ "$output" == *"ALPN protocol: http/1.1"* ]]
+}
+
+@test "forwarder loopback mode is unchanged: plaintext http on the old port" {
+    start_proxy
+    start_forwarder loopback 18445
+    run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
+    kill "$FWD_PID" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
+}
+
+@test "forwarder tls mode refuses to start without a cert, rather than silently downgrading" {
+    start_proxy
+    # `run env ...`, not a `VAR=x run ...` prefix: an assignment prefixed to a
+    # shell *function* persists in the calling shell rather than scoping to
+    # the call, so it would leak into every later test in this file.
+    run env SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
+        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
 }

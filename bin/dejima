@@ -282,7 +282,7 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
@@ -484,23 +484,35 @@ fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
-# bin/dejima-anthropic-proxy and docs/security.md) and hand Claude Code a
-# placeholder token pointed at a loopback forwarder. Nothing needs masking
-# any more - ~/.claude isn't mounted as a whole, so the credential (and the
-# proxy's .credentials-proxy-tmp staging directory beside it) simply never
-# crosses into the container. That masking is what #50 was: both masks were
-# single-file/-directory mounts nested in the read-write ~/.claude mount,
-# and the proxy's own write-back renamed the credential out from under them,
-# detaching the mask and exposing the real token from the first refresh on.
+# bin/dejima-anthropic-proxy and docs/security.md). Nothing needs masking
+# any more - ~/.claude isn't mounted as a whole, so the real credential (and
+# the proxy's .credentials-proxy-tmp staging directory beside it) simply
+# never crosses into the container. That masking is what #50 was: both masks
+# were single-file/-directory mounts nested in the read-write ~/.claude
+# mount, and the proxy's own write-back renamed the credential out from
+# under them, detaching the mask and exposing the real token from the first
+# refresh on.
+#
+# How the container then reaches the proxy depends on the transport. In the
+# default tls one, entrypoint.sh points api.anthropic.com at an in-container
+# TLS terminator, so no ANTHROPIC_* value is set at all and the session is
+# indistinguishable from a stock install - which means Claude Code reads
+# ~/.claude/.credentials.json, so a fake one is generated below and mounted
+# there. SANDBOX_ANTHROPIC_TRANSPORT=loopback is the documented fallback if
+# certificate pinning ever makes that impossible: an explicit base URL and
+# placeholder token at a plaintext forwarder, as before, with no credential
+# file in the container at all.
 #
 # Skipped when there's no claudeAiOauth block to protect (API-key setups),
 # or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch. Both then mount the real
 # credential in explicitly, which used to come free with the whole-directory
 # mount and now has to be stated.
+SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
+SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
@@ -524,8 +536,39 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
         exit 1
     fi
     extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
-    SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
-    SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+    if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "loopback" ]; then
+        SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
+        SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+    else
+        # With no ANTHROPIC_AUTH_TOKEN set, Claude Code authenticates from
+        # .credentials.json directly, so the container needs a well-formed
+        # one where it would otherwise have no credential file at all. Only
+        # the two secrets are faked; scopes/subscriptionType/rateLimitTier/
+        # clientId are copied so the session's own UI reflects the real
+        # account.
+        #
+        # The expiry deliberately does NOT mirror the real credential. A
+        # near-term expiresAt would make Claude Code refresh on its own,
+        # against platform.claude.com, with a refresh token that is not real -
+        # which fails and logs the session out. A year out means it never
+        # tries; the host proxy owns refresh, as it already did.
+        SANDBOX_FAKE_CREDENTIALS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-fake-credentials.XXXXXX")"
+        jq --argjson exp "$(( ($(date +%s) + 31536000) * 1000 ))" '
+            {claudeAiOauth: (
+                {accessToken: "sandbox-credential-proxy-placeholder",
+                 refreshToken: "sandbox-credential-proxy-placeholder",
+                 expiresAt: $exp,
+                 refreshTokenExpiresAt: $exp}
+                + (.claudeAiOauth
+                   | {scopes, subscriptionType, rateLimitTier, clientId}
+                   | with_entries(select(.value != null)))
+            )}' "$HOME/.claude/.credentials.json" > "$SANDBOX_FAKE_CREDENTIALS_FILE"
+        chmod 600 "$SANDBOX_FAKE_CREDENTIALS_FILE"
+        # Read-write: Claude Code rewrites this file on its own schedule, and
+        # a failed write is a startup error. It writes to the host temp file,
+        # which the EXIT trap removes.
+        extra_mounts+=(-v "$SANDBOX_FAKE_CREDENTIALS_FILE:$HOME/.claude/.credentials.json")
+    fi
 elif [ -f "$HOME/.claude/.credentials.json" ]; then
     # No proxy: the session authenticates with the real credential, so it has
     # to be mounted in. Read-write because Claude Code refreshes it in place.
@@ -534,6 +577,7 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+export SANDBOX_ANTHROPIC_TRANSPORT
 
 # Optional remote access (see docs/remote-access.md). Entirely skipped
 # unless ~/.config/dejima/remote.conf exists - with it absent nothing below

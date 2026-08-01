@@ -39,6 +39,11 @@ class Handler(BaseHTTPRequestHandler):
             "method": self.command,
             "path": self.path,
             "headers": {k.lower(): v for k, v in self.headers.items()},
+            # The same headers unflattened: name as it arrived on the wire, in
+            # arrival order, repeats included. `headers` above answers "what
+            # value got through"; this answers "what did the block look like",
+            # which is what the proxy's wire-fidelity tests assert on.
+            "header_lines": [[k, v] for k, v in self.headers.items()],
             "body": body.decode("utf-8", "replace"),
         }).encode())
 

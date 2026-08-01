@@ -688,7 +688,9 @@ setup() {
     # mounted into the read-write ~/.claude mount. That was #50: the proxy's
     # own write-back renamed the credential out from under its mask,
     # detaching it and exposing the real token from the first refresh on.
-    # Neither path is mounted at all now, so there is nothing left to mask.
+    # Neither path is mounted at all now, so there is nothing left to mask -
+    # the fake credential the tls transport mounts (see below) is a file the
+    # container would otherwise not have, not a mask over the operator's.
     grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
     run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
@@ -712,9 +714,10 @@ setup() {
 @test "entrypoint.sh gives the container an empty credentials file of its own" {
     # The mask used to provide one; Claude Code shouldn't have to be trusted
     # to treat an absent credentials file the same as an empty one. Guarded
-    # on non-existence so it can't clobber the real credential that
-    # SANDBOX_CREDENTIAL_PROXY=0 mounts in - mounts are established before
-    # the entrypoint runs.
+    # on non-existence so it can't clobber either of the credentials
+    # bin/dejima does mount - the fake one under the tls transport, the real
+    # one under SANDBOX_CREDENTIAL_PROXY=0 - since mounts are established
+    # before the entrypoint runs.
     grep -q 'if \[ ! -e "\$SANDBOX_HOME/\.claude/\.credentials\.json" \]; then' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'install -o "\$SANDBOX_USER" -g "\$SANDBOX_USER" -m 600 /dev/null "\$SANDBOX_HOME/\.claude/\.credentials\.json"' "$SANDBOX_DIR/entrypoint.sh"
 }
@@ -1265,4 +1268,138 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -eq 0 ]
     [[ "$output" != *"unacknowledged CRITICAL"* ]]
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
+}
+
+@test "entrypoint terminates TLS for api.anthropic.com on loopback by default" {
+    # The transport is normalized in exactly one place so the forwarder, the
+    # cert generation, and the readiness probe cannot disagree about which
+    # mode this session is in.
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
+    # CN alone is not enough - Node verifies the SAN.
+    grep -q 'subjectAltName=DNS:api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'CN=api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'NODE_EXTRA_CA_CERTS' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "entrypoint aborts when the forwarder never binds" {
+    # A silent timeout would leave api.anthropic.com pointed at a loopback
+    # port with nothing behind it - every API call then fails with a
+    # connection error that gives no hint where it came from.
+    grep -q 'the credential-proxy forwarder never bound' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT=loopback' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "the hosts entry is written only when the proxy is actually running" {
+    # Under SANDBOX_CREDENTIAL_PROXY=0 there is no listener on :443, so a
+    # hosts entry would black-hole the real API - which is why this cannot be
+    # a compose extra_hosts entry. It must sit inside the proxy-socket guard.
+    local guard body
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ -n "$guard" ]
+    body=$(grep -n '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ "$body" -gt "$guard" ]
+}
+
+@test "openssl is installed explicitly, not relied on transitively" {
+    # entrypoint.sh generates the terminator's cert at startup; a transitive
+    # dependency dropping out of the base image would break the credential
+    # path at runtime rather than at build time.
+    grep -qE '^\s+openssl \\$' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "entrypoint fails loudly, with a reason, if openssl cert generation fails" {
+    # set -e already aborts on openssl's nonzero exit before chown/export can
+    # touch a missing cert, so a failure here can't silently proceed or leak
+    # the credential - but redirecting openssl's stderr to /dev/null would
+    # still leave it dying silent-but-loud: nonzero exit, no explanation.
+    grep -q 'if ! openssl_err=\$(openssl req -x509' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'FATAL: openssl failed to generate the TLS terminator cert' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'echo "\$openssl_err" >&2' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "compose passes the transport through and lets an unprivileged process bind :443" {
+    grep -qE '^\s*SANDBOX_ANTHROPIC_TRANSPORT:\s*\$\{SANDBOX_ANTHROPIC_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    # Docker already defaults this to 0, but the terminator runs as the
+    # unprivileged sandbox user: pinning it means a future default change
+    # fails at launch instead of silently breaking the credential path.
+    grep -qE '^\s*net\.ipv4\.ip_unprivileged_port_start:\s*0\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "compose does not pin api.anthropic.com to loopback unconditionally" {
+    # That belongs in entrypoint.sh, inside the proxy guard - see the
+    # entrypoint test above for why an unconditional entry breaks the
+    # SANDBOX_CREDENTIAL_PROXY=0 path.
+    ! grep -q 'extra_hosts' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "bin/dejima defaults to the tls transport and exports it" {
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$REPO_ROOT/bin/dejima"
+    grep -q 'export .*SANDBOX_ANTHROPIC_TRANSPORT' "$REPO_ROOT/bin/dejima"
+}
+
+@test "tls mode mounts a fake credential, never the real one, and sets no ANTHROPIC_* pair" {
+    # tls mode is the one case that puts a credentials file into the
+    # container: Claude Code reads .credentials.json directly when there is no
+    # ANTHROPIC_AUTH_TOKEN, so the empty container-local file entrypoint.sh
+    # would otherwise leave isn't enough - it needs a well-formed document,
+    # with the secrets faked and the non-secret fields
+    # (scopes/subscriptionType/rateLimitTier/clientId) copied so the session's
+    # own UI state stays accurate.
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_FAKE_CREDENTIALS_FILE:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
+    grep -q 'sandbox-credential-proxy-placeholder' "$REPO_ROOT/bin/dejima"
+    grep -q 'subscriptionType' "$REPO_ROOT/bin/dejima"
+    grep -q 'rateLimitTier' "$REPO_ROOT/bin/dejima"
+    # Expiry is deliberately NOT mirrored from the real credential: a
+    # near-term expiresAt makes Claude Code refresh with the fake refresh
+    # token, fail, and log the session out.
+    grep -q 'refreshTokenExpiresAt' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the loopback transport still sets the base URL and placeholder token" {
+    grep -q 'SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"' "$REPO_ROOT/bin/dejima"
+    grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
+}
+
+@test "api.anthropic.com is in the fixed domains only when the proxy is off" {
+    # Not unconditionally allowlisted: with the proxy on, the session reaches
+    # the API through the forwarder rather than by resolving this name, so
+    # leaving it unresolvable defeats a bypass that looks it up by DNS. When
+    # the proxy is off (kill
+    # switch or API-key auth) DNS is the only path to the API, so it has to be
+    # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
+    # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
+    # non-fatal when it fails to resolve.
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    ! grep -qx 'api.anthropic.com' <<< "$output"
+
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    grep -qx 'api.anthropic.com' <<< "$output"
+
+    # Unset (a bare `docker run` that passes no socket) must behave like empty.
+    # Under `set -u`, as both consumers run, so that dropping the `:-` default
+    # fails here rather than at container start.
+    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    grep -qx 'api.anthropic.com' <<< "$output"
+
+    # ...and entrypoint.sh no longer adds it to the extra list, which would
+    # reinstate both of the exemptions above.
+    ! grep -q 'extra_domains.*api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "an unrecognised SANDBOX_ANTHROPIC_TRANSPORT is rejected, not silently treated as loopback" {
+    # bin/dejima branches on `loopback`, entrypoint.sh and the forwarder on
+    # `tls` - so a typo configures the two halves for different transports and
+    # every API call fails with nothing naming the cause.
+    grep -q 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q "The only valid values are 'tls' (the default) and 'loopback'" "$SANDBOX_DIR/entrypoint.sh"
+    # Ahead of the proxy-socket guard, so it catches the typo whatever else
+    # this session is configured for.
+    local check guard
+    check=$(grep -n 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ "$check" -lt "$guard" ]
 }
