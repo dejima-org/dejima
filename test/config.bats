@@ -395,3 +395,56 @@ write_config() {
         "$REPO_ROOT/bin" "$REPO_ROOT/install.sh"
     [ "$status" -ne 0 ]
 }
+
+@test "--print-config resolves every schema key" {
+    write_config '[core]' 'firewall = off' '[audit]' 'keep = 3'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"core.firewall=off"* ]]
+    [[ "$output" == *"audit.keep=3"* ]]
+    # Absent keys resolve to their defaults, expanded.
+    [[ "$output" == *"core.known_hosts=$HOME/.ssh/known_hosts"* ]]
+    [[ "$output" == *"credentials.transport=tls"* ]]
+}
+
+@test "--print-config emits one line per schema key and nothing else" {
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    expected="$(lib _config_keys | wc -l)"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq "$expected" ]
+}
+
+@test "--print-config refuses an invalid config rather than printing defaults" {
+    write_config '[audit]' 'keep = 0'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value"* ]]
+}
+
+@test "--print-config does not need Docker or a workspace argument" {
+    write_config '[core]' 'firewall = on'
+    PATH="/nonexistent:$PATH" run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+}
+
+@test "core.command refuses a value with a leading dash" {
+    # entrypoint.sh expands SANDBOX_CMD unquoted into `gosu "$SANDBOX_USER"
+    # ${SANDBOX_CMD:-claude}` - a leading "-" would be parsed as an option to
+    # gosu rather than as the command to run. --print-config exits before
+    # this is wired in, so this exercises the real launch path far enough to
+    # reach it (a fake HOME with a minimal settings.json, a dedicated
+    # SANDBOX_SSH_KEY so the missing-agent check doesn't fire first) without
+    # needing Docker, since the guard fires before any docker invocation.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' "ssh_key = $key" 'command = --evil'
+    workspace="$(mktemp -d)"
+    HOME="$FAKE_HOME" SSH_AUTH_SOCK= run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"core.command"* ]]
+    rm -rf "$FAKE_HOME" "$workspace"
+}

@@ -17,6 +17,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
+
+# --print-config resolves the whole precedence chain and exits, before any
+# workspace argument is required and before anything is built or mounted.
+# It exists for two reasons: it answers "one config file now - what is
+# actually in effect?", and it is what makes the flag-beats-config chain
+# testable without booting Docker.
+if [ "${1:-}" = "--print-config" ]; then
+    config_validate || exit 1
+    while IFS= read -r _key; do
+        _section="${_key%.*}"
+        _leaf="${_key##*.}"
+        printf '%s=%s\n' "$_key" "$(config_get "$_section" "$_leaf")"
+    done < <(_config_keys)
+    exit 0
+fi
 
 WORKSPACE_DIR="${1:-$(pwd)}"
 if [ ! -d "$WORKSPACE_DIR" ]; then
@@ -43,8 +60,6 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 # the read-write workspace mount, so treating it as a grant would let a
 # session widen its own firewall for the next run. The declaration is only
 # ever reported (see hooks/sandbox-context.sh) and approved by hand.
-# shellcheck source=dejima-project-lib.sh
-source "$SCRIPT_DIR/dejima-project-lib.sh"
 ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
 PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
 if [ -n "$PROJECT_STORE" ]; then
@@ -56,8 +71,8 @@ fi
 # only out of the container's reach while none of them are inside the
 # mounted workspace - same class of warning as the self-mounted repo TCB
 # warning below.
-AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
-BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+AUDIT_DIR="$(config_get audit dir)"
+BASELINE_DIR="$(config_get audit baselines_dir)"
 # The three stores fail in three different ways once they are reachable, and
 # an operator who sees this needs to know which one they are looking at - so
 # each states its own consequence rather than sharing one text. Consequence
@@ -83,7 +98,7 @@ warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
     "a session can write its own acknowledgements, suppressing the" \
     "findings it would otherwise produce here from every later report."
 
-SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
+SANDBOX_SSH_KEY="$(config_get core ssh_key)"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
     echo "SANDBOX_SSH_KEY is set but not a file: $SANDBOX_SSH_KEY" >&2
     exit 1
@@ -132,22 +147,18 @@ if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "unless SANDBOX_SSH_KEY is also set." >&2
 fi
 
-if [ -z "${GITEA_TOKEN:-}" ]; then
-    GITEA_TOKEN_FILE="${GITEA_TOKEN_FILE:-$HOME/.config/gitea/token}"
-    if [ -f "$GITEA_TOKEN_FILE" ]; then
-        GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
-    fi
+GITEA_TOKEN_FILE="$(config_get forge.gitea token_file)"
+if [ -f "$GITEA_TOKEN_FILE" ]; then
+    GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
 fi
 
-if [ -z "${GH_TOKEN:-}" ]; then
-    # Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
-    # auth login` session is write-capable, which would defeat the point.
-    # This should be a dedicated read-only fine-grained PAT (Contents +
-    # Metadata: read-only), generated separately for this sandbox.
-    GH_TOKEN_FILE="${GH_TOKEN_FILE:-$HOME/.config/gh/sandbox-token}"
-    if [ -f "$GH_TOKEN_FILE" ]; then
-        GH_TOKEN="$(<"$GH_TOKEN_FILE")"
-    fi
+# Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
+# auth login` session is write-capable, which would defeat the point.
+# This should be a dedicated read-only fine-grained PAT (Contents +
+# Metadata: read-only), generated separately for this sandbox.
+GH_TOKEN_FILE="$(config_get github token_file)"
+if [ -f "$GH_TOKEN_FILE" ]; then
+    GH_TOKEN="$(<"$GH_TOKEN_FILE")"
 fi
 
 # Read-write scratch space, separate from WORKSPACE_DIR, for passing files
@@ -155,7 +166,7 @@ fi
 # touching the actual project checkout. Persists across sessions (it's a
 # real host directory, not a container volume) since the point is sharing
 # things with the host, not just scratch space for one run.
-SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/dejima/shared}"
+SANDBOX_SHARE_DIR="$(config_get core share_dir)"
 mkdir -p "$SANDBOX_SHARE_DIR"
 
 # skills/commands/agents/output-styles overlays (see docker-compose.yml) can
@@ -305,14 +316,35 @@ export SANDBOX_CLAUDE_JSON_FILE
 export SANDBOX_GITCONFIG_DIR
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
-export SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
 export GITEA_TOKEN="${GITEA_TOKEN:-}"
-export GITEA_SSH_HOST="${GITEA_SSH_HOST:-}"
-export GITEA_API="${GITEA_API:-}"
+export GITEA_SSH_HOST="$(config_get forge.gitea ssh_host)"
+export GITEA_API="$(config_get forge.gitea api)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 export ALLOW_GITHUB_PUSH="${ALLOW_GITHUB_PUSH:-0}"
 export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')}"
+
+# core.command permits a leading "-" (it is validated as a generic identifier,
+# shared with other keys that have no such concern) but entrypoint.sh expands
+# it unquoted into `gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"` - a
+# leading dash there would be parsed as an option to gosu, not as the command.
+# Refuse here, at the point this value is wired in, rather than relax the
+# schema type for every other identifier-typed key.
+SANDBOX_CMD="$(config_get core command)"
+case "$SANDBOX_CMD" in
+    -*)
+        echo "invalid value for core.command: must not start with '-': $SANDBOX_CMD" >&2
+        exit 1
+        ;;
+esac
+export SANDBOX_CMD
+# docker-compose.yml/entrypoint.sh compare these against "1"/"0", not
+# "on"/"off" - config_get_bool is what produces that, config_get would pass
+# "on"/"off" straight through and (among other things) silently disable the
+# firewall by default.
+export ENABLE_FIREWALL="$(config_get_bool core firewall)"
+export SANDBOX_LOG_CONVERSATION="$(config_get_bool logging conversation)"
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
@@ -353,7 +385,8 @@ done
 # Optional: bring in a real nvim config to pair with SANDBOX_CMD=nvim (see
 # entrypoint.sh). Not baked into the image - this repo has no opinion on
 # anyone's personal editor config.
-if [ -n "${SANDBOX_NVIM_CONFIG:-}" ]; then
+SANDBOX_NVIM_CONFIG="$(config_get mounts nvim_config)"
+if [ -n "$SANDBOX_NVIM_CONFIG" ]; then
     if [ ! -d "$SANDBOX_NVIM_CONFIG" ]; then
         echo "SANDBOX_NVIM_CONFIG is set but not a directory: $SANDBOX_NVIM_CONFIG" >&2
         exit 1
@@ -381,7 +414,8 @@ fi
 # an editor config shells out to. Colon-separated, like $PATH. Mounted
 # read-only at their own path, same as everything else here - this repo
 # still has no opinion on what's inside any of them.
-if [ -n "${SANDBOX_EXTRA_MOUNTS:-}" ]; then
+SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
     IFS=':' read -ra extra_paths <<< "$SANDBOX_EXTRA_MOUNTS"
     for path in "${extra_paths[@]}"; do
         [ -n "$path" ] || continue
@@ -472,7 +506,7 @@ fi
 # Skipped when there's no claudeAiOauth block to protect (API-key setups),
 # or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch - both restore the old
 # behavior exactly (credential mounted in with the rest of ~/.claude).
-SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
+SANDBOX_ANTHROPIC_TRANSPORT="$(config_get credentials transport)"
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
@@ -480,7 +514,7 @@ SANDBOX_ANTHROPIC_PROXY_DIR=""
 SANDBOX_CREDENTIALS_MASK_FILE=""
 SANDBOX_CREDENTIALS_TMPDIR_MASK=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
-if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
+if [ "$(config_get_bool credentials proxy)" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-anthropic-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
@@ -543,9 +577,9 @@ export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC
 export SANDBOX_ANTHROPIC_TRANSPORT
 
 # Optional remote access (see docs/remote-access.md). Entirely skipped
-# unless ~/.config/dejima/remote.conf exists - with it absent nothing below
-# runs, no state is created, and the compose invocation is exactly what it
-# was before this feature existed.
+# unless [remote-access] enabled is on in the config file - with it absent
+# nothing below runs, no state is created, and the compose invocation is
+# exactly what it was before this feature existed.
 if remote_enabled; then
     DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
     DEJIMA_STATE_DIR="$(remote_state_dir)"
@@ -744,11 +778,11 @@ if [ -n "$pending_crit" ]; then
         printf '          [c] continue  [q] quit: ' >&2
         read -r reply || reply=q
         case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
-    elif [ "${DEJIMA_AUDIT_STRICT:-0}" = "1" ]; then
-        echo "          DEJIMA_AUDIT_STRICT=1 and stdin is not a tty - refusing to start." >&2
+    elif [ "$(config_get_bool audit strict)" = "1" ]; then
+        echo "          audit.strict is on and stdin is not a tty - refusing to start." >&2
         exit 1
     else
-        echo "          (not a tty - continuing; set DEJIMA_AUDIT_STRICT=1 to refuse)" >&2
+        echo "          (not a tty - continuing; set audit.strict = on to refuse)" >&2
     fi
 fi
 

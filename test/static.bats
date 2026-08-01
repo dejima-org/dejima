@@ -592,8 +592,9 @@ setup() {
     [ "$output" -eq 1 ]
 }
 
-@test "credential proxy is on by default, gated only by SANDBOX_CREDENTIAL_PROXY=0" {
-    grep -q '"\${SANDBOX_CREDENTIAL_PROXY:-1}" != "0"' "$REPO_ROOT/bin/dejima"
+@test "credential proxy is on by default, gated only by credentials.proxy" {
+    grep -q 'config_get_bool credentials proxy' "$REPO_ROOT/bin/dejima"
+    grep -Pq 'credentials\.proxy\tbool\ton' "$REPO_ROOT/bin/dejima-config-lib.sh"
 }
 
 @test "bin/dejima masks the credentials file and mounts the proxy socket dir" {
@@ -1071,7 +1072,7 @@ SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd .gitea)
 }
 
 @test "the startup warning does not block when stdin is not a tty" {
-    grep -q 'DEJIMA_AUDIT_STRICT' "$REPO_ROOT/bin/dejima"
+    grep -q 'config_get_bool audit strict' "$REPO_ROOT/bin/dejima"
     grep -q '\-t 0' "$REPO_ROOT/bin/dejima"
 }
 
@@ -1097,6 +1098,12 @@ EOF
     chmod +x "$DEJIMA_T/docker"
     : > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
+    cat > "$DEJIMA_T/config/config" <<EOF
+[core]
+ssh_key = $DEJIMA_T/sandbox-key
+[audit]
+dir = $DEJIMA_T/audit
+EOF
 }
 
 # Redirected from /dev/null, so this is deterministically the "stdin is not a
@@ -1105,10 +1112,7 @@ EOF
 startup_warning_launch() {
     HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
         DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
-        DEJIMA_AUDIT_DIR="$DEJIMA_T/audit" \
         SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
-        SANDBOX_CREDENTIAL_PROXY=0 \
-        SANDBOX_SSH_KEY="$DEJIMA_T/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
         "$REPO_ROOT/bin/dejima" "$DEJIMA_T/ws" < /dev/null
 }
@@ -1134,11 +1138,12 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }
 
-@test "DEJIMA_AUDIT_STRICT=1 refuses to start over unacknowledged CRITICAL history when stdin is not a tty" {
+@test "audit.strict = on refuses to start over unacknowledged CRITICAL history when stdin is not a tty" {
     startup_warning_setup
+    printf '[audit]\nstrict = on\n' >> "$DEJIMA_T/config/config"
     mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
     : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
-    DEJIMA_AUDIT_STRICT=1 run startup_warning_launch
+    run startup_warning_launch
     [ "$status" -ne 0 ]
     [[ "$output" == *"refusing to start"* ]]
     ! grep -q ' run --rm ' "$DEJIMA_T/docker-log" 2>/dev/null
@@ -1221,7 +1226,8 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
 }
 
 @test "bin/dejima defaults to the tls transport and exports it" {
-    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$REPO_ROOT/bin/dejima"
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\$(config_get credentials transport)"' "$REPO_ROOT/bin/dejima"
+    grep -Pq 'credentials\.transport\tenum:tls\|loopback\ttls' "$REPO_ROOT/bin/dejima-config-lib.sh"
     grep -q 'export .*SANDBOX_ANTHROPIC_TRANSPORT' "$REPO_ROOT/bin/dejima"
 }
 

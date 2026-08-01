@@ -110,12 +110,19 @@ EOF
     PROJ="$(mktemp -d)"
 }
 
+# ssh_key is written into whatever config file config_root() currently
+# resolves to and appended rather than written, so it layers over whatever
+# write_remote_config already put there instead of clobbering it - and so it
+# still creates the file at all when a test calls launch() with no
+# write_remote_config call.
 launch() {
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \
-        SANDBOX_CREDENTIAL_PROXY=0 \
-        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
         "$REPO_ROOT/bin/dejima" "$@"
 }
@@ -442,7 +449,7 @@ EOF
 @test "an inherited DEJIMA_NOTIFY_DIR is not deleted on an early exit before remote access is evaluated" {
     # trap cleanup EXIT is installed long before the remote-access block ever
     # runs - several unrelated `exit 1` paths sit in between (a bad
-    # SANDBOX_EXTRA_MOUNTS entry is one), and the trap must not delete an
+    # mounts.readonly entry is one), and the trap must not delete an
     # inherited DEJIMA_NOTIFY_DIR on any of them either, not just on the
     # ordinary feature-off success path the previous test covers.
     stub_launch
@@ -450,9 +457,9 @@ EOF
     survive="$survive_parent/must-survive"
     mkdir -p "$survive"
     export DEJIMA_NOTIFY_DIR="$survive"
-    export SANDBOX_EXTRA_MOUNTS="$LAUNCH_DIR/does-not-exist"
+    printf '[mounts]\nreadonly = %s\n' "$LAUNCH_DIR/does-not-exist" > "$CONFIG_DIR/config"
     run launch "$PROJ"
-    unset DEJIMA_NOTIFY_DIR SANDBOX_EXTRA_MOUNTS
+    unset DEJIMA_NOTIFY_DIR
     [ "$status" -ne 0 ]
     [ -d "$survive" ]
     rm -rf "$survive_parent" "$PROJ"
