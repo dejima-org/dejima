@@ -475,8 +475,8 @@ default:
 - `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` (npm and
   mason's Python-based LSP tools), `release-assets.githubusercontent.com`
   (GitHub release assets, a separate CDN from github.com's own IPs),
-  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums),
-  `api.anthropic.com`
+  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums);
+  `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
 - whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 

@@ -17,6 +17,15 @@ fi
 
 extra_domains="${GITEA_SSH_HOST:-} ${gitea_api_host} ${loki_host} ${ALLOWED_DOMAINS:-}"
 
+# api.anthropic.com is not in fixed-domains.sh - allowlisting it would help a
+# session bypass the credential proxy when the proxy is on. But when it is off
+# (kill switch or API-key auth), DNS is the only path to the API and it must
+# be allowlisted for those modes to keep working. Add it to the runtime
+# allowlist only when there is no proxy socket.
+if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
+    extra_domains="${extra_domains} api.anthropic.com"
+fi
+
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     # dns-proxy.sh must run first: it repoints /etc/resolv.conf at a local
     # dnsmasq that only resolves allowlisted names, so init-firewall.sh's own

@@ -281,15 +281,15 @@ dexec_node() {
     [ -n "$output" ]
 }
 
-@test "api.anthropic.com does not resolve - the proxy is the only path to the API" {
-    # Deliberately not allowlisted. A session with the credential proxy on
-    # reaches the API through the in-container TLS terminator, via an
-    # /etc/hosts entry that getaddrinfo honours without consulting DNS at
-    # all - so anything asking DNS for this name is trying to go around the
-    # proxy, and must fail closed. (This file's shared container runs with no
-    # proxy socket, so it has no hosts entry either: DNS is all that's left.)
-    run dexec dig api.anthropic.com
-    [[ "$output" == *"status: REFUSED"* ]]
+@test "api.anthropic.com resolves in proxy-off mode (kill switch / API-key auth)" {
+    # api.anthropic.com is not in the fixed allowlist - allowlisting it there
+    # would help a session bypass the credential proxy when the proxy is on.
+    # But when the proxy is off (kill switch or API-key auth), DNS is the only
+    # path to the API and entrypoint.sh allowlists it. This file's shared
+    # container runs with no SANDBOX_ANTHROPIC_PROXY_SOCKET, so it is in
+    # proxy-off mode and the name must resolve.
+    run dexec dig +short api.anthropic.com
+    [ -n "$output" ]
 }
 
 @test "a non-allowlisted destination is unreachable" {

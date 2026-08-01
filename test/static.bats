@@ -1245,10 +1245,15 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
 }
 
-@test "api.anthropic.com is not in the firewall allowlist" {
-    # The container reaches the API only through the credential proxy now:
-    # /etc/hosts sends the name to loopback, so allowlisting it would only
-    # ever help something trying to bypass the proxy. Removing it makes that
-    # bypass fail closed.
+@test "api.anthropic.com is not in the fixed domains but allowlisted when the proxy is off" {
+    # api.anthropic.com is not in the fixed allowlist - allowlisting it there
+    # would help a session bypass the credential proxy when the proxy is on.
+    # But when the proxy is off (kill switch or API-key auth), DNS is the only
+    # path to the API and it must be allowlisted. entrypoint.sh adds it to the
+    # runtime allowlist when SANDBOX_ANTHROPIC_PROXY_SOCKET is empty,
+    # preserving the guarantee that DNS lookup fails when the proxy is supposed
+    # to be the only path.
     ! grep -q '"api.anthropic.com"' "$SANDBOX_DIR/fixed-domains.sh"
+    grep -q 'if \[ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
 }
