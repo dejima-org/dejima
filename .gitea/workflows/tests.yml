@@ -47,7 +47,19 @@ jobs:
           su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
 
   runtime:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest, unlike the job above. This one only works on a runner
+    # configured for it - host network namespace, the Docker socket, and the
+    # shared volume below - and none of that is anything the workflow can ask
+    # for. On a generic runner it fails the preflight check outright.
+    #
+    # ubuntu-latest is a label every runner carries, so which one picked this
+    # up was a coin flip, and a re-run that happened to land on an unconfigured
+    # runner failed on a repo that had not changed. A label only the configured
+    # runner has makes that unrepresentable rather than merely diagnosable: no
+    # runner matching it means this job queues instead of running somewhere it
+    # cannot work. The fast job stays on ubuntu-latest, because it genuinely
+    # does run anywhere.
+    runs-on: dejima-runtime
     container:
       image: node:20-bookworm
       # One volume, and it is load-bearing - see TMPDIR on the bats step for
@@ -89,8 +101,28 @@ jobs:
           # daemon this job would never start), so take the static binary.
           curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
             | tar -xzC /usr/local/bin --strip-components=1 docker/docker
+          # buildx ships separately from that tarball, and `docker build` picks
+          # the builder by whether this plugin is present: with it, BuildKit;
+          # without it, the legacy builder, which creates, commits and removes a
+          # real container per instruction. That cost ~10s x 56 steps here - more
+          # of the build than the downloads and compiles it was wrapping.
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-$(dpkg --print-architecture)"
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+          # Because that choice is silent, check it rather than assume it. A
+          # download that returned an error page instead of a binary still
+          # chmods fine, and the only symptom would be the slow builds this is
+          # meant to fix - which look like nothing being wrong.
+          docker buildx version || {
+            echo "The buildx plugin did not load, so docker build would quietly use the" >&2
+            echo "legacy builder instead of BuildKit. Check the download URL above still" >&2
+            echo "resolves for this architecture." >&2
+            exit 1
+          }
         env:
           DOCKER_CLI_VERSION: 27.5.1
+          BUILDX_VERSION: 0.36.0
 
       # Fails here, with the fix in the message, rather than thirty tests deep
       # in a suite that cannot work. Both of these are runner configuration,
@@ -137,6 +169,50 @@ jobs:
             exit 1
           }
 
+      # The token raises the api.github.com/meta ceiling from 60 requests an
+      # hour to 5000, and nothing about a run looks different when it stops
+      # doing that. A misspelled secret name, a revoked token and an expiry a
+      # year from now all present identically: green for a while, then
+      # containers failing to boot in init-firewall.sh - which reads as a
+      # regression in the firewall rather than as a lapsed credential. So ask
+      # the API what the ceiling actually is, rather than checking that a
+      # variable is non-empty and assuming the rest.
+      - name: Check the GitHub ranges lookup is authenticated
+        env:
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+        run: |
+          # Not a failure. Without the secret the suite still runs, it just
+          # spends the anonymous quota - which is the right default for a
+          # fork, and only a problem once runs get frequent.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No GH_META_TOKEN secret is configured, so GitHub's IP ranges will be"
+            echo "fetched anonymously: 60 requests an hour for this entire runner host,"
+            echo "against thirteen container starts per run. Fine occasionally, and on a"
+            echo "busy day the containers stop booting instead. See issue #37."
+            exit 0
+          fi
+          # No -f. A rejected token still answers with the header this reads,
+          # and the anonymous ceiling it reports is a far better diagnostic
+          # than curl exiting silently on the 401.
+          limit=$(curl -sI --connect-timeout 10 -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/meta | tr -d '\r' \
+            | awk -F': ' 'tolower($1)=="x-ratelimit-limit" {print $2}')
+          if [ -z "$limit" ]; then
+            echo "No x-ratelimit-limit came back from api.github.com/meta at all, so the" >&2
+            echo "request itself did not complete. This one is about reachability from" >&2
+            echo "the runner, not about the token." >&2
+            exit 1
+          fi
+          if [ "$limit" -lt 5000 ]; then
+            echo "GH_META_TOKEN is set, but GitHub reports a ceiling of $limit/hour - that" >&2
+            echo "is the anonymous quota, so the token is not being accepted. Expired or" >&2
+            echo "revoked is the likely cause; a wrong secret name would have arrived" >&2
+            echo "empty and been reported above instead. Replace it with a fine-grained" >&2
+            echo "PAT with no permissions - /meta is public data and needs none." >&2
+            exit 1
+          fi
+          echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
+
       - uses: actions/checkout@v4
 
       # The build dominates this job, and inside setup_file it is a `docker
@@ -154,6 +230,26 @@ jobs:
       - run: bats test/runtime.bats
         env:
           SKIP_BUILD: 1
+          # Every container this suite starts fetches GitHub's IP ranges from
+          # api.github.com/meta in init-firewall.sh, and unauthenticated that
+          # endpoint allows 60 requests an hour per source IP - shared with
+          # everything else on this runner host. Thirteen starts per run means
+          # two runs an hour exhausts it, after which containers fail to boot
+          # and tests fail on the quota rather than on anything they assert.
+          #
+          # This became reachable when the build got fast: at ~48 minutes a
+          # run the starts were spread thin enough to stay under, and at ~4
+          # minutes they are not. Any token authenticates the fetch and raises
+          # the ceiling to 5000/hour; /meta is public data and needs no scopes
+          # at all, so the secret behind this should be a fine-grained PAT
+          # with no permissions and no repository access - not a token that
+          # can do anything else. It reaches `gh auth setup-git` inside the
+          # containers, so a scope granted here is a scope handed to every
+          # sandbox the suite starts.
+          #
+          # Unset is fine and the suite still runs - it just spends the
+          # anonymous quota, so expect the failure above on a busy day.
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
           # runtime.bats builds fixtures on disk - ssh keys, statusline
           # scripts, .claude.json copies, a proxy socket - and bind-mounts
           # them into containers it starts. Those containers are siblings of

@@ -73,12 +73,25 @@ setup_file() {
     docker network rm "$network" >/dev/null 2>&1 || true
     docker network create "$network" >/dev/null
 
-    # No GITEA_*/GH_TOKEN/LOKI_URL: this suite only asserts the default
-    # allowlist and enforcement, which shouldn't depend on any of them.
+    # No GITEA_*/LOKI_URL: this suite only asserts the default allowlist and
+    # enforcement, which shouldn't depend on either.
+    #
+    # GH_TOKEN is forwarded rather than dropped, and every container start in
+    # this file does the same. It doesn't change the allowlist - it only
+    # authenticates init-firewall.sh's api.github.com/meta fetch, which
+    # returns the same ranges either way. What it changes is the quota: that
+    # endpoint allows 60 requests an hour per source IP unauthenticated, and
+    # this file starts thirteen containers, so two runs in an hour exhaust it
+    # and every container after that dies in init-firewall.sh with a rate
+    # limit error rather than anything to do with what was being tested.
+    # Locally it's usually unset and expands empty, which both init-firewall
+    # and entrypoint treat exactly as absent - so the no-token path stays the
+    # default here and only CI, where the volume is, passes a real one.
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$network" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -147,6 +160,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$test_image" >/dev/null
 
@@ -174,6 +188,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -228,6 +243,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$mounted_copy:/home/node/.claude.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -286,6 +302,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ALLOW_GITHUB_PUSH=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -304,6 +321,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e GITEA_SSH_HOST=gitea.internal.example \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -331,6 +349,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$src/skills:/home/node/.claude/skills:ro" \
         -v "$src/commands:/home/node/.claude/commands:ro" \
         -v "$src/agents:/home/node/.claude/agents:ro" \
@@ -373,6 +392,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude:/home/node/.claude" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -446,6 +466,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude:/home/node/.claude" \
         -v "$target_dir:$target_dir:ro" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
@@ -597,6 +618,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
@@ -656,6 +678,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$TD/dotclaude:/home/node/.claude" \
         -v "$mask_file:/home/node/.claude/.credentials.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -752,6 +775,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$ws:$ws" \
         -v "$hook:/usr/local/bin/sandbox-context.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -795,6 +819,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$derived" >/dev/null
     wait_ready "$test_container"
