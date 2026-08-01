@@ -81,7 +81,7 @@ setup_file() {
     # authenticates init-firewall.sh's api.github.com/meta fetch, which
     # returns the same ranges either way. What it changes is the quota: that
     # endpoint allows 60 requests an hour per source IP unauthenticated, and
-    # this file starts thirteen containers, so two runs in an hour exhaust it
+    # this file starts fifteen containers, so two runs in an hour exhaust it
     # and every container after that dies in init-firewall.sh with a rate
     # limit error rather than anything to do with what was being tested.
     # Locally it's usually unset and expands empty, which both init-firewall
@@ -133,6 +133,8 @@ teardown() {
     docker rm -f "dejima-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rmi "dejima-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-tls-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-nohosts-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -601,7 +603,7 @@ EOF'
     [ "$output" = "0" ]
 }
 
-@test "credential proxy chain: loopback -> forwarder -> unix socket -> host proxy injects the real token" {
+@test "loopback transport: 127.0.0.1 -> forwarder -> unix socket -> host proxy injects the real token" {
     TD="$BATS_TEST_TMPDIR"
     python3 "$BATS_TEST_DIRNAME/fixtures/fake-anthropic.py" > "$TD/port" &
     FAKE_PID=$!
@@ -631,6 +633,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -858,6 +861,7 @@ EOF
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
+        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         node "$BATS_TEST_DIRNAME/../docker/anthropic-proxy-forwarder.js" &
     FWD_PID=$!
     sleep 0.5
@@ -937,4 +941,96 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     # from timeout, and that is still containment.
     run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
     [ "$status" -ne 0 ]
+}
+
+@test "tls transport: https://api.anthropic.com from inside the container reaches the host proxy" {
+    TD="$BATS_TEST_TMPDIR"
+    python3 "$BATS_TEST_DIRNAME/fixtures/fake-anthropic.py" > "$TD/port" &
+    FAKE_PID=$!
+    for _ in $(seq 1 50); do [ -s "$TD/port" ] && break; sleep 0.1; done
+    cat > "$TD/credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
+        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
+        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
+    PROXY_PID=$!
+    for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
+    # See the loopback test above for why this chmod is here.
+    chmod 666 "$TD/proxy.sock"
+
+    container="dejima-test-tls-$(basename "$BATS_FILE_TMPDIR")"
+    # No ANTHROPIC_* env at all - that absence is the thing under test.
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -v "$TD:$TD" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$container"
+
+    # NODE_EXTRA_CA_CERTS has to be passed explicitly: docker exec starts from
+    # the image's ENV, not from the entrypoint process's exported environment.
+    # The session command itself is a child of the entrypoint and does inherit
+    # it - which is what the /proc/1/environ check below confirms.
+    run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-anthropic-tls/cert.pem \
+        "$container" node -e '
+        fetch("https://api.anthropic.com/v1/messages", {method: "POST", body: "{}"})
+          .then(r => r.text()).then(t => { console.log(t); })
+          .catch(e => { console.error(e); process.exit(1); })'
+    status_tls=$status; output_tls=$output
+
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
+    env_anthropic=$output
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c NODE_EXTRA_CA_CERTS || true"
+    env_ca=$output
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
+    env_token=$output
+    run docker exec "$container" grep -c '127.0.0.1 api.anthropic.com' /etc/hosts
+    hosts_hits=$output
+    # /etc/hosts resolves the name locally, but that only wins inside
+    # getaddrinfo - the DNS proxy itself must still refuse it, same as any
+    # other name that isn't on the allowlist (see the DNS-proxy test above).
+    # Anything that resolves api.anthropic.com by DNS instead of /etc/hosts
+    # (a bypass of the /etc/hosts pin) has no route to the real API at all.
+    run docker exec "$container" dig api.anthropic.com
+    dig_output=$output
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    kill "$PROXY_PID" "$FAKE_PID" 2>/dev/null || true
+
+    [ "$status_tls" -eq 0 ]
+    # The client sent no Authorization header; the host proxy supplied one.
+    [[ "$output_tls" == *'"authorization": "Bearer real-access-token"'* ]]
+    # Both fingerprints are gone: no base URL, no placeholder token...
+    [ "$env_anthropic" = "0" ]
+    # ...while the trust anchor the session actually needs did get inherited.
+    [ "$env_ca" = "1" ]
+    [ "$env_token" = "0" ]
+    [ "$hosts_hits" = "1" ]
+    [[ "$dig_output" == *"status: REFUSED"* ]]
+}
+
+@test "the kill switch leaves api.anthropic.com unpinned, so the real API stays reachable" {
+    # SANDBOX_CREDENTIAL_PROXY=0 mounts the real credential and starts no
+    # forwarder. If the hosts entry were unconditional (a compose extra_hosts
+    # entry, say), this container would send every API call into a loopback
+    # port nothing is listening on.
+    container="dejima-test-nohosts-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$container"
+
+    run docker exec "$container" grep -c 'api.anthropic.com' /etc/hosts
+    hosts_hits=$output
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+
+    [ "$hosts_hits" = "0" ]
 }
