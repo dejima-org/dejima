@@ -220,11 +220,18 @@ cleanup() {
     # inside it (e.g. an unwritable subdirectory) and make its `rm -rf`
     # fail, same hazard and same guard as the marker-directory removal
     # further down.
+    #
+    # SANDBOX_GITCONFIG_DIR additionally carries a `:-` default because it is
+    # the one name here first assigned BELOW `trap cleanup EXIT` rather than
+    # above it. Nothing in that window can exit today (it holds only
+    # comments, and a failed `VAR="$(mktemp -d)"` still binds VAR to the
+    # empty string before set -e fires), so this is the invariant every other
+    # name here already keeps, not a live fix - see the static test.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
