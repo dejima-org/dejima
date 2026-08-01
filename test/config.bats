@@ -605,9 +605,21 @@ write_config() {
 }
 
 @test "every retired variable in the detector names a real schema key" {
+    # Scoped to the detector's own table rather than the whole file: a loose
+    # scan also matches operator-facing text like the "[c] continue" prompt,
+    # and the fix for that must never be to reword the prompt. The "="
+    # anchor matters too: every real entry is NAME=[section] key, so
+    # anchoring on it excludes prose that merely contains a bracket.
+    local keys
+    keys="$(sed -n '/^_warn_legacy_env()/,/^}/p' "$REPO_ROOT/bin/dejima" \
+            | grep -oE '=\[[a-z.-]+\] [a-z_]+' \
+            | sed 's/^=\[//; s/\] /./')"
+    # Asserted explicitly so a grep that silently stops matching anything
+    # (e.g. after the table is reformatted) fails loudly instead of passing
+    # vacuously over an empty list.
+    [ "$(printf '%s\n' "$keys" | wc -l)" -eq 22 ]
     while IFS= read -r key; do
         run lib _config_spec "$key"
         [ "$status" -eq 0 ] || { echo "detector names unknown key: $key"; return 1; }
-    done < <(grep -oE '\[[a-z.-]+\] [a-z_]+' "$REPO_ROOT/bin/dejima" \
-             | sed 's/^\[//; s/\] /./')
+    done <<< "$keys"
 }

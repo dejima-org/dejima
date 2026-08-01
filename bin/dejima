@@ -893,7 +893,7 @@ if [ -n "$pending_crit" ]; then
     printf '%s\n' "$pending_crit" | sed 's#.*/##; s#-CRITICAL\.txt$##; s#^#          from run #' >&2
     echo "          Review with: dejima-audit ack \"$WORKSPACE_DIR\"" >&2
     if [ -t 0 ]; then
-        printf '          [c]ontinue  [q]uit: ' >&2
+        printf '          [c] continue  [q] quit: ' >&2
         read -r reply || reply=q
         case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
     elif [ "$(config_get_bool audit strict)" = "1" ]; then
