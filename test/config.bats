@@ -536,6 +536,16 @@ write_config() {
     [[ "$output" != *"core.command=nvim"* ]]
 }
 
+@test "a repeated flag takes the last value, same as a repeated config key" {
+    write_config '[core]' 'firewall = on' 'command = a' 'command = b'
+    run lib config_get core command
+    [ "$output" = "b" ]
+    run "$REPO_ROOT/bin/dejima" --cmd first --cmd second --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"core.command=second"* ]]
+    [[ "$output" != *"core.command=first"* ]]
+}
+
 @test "bin/dejima and dejima-audit agree on the default audit directory even with XDG_DATA_HOME set" {
     write_config '[core]' 'firewall = on'
     run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima" --print-config

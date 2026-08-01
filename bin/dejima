@@ -27,13 +27,19 @@ source "$SCRIPT_DIR/dejima-project-lib.sh"
 # fails here for the same reason it would fail in the file.
 FLAG_OVERRIDES=()
 _set_override() {
-    local key="$1" value="$2" type
+    local key="$1" value="$2" type entry
+    local -a kept=()
     type="$(config_type "$key")" || { echo "unknown config key: $key" >&2; exit 1; }
     if ! _config_valid_value "$type" "$value"; then
         echo "invalid value for --${key##*.}: $value" >&2
         exit 1
     fi
-    FLAG_OVERRIDES+=("$key=$value")
+    # A repeated flag takes the last value, same as a repeated key in the
+    # config file - drop any earlier override for this key before appending.
+    for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
+        [ "${entry%%=*}" = "$key" ] || kept+=("$entry")
+    done
+    FLAG_OVERRIDES=(${kept[@]+"${kept[@]}"} "$key=$value")
 }
 _need_value() {
     [ -n "${2:-}" ] && [ "${2:0:2}" != "--" ] || {
