@@ -137,27 +137,70 @@ one can't happen.
   of these tests exists because something was got wrong first.
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. `dejima` starts a host-side proxy
-  (`bin/dejima-anthropic-proxy`) on a per-session unix socket,
-  mounts an empty file over `.credentials.json` (the parent `~/.claude`
-  mount stays read-write, so a single-file mask is the mechanism), and
-  hands Claude Code a placeholder token plus an `ANTHROPIC_BASE_URL`
-  pointing at a loopback forwarder that pipes into the socket. The proxy
-  strips the placeholder, injects the real access token per request, and
-  owns OAuth refresh - rotated tokens are written back to the real host
-  file atomically, so host-side sessions stay logged in. What remains is
-  session-scoped: a compromised session can still *use* the model API as
-  you while it runs (that's inherent to the sandbox working at all), but
-  it can no longer read a durable credential and exfiltrate it for
-  offline use via the other allowed egress destinations (npm, GitHub,
-  your Gitea host). Caveats: `/login` inside the container doesn't work
-  while the proxy is on; the refresh flow mirrors a Claude Code internal
-  and may break if upstream changes it, in which case the proxy fails
-  loudly (launch abort, 502s on API calls) rather than silently.
+  (`bin/dejima-anthropic-proxy`) on a per-session unix socket and mounts a
+  fake credential over `.credentials.json` (the parent `~/.claude` mount
+  stays read-write, so a single-file mask is the mechanism) - the two
+  secrets are placeholders, while `scopes`/`subscriptionType`/
+  `rateLimitTier`/`clientId` are copied from the real file so the session's
+  own UI stays accurate. Its expiry is set a year out rather than mirrored,
+  deliberately: a near-term one would make Claude Code refresh on its own,
+  with a refresh token that isn't real, and log the session out. Inside the
+  container, `entrypoint.sh` points `api.anthropic.com` at a loopback TLS
+  terminator (`anthropic-proxy-forwarder.js`) whose certificate is generated
+  at startup and trusted only there, and which pipes raw bytes into the
+  proxy's socket. The proxy injects the real access token per request and
+  owns OAuth refresh - rotated tokens are written back to the real host file
+  atomically, so host-side sessions stay logged in. Claude Code itself is
+  configured exactly as it would be on the host: no `ANTHROPIC_BASE_URL`, no
+  `ANTHROPIC_AUTH_TOKEN`, nothing that marks the session as unusual either
+  to the client or to Anthropic. What remains is session-scoped: a
+  compromised session can still *use* the model API as you while it runs
+  (that's inherent to the sandbox working at all), but it can no longer read
+  a durable credential and exfiltrate it for offline use via the other
+  allowed egress destinations (npm, GitHub, your Gitea host). Caveats:
+  `/login` inside the container doesn't work while the proxy is on; the
+  refresh flow mirrors a Claude Code internal and may break if upstream
+  changes it, in which case the proxy fails loudly (launch abort, 502s on
+  API calls) rather than silently; and a 401 that does reach the container
+  can make Claude Code clear the fake credential file, showing a logged-out
+  session - harmless, since it's a host temp file, and rare, since the proxy
+  absorbs 401s with its own refresh-and-retry.
   `SANDBOX_CREDENTIAL_PROXY=0` is the kill switch, restoring the previous
   behavior - the credential mounted into the container, readable by a
   compromised session. Setups without a `claudeAiOauth` block (API-key
   auth) skip the proxy automatically; there's no stored subscription
   credential to protect.
+- **If TLS interception stops working.** The container reaches the API by
+  resolving `api.anthropic.com` to the loopback terminator above, whose
+  certificate is trusted only inside the container. If Claude Code ever pins
+  certificates for that host, the handshake starts failing - typically right
+  after an upgrade, as `UNABLE_TO_VERIFY_LEAF_SIGNATURE`,
+  `ERR_TLS_CERT_ALTNAME_INVALID`, or a pin-specific error. What
+  distinguishes pinning from a merely broken certificate is that
+  `curl --cacert /etc/dejima-anthropic-tls/cert.pem https://api.anthropic.com/v1/messages`
+  still succeeds from inside the container while Claude Code does not: the
+  certificate is fine, the client is refusing it. **This is not a reason to
+  set `SANDBOX_CREDENTIAL_PROXY=0`.** That kill switch mounts the real,
+  durable OAuth credential into a container a compromised session can read,
+  which is the single thing this whole mechanism exists to prevent.
+  Certificate pinning breaks how Claude Code is *addressed*; it has no
+  bearing on whether the credential can be kept on the host. Work down this
+  ladder instead - every rung keeps the credential out of the container, and
+  only the "looks like an ordinary session" property degrades. First,
+  `SANDBOX_ANTHROPIC_TRANSPORT=loopback`: a plaintext loopback forwarder and
+  an explicit `ANTHROPIC_BASE_URL=http://127.0.0.1:18300`, the topology this
+  sandbox used before the TLS terminator existed, so pinning cannot apply at
+  all. It costs the base-URL fingerprint, two attribution fields in the
+  `x-anthropic-billing-header`, and `/remote-control`. Second, if even that
+  fails, `ANTHROPIC_UNIX_SOCKET` pointed at the bind-mounted socket together
+  with `ANTHROPIC_BASE_URL=http://api.anthropic.com`: plaintext HTTP
+  straight over the socket, bypassing TLS entirely while keeping the
+  first-party base-URL check truthy. It costs more in appearance than rung
+  one - it classifies the session as host-orchestrated and emits its own
+  analytics event - which is why it isn't the default. Only if both fail,
+  and knowing what it gives up, `SANDBOX_CREDENTIAL_PROXY=0`. The first two
+  rungs are supported, tested modes, not improvised workarounds; if you
+  reach the third, treat it as a temporary state rather than a new baseline.
 - `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
   `agents/`, and `output-styles/` under `~/.claude` are layered back
   read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks
