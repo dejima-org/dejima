@@ -109,3 +109,101 @@ config_root() {
 config_path() {
     printf '%s/config' "$(config_root)"
 }
+
+# ---------------------------------------------------------------------------
+# Value validation
+#
+# Deliberately narrow, for the same reason valid_remote_value was: these
+# values reach a dnsmasq server= line, a curl -H header, a docker -v argument
+# and a URL handed to a phone. Anything shell-active, any whitespace, and
+# anything that could split a header must not survive validation.
+# ---------------------------------------------------------------------------
+
+# Moved here from dejima-project-lib.sh, unchanged: a declared domain has to
+# survive being written into a dnsmasq server=/domain/ line. Defining it here
+# rather than in both files keeps one definition, which is what stops the two
+# drifting apart.
+valid_domain() {
+    [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
+}
+
+_config_valid_value() {
+    local type="$1" value="$2" optional=0
+
+    if [ "${type:0:1}" = "?" ]; then
+        optional=1
+        type="${type:1}"
+    fi
+    if [ -z "$value" ]; then
+        # Empty is legal only under "?". A non-empty value still gets fully
+        # type-checked below either way - "optional" means "may be absent",
+        # never "may be anything".
+        [ "$optional" = 1 ]
+        return
+    fi
+
+    case "$type" in
+        bool)
+            [[ "$value" =~ ^(on|off)$ ]]
+            ;;
+        int:*:*)
+            local range min max
+            range="${type#int:}"
+            min="${range%%:*}"
+            max="${range##*:}"
+            [[ "$value" =~ ^[0-9]+$ ]] || return 1
+            [ "$value" -ge "$min" ] && [ "$value" -le "$max" ]
+            ;;
+        enum:*)
+            # Exact membership, not a substring test. Splitting on "|" and
+            # comparing each member is what stops the whole member list from
+            # validating as a value: "|tls|loopback|" contains "|tls|loopback|",
+            # so a delimiter-padded substring check accepts it.
+            local -a allowed=()
+            local member
+            IFS='|' read -ra allowed <<< "${type#enum:}"
+            for member in "${allowed[@]}"; do
+                [ "$value" = "$member" ] && return 0
+            done
+            return 1
+            ;;
+        path)
+            [[ "$value" == /* || "$value" == "~/"* || "$value" == "~" ]]
+            ;;
+        list:*)
+            local member="${type#list:}" element
+            # Declared local, and deliberately so: this function recurses into
+            # itself once per element, and a shared global here would be
+            # clobbered mid-loop the moment any member type also used it.
+            local -a elements=()
+            # Colon-separated, like $PATH. An empty element (a stray "::" or
+            # a trailing colon) is a config typo, not an entry to skip.
+            IFS=':' read -ra elements <<< "$value"
+            for element in "${elements[@]}"; do
+                _config_valid_value "$member" "$element" || return 1
+            done
+            ;;
+        hostname)
+            valid_domain "$value"
+            ;;
+        url)
+            # The same character set valid_remote_value used, plus a required
+            # http(s) scheme. Deliberately narrower than RFC 3986: these values
+            # reach a curl -H header, an nginx comparison, a firewall
+            # allowlist and prose an agent reads, so ";", "&", "$", backticks
+            # and parentheses must not survive even though a URL may legally
+            # contain them. Held in a variable and expanded unquoted, which is
+            # the only reliable way to keep the shell from eating a
+            # metacharacter before the regex engine ever sees it.
+            local re='^https?://[A-Za-z0-9:/._~?=%@+-]+$'
+            [[ "$value" =~ $re ]]
+            ;;
+        identifier)
+            [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+            ;;
+        *)
+            echo "config: unknown schema type: $type" >&2
+            return 1
+            ;;
+    esac
+}

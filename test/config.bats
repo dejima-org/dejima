@@ -67,3 +67,89 @@ EOF
     dupes="$(lib _config_keys | sort | uniq -d)"
     [ -z "$dupes" ] || { echo "duplicate keys: $dupes"; return 1; }
 }
+
+@test "bool accepts on and off and nothing else" {
+    run lib _config_valid_value bool on
+    [ "$status" -eq 0 ]
+    run lib _config_valid_value bool off
+    [ "$status" -eq 0 ]
+    for bad in true false 1 0 yes "" ON; do
+        run lib _config_valid_value bool "$bad"
+        [ "$status" -ne 0 ] || { echo "bool wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "int enforces its declared range" {
+    run lib _config_valid_value int:1:65535 7681
+    [ "$status" -eq 0 ]
+    for bad in 0 65536 -1 abc 12.5 ""; do
+        run lib _config_valid_value int:1:65535 "$bad"
+        [ "$status" -ne 0 ] || { echo "int wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "enum accepts only its listed members" {
+    run lib _config_valid_value 'enum:tls|loopback' tls
+    [ "$status" -eq 0 ]
+    run lib _config_valid_value 'enum:tls|loopback' loopback
+    [ "$status" -eq 0 ]
+    for bad in TLS tl "tls|loopback" ""; do
+        run lib _config_valid_value 'enum:tls|loopback' "$bad"
+        [ "$status" -ne 0 ] || { echo "enum wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "path requires an absolute or tilde-rooted value" {
+    run lib _config_valid_value path /tmp/x
+    [ "$status" -eq 0 ]
+    run lib _config_valid_value path '~/specs'
+    [ "$status" -eq 0 ]
+    for bad in relative/path ./x ""; do
+        run lib _config_valid_value path "$bad"
+        [ "$status" -ne 0 ] || { echo "path wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "the optional prefix is what permits an empty value" {
+    run lib _config_valid_value path ""
+    [ "$status" -ne 0 ]
+    run lib _config_valid_value '?path' ""
+    [ "$status" -eq 0 ]
+    run lib _config_valid_value '?int:8:72' ""
+    [ "$status" -eq 0 ]
+    # A non-empty value under "?" is still type-checked, not waved through.
+    run lib _config_valid_value '?int:8:72' 200
+    [ "$status" -ne 0 ]
+}
+
+@test "url accepts the shapes dejima actually configures" {
+    for good in "https://example.com/api/v1" "http://192.0.2.10:3100" \
+                "https://gitbox.example.io/api/v1" "https://ntfy.sh/topic?x=1"; do
+        run lib _config_valid_value url "$good"
+        [ "$status" -eq 0 ] || { echo "url wrongly rejected: '$good'"; return 1; }
+    done
+}
+
+@test "url rejects a space, a shell metacharacter, or a missing scheme" {
+    for bad in "http://a b" 'http://a;id' 'http://a&b' 'http://a$(id)' \
+               'http://a`id`' 'http://a|b' "ftp://a.b" "example.com"; do
+        run lib _config_valid_value url "$bad"
+        [ "$status" -ne 0 ] || { echo "url wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "hostname uses the same expression the approval store validates with" {
+    run lib _config_valid_value hostname gitbox.example.com
+    [ "$status" -eq 0 ]
+    for bad in "a b" "a/b" 'a;b' ""; do
+        run lib _config_valid_value hostname "$bad"
+        [ "$status" -ne 0 ] || { echo "hostname wrongly accepted: '$bad'"; return 1; }
+    done
+}
+
+@test "list:path validates every colon-separated element" {
+    run lib _config_valid_value 'list:path' /a:/b:'~/c'
+    [ "$status" -eq 0 ]
+    run lib _config_valid_value 'list:path' /a:relative
+    [ "$status" -ne 0 ]
+}
