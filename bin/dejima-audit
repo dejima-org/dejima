@@ -46,6 +46,28 @@ AUDIT_KEEP="${DEJIMA_AUDIT_KEEP:-10}"
 
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
+# The one report both `show` and `ack` operate on: the OLDEST unacknowledged
+# CRITICAL report if there is one, else the newest report overall.
+#
+# Oldest-CRITICAL-first, rather than a plain `sort | tail -1` over every
+# *.txt, because that always prefers the newer file - so a stale
+# *-CRITICAL.txt sitting behind a newer clean report would be unreachable
+# through `ack` entirely, while bin/dejima's startup warning kept firing on
+# it forever with no remedy but to press past it. That is the alert fatigue
+# this feature exists to end, so it must not be reachable by this route.
+#
+# Shared by both verbs so they cannot disagree: an operator following that
+# startup warning may well reach for `show` first, and showing them a
+# different report than the one being warned about sends them looking for a
+# finding that is not in it.
+select_report() {
+    local dir="$1" r
+    r="$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
+    [ -n "$r" ] || r="$(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+    [ -n "$r" ] || return 1
+    printf '%s\n' "$r"
+}
+
 BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
 
 # Two acknowledgement forms, deliberately distinct:
@@ -497,26 +519,21 @@ case "$cmd" in
         ;;
     show)
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
-        newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
-        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
-        cat "$newest"
+        report="$(select_report "$report_dir")" \
+            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        # Which report, on stderr so stdout stays the report content alone:
+        # `show` no longer necessarily prints the newest one, and an operator
+        # cross-referencing the run timestamps in the startup warning needs to
+        # know which of them they are looking at.
+        echo "dejima audit: $report" >&2
+        cat "$report"
         exit 0
         ;;
     ack)
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
-        # Oldest unacknowledged CRITICAL report first, not the newest report
-        # overall: a stale *-CRITICAL.txt sitting behind a newer clean
-        # report would otherwise never be reachable through `ack` at all (a
-        # plain `sort | tail -1` over every *.txt always prefers the newer
-        # one) - the startup warning in bin/dejima would keep firing on it
-        # forever with no way to clear it except pressing on past it, the
-        # exact failure this whole feature exists to stop. Still variable-
-        # named `newest` below for the rest of this case arm even when it
-        # isn't - renaming would ripple through every reference to it.
-        newest="$(find "$report_dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
-        [ -n "$newest" ] || newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
-        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        report="$(select_report "$report_dir")" \
+            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
 
         # Accumulate in memory and write once at the end: an ack interrupted
         # partway (q/Esc/EOF/Ctrl-C) must not leave a CRITICAL surface
@@ -530,7 +547,7 @@ case "$cmd" in
         # (or a non-path CRITICAL, which can never be "approved" - see
         # ackable below) must keep its suffix and stay eviction-protected.
         crit_seen=0; crit_acked=0
-        # The loop below reads report lines on its own stdin (`< "$newest"`),
+        # The loop below reads report lines on its own stdin (`< "$report"`),
         # so operator keystrokes are read from fd 3 - a copy of the script's
         # original stdin taken before that redirection - rather than
         # /dev/tty (which has nothing to open under piped test input; a
@@ -647,7 +664,7 @@ case "$cmd" in
                     ;;
                 *) ;;
             esac
-        done < "$newest"
+        done < "$report"
 
         if [ "$aborted" -eq 1 ] || [ "${#pending[@]}" -eq 0 ]; then
             echo ""; echo "dejima audit: nothing recorded."
@@ -659,8 +676,8 @@ case "$cmd" in
         # rotation) when every CRITICAL finding this report carried was
         # actually approved - not just when something was approved.
         if [ "$crit_seen" -gt 0 ] && [ "$crit_acked" -eq "$crit_seen" ]; then
-            case "$newest" in
-                *-CRITICAL.txt) mv "$newest" "${newest%-CRITICAL.txt}.txt" ;;
+            case "$report" in
+                *-CRITICAL.txt) mv "$report" "${report%-CRITICAL.txt}.txt" ;;
             esac
         fi
         echo ""; echo "dejima audit: recorded ${#pending[@]} acknowledgement(s) in $bf"

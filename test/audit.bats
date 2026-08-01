@@ -481,13 +481,46 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$result" -ne 124 ]
 }
 
-@test "show prints the newest report" {
+@test "show prints the only report there is, and names it" {
     snap
     echo 'export X=1' > "$WS/.envrc"
     cmp_ >/dev/null 2>&1
-    run "$AUDIT" show "$WS"
+    run bash -c "'$AUDIT' show '$WS' 2>&1"
     [ "$status" -eq 0 ]
     [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"-CRITICAL.txt"* ]]   # said which report it printed
+}
+
+@test "show and ack agree on which report they mean" {
+    # `show` selected the newest report overall while `ack` preferred the
+    # oldest unacknowledged CRITICAL one, so an operator who followed the
+    # startup warning to `show` first was handed a different report than the
+    # one being warned about - and went looking for a finding not in it.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    report_dir="$AUDITDIR/$slug"; mkdir -p "$report_dir"
+    cat > "$report_dir/2020-01-01-000000-CRITICAL.txt" <<REPORT
+dejima audit report for $WS
+CRITICAL HOST-CODE-EXECUTION workspace file: .envrc
+REPORT
+    cat > "$report_dir/2026-01-01-000001.txt" <<REPORT
+dejima audit report for $WS
+WARNING  changed workspace file: .vscode/settings.json
+REPORT
+    run "$AUDIT" show "$WS"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]           # the stale CRITICAL report...
+    [[ "$output" != *"settings.json"* ]]    # ...not the newer clean one
+}
+
+@test "show falls back to the newest report when no CRITICAL one is pending" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    report_dir="$AUDITDIR/$slug"; mkdir -p "$report_dir"
+    echo 'older' > "$report_dir/2020-01-01-000000.txt"
+    echo 'newer' > "$report_dir/2026-01-01-000001.txt"
+    run "$AUDIT" show "$WS"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"newer"* ]]
+    [[ "$output" != *"older"* ]]
 }
 
 @test "ack presents a stale unacknowledged CRITICAL report before a newer clean one" {
