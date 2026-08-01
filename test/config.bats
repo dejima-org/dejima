@@ -153,3 +153,20 @@ EOF
     run lib _config_valid_value 'list:path' /a:relative
     [ "$status" -ne 0 ]
 }
+
+@test "path rejects a colon, which would split a docker -v mount spec" {
+    # docker-compose.yml mounts share_dir as "${SANDBOX_SHARE_DIR}:${HOME}/shared".
+    # A colon in the value silently redirects source and target instead of
+    # failing, so it must not validate.
+    run lib _config_valid_value path /tmp/a:b
+    [ "$status" -ne 0 ]
+    run lib _config_valid_value path "$(printf '/tmp/a\nb')"
+    [ "$status" -ne 0 ]
+}
+
+@test "path still accepts a space, which is a legal path character" {
+    # Every consumer quotes this value, so rejecting spaces would only break
+    # operators whose home directory has one.
+    run lib _config_valid_value path '/home/someone/My Documents/proj'
+    [ "$status" -eq 0 ]
+}

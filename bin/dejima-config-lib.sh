@@ -168,6 +168,21 @@ _config_valid_value() {
             return 1
             ;;
         path)
+            # A ":" would split the host:container:mode triple in a docker -v
+            # argument - docker-compose.yml mounts share_dir as
+            # "${SANDBOX_SHARE_DIR}:${HOME}/shared", so an embedded colon
+            # silently mounts a different source at a different target rather
+            # than failing. A newline is refused for the same reason
+            # bin/dejima already refuses one in a workspace path.
+            #
+            # Deliberately nothing else: spaces and other shell-active
+            # characters stay legal, because every consumer quotes this value
+            # and a validator that rejected them would only break operators
+            # whose home directory has a space in it. The list: type splits on
+            # ":" before reaching here, so a colon-separated list is unaffected.
+            case "$value" in
+                *:*|*$'\n'*) return 1 ;;
+            esac
             [[ "$value" == /* || "$value" == "~/"* || "$value" == "~" ]]
             ;;
         list:*)
