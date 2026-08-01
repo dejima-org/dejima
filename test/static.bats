@@ -1194,3 +1194,13 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # path at runtime rather than at build time.
     grep -qE '^\s+openssl \\$' "$SANDBOX_DIR/Dockerfile"
 }
+
+@test "entrypoint fails loudly, with a reason, if openssl cert generation fails" {
+    # set -e already aborts on openssl's nonzero exit before chown/export can
+    # touch a missing cert, so a failure here can't silently proceed or leak
+    # the credential - but redirecting openssl's stderr to /dev/null would
+    # still leave it dying silent-but-loud: nonzero exit, no explanation.
+    grep -q 'if ! openssl_err=\$(openssl req -x509' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'FATAL: openssl failed to generate the TLS terminator cert' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'echo "\$openssl_err" >&2' "$SANDBOX_DIR/entrypoint.sh"
+}

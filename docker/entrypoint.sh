@@ -126,10 +126,24 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         # that traffic in the clear.
         tls_dir=/etc/dejima-anthropic-tls
         mkdir -p "$tls_dir"
-        openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+        # set -e aborts the script on openssl's nonzero exit either way, so a
+        # failure here never proceeds to chown/export a missing cert - but
+        # discarding its stderr would make that abort silent-but-loud (dies,
+        # says nothing why). Captured instead of routed straight to /dev/null
+        # so the one line that explains the failure survives to the FATAL
+        # block below; openssl's success-path chatter is just progress dots.
+        if ! openssl_err=$(openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
             -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \
             -subj "/CN=api.anthropic.com" \
-            -addext "subjectAltName=DNS:api.anthropic.com" 2>/dev/null
+            -addext "subjectAltName=DNS:api.anthropic.com" 2>&1); then
+            echo "FATAL: openssl failed to generate the TLS terminator cert for api.anthropic.com." >&2
+            echo "$openssl_err" >&2
+            echo "Not starting the session - API traffic would have no valid cert to trust." >&2
+            echo "Re-run with SANDBOX_ANTHROPIC_TRANSPORT=loopback, or with" >&2
+            echo "SANDBOX_CREDENTIAL_PROXY=0 to launch without the proxy (the real OAuth" >&2
+            echo "credential is then mounted into the container)." >&2
+            exit 1
+        fi
         chown "$SANDBOX_USER" "$tls_dir/key.pem" "$tls_dir/cert.pem"
         chmod 600 "$tls_dir/key.pem"
         chmod 644 "$tls_dir/cert.pem"
