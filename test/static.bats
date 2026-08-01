@@ -307,11 +307,11 @@ setup() {
     # through Claude Code's own layering. A copy would go stale the moment
     # the host edited the original, and would duplicate every hook it
     # carried across two layers that get merged.
-    #
-    # The operator's settings.json is therefore never read here at all - its
-    # one remaining mention is the pre-create guard below, not a jq input.
-    run grep -c 'HOME/\.claude/settings\.json' "$REPO_ROOT/bin/dejima"
-    [ "$output" = "1" ]
+    grep -qE '^jq -n .* > "\$SANDBOX_SETTINGS_FILE"$' "$REPO_ROOT/bin/dejima"
+    # The operator's settings.json is read only to check that it parses. It
+    # must never become an input to the override layer.
+    run grep -E 'HOME/\.claude/settings\.json.*SANDBOX_SETTINGS_FILE' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ]
 }
 
 @test "the override layer is mounted outside ~/.claude and passed as --settings" {

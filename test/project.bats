@@ -718,6 +718,25 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ ! -f "$LAUNCH_ENV" ]
 }
 
+@test "the launcher refuses to start on a settings.json that isn't valid JSON" {
+    # Claude Code ignores an unparseable settings.json wholesale, with only a
+    # startup warning, so the session would come up with no permissions, no
+    # hooks and no skipDangerousModePermissionPrompt - a bypass-mode warning
+    # and nothing pointing at the settings file. A stray character appended to
+    # the real file is exactly how this turned up.
+    launch_setup
+    printf '{"theme": "dark"}\nx\n' > "$LAUNCH_DIR/home/.claude/settings.json"
+    run launch "$PROJ"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"settings.json is not valid JSON"* ]]
+    [ ! -f "$LAUNCH_ENV" ]
+
+    printf '{"theme": "dark"}\n' > "$LAUNCH_DIR/home/.claude/settings.json"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -f "$LAUNCH_ENV" ]
+}
+
 @test "the launcher runs the derived image only when the project has approved dependencies" {
     launch_setup
     run launch "$PROJ"
