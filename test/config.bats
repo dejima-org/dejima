@@ -294,3 +294,104 @@ write_config() {
     run lib config_get core firewall
     [ "$status" -ne 0 ]
 }
+
+@test "remote_enabled is false until enabled is explicitly on" {
+    PROJECT_LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
+    plib() { bash -c 'source "$1"; shift; "$@"' _ "$PROJECT_LIB" "$@"; }
+    write_config '[core]' 'firewall = on'
+    run plib remote_enabled
+    [ "$status" -ne 0 ]
+    # A base_url alone must NOT open the front doors - the switch is explicit.
+    write_config '[remote-access]' 'base_url = https://dejima.example'
+    run plib remote_enabled
+    [ "$status" -ne 0 ]
+    write_config '[remote-access]' 'enabled = on'
+    run plib remote_enabled
+    [ "$status" -eq 0 ]
+    write_config '[remote-access]' 'enabled = off'
+    run plib remote_enabled
+    [ "$status" -ne 0 ]
+}
+
+@test "ntfy alone is a complete remote-access setup, with no base_url" {
+    # BASE_URL was always optional - ntfy is the only half that has to be
+    # reachable from a phone. Making a URL the switch would have dropped this
+    # supported configuration silently.
+    PROJECT_LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
+    plib() { bash -c 'source "$1"; shift; "$@"' _ "$PROJECT_LIB" "$@"; }
+    write_config '[remote-access]' 'enabled = on' \
+                 'ntfy_url = https://ntfy.example.invalid/dejima'
+    run plib remote_enabled
+    [ "$status" -eq 0 ]
+    run lib config_get remote-access base_url
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "remote_enabled survives a malformed line elsewhere in the config" {
+    # dejima-attach reads no VALUE out of the config, so a typo in an
+    # unrelated section must not take away the terminal an operator would fix
+    # that typo from. Everything that DOES read a value still refuses - the
+    # next test pins that contrast.
+    PROJECT_LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
+    plib() { bash -c 'source "$1"; shift; "$@"' _ "$PROJECT_LIB" "$@"; }
+    write_config '[remote-access]' 'enabled = on' \
+                 '[audit]' 'keep = 0' \
+                 '[core]' 'this is not an assignment'
+    run plib remote_enabled
+    [ "$status" -eq 0 ]
+}
+
+@test "a value read still refuses on the same malformed config" {
+    write_config '[remote-access]' 'enabled = on' '[audit]' 'keep = 0'
+    run lib config_get remote-access ntfy_url
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value"* ]]
+}
+
+@test "an existing remote.conf grants nothing" {
+    PROJECT_LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
+    plib() { bash -c 'source "$1"; shift; "$@"' _ "$PROJECT_LIB" "$@"; }
+    write_config '[core]' 'firewall = on'
+    printf 'BASE_URL=https://old.example\n' > "$CONFIG_DIR/remote.conf"
+    run plib remote_enabled
+    [ "$status" -ne 0 ]
+}
+
+@test "ttyd port and font size come from the config with their old bounds" {
+    PROJECT_LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
+    plib() { bash -c 'source "$1"; shift; "$@"' _ "$PROJECT_LIB" "$@"; }
+    write_config '[remote-access]' 'base_url = https://d.example'
+    run plib remote_ttyd_port
+    [ "$output" = "7681" ]
+    run plib remote_ttyd_font_size
+    [ "$output" = "" ]
+    write_config '[remote-access]' 'base_url = https://d.example' \
+                 'ttyd_port = 9000' 'ttyd_font_size = 20'
+    run plib remote_ttyd_port
+    [ "$output" = "9000" ]
+    run plib remote_ttyd_font_size
+    [ "$output" = "20" ]
+    # The bounds that stopped an unreadable terminal are now schema-enforced.
+    write_config '[remote-access]' 'base_url = https://d.example' 'ttyd_font_size = 200'
+    run plib remote_ttyd_font_size
+    [ "$status" -ne 0 ]
+}
+
+@test "project-lib re-exports config-lib's helpers without redefining them" {
+    # One definition of each, or the two files drift.
+    run grep -c '^valid_domain()' "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$output" = "0" ]
+    run grep -c '^config_root()' "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$output" = "0" ]
+    run grep -c '^valid_domain()' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    [ "$output" = "1" ]
+    run grep -c '^config_root()' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    [ "$output" = "1" ]
+}
+
+@test "no script still calls the retired remote.conf accessors" {
+    run grep -rn 'remote_conf_get\|remote_conf_path\|valid_remote_key\|valid_remote_value' \
+        "$REPO_ROOT/bin" "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ]
+}

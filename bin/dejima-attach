@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 
 if ! remote_enabled; then
-    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "Remote access is not configured (no [remote-access] enabled = on in $(config_path))." >&2
     echo "See README \"Remote access\"." >&2
     exit 1
 fi

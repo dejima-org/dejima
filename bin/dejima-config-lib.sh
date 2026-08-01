@@ -11,8 +11,8 @@
 # config on the same footing as code.
 #
 # Every read validates the WHOLE file, not just the requested key - the same
-# stance remote_conf_get took before this replaced it. A config that does not
-# parse means the operator got something wrong, and the alternative to
+# stance the old remote.conf accessor took before this replaced it. A config
+# that does not parse means the operator got something wrong, and the alternative to
 # refusing is launching a sandbox configured differently from what they
 # believe they configured. A launch performs on the order of thirty reads and
 # so re-parses thirty times; the file is tens of lines, and the cost buys the
@@ -60,6 +60,7 @@ audit.dir	path	~/.local/share/dejima/audit
 audit.baselines_dir	path	~/.local/share/dejima/baselines
 audit.keep	int:1:1000	10
 audit.strict	bool	off
+remote-access.enabled	bool	off
 remote-access.ntfy_url	?url
 remote-access.base_url	?url
 remote-access.ttyd_port	int:1:65535	7681
@@ -113,8 +114,8 @@ config_path() {
 # ---------------------------------------------------------------------------
 # Value validation
 #
-# Deliberately narrow, for the same reason valid_remote_value was: these
-# values reach a dnsmasq server= line, a curl -H header, a docker -v argument
+# Deliberately narrow, for the same reason the old remote.conf validator was:
+# these values reach a dnsmasq server= line, a curl -H header, a docker -v argument
 # and a URL handed to a phone. Anything shell-active, any whitespace, and
 # anything that could split a header must not survive validation.
 # ---------------------------------------------------------------------------
@@ -202,8 +203,8 @@ _config_valid_value() {
             valid_domain "$value"
             ;;
         url)
-            # The same character set valid_remote_value used, plus a required
-            # http(s) scheme. Deliberately narrower than RFC 3986: these values
+            # The same character set the old remote.conf validator used, plus a
+            # required http(s) scheme. Deliberately narrower than RFC 3986: these values
             # reach a curl -H header, an nginx comparison, a firewall
             # allowlist and prose an agent reads, so ";", "&", "$", backticks
             # and parentheses must not survive even though a URL may legally

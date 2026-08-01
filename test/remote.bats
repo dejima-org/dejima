@@ -34,74 +34,25 @@ teardown() {
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
-@test "remote_enabled is false without remote.conf and true with it" {
+# Writes a [remote-access] config with enabled = on and base_url set (so
+# remote_enabled is true) plus whatever extra key = value lines a test needs.
+write_remote_config() {
+    { printf '[remote-access]\n'; printf 'enabled = on\n'; printf 'base_url = https://d.example\n'; printf '%s\n' "$@"; } \
+        > "$CONFIG_DIR/config"
+}
+
+@test "remote_enabled is false until enabled is on, independent of base_url" {
+    printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
     run lib remote_enabled
     [ "$status" -ne 0 ]
-    : > "$CONFIG_DIR/remote.conf"
+    # base_url alone is not the switch - it never was, and consolidation must
+    # not make it one.
+    printf '[remote-access]\nbase_url = https://d.example\n' > "$CONFIG_DIR/config"
+    run lib remote_enabled
+    [ "$status" -ne 0 ]
+    printf '[remote-access]\nenabled = on\n' > "$CONFIG_DIR/config"
     run lib remote_enabled
     [ "$status" -eq 0 ]
-}
-
-@test "remote_conf_get reads values and skips comments and blanks" {
-    cat > "$CONFIG_DIR/remote.conf" <<'EOF'
-# the topic to push to
-NTFY_URL=https://ntfy.example.invalid/dejima
-
-BASE_URL=https://dejima.example.invalid
-EOF
-    run lib remote_conf_get NTFY_URL
-    [ "$status" -eq 0 ]
-    [ "$output" = "https://ntfy.example.invalid/dejima" ]
-    run lib remote_conf_get BASE_URL
-    [ "$output" = "https://dejima.example.invalid" ]
-}
-
-@test "remote_conf_get returns empty for a key the file does not set" {
-    printf 'NTFY_URL=https://ntfy.example.invalid/t\n' > "$CONFIG_DIR/remote.conf"
-    run lib remote_conf_get BASE_URL
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "a malformed remote.conf is refused, not silently ignored" {
-    # An unparseable config is the operator having got something wrong, and
-    # this feature's security properties depend on its values - so every
-    # read validates the whole file, not just the requested key.
-    printf 'NTFY_URL=https://ntfy.example.invalid/t\nthis is not a setting\n' \
-        > "$CONFIG_DIR/remote.conf"
-    run lib remote_conf_get NTFY_URL
-    [ "$status" -ne 0 ]
-
-    printf 'UNKNOWN_KEY=x\n' > "$CONFIG_DIR/remote.conf"
-    run lib remote_conf_get NTFY_URL
-    [ "$status" -ne 0 ]
-}
-
-@test "remote.conf values reject shell-active input" {
-    for bad in 'https://x/$(id)' 'https://x/`id`' 'a;curl evil' 'a b' 'a|b' 'a&b' 'a>b'; do
-        printf 'BASE_URL=%s\n' "$bad" > "$CONFIG_DIR/remote.conf"
-        run lib remote_conf_get BASE_URL
-        [ "$status" -ne 0 ]
-    done
-}
-
-@test "remote_ttyd_port defaults to 7681 and refuses out-of-range values" {
-    : > "$CONFIG_DIR/remote.conf"
-    run lib remote_ttyd_port
-    [ "$status" -eq 0 ]
-    [ "$output" = "7681" ]
-
-    printf 'TTYD_PORT=9999\n' > "$CONFIG_DIR/remote.conf"
-    run lib remote_ttyd_port
-    [ "$output" = "9999" ]
-
-    printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
-    run lib remote_ttyd_port
-    [ "$status" -ne 0 ]
-
-    printf 'TTYD_PORT=0\n' > "$CONFIG_DIR/remote.conf"
-    run lib remote_ttyd_port
-    [ "$status" -ne 0 ]
 }
 
 @test "valid_run_id accepts what bin/dejima generates and nothing else" {
@@ -171,7 +122,7 @@ launch() {
 
 run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
 
-@test "with no remote.conf the compose invocation is unchanged" {
+@test "with remote access unconfigured the compose invocation is unchanged" {
     # The opt-in guarantee, tested rather than asserted: an operator who has
     # not configured this feature must get byte-identical behavior.
     stub_launch
@@ -192,9 +143,9 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
     rm -rf "$PROJ"
 }
 
-@test "with remote.conf a registry entry is written and removed on exit" {
+@test "with remote access configured a registry entry is written and removed on exit" {
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     launch "$PROJ"
     # The EXIT trap removes it, so the directory exists but is empty by now.
     [ -d "$RUNTIME_DIR/dejima/sessions" ]
@@ -205,7 +156,7 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
 
 @test "the mounted marker directory is this run's own, and the registry is never mounted" {
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     launch "$PROJ"
     line="$(run_line)"
 
@@ -231,7 +182,7 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
     # with 1. Both halves are the session's to control, so without the guard a
     # compromised sandbox reports its own status in place of the real one.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 for arg in "$@"; do
@@ -267,7 +218,7 @@ EOF
     # strictly after it, and the container's own exit code (not 1, not the
     # audit's own status) is what bin/dejima reports.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 for arg in "$@"; do
@@ -313,7 +264,7 @@ EOF
     # reports the container's own distinctive exit code (5 - neither 0, nor
     # 1, nor the audit stub's own failure code of 3).
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 for arg in "$@"; do
@@ -342,7 +293,7 @@ EOF
     # guarded by the same || true, so it must not surface as bin/dejima's
     # reported exit code either.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 for arg in "$@"; do
@@ -400,7 +351,7 @@ EOF
 
 @test "a sandbox started outside tmux records an empty pane rather than being skipped" {
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     # The EXIT trap removes the entry, so snapshot it from inside the run:
     # the stub stands in for the container, and runs while it still exists.
     cat > "$LAUNCH_DIR/docker" <<EOF
@@ -424,7 +375,7 @@ EOF
     # entry (e.g. a forged pane=), so a path that can't be represented safely
     # is a hard failure, not silently sanitized.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     bad_proj="$PROJ"/$'line1\nline2'
     mkdir -p "$bad_proj"
     run launch "$bad_proj"
@@ -439,7 +390,7 @@ EOF
     # creates - a planted symlink at the state dir itself must be refused,
     # not followed into wherever it points.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     elsewhere="$(mktemp -d)"
     ln -s "$elsewhere" "$RUNTIME_DIR/dejima"
     run launch "$PROJ"
@@ -537,7 +488,7 @@ EOF
 }
 
 @test "dejima-attach refuses an id that is not a run id" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     for bad in 'nope' '../../etc/passwd' '$(id)' '0123456789abcdef0'; do
         run "$REPO_ROOT/bin/dejima-attach" "$bad"
         [ "$status" -ne 0 ]
@@ -546,20 +497,20 @@ EOF
 }
 
 @test "dejima-attach refuses a well-formed id with no registry entry" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     run "$REPO_ROOT/bin/dejima-attach" 0123456789abcdef
     [ "$status" -ne 0 ]
     [[ "$output" == *"No such session"* ]]
 }
 
-@test "dejima-attach refuses to run at all without remote.conf" {
+@test "dejima-attach refuses to run at all when remote access is unconfigured" {
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -ne 0 ]
     [[ "$output" == *"not configured"* ]]
 }
 
 @test "--list prunes entries whose container is gone" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id ffffffffffffffff
     # Old enough to be past the startup grace - a container that never existed
     # and a container that has not been created yet look identical to `docker
@@ -586,7 +537,7 @@ EOF
     # answer removes the entry for good (bin/dejima never rewrites it), which
     # takes the session out of BOTH front doors, and deletes the marker
     # directory that the imminent `docker compose run` bind-mounts.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id ffffffffffffffff
     write_entry 0123456789abcdef '%1' 'work:2'
     mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
@@ -599,7 +550,7 @@ EOF
 }
 
 @test "--list marks a session started outside tmux as not attachable" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     write_entry 0123456789abcdef '' ''
     run "$REPO_ROOT/bin/dejima-attach" --list
@@ -609,7 +560,7 @@ EOF
 }
 
 @test "--list marks a session whose pane is gone as stale" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     write_entry 0123456789abcdef '%99999' 'work:2'
     run "$REPO_ROOT/bin/dejima-attach" --list
@@ -640,7 +591,7 @@ EOF
     # a session they did not pick with nothing printed to say so. A leading
     # zero is not exotic on the front door this exists for - it is one stray
     # keypress on a phone keyboard.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_sessions
     local i
     for i in $(seq 11); do write_entry "$(printf '%016d' "$i")" '' ''; done
@@ -688,7 +639,7 @@ start_tmux() {
 }
 
 @test "--list shows a live tmux pane as attachable" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
@@ -705,7 +656,7 @@ start_tmux() {
 # script a terminal, which is the condition the colour is gated on. `script`
 # supplies one.
 @test "colour reaches the picker but never --list" {
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
@@ -758,7 +709,7 @@ start_tmux() {
     # lives: an invalid set-option target, or setting destroy-unattached while
     # the session is still detached, both leave the negative tests green while
     # no one can actually attach.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
@@ -795,7 +746,7 @@ start_tmux() {
     # "Couldn't ask" is not "it's gone". bin/dejima stamps the registry only at
     # launch, so pruning here would permanently unregister every running
     # sandbox - and rm -rf the notify dir out from under a live bind mount.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_broken
     write_entry 0123456789abcdef '%1' 'work:2'
     mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
@@ -810,7 +761,7 @@ start_tmux() {
     # started= reaches $(( )), where bash evaluates a non-numeric value as a
     # variable name and runs any command substitution in its subscript - and
     # set -u does not catch it when that name is already bound.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     write_entry 0123456789abcdef '%1' 'work:2'
     canary="$RUNTIME_DIR/PWNED"
@@ -826,7 +777,7 @@ start_tmux() {
     # The unreadable entry sorts first, so a fatal read aborts the loop before
     # the live session below it is ever printed - and the picker's process
     # substitution swallows the status, so sandboxes just silently vanish.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
@@ -854,7 +805,7 @@ EOF
     # line loses the parser's last-match-wins race to the real label= and
     # started= that follow it, but wins outright for a second pane=.
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     TMUX_PANE=$'%1\nstarted=now[$(id)]' run launch "$PROJ"
     [ "$status" -ne 0 ]
     [ -z "$(ls -A "$RUNTIME_DIR/dejima/sessions" 2>/dev/null)" ]
@@ -866,7 +817,7 @@ EOF
     # container must not read as "this isn't the one" for the session being
     # checked. Piping inspect into grep reports only grep's status, and a
     # spurious prune is unrecoverable - bin/dejima stamps at launch only.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
@@ -899,7 +850,7 @@ EOF
     # can chmod its own marker directory on the way out and make the next
     # prune's rm -rf fail. Aborting there would blank the picker - a sandbox
     # must not be able to deny the operator the front door.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     write_entry 0000000000000000 '%1' 'work:1'
     write_entry 0123456789abcdef '%1' 'work:2'
@@ -928,7 +879,7 @@ await_group() {
     # fresh ungrouped session under that name, which for a remote client is a
     # plain host shell with no sandbox in it. The base session must therefore
     # come from the live pane, never from the recorded label.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'nope:0'
@@ -945,7 +896,7 @@ await_group() {
     # base came from the label, renaming the real session and letting anything
     # else take the old name would silently attach the remote client to that
     # unrelated session.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
@@ -964,7 +915,7 @@ await_group() {
     # The 10# that fixes it is also the second line of defence behind the
     # started validation: "10#now[$(cmd)]" fails to lex before the array
     # subscript is ever evaluated.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     write_entry 0123456789abcdef '%1' 'work:2'
     sed -i 's/^started=.*/started=0999999999/' "$RUNTIME_DIR/dejima/sessions/0123456789abcdef"
@@ -994,7 +945,7 @@ EOF
     # Without the guard, an empty session name and window index are handed
     # straight to tmux, which reads them as "no target given" - a new ungrouped
     # session, and the group's current window rather than the sandbox's.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     stub_tmux_lost_pane
@@ -1036,7 +987,7 @@ EOF
     # routinely another client's throwaway, whoever holds a second connection
     # can drive this race, so the created session must be verified to actually
     # hold the sandbox pane rather than assumed to.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     # Stands in for that other client's group: really does hold the pane, and
@@ -1058,7 +1009,7 @@ EOF
     # and the group is created before tmux ever tries to open one. A leaked
     # group never gets destroy-unattached, and every later attach to that run
     # id joins it instead of creating one, so it stays leaked.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
@@ -1072,7 +1023,7 @@ EOF
 @test "attaching to a group that already exists still sets destroy-unattached" {
     # The option is per-session state, not per-client, so a group that ever
     # came into being without it outlives its client on every later attach.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     tmux new-session -d -t '=work' -s 'dejima-0123456789abcdef'
@@ -1099,7 +1050,7 @@ EOF
     # is landing in the right window rather than containment. The session
     # created twenty lines below is verified for exactly this; this one was
     # not.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     tmux new-session -d -s 'dejima-0123456789abcdef' 'sleep 300'
@@ -1119,7 +1070,7 @@ EOF
     # session named dejima-<id><anything> answers to the group's own name -
     # and "is the group already there?" answering yes about someone else's
     # session hands the remote client that session instead of the sandbox.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     stub_docker_run_id 0123456789abcdef
     start_tmux
     tmux new-session -d -s 'dejima-0123456789abcdefx' 'sleep 300'
@@ -1219,7 +1170,7 @@ EOF
 
 @test "notify hooks are registered only in the throwaway settings copy" {
     stub_launch
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     launch "$PROJ"
     grep -q 'dejima-notify.sh waiting' "$LAUNCH_DIR/settings-copy.json"
     grep -q 'dejima-notify.sh done' "$LAUNCH_DIR/settings-copy.json"
@@ -1265,7 +1216,7 @@ curl_log() { cat "$STUB_DIR/curl-argv" 2>/dev/null; }
 # every grep for the secret passes while the secret goes out. Compared whole,
 # an added argument of any kind fails the test.
 #
-# $1 title suffix, $2 body, $3 click URL ("" for a config with no BASE_URL).
+# $1 title suffix, $2 body, $3 click URL.
 expect_argv() {
     printf '%s\n' -fsS --max-time 10 --retry 2 \
         -H "Title: dejima: $1" \
@@ -1287,9 +1238,11 @@ marker() {
 }
 
 conf_with_ntfy() {
-    cat > "$CONFIG_DIR/remote.conf" <<'EOF'
-NTFY_URL=https://ntfy.example.invalid/dejima
-BASE_URL=https://dejima.example.invalid
+    cat > "$CONFIG_DIR/config" <<'EOF'
+[remote-access]
+enabled = on
+ntfy_url = https://ntfy.example.invalid/dejima
+base_url = https://dejima.example.invalid
 EOF
 }
 
@@ -1300,7 +1253,7 @@ EOF
     marker 0123456789abcdef waiting
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
-    # The click URL is BASE_URL from remote.conf plus the DIRECTORY NAME, and
+    # The click URL is base_url from the config plus the DIRECTORY NAME, and
     # the project name comes from the registry's workspace= (host-written by
     # bin/dejima; write_entry sets it to /home/someone/myproject). Nothing
     # here is sourced from the marker.
@@ -1445,14 +1398,14 @@ EOF
     [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
 }
 
-@test "the watcher refuses to start without NTFY_URL" {
-    : > "$CONFIG_DIR/remote.conf"
+@test "the watcher refuses to start without ntfy_url" {
+    write_remote_config
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -ne 0 ]
-    [[ "$output" == *"NTFY_URL"* ]]
+    [[ "$output" == *"ntfy_url"* ]]
 }
 
-@test "the watcher refuses to start at all without remote.conf" {
+@test "the watcher refuses to start at all when remote access is unconfigured" {
     # The opt-in guarantee: with the feature unconfigured nothing here runs,
     # and in particular no state directory is created.
     stub_curl
@@ -1464,30 +1417,28 @@ EOF
 }
 
 @test "a config value curl would read as an option is refused, not passed on" {
-    # valid_remote_value permits a leading '-', which is harmless in a config
-    # file and not harmless in curl's argument list: curl reads "-K/path" as
-    # an OPTION, and -K takes the request's URL (and its output file) from
-    # that path instead - verified against the real curl, which duly connected
-    # to the config file's URL rather than to the one in remote.conf. So a
-    # value that isn't a URL sends the push somewhere the operator never
-    # named. remote.conf is operator-written, which is a reason to refuse a
-    # bad value loudly rather than to assume a good one.
+    # The url schema type requires an http(s) scheme, which "-K/path" is not -
+    # verified against the real curl, which would otherwise read "-K/path" as
+    # an OPTION and take the request's URL (and its output file) from that
+    # path instead. A value that isn't a URL is refused at parse time, before
+    # anything is pushed. The config is operator-written, which is a reason
+    # to refuse a bad value loudly rather than to assume a good one.
     stub_curl
     write_entry 0123456789abcdef '%1' 'work:2'
     marker 0123456789abcdef waiting
-    printf 'NTFY_URL=-K/tmp/dejima-test-curl-config\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ntfy_url = -K/tmp/dejima-test-curl-config'
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -ne 0 ]
-    [[ "$output" == *"NTFY_URL"* ]]
+    [[ "$output" == *"ntfy_url"* ]]
     [ -z "$(curl_log)" ]
 
-    # BASE_URL reaches the phone as the Click: target rather than curl's argv,
+    # base_url reaches the phone as the Click: target rather than curl's argv,
     # but it is the same class of value and the same refusal.
-    printf 'NTFY_URL=https://ntfy.example.invalid/t\nBASE_URL=-o/tmp/dejima-test-out\n' \
-        > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ntfy_url = https://ntfy.example.invalid/t' \
+                         'base_url = -o/tmp/dejima-test-out'
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -ne 0 ]
-    [[ "$output" == *"BASE_URL"* ]]
+    [[ "$output" == *"base_url"* ]]
     [ -z "$(curl_log)" ]
     # Refused before anything was consumed, so a real marker is still there.
     [ -f "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ]
@@ -1579,12 +1530,13 @@ EOF
     rm -rf "$elsewhere"
 }
 
-@test "a push still goes out when BASE_URL is not configured" {
-    # BASE_URL is optional - ntfy alone is a complete setup, and it is the
+@test "a push still goes out when base_url is not configured" {
+    # base_url is optional - ntfy alone is a complete setup, and it is the
     # only half that needs to be reachable from the phone. This pins the
     # otherwise-unexercised branch that composes no Click header at all,
     # including the empty-array expansion it hands to curl under set -u.
-    printf 'NTFY_URL=https://ntfy.example.invalid/dejima\n' > "$CONFIG_DIR/remote.conf"
+    printf '[remote-access]\nenabled = on\nntfy_url = https://ntfy.example.invalid/dejima\n' \
+        > "$CONFIG_DIR/config"
     stub_curl
     write_entry 0123456789abcdef '%1' 'work:2'
     marker 0123456789abcdef waiting
@@ -1678,17 +1630,18 @@ EOF
 }
 
 @test "a debounce window that is not a number is refused" {
-    # It reaches an arithmetic context, and it is the one input to this script
-    # that comes from the unit file's environment rather than from a file.
-    conf_with_ntfy
+    # debounce used to reach an arithmetic context straight from
+    # DEJIMA_DEBOUNCE_SECONDS; it now goes through the schema's int:0:86400
+    # at config parse time instead, before this script ever sees it.
     stub_curl
     write_entry 0123456789abcdef '%1' 'work:2'
     marker 0123456789abcdef waiting
-    # Not the empty string: unset and empty both mean "use the default".
     for bad in 'x[$(touch '"$RUNTIME_DIR"'/PWNED)]' '60s' '-1' '6 0'; do
-        DEJIMA_DEBOUNCE_SECONDS="$bad" run "$REPO_ROOT/bin/dejima-notify-watch" --once
+        write_remote_config 'ntfy_url = https://ntfy.example.invalid/t' "debounce = $bad"
+        run "$REPO_ROOT/bin/dejima-notify-watch" --once
         [ "$status" -ne 0 ]
-        [[ "$output" == *"DEJIMA_DEBOUNCE_SECONDS"* ]]
+        [[ "$output" == *"invalid value"* ]]
+        [[ "$output" == *"debounce"* ]]
     done
     [ ! -e "$RUNTIME_DIR/PWNED" ]
     [ -z "$(curl_log)" ]
@@ -1833,9 +1786,9 @@ unit_exec_start() {
     printf '%s' "${line//%h/$2}"
 }
 
-@test "dejima-ttyd binds ttyd to loopback and takes its port from remote.conf" {
+@test "dejima-ttyd binds ttyd to loopback and takes its port from the config" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
-    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 12345'
     stub_ttyd
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
@@ -1843,7 +1796,7 @@ unit_exec_start() {
 
     # The default is the library's, not a second copy of it in this script.
     : > "$STUB_DIR/ttyd-argv"
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 7681
@@ -1876,8 +1829,8 @@ s = socket.socket()
 s.bind(("127.0.0.1", 0))
 s.listen(1)
 port = s.getsockname()[1]
-with open(os.path.join(config_dir, "remote.conf"), "w") as f:
-    f.write("TTYD_PORT=%d\n" % port)
+with open(os.path.join(config_dir, "config"), "w") as f:
+    f.write("[remote-access]\nenabled = on\nbase_url = https://d.example\nttyd_port = %d\n" % port)
 
 held = subprocess.run([script], capture_output=True, text=True)
 s.close()
@@ -1905,7 +1858,7 @@ PY
     [ "$(ttyd_log | grep -c -- '--interface')" -eq 1 ]
 }
 
-@test "dejima-ttyd refuses to start without remote.conf, before ttyd is reached" {
+@test "dejima-ttyd refuses to start when remote access is unconfigured, before ttyd is reached" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     stub_ttyd
     run "$REPO_ROOT/bin/dejima-ttyd"
@@ -1917,11 +1870,11 @@ PY
 
 @test "dejima-ttyd reports a missing ttyd instead of exec-ing into nothing" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     # A PATH holding only what the script itself needs, so the absence of ttyd
     # is a property of this test rather than of whoever runs it.
     STUB_DIR="$(mktemp -d)"
-    for tool in readlink dirname; do
+    for tool in readlink dirname cat; do
         ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
     done
     run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
@@ -1939,61 +1892,69 @@ PY
     [[ "$output" == *"needs it, 1.7.4 or newer"* ]]
 }
 
-@test "dejima-ttyd reports a broken remote.conf before it reports a missing ttyd" {
+@test "dejima-ttyd reports a broken config before it reports a missing ttyd" {
     # An operator missing both pieces is otherwise sent to install a package,
     # after which they hit the identical failure having never been told that
     # their config is the other half of it. The config error is also the one
     # they cannot work out for themselves.
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
-    printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 99999'
     # The same isolated PATH the missing-ttyd test uses, so the absence is a
     # property of this test rather than of whoever runs it.
     STUB_DIR="$(mktemp -d)"
-    for tool in readlink dirname; do
+    for tool in readlink dirname cat; do
         ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
     done
     run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"TTYD_PORT out of range"* ]]
+    [[ "$output" == *"invalid value"* ]]
+    [[ "$output" == *"ttyd_port"* ]]
     [[ "$output" != *"ttyd is not installed"* ]]
 }
 
-@test "a malformed remote.conf does not take the attach front door down with it" {
-    # dejima-attach reads no VALUE out of remote.conf - to it the file is a
-    # switch, and all it asks is whether it exists - so a bad line cannot
-    # change what it does, and refusing over one would take away the terminal
-    # an operator would fix the file from. The scripts that DO consume a value
-    # refuse, on the same file, which is the contrast the README draws.
-    printf 'GARBAGE LINE WITH NO EQUALS\n' > "$CONFIG_DIR/remote.conf"
+@test "a malformed config takes down the scripts that read a value, not dejima-attach" {
+    # dejima-attach reads no VALUE out of the config - remote_enabled only
+    # asks whether [remote-access] enabled is on, through its own parser
+    # rather than config_get, so a bad line elsewhere cannot take away the
+    # terminal an operator would fix that typo from. Everything that DOES
+    # read a value still goes through config_get, which validates the WHOLE
+    # file, so it still refuses - that contrast is the point of keeping
+    # remote_enabled off config_get.
+    write_remote_config 'this is not an assignment'
     stub_docker_run_id 0123456789abcdef
     write_entry 0123456789abcdef '' ''
     run "$REPO_ROOT/bin/dejima-attach" --list
     [ "$status" -eq 0 ]
     [[ "$output" == *"0123456789abcdef"* ]]
 
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed"* ]]
+
     run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -ne 0 ]
-    [[ "$output" == *"malformed line"* ]]
+    [[ "$output" == *"malformed"* ]]
 }
 
-@test "dejima-ttyd refuses an out-of-range TTYD_PORT rather than launching without one" {
+@test "dejima-ttyd refuses an out-of-range ttyd_port rather than launching without one" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
-    printf 'TTYD_PORT=99999\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 99999'
     stub_ttyd
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     # Named, so this cannot pass because ttyd was missing or the config was.
-    [[ "$output" == *"TTYD_PORT out of range"* ]]
+    [[ "$output" == *"invalid value"* ]]
+    [[ "$output" == *"ttyd_port"* ]]
     [ -z "$(ttyd_log)" ]
 }
 
-@test "TTYD_FONT_SIZE reaches ttyd as an option, and its absence sends none at all" {
+@test "ttyd_font_size reaches ttyd as an option, and its absence sends none at all" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
 
     # Unset first. The point of the default is that no -t is sent, leaving
     # ttyd on whatever its own default is - not that we send a number that
     # currently happens to agree with it.
-    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 12345'
     stub_ttyd
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
@@ -2005,33 +1966,31 @@ PY
     # arrived somewhere" would also pass if it were welded onto another
     # argument, and this is a value from a config file reaching an exec.
     : > "$STUB_DIR/ttyd-argv"
-    printf 'TTYD_PORT=12345\nTTYD_FONT_SIZE=20\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_font_size = 20'
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345 20
 }
 
-@test "dejima-ttyd refuses a TTYD_FONT_SIZE outside its range rather than launching with one" {
+@test "dejima-ttyd refuses a ttyd_font_size outside its range rather than launching with one" {
     # A size large enough to make a single glyph wider than the viewport
     # renders a terminal that displays nothing, which an operator reads as a
     # broken front door rather than as a typo in a file three steps back. Same
-    # treatment TTYD_PORT gets, and for the same reason: refuse at the config,
+    # treatment ttyd_port gets, and for the same reason: refuse at the config,
     # where the message can name the key.
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     local bad
     for bad in 0 7 73 999 abc 1e2 -20; do
         stub_ttyd
         : > "$STUB_DIR/ttyd-argv"
-        printf 'TTYD_PORT=12345\nTTYD_FONT_SIZE=%s\n' "$bad" > "$CONFIG_DIR/remote.conf"
+        write_remote_config 'ttyd_port = 12345' "ttyd_font_size = $bad"
         run "$REPO_ROOT/bin/dejima-ttyd"
-        [ "$status" -ne 0 ] || { echo "accepted TTYD_FONT_SIZE=$bad" >&2; false; }
+        [ "$status" -ne 0 ] || { echo "accepted ttyd_font_size=$bad" >&2; false; }
         # Named, so this cannot pass because ttyd was missing or the port was
-        # bad. "abc"/"1e2"/"-20" are refused a step earlier, by the character
-        # class remote.conf values are held to, so either message is correct -
-        # what must not happen is a launch.
-        [[ "$output" == *"TTYD_FONT_SIZE"* ]] \
-            || { echo "refused TTYD_FONT_SIZE=$bad without naming it: $output" >&2; false; }
-        [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite TTYD_FONT_SIZE=$bad" >&2; false; }
+        # bad - what must not happen is a launch.
+        [[ "$output" == *"ttyd_font_size"* ]] \
+            || { echo "refused ttyd_font_size=$bad without naming it: $output" >&2; false; }
+        [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite ttyd_font_size=$bad" >&2; false; }
     done
 }
 
@@ -2044,7 +2003,7 @@ PY
     # host shell - no operator interaction beyond visiting the page. auth_basic
     # cannot stop that, because it is satisfied by the victim's own browser.
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
-    printf 'TTYD_PORT=12345\n' > "$CONFIG_DIR/remote.conf"
+    write_remote_config 'ttyd_port = 12345'
     stub_ttyd
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
@@ -2204,7 +2163,7 @@ nginx_blocks() {
     [ -f "$ex" ]
     # Taken from the library rather than hardcoded, so the example and the
     # default can never drift apart without this failing.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     run lib remote_ttyd_port
     [ "$status" -eq 0 ]
     port="$output"
@@ -2359,7 +2318,7 @@ nginx_blocks() {
     [ "$status" -ne 0 ]
 
     # Nothing was enabled, and nothing under the runtime dir was created: the
-    # feature stays off until the operator writes remote.conf.
+    # feature stays off until the operator sets [remote-access] enabled = on.
     [ ! -e "$RUNTIME_DIR/dejima" ]
     [ ! -e "$FAKE_HOME/.config/systemd" ]
 
@@ -2372,23 +2331,23 @@ nginx_blocks() {
     # And with one, it may not: re-running the installer after a git pull is
     # exactly what an operator with a front door already up does, and telling
     # them nothing is listening is a false statement about their own machine.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
     [ "$status" -eq 0 ]
     [[ "$output" != *"nothing is listening"* ]]
-    [[ "$output" == *"$CONFIG_DIR/remote.conf"* ]]
+    [[ "$output" == *"$CONFIG_DIR/config"* ]]
 
     # With DEJIMA_CONFIG_DIR unset, which is how every operator runs it: the
     # installer has to look where the library looks. Everything above runs
     # with the variable exported, so the default path is otherwise never
     # exercised and could point anywhere.
     mkdir -p "$FAKE_HOME/.config/dejima"
-    : > "$FAKE_HOME/.config/dejima/remote.conf"
+    printf '[remote-access]\nenabled = on\nbase_url = https://d.example\n' > "$FAKE_HOME/.config/dejima/config"
     run env -u DEJIMA_CONFIG_DIR HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" \
         "$REPO_ROOT/install.sh"
     [ "$status" -eq 0 ]
     [[ "$output" != *"nothing is listening"* ]]
-    [[ "$output" == *"$FAKE_HOME/.config/dejima/remote.conf"* ]]
+    [[ "$output" == *"$FAKE_HOME/.config/dejima/config"* ]]
 }
 
 @test "the systemd units are user units that run the installed scripts and duplicate no configuration" {
@@ -2403,8 +2362,8 @@ nginx_blocks() {
         # NTFY_URL here"), and a grep that could not tell the two apart would
         # force those comments out of the file to stay green.
         # Restarting on failure, not always: these units exist to be given up
-        # on when remote.conf is missing or wrong, which is a clean-ish exit
-        # away from Restart=always.
+        # on when base_url is unset or the config is invalid, which is a
+        # clean-ish exit away from Restart=always.
         grep -q '^Restart=on-failure$' "$f"
         # A WHITELIST of directive names, not a list of banned ones: a denylist
         # only ever catches the directives someone thought of, and these units
@@ -2440,7 +2399,8 @@ nginx_blocks() {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.config/dejima"
     ln -s "$REPO_ROOT/bin/dejima-ttyd" "$FAKE_HOME/.local/bin/dejima-ttyd"
-    printf 'TTYD_PORT=12345\n' > "$FAKE_HOME/.config/dejima/remote.conf"
+    printf '[remote-access]\nenabled = on\nbase_url = https://d.example\nttyd_port = 12345\n' \
+        > "$FAKE_HOME/.config/dejima/config"
     stub_ttyd
 
     local exec_start
@@ -2451,7 +2411,7 @@ nginx_blocks() {
     [ "$status" -eq 0 ]
     # %h resolved to the install destination, the symlink resolved back to
     # this repo (the command below is the repo's dejima-attach, not the
-    # link), and remote.conf was found at the default config path with no
+    # link), and the config was found at the default config path with no
     # DEJIMA_CONFIG_DIR in the environment to point at it.
     assert_ttyd_argv 12345
 }
@@ -2467,7 +2427,7 @@ nginx_blocks() {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.config/dejima"
     ln -s "$REPO_ROOT/bin/dejima-notify-watch" "$FAKE_HOME/.local/bin/dejima-notify-watch"
-    cp "$CONFIG_DIR/remote.conf" "$FAKE_HOME/.config/dejima/remote.conf"
+    cp "$CONFIG_DIR/config" "$FAKE_HOME/.config/dejima/config"
     write_entry 0123456789abcdef '%1' 'work:2'
     marker 0123456789abcdef waiting
 
@@ -2544,17 +2504,18 @@ remote_doc() {
     has -F 'remote.conf'
     has -F '~/.config/dejima/remote.conf'
 
-    # Every key the parser accepts, derived from the parser rather than
-    # listed here: a fourth key added to valid_remote_key without a row in
-    # the table fails this.
+    # Every key the (now retired) remote.conf parser accepted. This list used
+    # to be derived from valid_remote_key(); that function is gone along with
+    # remote.conf itself (see bin/dejima-project-lib.sh), and this doc still
+    # describes the old file - rewriting it to the [remote-access] config
+    # section is docs' job, not this task's. Pinned here rather than derived
+    # so this still catches the doc losing one of them in the meantime.
     local keys key
-    keys="$(sed -n '/^valid_remote_key()/,/^}/p' "$REPO_ROOT/bin/dejima-project-lib.sh" \
-        | grep -oE '\b[A-Z][A-Z_]+\b' | sort -u)"
-    [ -n "$keys" ]
+    keys='NTFY_URL BASE_URL TTYD_PORT TTYD_FONT_SIZE'
     for key in $keys; do has -F "\`$key\`"; done
 
     # The port default, taken from the library so the two cannot drift.
-    : > "$CONFIG_DIR/remote.conf"
+    write_remote_config
     run lib remote_ttyd_port
     [ "$status" -eq 0 ]
     has -F "$output"

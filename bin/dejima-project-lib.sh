@@ -20,13 +20,10 @@
 #   is ever mounted into the container. They are the only things that
 #   actually grant anything.
 
-DEJIMA_MAX_DECLARED=200
+# shellcheck source=dejima-config-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/dejima-config-lib.sh"
 
-# Same expression bin/dejima-allow validates with - a declared
-# domain has to survive being written into a dnsmasq server=/domain/ line.
-valid_domain() {
-    [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
-}
+DEJIMA_MAX_DECLARED=200
 
 # <ecosystem>:<name>. The character class is deliberately narrow: an
 # approved spec gets interpolated into a generated Dockerfile RUN line, so
@@ -66,10 +63,6 @@ read_declared() {
         printf 'truncated %s\n' "$total"
     fi
     return 0
-}
-
-config_root() {
-    printf '%s' "${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}"
 }
 
 # The global store is config_root() itself, not a subdirectory of it - the
@@ -246,29 +239,49 @@ generate_derived_dockerfile() {
 # ---------------------------------------------------------------------------
 # Remote access (opt-in). See docs/remote-access.md.
 #
-# The mere existence of remote.conf is the switch: with it absent, every code
-# path this feature adds is skipped and bin/dejima builds exactly the
-# invocation it built before the feature existed. Same "unset means skipped
-# entirely" shape LOKI_URL already has.
+# The switch used to be the mere existence of remote.conf. It is now a
+# non-empty [remote-access] base_url in the single config file: same
+# "unset means every code path this feature adds is skipped" property, one
+# fewer file. An old remote.conf on disk grants nothing - install.sh reports
+# it as no longer read rather than deleting it.
 # ---------------------------------------------------------------------------
 
-remote_conf_path() {
-    printf '%s/remote.conf' "$(config_root)"
-}
-
+# The switch is an explicit boolean, not a URL. remote.conf's mere existence
+# used to be the switch; consolidation removes that trick, and overloading
+# base_url in its place would have quietly dropped a supported setup - ntfy
+# alone is a complete configuration, with base_url unset, and the old suite
+# pinned it.
+#
+# Deliberately NOT routed through config_get, which validates the whole file
+# on every read. dejima-attach reads no VALUE out of the config - to it remote
+# access is simply on or off - and refusing it over a typo in an unrelated
+# section would take away the terminal an operator would fix that typo from.
+# That exemption was a deliberate, commented property of the old code, and the
+# blast radius only grew with consolidation: one file now holds 29 keys across
+# nine sections instead of remote.conf's four. Everything that consumes an
+# actual value still goes through config_get and still refuses on a malformed
+# file, which is the contrast the README draws.
 remote_enabled() {
-    [ -f "$(remote_conf_path)" ]
-}
-
-valid_remote_key() {
-    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT|TTYD_FONT_SIZE)$ ]]
-}
-
-# Deliberately narrow. These values end up in a curl -H header, an nginx
-# comparison, and a URL handed to a phone - anything shell-active, any
-# whitespace, and anything that could split a header must not survive.
-valid_remote_value() {
-    [[ "$1" =~ ^[A-Za-z0-9:/._~?=%@+-]*$ ]]
+    local line section="" key value="" cur
+    config_exists || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(_config_trim "$line")"
+        case "$line" in
+            ''|'#'*|';'*) continue ;;
+            '['*']')
+                cur="${line#\[}"
+                section="$(_config_trim "${cur%\]}")"
+                continue
+                ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        [ "$section" = "remote-access" ] || continue
+        key="$(_config_trim "${line%%=*}")"
+        [ "$key" = "enabled" ] || continue
+        value="$(_config_trim "${line#*=}")"
+    done < "$(config_path)"
+    [ "$value" = "on" ]
 }
 
 # A run ID as bin/dejima generates it. Shared with dejima-attach and
@@ -282,64 +295,14 @@ remote_state_dir() {
     printf '%s/dejima' "${XDG_RUNTIME_DIR:-/tmp}"
 }
 
-# remote_conf_get <key>
-# Prints the value, or nothing when the file doesn't set it. Validates the
-# WHOLE file on every read, not just the requested key: a remote.conf that
-# doesn't parse means the operator got something wrong, and this feature's
-# security properties depend on its values - so refuse rather than proceed,
-# the same way approved_entries does for the approval store.
-remote_conf_get() {
-    local want="$1" conf line key value found=""
-    valid_remote_key "$want" || { echo "unknown remote.conf key: $want" >&2; return 1; }
-    conf="$(remote_conf_path)"
-    [ -f "$conf" ] || return 0
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        case "$line" in
-            ''|'#'*) continue ;;
-            *=*) ;;
-            *) echo "malformed line in $conf: $line" >&2; return 1 ;;
-        esac
-        key="${line%%=*}"
-        value="${line#*=}"
-        if ! valid_remote_key "$key"; then
-            echo "unknown key in $conf: $key" >&2
-            return 1
-        fi
-        if ! valid_remote_value "$value"; then
-            echo "invalid value for $key in $conf: $value" >&2
-            return 1
-        fi
-        [ "$key" = "$want" ] && found="$value"
-    done < "$conf"
-    printf '%s' "$found"
-}
-
 remote_ttyd_port() {
-    local port
-    port="$(remote_conf_get TTYD_PORT)" || return 1
-    port="${port:-7681}"
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        echo "TTYD_PORT out of range in $(remote_conf_path): $port" >&2
-        return 1
-    fi
-    printf '%s' "$port"
+    config_get remote-access ttyd_port
 }
 
-# Empty when unset, which is the signal to pass no -t at all and leave ttyd on
-# its own default. Bounded rather than merely numeric: this reaches ttyd as
-# argv, and a value large enough to make one glyph wider than the viewport
-# leaves a terminal that can render nothing at all - reported as "the front
-# door is broken", with the cause three files away. 8 is already small on a
-# phone; 72 is already absurd on a desktop.
+# Empty when unset, which is the signal to pass no -t at all and leave ttyd
+# on its own default. The 8-72 bound that kept one glyph from being wider
+# than the viewport is now the schema's "?int:8:72", enforced at parse time
+# for every read rather than only in this accessor.
 remote_ttyd_font_size() {
-    local size
-    size="$(remote_conf_get TTYD_FONT_SIZE)" || return 1
-    [ -n "$size" ] || return 0
-    if [[ ! "$size" =~ ^[0-9]+$ ]] || [ "$size" -lt 8 ] || [ "$size" -gt 72 ]; then
-        echo "TTYD_FONT_SIZE must be 8-72 in $(remote_conf_path): $size" >&2
-        return 1
-    fi
-    printf '%s' "$size"
+    config_get remote-access ttyd_font_size
 }

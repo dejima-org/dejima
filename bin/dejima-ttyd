@@ -1,7 +1,8 @@
 #!/bin/bash
-# Launches ttyd with dejima-attach as its command, reading TTYD_PORT from
-# remote.conf so the port has exactly one source of truth (the systemd unit
-# deliberately does not repeat it). Started by systemd/dejima-ttyd.service.
+# Launches ttyd with dejima-attach as its command, reading ttyd_port from
+# the config's [remote-access] section so the port has exactly one source of
+# truth (the systemd unit deliberately does not repeat it). Started by
+# systemd/dejima-ttyd.service.
 # See docs/remote-access.md.
 #
 # --interface 127.0.0.1 is a security requirement, not a preference.
@@ -42,13 +43,13 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 
 if ! remote_enabled; then
-    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "Remote access is not configured (no [remote-access] enabled = on in $(config_path))." >&2
     echo "See README \"Remote access\"." >&2
     exit 1
 fi
 
 # Read BEFORE the ttyd check below, deliberately: an operator with both a
-# broken remote.conf and no ttyd is otherwise told only about the package,
+# broken config and no ttyd is otherwise told only about the package,
 # installs it, comes back to the identical failure, and never learns that
 # their config is the other half of it. remote_ttyd_port validates the whole
 # file and names the line that broke it, and a failure here is fatal under
