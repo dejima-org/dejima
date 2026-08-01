@@ -9,6 +9,17 @@ setup() {
     LIB="$REPO_ROOT/bin/dejima-config-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
+    # Retired variables may already be exported by whatever launched this
+    # shell (a dejima session itself sets several of these) - clear them so
+    # tests see a hermetic baseline instead of depending on the invoking
+    # environment.
+    unset GITEA_SSH_HOST GITEA_API GITEA_TOKEN_FILE GH_TOKEN_FILE \
+        SANDBOX_CMD SANDBOX_SSH_KEY SANDBOX_SHARE_DIR SANDBOX_EXTRA_MOUNTS \
+        SANDBOX_NVIM_CONFIG SANDBOX_CREDENTIAL_PROXY SANDBOX_ANTHROPIC_TRANSPORT \
+        SANDBOX_LOG_CONVERSATION LOKI_URL ENABLE_FIREWALL SSH_KNOWN_HOSTS \
+        ALLOW_GITHUB_PUSH DEJIMA_AUDIT_DIR DEJIMA_AUDIT_BASELINE_DIR \
+        DEJIMA_AUDIT_KEEP DEJIMA_AUDIT_STRICT DEJIMA_AUDIT_STATUSLINE \
+        DEJIMA_AUDIT_PROJECTS_DIR DEJIMA_DEBOUNCE_SECONDS
 }
 
 teardown() {
@@ -558,4 +569,45 @@ write_config() {
     audit_base="$(printf '%s\n' "$output" | grep '^baselines_dir=' | cut -d= -f2-)"
     [ "$dejima_dir" = "$audit_dir" ]
     [ "$dejima_base" = "$audit_base" ]
+}
+
+@test "a missing config file refuses the launch and names the path" {
+    rm -f "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$CONFIG_DIR/config"* ]]
+    [[ "$output" == *"install.sh"* ]]
+}
+
+@test "a retired variable in the environment is named, with its new home" {
+    write_config '[core]' 'firewall = on'
+    GITEA_SSH_HOST=git.example run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GITEA_SSH_HOST"* ]]
+    [[ "$output" == *"no longer read"* ]]
+    [[ "$output" == *"[forge.gitea] ssh_host"* ]]
+}
+
+@test "the newest retired variable is detected too" {
+    write_config '[core]' 'firewall = on'
+    SANDBOX_ANTHROPIC_TRANSPORT=loopback run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"SANDBOX_ANTHROPIC_TRANSPORT"* ]]
+    [[ "$output" == *"[credentials] transport"* ]]
+    # Named, never honoured.
+    [[ "$output" == *"credentials.transport=tls"* ]]
+}
+
+@test "a clean environment produces no migration noise" {
+    write_config '[core]' 'firewall = on'
+    run env -u GITEA_SSH_HOST -u GITEA_API -u LOKI_URL -u SANDBOX_CMD \
+        "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" != *"no longer read"* ]]
+}
+
+@test "every retired variable in the detector names a real schema key" {
+    while IFS= read -r key; do
+        run lib _config_spec "$key"
+        [ "$status" -eq 0 ] || { echo "detector names unknown key: $key"; return 1; }
+    done < <(grep -oE '\[[a-z.-]+\] [a-z_]+' "$REPO_ROOT/bin/dejima" \
+             | sed 's/^\[//; s/\] /./')
 }

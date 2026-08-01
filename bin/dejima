@@ -77,6 +77,61 @@ config_get() {
     _config_get_from_file "$1" "$2"
 }
 
+# Retired environment variables. Named, never honoured: silently ignoring an
+# exported LOKI_URL means logs stop shipping with nothing saying why, and
+# silently ignoring SANDBOX_ANTHROPIC_TRANSPORT means a session quietly gets
+# a different egress path than the operator configured. Both are the class of
+# surprise this repo spends its warnings on.
+_warn_legacy_env() {
+    local pair name dest shown=0
+    for pair in \
+        "GITEA_SSH_HOST=[forge.gitea] ssh_host" \
+        "GITEA_API=[forge.gitea] api" \
+        "GITEA_TOKEN_FILE=[forge.gitea] token_file" \
+        "GH_TOKEN_FILE=[github] token_file" \
+        "SANDBOX_CMD=[core] command" \
+        "SANDBOX_SSH_KEY=[core] ssh_key" \
+        "SANDBOX_SHARE_DIR=[core] share_dir" \
+        "SANDBOX_EXTRA_MOUNTS=[mounts] readonly" \
+        "SANDBOX_NVIM_CONFIG=[mounts] nvim_config" \
+        "SANDBOX_CREDENTIAL_PROXY=[credentials] proxy" \
+        "SANDBOX_ANTHROPIC_TRANSPORT=[credentials] transport" \
+        "SANDBOX_LOG_CONVERSATION=[logging] conversation" \
+        "LOKI_URL=[logging] loki_url" \
+        "ENABLE_FIREWALL=[core] firewall" \
+        "SSH_KNOWN_HOSTS=[core] known_hosts" \
+        "ALLOW_GITHUB_PUSH=the --allow-github-push flag" \
+        "DEJIMA_AUDIT_DIR=[audit] dir" \
+        "DEJIMA_AUDIT_BASELINE_DIR=[audit] baselines_dir" \
+        "DEJIMA_AUDIT_KEEP=[audit] keep" \
+        "DEJIMA_AUDIT_STRICT=[audit] strict" \
+        "DEJIMA_AUDIT_STATUSLINE=[harness.claude-code] statusline_path" \
+        "DEJIMA_AUDIT_PROJECTS_DIR=[harness.claude-code] projects_dir" \
+        "DEJIMA_DEBOUNCE_SECONDS=[remote-access] debounce" \
+    ; do
+        name="${pair%%=*}"
+        dest="${pair#*=}"
+        [ -n "${!name:-}" ] || continue
+        if [ "$shown" = 0 ]; then
+            echo "" >&2
+            echo "These environment variables are no longer read by dejima:" >&2
+            shown=1
+        fi
+        printf '  %s -> %s\n' "$name" "$dest" >&2
+    done
+    if [ "$shown" = 1 ]; then
+        echo "Set them in $(config_path) instead, then unset them in your shell profile." >&2
+        echo "" >&2
+    fi
+}
+_warn_legacy_env
+
+if ! config_exists; then
+    echo "No dejima config at $(config_path)." >&2
+    echo "Run ./install.sh to generate a starter one, then edit it." >&2
+    exit 1
+fi
+
 # --print-config resolves the whole precedence chain and exits, before any
 # workspace argument is required and before anything is built or mounted.
 # It exists for two reasons: it answers "one config file now - what is
@@ -838,7 +893,7 @@ if [ -n "$pending_crit" ]; then
     printf '%s\n' "$pending_crit" | sed 's#.*/##; s#-CRITICAL\.txt$##; s#^#          from run #' >&2
     echo "          Review with: dejima-audit ack \"$WORKSPACE_DIR\"" >&2
     if [ -t 0 ]; then
-        printf '          [c] continue  [q] quit: ' >&2
+        printf '          [c]ontinue  [q]uit: ' >&2
         read -r reply || reply=q
         case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
     elif [ "$(config_get_bool audit strict)" = "1" ]; then
