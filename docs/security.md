@@ -33,8 +33,8 @@ one can't happen.
   the project mount instead of the config mount. "Only point this at
   trusted repositories" (above) covers input trust; this is about the
   sandbox writing a persistence payload into an otherwise-trusted repo.
-  The workspace's own `.git/hooks` directory is now layered read-only
-  (same pattern as the `~/.claude` overlays below), so planting a hook
+  The workspace's own `.git/hooks` directory is now mounted read-only
+  (same pattern as the `~/.claude` code directories below), so planting a hook
   file directly is closed - accepted breakage: installing hooks
   *in-session* (`husky`, `pre-commit install`) now fails, which is the
   point. `core.hooksPath` and `.claude/settings.local.json` aren't
@@ -85,8 +85,9 @@ one can't happen.
   what you acknowledge is the file that is actually on disk rather than a
   readable approximation of its name.
 - `~/.claude/projects` (session transcripts and per-project memory) is
-  **not** mounted read-only, unlike the other `~/.claude` overlays above -
-  deliberately. Scoping a read-only overlay to "the current project's slug"
+  **not** mounted read-only, unlike the code-carrying `~/.claude`
+  directories - deliberately. Scoping a read-only mount to "the
+  current project's slug"
   would break the sandbox's own worktree workflow: a session running in
   `WORKSPACE/.worktrees/<branch>` writes to a *different* projects slug
   than the parent repo, so a slug-scoped overlay would either block that
@@ -136,10 +137,11 @@ one can't happen.
   `ipset add` is duplicate-safe now, which is the pattern to expect. Each
   of these tests exists because something was got wrong first.
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
-  enters the container. `dejima` starts a host-side proxy
-  (`bin/dejima-anthropic-proxy`) on a per-session unix socket,
-  mounts an empty file over `.credentials.json` (the parent `~/.claude`
-  mount stays read-write, so a single-file mask is the mechanism), and
+  enters the container. It simply isn't mounted: `~/.claude` is not shared
+  as a whole (see the mount inventory below), so there is no path from
+  inside the container to that file, and `entrypoint.sh` gives the session
+  an empty container-local one of its own. `dejima` starts a host-side
+  proxy (`bin/dejima-anthropic-proxy`) on a per-session unix socket and
   hands Claude Code a placeholder token plus an `ANTHROPIC_BASE_URL`
   pointing at a loopback forwarder that pipes into the socket. The proxy
   strips the placeholder, injects the real access token per request, and
@@ -154,56 +156,78 @@ one can't happen.
   and may break if upstream changes it, in which case the proxy fails
   loudly (launch abort, 502s on API calls) rather than silently.
   `SANDBOX_CREDENTIAL_PROXY=0` is the kill switch, restoring the previous
-  behavior - the credential mounted into the container, readable by a
-  compromised session. Setups without a `claudeAiOauth` block (API-key
+  behavior - the credential mounted into the container explicitly, readable
+  by a compromised session. Setups without a `claudeAiOauth` block (API-key
   auth) skip the proxy automatically; there's no stored subscription
   credential to protect.
-- `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
-  `agents/`, and `output-styles/` under `~/.claude` are layered back
-  read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks
-  execute automatically with no separate approval step, skills can ship
-  executable scripts, and commands/agents/output-styles are prompt text
-  loaded into a later host session, so without this a compromised session
-  could plant a backdoored hook - including by unlinking one of
-  `install.sh`'s hook symlinks and dropping a plain file in its place, since
-  the dynamic per-target mounts `dejima` adds at launch only
-  protect symlink targets that resolve *outside* `~/.claude`, never this
-  directory itself - rewrite `CLAUDE.md` with injected instructions, tamper
-  with plugin code, or drop a malicious skill/command/agent/output-style
-  file - something that would then run or load **unsandboxed on the host**
-  the next time Claude Code starts there, turning a single compromised
-  sandbox session into persistent host compromise. `skills/`, `commands/`,
-  `agents/`, and `output-styles/` may not exist yet on a given host, so
-  `dejima` pre-creates them at launch (empty is fine) - a
-  read-only overlay only applies to a directory that already exists, and
-  without pre-creation a compromised session could create the directory
-  itself first, then populate it, before the overlay ever had something to
-  sit on top of. Everything else under `~/.claude` (session/project
-  history, caches) stays read-write, since it's runtime state Claude Code
-  needs to update - this list is a denylist of
-  known code/config surfaces, not an allowlist, so it has to be kept in
-  step with whatever new config surfaces Claude Code adds.
+- `~/.claude` is **not** shared with the container as a whole. Its contents
+  are enumerated in `docker-compose.yml`, in three classes, and anything not
+  listed is container-local: writable during the session and gone with the
+  container.
+  - **Read-write, because it has to survive the session**: `projects/`,
+    `file-history/`, `backups/`, `tasks/`, `plans/`, `sessions/`. All
+    directories, which is what makes them safe (see the detachment note
+    below).
+  - **Read-only**: `plugins/`, `hooks/`, `skills/`, `commands/`, `agents/`,
+    `output-styles/`, plus the symlink-target directories `dejima`
+    discovers at launch. Hooks execute automatically with no separate
+    approval step, skills can ship executable scripts, and
+    commands/agents/output-styles are prompt text loaded into a later host
+    session, so without this a compromised session could plant a backdoored
+    hook - including by unlinking one of `install.sh`'s hook symlinks and
+    dropping a plain file in its place, since the dynamic per-target mounts
+    only protect symlink targets that resolve *outside* `~/.claude`, never
+    this directory itself - tamper with plugin code, or drop a malicious
+    skill/command/agent/output-style file. Any of those would then run or
+    load **unsandboxed on the host** the next time Claude Code starts
+    there, turning a single compromised sandbox session into persistent
+    host compromise. They may not exist yet on a given host, so `dejima`
+    pre-creates them at launch (empty is fine) - Docker can only mount a
+    directory that already exists, and without pre-creation a compromised
+    session could create and populate one itself.
+  - **Copied in, not mounted**: `settings.json`, `CLAUDE.md`, and
+    `statusline.sh` are mounted read-only at `/etc/dejima-claude/` and
+    installed into `~/.claude` by `entrypoint.sh` as root-owned, unwritable
+    files. A session can still unlink and replace them - `~/.claude` belongs
+    to it - but only its own copy, which was the whole point of making them
+    read-only.
+
+  The reason for the split is that a **single-file bind mount silently
+  detaches**. It is pinned to the dentry at its mount point, so when the
+  host replaces the underlying file - the ordinary atomic
+  write-temp-then-`rename`, performed by Claude Code itself or by any sync
+  daemon watching `~/.claude` - that dentry is unlinked and the mount goes
+  away with no error anywhere. `docker inspect` still lists it;
+  `/proc/self/mountinfo` inside the container no longer does. This was
+  found the hard way three times: the generated settings overlay reverting
+  mid-session (#47), every other file overlay carrying the same latent bug
+  (#48), and the mask over `.credentials.json` detaching on the proxy's own
+  first token refresh, exposing the operator's real OAuth access *and*
+  refresh tokens to the sandbox (#50). Directory mounts are immune, because
+  a rename replaces an entry *within* the mounted directory rather than the
+  mount point itself. Enumerating also changes the failure mode: with no
+  read-write parent underneath, a mount that somehow did detach falls
+  through to an empty container-local path rather than to the host's real
+  file. The cost is that anything a future Claude Code version adds under
+  `~/.claude` is container-local until it is listed here - it works during
+  the session but doesn't persist, which is the safer direction to fail.
 - `~/.claude/statusline.sh` (referenced by `settings.json`'s
-  `statusLine.command` and executed on the host) is bind-mounted onto
-  itself read-only by `dejima`, for the same reason as the
-  list above - to stop a compromised session from unlinking it and dropping
-  its own script in its place. **Confirmed against a live container**
-  (`test/runtime.bats`'s statusline.sh tests): this reliably blocks
-  replacement when `statusline.sh` is a plain regular file. It does
-  **not** when `statusline.sh` is a symlink (the common case - typically
-  into a dotfiles checkout): Docker/runc resolves the bind-mount
-  destination through the symlink to its target directory rather than
-  binding to the symlink dentry itself, so the symlink entry stays on the
-  writable `~/.claude` mount, still replaceable. There is no mount-based
-  fix for this (`~/.claude` can't be made read-only - session history has
-  to stay writable). The compensating control is detection, not
-  prevention: `bin/dejima-audit` hashes `statusline.sh` (following
-  a symlink to its target *path string*, so a repointed or replaced
-  symlink is caught even though its own inode doesn't change) and reports
-  it as a host-code-execution finding when the session exits. This is a
-  defense-in-depth gap, not an open one: exploiting it requires a sandbox
-  session that's already compromised, and that compromise is caught on
-  exit either way.
+  `statusLine.command` and executed on the host) is one of the copied-in
+  files above, and the case that shows why copying beats mounting. It used
+  to be bind-mounted read-only onto its own path, which - **confirmed
+  against a live container** - blocked replacement only when
+  `statusline.sh` was a plain regular file. When it was a symlink (the
+  common case, into a config checkout elsewhere), Docker/runc resolved the
+  bind-mount destination through the symlink to its target, so the symlink
+  entry itself stayed on the writable `~/.claude` mount and remained
+  replaceable, and detection was the only compensating control. Staging
+  turns that same symlink resolution into the fix: it happens on the
+  *source* side, so what gets copied in is the real content and the copy
+  has no route back to the host (`test/runtime.bats`'s statusline.sh
+  tests). `bin/dejima-audit` still hashes `statusline.sh` on the host
+  (following a symlink to its target *path string*, so a repointed or
+  replaced symlink is caught even though its own inode doesn't change) and
+  reports a change as a host-code-execution finding when the session exits.
 - `~/.claude.json` mixes that same kind of live state (project registry,
   usage stats, caches) with config (`mcpServers`). Unlike the four above,
   it can't just be layered read-only: Claude Code does an atomic
@@ -213,7 +237,7 @@ one can't happen.
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
   Instead, `dejima` generates a throwaway copy of the file at
   launch (seeded from the real file, same "generate a sandbox-specific
-  file on the host" pattern as the generated `settings.json` copy above)
+  file on the host" pattern as the generated settings override layer)
   and mounts *that* read-write in its place; the copy is discarded,
   unmodified in the real file, when the session ends. A compromised
   session can add whatever it wants to `mcpServers` (or anything else in

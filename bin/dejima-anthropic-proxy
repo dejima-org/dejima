@@ -82,15 +82,20 @@ class Credentials:
     def _write(self, data):
         # Atomic and permission-preserving: host-side Claude Code reads this
         # same file and must never observe a partial write or a looser mode.
-        # Staged in a dedicated subdirectory, not ~/.claude directly - that
-        # directory is bind-mounted read-write into the sandbox container, and
-        # only the single ~/.claude/.credentials.json path is masked from it
-        # (see bin/dejima); a sibling temp file created directly in
-        # ~/.claude would be container-readable for the whole write window.
-        # bin/dejima masks this subdirectory entirely (empty read-only
-        # overlay), and the rename below stays same-filesystem (a subdirectory
-        # of the same parent), so atomicity is unaffected either way - what the
-        # container's own bind mount shows is irrelevant to a host-side rename.
+        # Staged in a dedicated subdirectory rather than ~/.claude directly,
+        # which keeps the plaintext window out of any directory the sandbox
+        # can see, and keeps the rename below same-filesystem (a subdirectory
+        # of the same parent) so atomicity is unaffected.
+        #
+        # This used to lean on bin/dejima masking both paths with bind mounts,
+        # on the reasoning that "what the container's own bind mount shows is
+        # irrelevant to a host-side rename". That was backwards, and it was
+        # #50: the rename is unaffected by the container's mount, but the
+        # container's mount is destroyed by the rename. Replacing the file
+        # unlinks the dentry the mask was pinned to, so the mask detached and
+        # the sandbox saw the real token from the first refresh on. ~/.claude
+        # is no longer bind-mounted as a whole, so neither this directory nor
+        # the credential reaches the container and there is nothing to mask.
         directory = os.path.join(os.path.dirname(self.path) or ".", ".credentials-proxy-tmp")
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory)
