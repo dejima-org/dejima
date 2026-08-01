@@ -329,14 +329,21 @@ SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin dejima ~/repos/some-project
 
 ## Config parity with your host Claude Code setup
 
-`~/.claude` is bind-mounted read-write, so global `CLAUDE.md`, settings,
-hooks, and plugins all carry over automatically, and your existing login
-stays effective too — no separate first-run login, though the credential
-itself doesn't enter the container directly (see
-[security notes](docs/security.md) for the host-side proxy that makes that
-work). (`~/.claude.json` is handled
-differently — a throwaway per-session copy, not the real file; see
-[security notes](docs/security.md) for exactly what that means.)
+Global `CLAUDE.md`, settings, hooks, skills, and plugins all carry over
+automatically, and your existing login stays effective too — no separate
+first-run login, though the credential itself never enters the container
+(see [security notes](docs/security.md) for the host-side proxy that makes
+that work).
+
+`~/.claude` itself is *not* shared as a whole: its contents are enumerated
+in `docker-compose.yml`, config files are copied in rather than mounted,
+and anything not listed is container-local — writable during the session,
+gone with the container. Session transcripts, plans, and the edit-undo
+record are on the list, so `claude --resume` on the host still works; a
+credential, cache, or newly-added config file is not. The
+[security notes](docs/security.md) explain the split and why single-file
+mounts couldn't be trusted here. (`~/.claude.json` is handled differently
+again — a throwaway per-session copy, not the real file.)
 
 The project directory is mounted at the *same absolute path* inside the
 container as on the host, so Claude Code's session-history keying lines up
@@ -435,7 +442,7 @@ if something genuinely needs to break out (broader network, host changes,
 GUI/hardware), stop and ask rather than trying to work around the firewall,
 since the same session can be resumed unrestricted on the host via
 `claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
-(`PreToolUse`) also applies here, since `~/.claude` is shared.
+(`PreToolUse`) also applies here, since `~/.claude/hooks` is mounted in.
 
 `git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
 any `git push` whose resolved remote isn't the Gitea host, and any push to
@@ -774,7 +781,7 @@ obscurely partway through; the file says why each is needed.
 
 `static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
 `ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
-`~/.claude` read-only overlay lines are present, `dejima-allow`
+`~/.claude` mount inventory is exactly what it should be, `dejima-allow`
 rejects a malicious domain argument. `runtime.bats` builds the image, boots
 a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
 env var makes it stop just short of execing `$SANDBOX_CMD`, so the suite can attach

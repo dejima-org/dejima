@@ -379,17 +379,13 @@ dexec_node() {
     rm -rf "$src"
 }
 
-@test "statusline.sh read-only mount blocks replacement when it's a plain regular file" {
-    # Companion to the overlay-dirs test above, but for bin/dejima's
-    # narrower statusline.sh-onto-itself mount (see its comment there) rather
-    # than a whole subdirectory. This test does NOT use bin/dejima or
-    # docker-compose.yml directly - it builds the same mount shape by hand: a
-    # whole ~/.claude directory bind-mounted read-write (docker-compose.yml's
-    # own ~/.claude mount), with statusline.sh itself bind-mounted read-only
-    # back onto its own path on top, source and destination the same literal
-    # path exactly as bin/dejima constructs it (container HOME
-    # matches host HOME - see Dockerfile). This shared container isn't reused
-    # for this (it has no ~/.claude mount at all - see setup_file).
+@test "a staged statusline.sh is copied in root-owned, and replacing it never reaches the host" {
+    # Companion to the overlay-dirs test above, but for the config
+    # bin/dejima stages at /etc/dejima-claude for entrypoint.sh to copy into
+    # ~/.claude (see its comment there) rather than mounting at its real
+    # path. This test does NOT use bin/dejima or docker-compose.yml directly
+    # - it builds the same shape by hand. This shared container isn't reused
+    # for it (it has no staging mount at all - see setup_file).
     local test_container="dejima-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
     local dotclaude; dotclaude="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
@@ -397,9 +393,8 @@ dexec_node() {
     # mktemp -d is mode 700, which only works because the uid running these
     # tests is usually the same one the container's node maps to. Where it
     # isn't - CI runs as root, node is 1000 - node cannot even traverse this
-    # directory, and the read below fails having proved nothing. Writable
-    # rather than merely readable so that the :ro mount stays the only
-    # reason the two writes above it fail.
+    # directory. Writable, so that if the container's copy somehow did lead
+    # back here the write below would succeed and this test would say so.
     chmod 777 "$dotclaude"
 
     docker run -d --name "$test_container" \
@@ -407,61 +402,52 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude:/home/node/.claude" \
-        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
 
-    # A `rm` on a bind-mounted file fails from ordinary mount-point-busy
-    # semantics regardless of the :ro flag, so `rm -f X && echo pwned > X`
-    # alone doesn't prove anything about read-only enforcement - the `&&`
-    # short-circuits before the write it was meant to test ever runs, so
-    # this would pass identically even without `:ro`. The write that
-    # actually depends on the read-only flag is an in-place overwrite that
-    # never unlinks the file first.
+    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    [[ "$output" == *"original"* ]]
+    run docker exec -u node "$test_container" stat -c '%U %a' /home/node/.claude/statusline.sh
+    [[ "$output" == "root 555" ]]
+
+    # An in-place overwrite fails on the mode alone. Unlinking and replacing
+    # it succeeds - ~/.claude belongs to the session - but the copy is the
+    # only thing that changes: nothing on the host is reachable from it.
     run docker exec -u node "$test_container" sh -c \
         'echo pwned > /home/node/.claude/statusline.sh'
     [ "$status" -ne 0 ]
-
     run docker exec -u node "$test_container" sh -c \
-        'truncate -s 0 /home/node/.claude/statusline.sh'
-    [ "$status" -ne 0 ]
+        'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
+    [ "$status" -eq 0 ]
 
-    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
+    run cat "$dotclaude/statusline.sh"
     [[ "$output" == *"original"* ]]
+    [[ "$output" != *"pwned"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$dotclaude"
 }
 
-@test "statusline.sh read-only mount does NOT protect it when it's a symlink (Finding 1 - confirmed gap, see bin/dejima-audit)" {
-    # Same mount shape as the plain-regular-file test above, except
-    # statusline.sh on the host is a symlink into a separately-mounted
-    # directory - the common real setup
-    # (~/.claude/statusline.sh -> ~/dotfiles/statusline.sh). The parent
-    # ~/.claude mount is established first (same order docker-compose.yml
-    # uses), so by the time the more-specific statusline.sh mount below is
-    # processed, the destination path already has that symlink sitting on
-    # it - and bind-mount destination resolution (runc's SecureJoin) follows
-    # symlinks within the rootfs. This CONFIRMS the mount resolves through
-    # the symlink to the target directory (already read-only via the
-    # separate target_dir mount below, mirroring bin/dejima's own
-    # symlink-target scan) instead of binding to the symlink dentry itself -
-    # so the symlink dentry stays a perfectly ordinary, writable entry on
-    # the read-write ~/.claude mount, with no mountpoint-busy protection
-    # either. This test is a characterization test of that CONFIRMED,
-    # known, deliberately-documented limitation (see bin/dejima and
-    # README "Security notes"), not an aspiration: it asserts the
-    # replacement SUCCEEDS. The compensating control is detection, not
-    # prevention - bin/dejima-audit hashes the symlink's target
-    # string and reports a changed/repointed statusline.sh as a
-    # host-code-execution finding after the session exits (see
-    # test/audit.bats). If this test ever starts FAILING, that means
-    # Docker/runc changed destination-symlink resolution and this gap may
-    # have closed - that would be good news worth investigating and acting
-    # on (tightening the comments/audit accordingly), not a regression to
-    # "fix" back to the old behavior.
+@test "staging also protects a symlinked statusline.sh, which the old read-only mount did not (Finding 1)" {
+    # Same shape as the plain-regular-file test above, except statusline.sh
+    # on the host is a symlink into a separate directory - the common real
+    # setup (~/.claude/statusline.sh -> a config checkout elsewhere). That
+    # case used to be a CONFIRMED, documented gap: statusline.sh was mounted
+    # read-only back onto its own path inside a read-write ~/.claude mount,
+    # the parent mount was established first so the destination already had
+    # the symlink sitting on it, and bind-mount destination resolution
+    # (runc's SecureJoin) followed it - the :ro mount landed on the target
+    # and the symlink dentry itself stayed an ordinary writable entry that a
+    # session could unlink and replace. Detection (bin/dejima-audit hashing
+    # the target string) was the only compensating control.
+    #
+    # Staging closes it outright, and for the opposite reason: source-side
+    # symlink resolution is exactly what's wanted, so what lands at
+    # /etc/dejima-claude is the real content, and entrypoint.sh copies it to
+    # a path with no route back to the host at all. This test asserts the
+    # replacement no longer reaches either the symlink or its target.
     local test_container="dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
     local target_dir dotclaude
     target_dir="$(mktemp -d)"
@@ -469,11 +455,9 @@ dexec_node() {
     chmod +x "$target_dir/statusline.sh"
     dotclaude="$(mktemp -d)"
     ln -s "$target_dir/statusline.sh" "$dotclaude/statusline.sh"
-    # Both mode 700 from mktemp -d; see the regular-file test above. This one
-    # asserts the overwrite *succeeds*, so node needs to be able to unlink
-    # and create in $dotclaude and write through the symlink into
-    # $target_dir - otherwise the confirmed gap this documents would look
-    # closed for a reason that has nothing to do with the gap.
+    # Both mode 700 from mktemp -d; see the regular-file test above. Left
+    # writable for the same reason: a write that did get through must be
+    # able to land, or this would pass for reasons unrelated to the gap.
     chmod 777 "$target_dir" "$dotclaude"
 
     docker run -d --name "$test_container" \
@@ -481,9 +465,7 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude:/home/node/.claude" \
-        -v "$target_dir:$target_dir:ro" \
-        -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
@@ -492,8 +474,11 @@ dexec_node() {
         'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
     [ "$status" -eq 0 ]
 
-    run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
-    [[ "$output" == *"pwned"* ]]
+    [ -L "$dotclaude/statusline.sh" ]
+    [ "$(readlink "$dotclaude/statusline.sh")" = "$target_dir/statusline.sh" ]
+    run cat "$target_dir/statusline.sh"
+    [[ "$output" == *"original"* ]]
+    [[ "$output" != *"pwned"* ]]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$target_dir" "$dotclaude"
@@ -667,26 +652,34 @@ EOF
     [ "$env_hits" = "0" ]
 }
 
-@test "credential mask: ~/.claude/.credentials.json in-container is empty, never the real token (the actual bin/dejima mask mechanism)" {
+@test "the real credential never enters the container, and a host-side refresh can't change that (#50)" {
     # Unlike the proxy-chain test above (which hand-builds a docker run to
-    # exercise the proxy's HTTP path), this test reuses the exact masking
-    # mechanism bin/dejima itself uses at launch (see
-    # SANDBOX_CREDENTIALS_MASK_FILE there): a real ~/.claude directory
-    # bind-mounted read-write, with an empty file layered read-write on top
-    # at .credentials.json specifically - the same "more specific mount wins"
-    # trick as the other ~/.claude overlays. This is the check the design
-    # spec asked for: the real credential file's content must never be
-    # visible at that path inside the container.
+    # exercise the proxy's HTTP path), this test reuses the mount shape
+    # bin/dejima itself launches with: ~/.claude is not mounted, only the
+    # enumerated directories inside it are, and .credentials.json is not one
+    # of them. Claude Code still finds a credentials file, because
+    # entrypoint.sh creates an empty container-local one.
+    #
+    # The second half is the regression this test previously lacked, and #50
+    # is what walked through the gap. The old shape mounted ~/.claude
+    # read-write with an empty file layered over .credentials.json, and
+    # asserting only at startup made that look airtight. But a single-file
+    # bind mount is pinned to the dentry at its mount point: the first
+    # host-side atomic replace - which is exactly how the proxy writes a
+    # rotated token back, and how host-side Claude Code writes it too -
+    # unlinked that dentry, the mask silently detached, and the path fell
+    # through to the operator's real, current token. So replace the host
+    # file the way a refresh does, and assert again afterwards.
     TD="$BATS_TEST_TMPDIR"
-    mkdir -p "$TD/dotclaude"
-    cat > "$TD/dotclaude/.credentials.json" <<EOF
+    mkdir -p "$TD/dotclaude/projects" "$TD/dotclaude/plans"
+    write_creds() {
+        cat > "$1" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"real-refresh-token","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    chmod -R 666 "$TD/dotclaude/.credentials.json"
-    chmod 777 "$TD/dotclaude"
-    mask_file="$TD/mask"
-    : > "$mask_file"
-    chmod 666 "$mask_file"
+    }
+    write_creds "$TD/dotclaude/.credentials.json"
+    chmod 666 "$TD/dotclaude/.credentials.json"
+    chmod -R 777 "$TD/dotclaude"
 
     container="dejima-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
@@ -694,21 +687,34 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$TD/dotclaude:/home/node/.claude" \
-        -v "$mask_file:/home/node/.claude/.credentials.json" \
+        -v "$TD/dotclaude/projects:/home/node/.claude/projects" \
+        -v "$TD/dotclaude/plans:/home/node/.claude/plans" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$container"
 
     run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run docker exec -u node "$container" grep -rl real-access-token /home/node/.claude
+    [ "$status" -ne 0 ]
+
+    # A token refresh, as os.replace() performs it: write a sibling temp file
+    # and rename it over the credential.
+    write_creds "$TD/dotclaude/.credentials.json.new"
+    chmod 666 "$TD/dotclaude/.credentials.json.new"
+    mv -f "$TD/dotclaude/.credentials.json.new" "$TD/dotclaude/.credentials.json"
+
+    run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
     status_creds=$status; output_creds=$output
+    run docker exec -u node "$container" grep -rl real-access-token /home/node/.claude
+    status_grep=$status
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
     [ "$status_creds" -eq 0 ]
     [ -z "$output_creds" ]
-    [[ "$output_creds" != *"real-access-token"* ]]
-    [[ "$output_creds" != *"real-refresh-token"* ]]
+    [ "$status_grep" -ne 0 ]
 }
 
 @test "mid-session allowed domains get ongoing ipset tracking, not a one-time snapshot" {

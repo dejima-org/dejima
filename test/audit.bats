@@ -228,14 +228,16 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *"statusline.sh"* ]]
 }
 
-@test "flags the confirmed exploit: a symlink statusline.sh swapped for a regular file" {
-    # This is the CONFIRMED Finding-1 gap: bin/dejima's read-only
-    # mount onto ~/.claude/statusline.sh does not reliably survive when
-    # statusline.sh is a symlink (the common case, e.g. into a dotfiles
-    # checkout) - runc resolves the bind-mount destination through the
-    # symlink, leaving the symlink dentry itself on the writable ~/.claude
-    # mount and still replaceable (confirmed against a live container - see
-    # test/runtime.bats). Detection here is the compensating control.
+@test "flags the once-confirmed exploit: a symlink statusline.sh swapped for a regular file" {
+    # This was the CONFIRMED Finding-1 gap: statusline.sh was mounted
+    # read-only onto its own path inside a read-write ~/.claude mount, and
+    # runc resolved the bind-mount destination through the symlink (the
+    # common case, e.g. into a config checkout elsewhere), leaving the
+    # symlink dentry itself writable and replaceable. Staging the file for
+    # entrypoint.sh to copy in closed it (see test/runtime.bats), so
+    # detection is no longer the only control - but a session reaching the
+    # host statusline by some other route is exactly what an exit-time audit
+    # is for, so this stays.
     local target_dir; target_dir="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$target_dir/statusline.sh"
     ln -s "$target_dir/statusline.sh" "$DEJIMA_AUDIT_STATUSLINE"
