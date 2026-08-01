@@ -185,22 +185,26 @@ one can't happen.
   which is the single thing this whole mechanism exists to prevent.
   Certificate pinning breaks how Claude Code is *addressed*; it has no
   bearing on whether the credential can be kept on the host. Work down this
-  ladder instead - every rung keeps the credential out of the container, and
-  only the "looks like an ordinary session" property degrades. First,
-  `SANDBOX_ANTHROPIC_TRANSPORT=loopback`: a plaintext loopback forwarder and
-  an explicit `ANTHROPIC_BASE_URL=http://127.0.0.1:18300`, the topology this
-  sandbox used before the TLS terminator existed, so pinning cannot apply at
-  all. It costs the base-URL fingerprint, two attribution fields in the
-  `x-anthropic-billing-header`, and `/remote-control`. Second, if even that
-  fails, `ANTHROPIC_UNIX_SOCKET` pointed at the bind-mounted socket together
-  with `ANTHROPIC_BASE_URL=http://api.anthropic.com`: plaintext HTTP
-  straight over the socket, bypassing TLS entirely while keeping the
-  first-party base-URL check truthy. It costs more in appearance than rung
-  one - it classifies the session as host-orchestrated and emits its own
-  analytics event - which is why it isn't the default. Only if both fail,
-  and knowing what it gives up, `SANDBOX_CREDENTIAL_PROXY=0`. The first two
-  rungs are supported, tested modes, not improvised workarounds; if you
-  reach the third, treat it as a temporary state rather than a new baseline.
+  ladder instead - the first two rungs keep the credential out of the
+  container, and only the "looks like an ordinary session" property degrades.
+  First, `SANDBOX_ANTHROPIC_TRANSPORT=loopback`: a plaintext loopback
+  forwarder and an explicit `ANTHROPIC_BASE_URL=http://127.0.0.1:18300`, the
+  topology this sandbox used before the TLS terminator existed, so pinning
+  cannot apply at all. It costs the base-URL fingerprint, two attribution
+  fields in the `x-anthropic-billing-header`, and `/remote-control`. Second,
+  if even that fails, `ANTHROPIC_UNIX_SOCKET` pointed at the bind-mounted
+  socket together with `ANTHROPIC_BASE_URL=http://api.anthropic.com`:
+  plaintext HTTP straight over the socket, bypassing TLS entirely while
+  keeping the first-party base-URL check truthy. That rung is a direction,
+  not a switch: nothing in this repo implements or tests it, both variables
+  have to be passed through `docker-compose.yml` by hand, and it depends on
+  Claude Code's own support for `ANTHROPIC_UNIX_SOCKET`. It also costs more in
+  appearance than rung one: it classifies the session as host-orchestrated
+  and emits its own analytics event. Only if both fail, and knowing what it
+  gives up, `SANDBOX_CREDENTIAL_PROXY=0` - the one rung that surrenders the
+  real credential into the container. Rung one is a supported, tested mode,
+  not an improvised workaround; if you reach the third, treat it as a
+  temporary state rather than a new baseline.
 - `settings.json`, `CLAUDE.md`, `plugins/`, `hooks/`, `skills/`, `commands/`,
   `agents/`, and `output-styles/` under `~/.claude` are layered back
   read-only on top of the (otherwise read-write) `~/.claude` mount. Hooks

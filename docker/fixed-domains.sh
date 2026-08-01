@@ -1,10 +1,5 @@
 # Sourced by both init-firewall.sh (IP-based ipset allowlist) and
 # dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
-# api.anthropic.com is deliberately absent from the fixed list: allowlisting
-# it would help a session bypass the credential proxy when the proxy is on.
-# entrypoint.sh adds it to the runtime allowlist only when the proxy is off
-# (kill switch or API-key auth), preserving the proxy's guarantee that DNS
-# lookup of this name fails when a proxy is supposed to be the only path.
 FIXED_DOMAINS=(
     "registry.npmjs.org"
     "platform.claude.com"
@@ -15,6 +10,19 @@ FIXED_DOMAINS=(
     "proxy.golang.org"
     "sum.golang.org"
 )
+
+# api.anthropic.com is allowlisted only when this session has no credential
+# proxy (kill switch or API-key auth), where DNS is the only path to the API.
+# With the proxy on, entrypoint.sh pins the name to loopback in /etc/hosts, and
+# leaving it unresolvable defeats a bypass of that pin which looks the name up
+# by DNS. It is not a route block: the API's address stays reachable as an IP
+# literal for as long as platform.claude.com above resolves to the same one.
+# Appended here rather than to EXTRA_ALLOWED_DOMAINS because it is a public
+# SaaS name: dns-proxy.sh exempts the extra list from stop-dns-rebind, and
+# init-firewall.sh downgrades a failed lookup there to a warning.
+if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
+    FIXED_DOMAINS+=("api.anthropic.com")
+fi
 
 # GitHub itself is allowlisted by IP range (see github-domains ipset,
 # populated from api.github.com/meta), never by resolving these names to

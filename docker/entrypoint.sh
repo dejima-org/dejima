@@ -17,15 +17,6 @@ fi
 
 extra_domains="${GITEA_SSH_HOST:-} ${gitea_api_host} ${loki_host} ${ALLOWED_DOMAINS:-}"
 
-# api.anthropic.com is not in fixed-domains.sh - allowlisting it would help a
-# session bypass the credential proxy when the proxy is on. But when it is off
-# (kill switch or API-key auth), DNS is the only path to the API and it must
-# be allowlisted for those modes to keep working. Add it to the runtime
-# allowlist only when there is no proxy socket.
-if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
-    extra_domains="${extra_domains} api.anthropic.com"
-fi
-
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     # dns-proxy.sh must run first: it repoints /etc/resolv.conf at a local
     # dnsmasq that only resolves allowlisted names, so init-firewall.sh's own
@@ -123,6 +114,22 @@ fi
 # that has to keep working.
 SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
 export SANDBOX_ANTHROPIC_TRANSPORT
+# Checked here rather than in bin/dejima because every launch reaches this
+# script, including a bare `docker run` (see test/runtime.bats). The two halves
+# branch on opposite polarity - bin/dejima treats anything but `loopback` as
+# tls, this script and the forwarder treat anything but `tls` as loopback - so
+# a typo would configure them for different transports and fail every API call
+# with nothing pointing back at the cause.
+case "$SANDBOX_ANTHROPIC_TRANSPORT" in
+    tls|loopback) ;;
+    *)
+        echo "FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to '$SANDBOX_ANTHROPIC_TRANSPORT'." >&2
+        echo "The only valid values are 'tls' (the default) and 'loopback'; they are" >&2
+        echo "case-sensitive. Not starting the session - the host and container halves" >&2
+        echo "of the credential proxy would disagree about which transport is in use." >&2
+        exit 1
+        ;;
+esac
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     forwarder_port=18300
     if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "tls" ]; then
@@ -159,8 +166,8 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         export SANDBOX_ANTHROPIC_TLS_CERT="$tls_dir/cert.pem"
         export SANDBOX_ANTHROPIC_TLS_KEY="$tls_dir/key.pem"
         # /etc/hosts wins over DNS in getaddrinfo, so this bypasses the DNS
-        # proxy entirely - which is why fixed-domains.sh no longer needs to
-        # allowlist the name at all.
+        # proxy entirely - which is why fixed-domains.sh leaves the name off
+        # the allowlist whenever there is a proxy socket.
         echo "127.0.0.1 api.anthropic.com" >> /etc/hosts
         # The trust anchor for the cert above. NODE_EXTRA_CA_CERTS rather than
         # the system store: it needs no update-ca-certificates run, and it is

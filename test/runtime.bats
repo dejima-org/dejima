@@ -284,12 +284,12 @@ dexec_node() {
 }
 
 @test "api.anthropic.com resolves in proxy-off mode (kill switch / API-key auth)" {
-    # api.anthropic.com is not in the fixed allowlist - allowlisting it there
-    # would help a session bypass the credential proxy when the proxy is on.
-    # But when the proxy is off (kill switch or API-key auth), DNS is the only
-    # path to the API and entrypoint.sh allowlists it. This file's shared
-    # container runs with no SANDBOX_ANTHROPIC_PROXY_SOCKET, so it is in
-    # proxy-off mode and the name must resolve.
+    # api.anthropic.com is left off the allowlist when the credential proxy is
+    # on, so a bypass of the /etc/hosts pin that resolves the name by DNS gets
+    # no address. When the proxy is off (kill switch or API-key auth), DNS is
+    # the only path to the API and fixed-domains.sh allowlists it. This file's
+    # shared container runs with no SANDBOX_ANTHROPIC_PROXY_SOCKET, so it is
+    # in proxy-off mode and the name must resolve.
     run dexec dig +short api.anthropic.com
     [ -n "$output" ]
 }
@@ -993,9 +993,10 @@ EOF
     hosts_hits=$output
     # /etc/hosts resolves the name locally, but that only wins inside
     # getaddrinfo - the DNS proxy itself must still refuse it, same as any
-    # other name that isn't on the allowlist (see the DNS-proxy test above).
-    # Anything that resolves api.anthropic.com by DNS instead of /etc/hosts
-    # (a bypass of the /etc/hosts pin) has no route to the real API at all.
+    # other name that isn't on the allowlist (see the DNS-proxy test above),
+    # so a bypass of the pin that looks the name up by DNS gets no address.
+    # It is not a route check: the API's address stays reachable as an IP
+    # literal for as long as allowlisted platform.claude.com resolves to it.
     run docker exec "$container" dig api.anthropic.com
     dig_output=$output
 
@@ -1035,4 +1036,33 @@ EOF
     docker rm -f "$container" >/dev/null 2>&1 || true
 
     [ "$hosts_hits" = "0" ]
+}
+
+@test "an unrecognised transport aborts the container instead of half-configuring it" {
+    # `Loopback` is not `loopback`: bin/dejima would take its tls branch while
+    # this container took its loopback one, and every API call in the session
+    # would fail with nothing naming the cause.
+    container="dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    # Without the check the entrypoint runs on into SANDBOX_TEST_MODE's `sleep
+    # infinity` and never exits - the timeout turns that regression into a
+    # failure here rather than a hung suite.
+    run timeout 120 docker wait "$container"
+    exit_code=$output
+    logs=$(docker logs "$container" 2>&1)
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+
+    [ "$exit_code" = "1" ]
+    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]]
+    [[ "$logs" == *"'tls'"* ]]
+    [[ "$logs" == *"'loopback'"* ]]
 }

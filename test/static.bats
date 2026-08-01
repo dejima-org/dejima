@@ -1245,15 +1245,42 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
 }
 
-@test "api.anthropic.com is not in the fixed domains but allowlisted when the proxy is off" {
-    # api.anthropic.com is not in the fixed allowlist - allowlisting it there
-    # would help a session bypass the credential proxy when the proxy is on.
-    # But when the proxy is off (kill switch or API-key auth), DNS is the only
-    # path to the API and it must be allowlisted. entrypoint.sh adds it to the
-    # runtime allowlist when SANDBOX_ANTHROPIC_PROXY_SOCKET is empty,
-    # preserving the guarantee that DNS lookup fails when the proxy is supposed
-    # to be the only path.
-    ! grep -q '"api.anthropic.com"' "$SANDBOX_DIR/fixed-domains.sh"
-    grep -q 'if \[ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+@test "api.anthropic.com is in the fixed domains only when the proxy is off" {
+    # Not unconditionally allowlisted: with the proxy on, entrypoint.sh pins
+    # the name in /etc/hosts and leaving it unresolvable defeats a bypass of
+    # that pin which looks the name up by DNS. When the proxy is off (kill
+    # switch or API-key auth) DNS is the only path to the API, so it has to be
+    # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
+    # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
+    # non-fatal when it fails to resolve.
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    ! grep -qx 'api.anthropic.com' <<< "$output"
+
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    grep -qx 'api.anthropic.com' <<< "$output"
+
+    # Unset (a bare `docker run` that passes no socket) must behave like empty.
+    run bash -c "unset SANDBOX_ANTHROPIC_PROXY_SOCKET; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    grep -qx 'api.anthropic.com' <<< "$output"
+
+    # ...and entrypoint.sh no longer adds it to the extra list, which would
+    # reinstate both of the exemptions above.
+    ! grep -q 'extra_domains.*api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "an unrecognised SANDBOX_ANTHROPIC_TRANSPORT is rejected, not silently treated as loopback" {
+    # bin/dejima branches on `loopback`, entrypoint.sh and the forwarder on
+    # `tls` - so a typo configures the two halves for different transports and
+    # every API call fails with nothing naming the cause.
+    grep -q 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q "The only valid values are 'tls' (the default) and 'loopback'" "$SANDBOX_DIR/entrypoint.sh"
+    # Ahead of the proxy-socket guard, so it catches the typo whatever else
+    # this session is configured for.
+    local check guard
+    check=$(grep -n 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ "$check" -lt "$guard" ]
 }
