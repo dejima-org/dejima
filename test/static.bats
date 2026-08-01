@@ -1204,3 +1204,18 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q 'FATAL: openssl failed to generate the TLS terminator cert' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'echo "\$openssl_err" >&2' "$SANDBOX_DIR/entrypoint.sh"
 }
+
+@test "compose passes the transport through and lets an unprivileged process bind :443" {
+    grep -qE '^\s*SANDBOX_ANTHROPIC_TRANSPORT:\s*\$\{SANDBOX_ANTHROPIC_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    # Docker already defaults this to 0, but the terminator runs as the
+    # unprivileged sandbox user: pinning it means a future default change
+    # fails at launch instead of silently breaking the credential path.
+    grep -qE '^\s*net\.ipv4\.ip_unprivileged_port_start:\s*0\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "compose does not pin api.anthropic.com to loopback unconditionally" {
+    # That belongs in entrypoint.sh, inside the proxy guard - see the
+    # entrypoint test above for why an unconditional entry breaks the
+    # SANDBOX_CREDENTIAL_PROXY=0 path.
+    ! grep -q 'extra_hosts' "$SANDBOX_DIR/docker-compose.yml"
+}
