@@ -496,6 +496,46 @@ write_config() {
     rm -rf "$store"
 }
 
+@test "a flag overrides the config file" {
+    write_config '[core]' 'firewall = on' 'command = claude'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"core.firewall=on"* ]]
+    run "$REPO_ROOT/bin/dejima" --no-firewall --print-config
+    [[ "$output" == *"core.firewall=off"* ]]
+    run "$REPO_ROOT/bin/dejima" --cmd nvim --print-config
+    [[ "$output" == *"core.command=nvim"* ]]
+}
+
+@test "a flag value is validated against the same schema type" {
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --cmd 'rm -rf /' --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value"* ]]
+}
+
+@test "an unknown flag is refused rather than treated as a path" {
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --nonesuch --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown option"* ]]
+}
+
+@test "a flag requiring a value refuses to consume the next flag as one" {
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --cmd --no-firewall --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--cmd"* ]]
+}
+
+@test "flags stop at -- so container arguments pass through untouched" {
+    write_config '[core]' 'firewall = on'
+    # A double dash means everything after it belongs to the container
+    # command, including something that looks like one of our own flags.
+    run "$REPO_ROOT/bin/dejima" --print-config -- --cmd nvim
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"core.command=nvim"* ]]
+}
+
 @test "bin/dejima and dejima-audit agree on the default audit directory even with XDG_DATA_HOME set" {
     write_config '[core]' 'firewall = on'
     run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima" --print-config

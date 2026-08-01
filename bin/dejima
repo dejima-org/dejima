@@ -20,12 +20,63 @@ COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 
+# Flags come before the optional workspace path and stop at "--", so
+# everything after that reaches the container command untouched - including a
+# token that looks like one of our own flags. Each flag's value is validated
+# against the same schema type its config key uses, so `--cmd 'rm -rf /'`
+# fails here for the same reason it would fail in the file.
+FLAG_OVERRIDES=()
+_set_override() {
+    local key="$1" value="$2" type
+    type="$(config_type "$key")" || { echo "unknown config key: $key" >&2; exit 1; }
+    if ! _config_valid_value "$type" "$value"; then
+        echo "invalid value for --${key##*.}: $value" >&2
+        exit 1
+    fi
+    FLAG_OVERRIDES+=("$key=$value")
+}
+_need_value() {
+    [ -n "${2:-}" ] && [ "${2:0:2}" != "--" ] || {
+        echo "$1 requires a value" >&2
+        exit 1
+    }
+}
+
+PRINT_CONFIG=0
+ALLOW_GITHUB_PUSH_FLAG=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --) shift; break ;;
+        --print-config)      PRINT_CONFIG=1; shift ;;
+        --no-firewall)       _set_override core.firewall off; shift ;;
+        --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
+        --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
+        --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
+        --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
+        --*) echo "unknown option: $1" >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+
+# Wraps config_get so a flag wins over the file for the rest of this run.
+# Defined here rather than in the library because an override is a property
+# of one invocation of this launcher, not of the config file.
+config_get() {
+    local key="$1.$2" entry
+    for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
+        [ "${entry%%=*}" = "$key" ] || continue
+        printf '%s' "${entry#*=}"
+        return 0
+    done
+    _config_get_from_file "$1" "$2"
+}
+
 # --print-config resolves the whole precedence chain and exits, before any
 # workspace argument is required and before anything is built or mounted.
 # It exists for two reasons: it answers "one config file now - what is
 # actually in effect?", and it is what makes the flag-beats-config chain
 # testable without booting Docker.
-if [ "${1:-}" = "--print-config" ]; then
+if [ "$PRINT_CONFIG" = 1 ]; then
     config_validate || exit 1
     while IFS= read -r _key; do
         _section="${_key%.*}"
@@ -322,7 +373,13 @@ export GITEA_SSH_HOST="$(config_get forge.gitea ssh_host)"
 export GITEA_API="$(config_get forge.gitea api)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
-export ALLOW_GITHUB_PUSH="${ALLOW_GITHUB_PUSH:-0}"
+# --allow-github-push is a per-launch convenience over setting the
+# environment variable directly - it wins when passed, same as any other flag.
+if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+    export ALLOW_GITHUB_PUSH=1
+else
+    export ALLOW_GITHUB_PUSH="${ALLOW_GITHUB_PUSH:-0}"
+fi
 export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')}"
 
 # core.command permits a leading "-" (it is validated as a generic identifier,

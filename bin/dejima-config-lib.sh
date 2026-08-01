@@ -334,7 +334,7 @@ _config_expand() {
 # means no key, while omitting the line entirely means the default. Tracking
 # that with a separate flag rather than testing the value for emptiness is
 # what keeps `share_dir =` from silently becoming the default path.
-config_get() {
+_config_get_from_file() {
     local section="$1" want="$2" conf line cur="" key value type
     local found="" seen=0
     if ! type="$(config_type "$section.$want")"; then
@@ -364,6 +364,11 @@ config_get() {
     [ "$seen" = 1 ] || found="$(config_default "$section.$want")"
     _config_expand "$type" "$found"
 }
+
+# Thin wrapper so other callers are unaffected - bin/dejima redefines
+# config_get itself, after sourcing this file, to consult per-launch flag
+# overrides first and fall back to _config_get_from_file.
+config_get() { _config_get_from_file "$@"; }
 
 config_get_bool() {
     local value
