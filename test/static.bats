@@ -173,6 +173,34 @@ setup() {
     grep -q 'mktemp -d.*gitconfig' "$REPO_ROOT/bin/dejima"
 }
 
+@test "every name cleanup() dereferences is bound by the time the EXIT trap can fire" {
+    # bin/dejima runs under `set -u`, and a failing command in an EXIT trap
+    # replaces the shell's exit status - so an unbound name in cleanup()
+    # aborts the trap partway, before it reaches the audit that is
+    # deliberately its last act. Structural, not behavioral: the window
+    # between `trap cleanup EXIT` and a later assignment holds only comments
+    # today, so nothing can currently exit inside it (a failed `VAR="$(...)"`
+    # still binds VAR to the empty string before set -e fires). This guards
+    # the invariant against the edit that puts something exitable there.
+    #
+    # A name is satisfied by EITHER a first assignment above the trap OR a
+    # `${NAME:-}` form somewhere in cleanup() - the latter covers the bare
+    # uses that sit inside their own `[ -n "${NAME:-}" ]` guard.
+    d="$REPO_ROOT/bin/dejima"
+    trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    [ -n "$trap_line" ]
+    body="$(sed -n '/^cleanup() {/,/^}/p' "$d")"
+    [ -n "$body" ]
+    for v in $(printf '%s\n' "$body" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' \
+                   | tr -d '${}' | sort -u); do
+        printf '%s\n' "$body" | grep -q "\${$v:-" && continue
+        asg="$(grep -nE "^[[:space:]]*(export )?$v=" "$d" | head -1 | cut -d: -f1)"
+        [ -n "$asg" ] || { echo "cleanup() uses \$$v, never assigned at all"; false; }
+        [ "$asg" -lt "$trap_line" ] \
+            || { echo "cleanup() uses \$$v unguarded, first assigned at line $asg, after the trap at $trap_line"; false; }
+    done
+}
+
 @test "docker-compose.yml never hardcodes /home/node - the container home is host-parametrized" {
     # ${HOME:-/home/node} (the SANDBOX_HOME build arg's own default value,
     # mirroring the Dockerfile's default) is the one legitimate exception -

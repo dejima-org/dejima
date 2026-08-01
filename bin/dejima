@@ -58,16 +58,30 @@ fi
 # warning below.
 AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
 BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
-for store in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR"; do
+# The three stores fail in three different ways once they are reachable, and
+# an operator who sees this needs to know which one they are looking at - so
+# each states its own consequence rather than sharing one text. Consequence
+# lines are hand-wrapped by the caller and printed one per argument.
+warn_if_inside_workspace() {
+    local what="$1" store="$2"; shift 2
     case "$store/" in
-        "$WORKSPACE_DIR"/*)
-            echo "Warning: the approval store ($store) is inside the mounted" >&2
-            echo "workspace this session - both the global approvals and every" >&2
-            echo "project's under it are writable from inside the sandbox, so they" >&2
-            echo "are no longer out of reach. Review them after this session." >&2
-            ;;
+        "$WORKSPACE_DIR"/*) ;;
+        *) return 0 ;;
     esac
-done
+    echo "Warning: the $what ($store) is inside the mounted" >&2
+    echo "workspace this session, writable from inside the sandbox:" >&2
+    printf '  %s\n' "$@" >&2
+    echo "Review it after this session." >&2
+}
+warn_if_inside_workspace "approval store" "$(config_root)" \
+    "the global approvals and every project's under it can be edited," \
+    "so a session can approve its own domains and dependencies."
+warn_if_inside_workspace "audit report store" "$AUDIT_DIR" \
+    "a session can delete the exit-time reports of earlier runs," \
+    "including unacknowledged CRITICAL ones it is named in."
+warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
+    "a session can write its own acknowledgements, suppressing the" \
+    "findings it would otherwise produce here from every later report."
 
 SANDBOX_SSH_KEY="${SANDBOX_SSH_KEY:-}"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
@@ -220,11 +234,18 @@ cleanup() {
     # inside it (e.g. an unwritable subdirectory) and make its `rm -rf`
     # fail, same hazard and same guard as the marker-directory removal
     # further down.
+    #
+    # SANDBOX_GITCONFIG_DIR additionally carries a `:-` default because it is
+    # the one name here first assigned BELOW `trap cleanup EXIT` rather than
+    # above it. Nothing in that window can exit today (it holds only
+    # comments, and a failed `VAR="$(mktemp -d)"` still binds VAR to the
+    # empty string before set -e fires), so this is the invariant every other
+    # name here already keeps, not a live fix - see the static test.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
-    rm -rf "$SANDBOX_GITCONFIG_DIR" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
@@ -673,7 +694,7 @@ export SANDBOX_IMAGE
 # host-side and stays host-side: it must never be routed into the session's
 # context, which would make it a cross-session persistence channel.
 audit_slug="$(printf '%s' "$WORKSPACE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
-audit_reports="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}/$audit_slug"
+audit_reports="$AUDIT_DIR/$audit_slug"
 # `|| true`: a workspace with no history yet (the common case - nothing has
 # ever run against it, or every past finding is already acknowledged) has no
 # audit_reports directory at all, and find on a missing path exits nonzero -

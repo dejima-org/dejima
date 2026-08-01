@@ -73,6 +73,17 @@ one can't happen.
   session, another host process, or you editing the same files by hand
   during the run all land in the same diff and get reported identically -
   the tool has no way to tell them apart.
+- Report findings name a path or config key that a session may itself have
+  chosen, so those names reach your terminal as untrusted text. One that
+  contains an ASCII control character, a C1 control, or a Unicode bidi
+  override - which between them can scroll, blank, or visually reorder what
+  you read, and can split a name across the audit's own records - is
+  written hex-encoded behind a `{hex}` marker instead, and decodes with
+  `printf '%b' "$(sed 's/../\\x&/g' <<< HEX)"`. Ordinary names are printed
+  as-is, so the marker appearing at all is itself worth a second look.
+  The encoded form is what `dejima-audit ack` records in the baseline, so
+  what you acknowledge is the file that is actually on disk rather than a
+  readable approximation of its name.
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted read-only, unlike the other `~/.claude` overlays above -
   deliberately. Scoping a read-only overlay to "the current project's slug"

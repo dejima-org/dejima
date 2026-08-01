@@ -46,6 +46,28 @@ AUDIT_KEEP="${DEJIMA_AUDIT_KEEP:-10}"
 
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
+# The one report both `show` and `ack` operate on: the OLDEST unacknowledged
+# CRITICAL report if there is one, else the newest report overall.
+#
+# Oldest-CRITICAL-first, rather than a plain `sort | tail -1` over every
+# *.txt, because that always prefers the newer file - so a stale
+# *-CRITICAL.txt sitting behind a newer clean report would be unreachable
+# through `ack` entirely, while bin/dejima's startup warning kept firing on
+# it forever with no remedy but to press past it. That is the alert fatigue
+# this feature exists to end, so it must not be reachable by this route.
+#
+# Shared by both verbs so they cannot disagree: an operator following that
+# startup warning may well reach for `show` first, and showing them a
+# different report than the one being warned about sends them looking for a
+# finding that is not in it.
+select_report() {
+    local dir="$1" r
+    r="$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
+    [ -n "$r" ] || r="$(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+    [ -n "$r" ] || return 1
+    printf '%s\n' "$r"
+}
+
 BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
 
 # Two acknowledgement forms, deliberately distinct:
@@ -56,9 +78,15 @@ BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/
 #                       for CRITICAL, so approving a hook today does not
 #                       approve a different hook tomorrow.
 baseline_suppresses() {
-    local id="$1" sha="$2" bf verb rest bid bsha
+    local id="$1" sha="$2" bf verb rest bid bsha eid
     bf="$BASELINE_DIR/$(ws_slug "$ws")"
     [ -f "$bf" ] || return 1
+    # Callers pass the RAW id; the baseline file stores the encoded form (see
+    # enc_id). Encoded once here, outside the loop - it does not vary per
+    # line, and this runs for every finding. For an ordinary id the encoding
+    # is the identity, so baseline files written before this existed keep
+    # matching unchanged.
+    eid="$(enc_id "$id")"
     while read -r verb rest; do
         case "$verb" in ''|'#'*) continue ;; esac
         # An id may itself contain spaces (e.g. "file 2.md"), so it can't be
@@ -77,7 +105,7 @@ baseline_suppresses() {
                   esac ;;
             *)    continue ;;              # unknown verb
         esac
-        [ "$bid" = "$id" ] || continue
+        [ "$bid" = "$eid" ] || continue
         case "$verb" in
             # `ack` refusing to write `spam` for a CRITICAL surface is
             # convenience; this is the actual boundary - it holds even
@@ -154,6 +182,81 @@ sanitize() {
         | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g'
 }
 
+# sanitize() is lossy, so it must never be what an ID passes through.
+#
+# `ack` derives the baseline id it records from the report's text, and the
+# next `compare` matches that id against the RAW bytes on disk. An id
+# containing anything sanitize() strips therefore could not round-trip at
+# all: the surface stayed permanently unsuppressible and its report
+# permanently unclearable, so bin/dejima's startup warning fired forever -
+# the alert fatigue this whole feature exists to end, reached from the other
+# side. Ids are encoded instead, and the encoded form is canonical
+# everywhere it is written down: in the report AND in the baseline file.
+#
+# An id that survives sanitize() unchanged is already display-safe and is
+# written verbatim - that is every ordinary id, so reports and existing
+# baseline files are byte-for-byte what they were. Anything else is
+# hex-encoded behind a marker, which is ASCII by construction and reverses
+# exactly.
+#
+# An id that merely LOOKS encoded is encoded too, so that decoding stays
+# unambiguous: the marker's presence always means this encoder put it there.
+# Without that, a workspace could present an id that `ack` decoded into one
+# of the attacker's choosing - baselining something other than the finding
+# while still counting it acknowledged, the same shape as the id-derivation
+# hijacks the anchored case arms in `ack` guard against. Only the START of
+# an id is significant, and no monitored path can begin with the marker
+# (they are all rooted at .claude/.vscode/.git/.envrc/.mcp.json), but a git
+# config section name is free text in a file the session can write and the
+# audit parses that file directly rather than through git.
+#
+# The encoded form is also the honest rendering. sanitize() DELETES those
+# bytes, so a planted ".git/hooks/pre<U+202E>commit" displayed as
+# "precommit" sends an operator grepping for a name no file on disk has.
+HEX_MARK='{hex}'
+enc_id() {
+    local v="$1"
+    # Fast path, and the only one an ordinary id ever takes: decide with
+    # pattern matching alone, no subprocesses. hash_paths() calls this once
+    # per monitored file on both the snapshot and the compare side, so the
+    # exact check below - a subshell plus tr plus sed - is far too expensive
+    # to run unconditionally (a bare `git init` alone ships ~14 sample
+    # hooks).
+    #
+    # `local LC_ALL=C` puts bash's own matching into byte semantics for the
+    # duration, so [[:cntrl:]] is exactly C0+DEL. Any C1 or bidi character
+    # must contain the UTF-8 lead byte \302 or \342 respectively, so testing
+    # for those catches every one. The test is deliberately conservative
+    # rather than exact - ordinary text carrying one of those lead bytes (an
+    # em dash, say) falls through to the exact check and is then found
+    # clean and printed verbatim, which costs a little time and changes
+    # nothing.
+    local LC_ALL=C
+    case "$v" in
+        "$HEX_MARK"*) ;;
+        *[[:cntrl:]]*|*$'\302'*|*$'\342'*) ;;
+        *) printf '%s' "$v"; return ;;
+    esac
+    if [ "$(sanitize "$v")" = "$v" ]; then
+        case "$v" in "$HEX_MARK"*) ;; *) printf '%s' "$v"; return ;; esac
+    fi
+    printf '%s%s' "$HEX_MARK" "$(printf '%s' "$v" | od -An -tx1 | tr -d ' \n')"
+}
+# Inverse of enc_id. Built with parameter expansion and one printf rather
+# than a pipeline, so no command substitution inside can eat a trailing
+# byte. printf '%b' consumes the escapes left to right in a single pass,
+# which is what makes "\\x41" decode to a literal backslash followed by x41
+# instead of to "A".
+dec_id() {
+    local h="$1" esc=""
+    case "$h" in
+        "$HEX_MARK"*) h="${h#"$HEX_MARK"}" ;;
+        *) printf '%s' "$h"; return ;;
+    esac
+    while [ -n "$h" ]; do esc="$esc\\x${h:0:2}"; h="${h:2}"; done
+    printf '%b' "$esc"
+}
+
 # Undo git's config-file quoting of a value (git wraps values containing
 # special chars in "..." and backslash-escapes embedded \ and ") so exec
 # detection sees the real value instead of a quoted literal.
@@ -186,16 +289,25 @@ hash_value() {
 }
 
 hash_paths() {
-    # path<TAB>sha for each existing monitored path, sorted by path
+    # encoded-path<TAB>sha for each existing monitored path, sorted by path.
+    #
+    # Encoded (see enc_id) rather than raw, because this record is itself
+    # TAB-delimited and line-based: a filename containing a TAB would
+    # otherwise be silently truncated at it by the `cut -f1` that reads this
+    # back, and reported under a name no file on disk has - unackable for
+    # exactly the reason enc_id exists, and CRITICAL if the truncation still
+    # lands under .git/hooks/. TAB and newline are both in the set enc_id
+    # encodes, so an encoded path can never contain either. Ordinary paths
+    # encode to themselves, so this record is unchanged for them.
     local ws="$1" p
     {
         for p in .mcp.json .envrc; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
         done
         for dir in .claude .vscode .git/hooks; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
-                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                    printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
         done
@@ -203,19 +315,20 @@ hash_paths() {
 }
 
 tcb_snapshot() {
-    # path<TAB>sha for the sandbox's own trusted computing base, but only
-    # when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
+    # encoded-path<TAB>sha for the sandbox's own trusted computing base, but
+    # only when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
     # Empty otherwise, so a normal (non-self) workspace is unaffected.
+    # Encoded for the same reason as hash_paths above.
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
         for p in install.sh; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
         done
         for dir in bin hooks docker test; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
-                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                    printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
         done
@@ -348,20 +461,26 @@ case "$cmd" in
         while IFS= read -r line; do
             key="${line%%=*}"
             key_nopfx="${key#worktree:}"
+            # The key is the id-bearing half and is encoded; the value is
+            # display-only and is sanitized. Splitting them keeps a value
+            # full of control bytes from dragging its key into the opaque
+            # hex form, where the operator could no longer read which
+            # setting had changed.
+            body="$(enc_id "$key")=$(sanitize "${line#*=}")"
             if is_exec_key "$key_nopfx"; then
                 gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                 baseline_suppresses "$gid" "$gsha" && continue
-                crit+=("COMMAND-EXECUTION git config: $(sanitize "$line")")
+                crit+=("COMMAND-EXECUTION git config: $body")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
                     '!'*) gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                           baseline_suppresses "$gid" "$gsha" && continue
-                          crit+=("COMMAND-EXECUTION git alias: $(sanitize "$line")") ;;
-                    *)    warn+=("changed git config: $(sanitize "$line")") ;;
+                          crit+=("COMMAND-EXECUTION git alias: $body") ;;
+                    *)    warn+=("changed git config: $body") ;;
                 esac
             else
-                warn+=("changed git config: $(sanitize "$line")")
+                warn+=("changed git config: $body")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
@@ -370,18 +489,23 @@ case "$cmd" in
         # change emits both an old-hash and new-hash line; dedupe by path
         # so each changed path is reported once)
         while IFS= read -r line; do
+            # $line arrives encoded (see hash_paths). Everything that has to
+            # reach the real file, classify it, or match a baseline entry
+            # needs the raw name; only the report body keeps the encoded
+            # form, which is what enc_id would produce for it anyway.
+            rline="$(dec_id "$line")"
             cur_sha=""
-            [ -e "$ws/$line" ] && cur_sha="$(hash_entry "$ws/$line")"
-            baseline_suppresses "$line" "$cur_sha" && continue
-            case "$(path_severity "$line")" in
-                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(sanitize "$line")") ;;
-                WARNING)  warn+=("changed workspace file: $(sanitize "$line")") ;;
+            [ -e "$ws/$rline" ] && cur_sha="$(hash_entry "$ws/$rline")"
+            baseline_suppresses "$rline" "$cur_sha" && continue
+            case "$(path_severity "$rline")" in
+                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
+                WARNING)  warn+=("changed workspace file: $line") ;;
                 # Currently unreachable: hash_paths() only monitors
                 # .mcp.json/.envrc/.claude/.vscode/.git/hooks, and every path
                 # under those matches an earlier CRITICAL/WARNING pattern in
                 # path_severity(). Kept as the defensive default for
                 # surfaces monitored by a future task.
-                *)        info+=("changed workspace file: $(sanitize "$line")") ;;
+                *)        info+=("changed workspace file: $line") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
@@ -406,9 +530,11 @@ case "$cmd" in
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         while IFS= read -r line; do
-            tid="tcb:$line"; tsha=""; [ -e "$ws/$line" ] && tsha="$(hash_entry "$ws/$line")"
+            # Encoded on arrival, same as the path loop above.
+            rline="$(dec_id "$line")"
+            tid="tcb:$rline"; tsha=""; [ -e "$ws/$rline" ] && tsha="$(hash_entry "$ws/$rline")"
             baseline_suppresses "$tid" "$tsha" && continue
-            crit+=("TCB (sandbox self) modified: $(sanitize "$line")")
+            crit+=("TCB (sandbox self) modified: $line")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -421,7 +547,7 @@ case "$cmd" in
         while IFS= read -r line; do
             sid="statusline:$line"; ssha=""; [ -e "$STATUSLINE_PATH" ] && ssha="$(hash_entry "$STATUSLINE_PATH")"
             baseline_suppresses "$sid" "$ssha" && continue
-            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(sanitize "$line")")
+            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(enc_id "$line")")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -497,26 +623,21 @@ case "$cmd" in
         ;;
     show)
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
-        newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
-        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
-        cat "$newest"
+        report="$(select_report "$report_dir")" \
+            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        # Which report, on stderr so stdout stays the report content alone:
+        # `show` no longer necessarily prints the newest one, and an operator
+        # cross-referencing the run timestamps in the startup warning needs to
+        # know which of them they are looking at.
+        echo "dejima audit: $report" >&2
+        cat "$report"
         exit 0
         ;;
     ack)
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
-        # Oldest unacknowledged CRITICAL report first, not the newest report
-        # overall: a stale *-CRITICAL.txt sitting behind a newer clean
-        # report would otherwise never be reachable through `ack` at all (a
-        # plain `sort | tail -1` over every *.txt always prefers the newer
-        # one) - the startup warning in bin/dejima would keep firing on it
-        # forever with no way to clear it except pressing on past it, the
-        # exact failure this whole feature exists to stop. Still variable-
-        # named `newest` below for the rest of this case arm even when it
-        # isn't - renaming would ripple through every reference to it.
-        newest="$(find "$report_dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
-        [ -n "$newest" ] || newest="$(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
-        [ -n "$newest" ] || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        report="$(select_report "$report_dir")" \
+            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
 
         # Accumulate in memory and write once at the end: an ack interrupted
         # partway (q/Esc/EOF/Ctrl-C) must not leave a CRITICAL surface
@@ -530,7 +651,7 @@ case "$cmd" in
         # (or a non-path CRITICAL, which can never be "approved" - see
         # ackable below) must keep its suffix and stay eviction-protected.
         crit_seen=0; crit_acked=0
-        # The loop below reads report lines on its own stdin (`< "$newest"`),
+        # The loop below reads report lines on its own stdin (`< "$report"`),
         # so operator keystrokes are read from fd 3 - a copy of the script's
         # original stdin taken before that redirection - rather than
         # /dev/tty (which has nothing to open under piped test input; a
@@ -581,18 +702,32 @@ case "$cmd" in
             # which would truncate the derived id to everything after that
             # planted separator - the case match being anchored doesn't
             # protect the extraction that follows it.
-            ackable=0; id=""
+            #
+            # Two forms come out of this, because the two consumers need
+            # different ones (see enc_id): $id is the ENCODED id exactly as
+            # the report carries it, and is what gets written to the
+            # baseline file, which stores that form. $rid is the same id
+            # decoded back to the raw bytes on disk, for current_sha_for_id
+            # to stat and hash and for id_severity to classify. Only the
+            # id-bearing portion is decoded - never the namespace prefix
+            # this code adds itself.
+            ackable=0; id=""; rid=""
             case "$body" in
                 "HOST-CODE-EXECUTION workspace file: "*)
-                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }" ;;
+                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }"
+                    rid="$(dec_id "$id")" ;;
                 "changed workspace file: "*)
-                    ackable=1; id="${body#changed workspace file: }" ;;
+                    ackable=1; id="${body#changed workspace file: }"
+                    rid="$(dec_id "$id")" ;;
                 "COMMAND-EXECUTION git config: "*|"COMMAND-EXECUTION git alias: "*)
-                    ackable=1; cfgline="${body#*: }"; id="gitconfig:${cfgline%%=*}" ;;
+                    ackable=1; cfgline="${body#*: }"; ekey="${cfgline%%=*}"
+                    id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
                 "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "*)
-                    ackable=1; id="statusline:${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }" ;;
+                    ackable=1; esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
+                    id="statusline:$esl"; rid="statusline:$(dec_id "$esl")" ;;
                 "TCB (sandbox self) modified: "*)
-                    ackable=1; id="tcb:${body#TCB (sandbox self) modified: }" ;;
+                    ackable=1; etcb="${body#TCB (sandbox self) modified: }"
+                    id="tcb:$etcb"; rid="tcb:$(dec_id "$etcb")" ;;
                 *) ackable=0 ;;
             esac
             # Defence in depth: even an anchored arm above should never
@@ -600,6 +735,7 @@ case "$cmd" in
             # crit_acked (and thus whether a report can shed -CRITICAL.txt)
             # must only ever advance when a real, non-empty id was derived.
             [ -n "$id" ] || ackable=0
+            [ -n "$rid" ] || ackable=0
             echo ""
             echo "  [$tier] $body"
             if [ "$ackable" -ne 1 ]; then
@@ -625,7 +761,7 @@ case "$cmd" in
                     if [ "$ackable" -ne 1 ]; then
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
                     else
-                        sha="$(current_sha_for_id "$id")"
+                        sha="$(current_sha_for_id "$rid")"
                         if [ -z "$sha" ]; then
                             # Nothing left to pin the approval to: current_sha_for_id
                             # returning empty means $id no longer exists (deleted
@@ -647,7 +783,7 @@ case "$cmd" in
                     ;;
                 *) ;;
             esac
-        done < "$newest"
+        done < "$report"
 
         if [ "$aborted" -eq 1 ] || [ "${#pending[@]}" -eq 0 ]; then
             echo ""; echo "dejima audit: nothing recorded."
@@ -659,8 +795,8 @@ case "$cmd" in
         # rotation) when every CRITICAL finding this report carried was
         # actually approved - not just when something was approved.
         if [ "$crit_seen" -gt 0 ] && [ "$crit_acked" -eq "$crit_seen" ]; then
-            case "$newest" in
-                *-CRITICAL.txt) mv "$newest" "${newest%-CRITICAL.txt}.txt" ;;
+            case "$report" in
+                *-CRITICAL.txt) mv "$report" "${report%-CRITICAL.txt}.txt" ;;
             esac
         fi
         echo ""; echo "dejima audit: recorded ${#pending[@]} acknowledgement(s) in $bf"
