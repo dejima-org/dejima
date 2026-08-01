@@ -68,6 +68,99 @@ teardown() {
     [[ "$beta" == *"oauth-2025-04-20"* ]]
 }
 
+@test "the client's header block reaches upstream with its own casing and order" {
+    # The container half of this sandbox exists to make the session look like
+    # a stock install. If the proxy rewrote the request into CPython's house
+    # style on its way out, that fingerprint would simply move from the client
+    # to the wire, where the API sees it instead. Sent in a deliberately
+    # un-CPython shape: mixed casing, and a header after the one the proxy has
+    # to rewrite, so a rewrite that reorders shows up here.
+    start_proxy
+    run pcurl -H "Content-Type: application/json" -H "Anthropic-Version: 2023-06-01" \
+        -H "X-Stainless-Lang: js" -d '{}' http://proxy/v1/messages
+    [ "$status" -eq 0 ]
+    names="$(jq -r '.header_lines[][0]' <<<"$output")"
+    grep -qx 'Content-Type' <<<"$names"
+    grep -qx 'Anthropic-Version' <<<"$names"
+    grep -qx 'X-Stainless-Lang' <<<"$names"
+    # Position, not just presence: Authorization keeps the slot curl gave it,
+    # ahead of the three above, rather than being appended after them.
+    auth_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("authorization")' <<<"$output")"
+    type_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("content-type")' <<<"$output")"
+    [ "$auth_at" -lt "$type_at" ]
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+}
+
+@test "no Accept-Encoding is invented for a client that sent none" {
+    # http.client's putrequest() adds `Accept-Encoding: identity` whenever the
+    # caller passed none - a CPython tell that no browser or Node client
+    # sends. curl sends no accept-encoding unless asked, so upstream must see
+    # none at all.
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase | select(. == "accept-encoding")] | length' <<<"$output")" = "0" ]
+    # ...and a client that does send one keeps its own value, unaltered.
+    run pcurl -H "Accept-Encoding: gzip, deflate" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers["accept-encoding"]' <<<"$output")" = "gzip, deflate" ]
+}
+
+@test "repeated headers survive as repeats instead of collapsing to the last" {
+    # Rebuilding the block through a dict silently keeps only the last value.
+    start_proxy
+    run pcurl -H "X-Dup: one" -H "X-Dup: two" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[] | select(.[0] | ascii_downcase == "x-dup") | .[1]] | join("|")' <<<"$output")" = "one|two" ]
+}
+
+@test "the injected token is sent once even when the client repeats its placeholder" {
+    # The replacement is per-header-name, not per-occurrence: a duplicated
+    # Authorization must not become two copies of the real token.
+    start_proxy
+    run curl -s --unix-socket "$SOCK" -H "Authorization: Bearer $PLACEHOLDER" \
+        -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '[.header_lines[] | select(.[0] | ascii_downcase == "authorization")] | length' <<<"$output")" = "1" ]
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
+    [[ "$output" != *"$PLACEHOLDER"* ]]
+}
+
+@test "an anthropic-beta that already carries the OAuth value is forwarded untouched" {
+    # Re-joining a list that needs no change would normalize the client's
+    # spacing - the same class of tell as the casing. This is the common case
+    # in the tls transport, where Claude Code sends the header itself.
+    start_proxy
+    run pcurl -H "anthropic-beta: oauth-2025-04-20, context-1m-2025-08-07" \
+        -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers["anthropic-beta"]' <<<"$output")" = "oauth-2025-04-20, context-1m-2025-08-07" ]
+}
+
+@test "a bodyless request gains no Content-Length the client never sent" {
+    start_proxy
+    run pcurl http://proxy/v1/models
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase | select(. == "content-length")] | length' <<<"$output")" = "0" ]
+}
+
+@test "a chunked request is de-framed into a Content-Length upstream" {
+    # The proxy has to buffer to inject the token, so chunked framing cannot
+    # survive - but the length it declares must match what it forwards, and
+    # the hop-by-hop Transfer-Encoding must not travel with it.
+    start_proxy
+    run curl -s --unix-socket "$SOCK" -H "Transfer-Encoding: chunked" \
+        -H "Authorization: Bearer $PLACEHOLDER" \
+        -d '{"hello":1}' http://proxy/v1/messages
+    [ "$(jq -r '.body' <<<"$output")" = '{"hello":1}' ]
+    [ "$(jq -r '.headers["content-length"]' <<<"$output")" = "11" ]
+    [ "$(jq -r '.headers["transfer-encoding"] // "absent"' <<<"$output")" = "absent" ]
+}
+
+@test "Host is rewritten for the upstream, in place" {
+    # It must name the upstream, not the socket the container reached - but it
+    # is replaced where the client put it rather than dropped and re-added,
+    # which is what keeps the rest of the block in order.
+    start_proxy
+    run pcurl -d '{}' http://proxy/v1/messages
+    [ "$(jq -r '.headers.host' <<<"$output")" = "127.0.0.1:$PORT" ]
+    [ "$(jq -r '[.header_lines[][0] | ascii_downcase] | index("host")' <<<"$output")" = "0" ]
+}
+
 @test "passes upstream status and body through unchanged" {
     start_proxy
     run bash -c 'curl -s -o "$1/body" -w "%{http_code}" --unix-socket "$2" http://proxy/status-503' _ "$TD" "$SOCK"

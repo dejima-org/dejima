@@ -154,8 +154,17 @@ one can't happen.
   - rotated tokens are written back to the real host file atomically, so
   host-side sessions stay logged in. Claude Code itself is configured
   exactly as it would be on the host: no `ANTHROPIC_BASE_URL`, no
-  `ANTHROPIC_AUTH_TOKEN`, nothing that marks the session as unusual either
-  to the client or to Anthropic. What remains is session-scoped: a
+  `ANTHROPIC_AUTH_TOKEN`, nothing that marks the session as unusual to the
+  client. The proxy then forwards the client's header block verbatim -
+  same names, same casing, same order, repeats intact, and no
+  `Accept-Encoding` it didn't send - changing only the `Authorization`
+  value, and `anthropic-beta` if the OAuth value isn't already there. Left
+  to itself, Python's `http.client` would have rewritten all of that into
+  its own house style and moved the fingerprint from the client to the
+  wire. What it cannot disguise is that the connection is made by CPython's
+  `ssl` rather than by Node: the TLS handshake (JA3/JA4) and the absence of
+  connection reuse still distinguish it at that layer. What remains is
+  session-scoped: a
   compromised session can still *use* the model API as you while it runs
   (that's inherent to the sandbox working at all), but it can no longer read
   a durable credential and exfiltrate it for offline use via the other
