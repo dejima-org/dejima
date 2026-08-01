@@ -75,8 +75,9 @@ one can't happen.
   the tool has no way to tell them apart.
 - Report findings name a path or config key that a session may itself have
   chosen, so those names reach your terminal as untrusted text. One that
-  contains terminal escapes, C1 controls, or Unicode bidi overrides - all
-  of which can scroll, blank, or visually reorder what you read - is
+  contains an ASCII control character, a C1 control, or a Unicode bidi
+  override - which between them can scroll, blank, or visually reorder what
+  you read, and can split a name across the audit's own records - is
   written hex-encoded behind a `{hex}` marker instead, and decodes with
   `printf '%b' "$(sed 's/../\\x&/g' <<< HEX)"`. Ordinary names are printed
   as-is, so the marker appearing at all is itself worth a second look.

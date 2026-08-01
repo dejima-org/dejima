@@ -451,6 +451,29 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$output" = "" ]
 }
 
+@test "a TAB in a monitored path does not truncate it in the snapshot record" {
+    # The snapshot record is path<TAB>sha, read back with `cut -f1`, so a TAB
+    # in a filename used to truncate the path there - upstream of any
+    # encoding. ".git/hooks/pre<TAB>commit" was reported as ".git/hooks/pre":
+    # still CRITICAL (it is still under .git/hooks/), still naming a file
+    # that does not exist, so still unackable and nagging forever. Encoding
+    # the path into that record closes it, because an encoded path can
+    # contain neither TAB nor newline.
+    snap
+    printf 'x' > "$WS/.git/hooks/$(printf 'pre\tcommit')"
+    run cmp_
+    [[ "$output" != *".git/hooks/pre"$'\t'* ]]
+    [[ "$output" != *"! HOST-CODE-EXECUTION workspace file: .git/hooks/pre"* ]]
+    [[ "$output" == *"{hex}2e6769742f686f6f6b732f70726509636f6d6d6974"* ]]
+    # ...and it can actually be acknowledged, which was the whole point
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    [[ "$output" != *"no longer exists"* ]]
+    run cmp_
+    [ "$output" = "" ]
+}
+
 @test "a file whose name merely contains the hex marker is left alone and still round-trips" {
     # The marker is only meaningful at the START of an id, so this one is
     # display-safe and is passed through verbatim - the encoding must not

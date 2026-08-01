@@ -216,6 +216,27 @@ sanitize() {
 HEX_MARK='{hex}'
 enc_id() {
     local v="$1"
+    # Fast path, and the only one an ordinary id ever takes: decide with
+    # pattern matching alone, no subprocesses. hash_paths() calls this once
+    # per monitored file on both the snapshot and the compare side, so the
+    # exact check below - a subshell plus tr plus sed - is far too expensive
+    # to run unconditionally (a bare `git init` alone ships ~14 sample
+    # hooks).
+    #
+    # `local LC_ALL=C` puts bash's own matching into byte semantics for the
+    # duration, so [[:cntrl:]] is exactly C0+DEL. Any C1 or bidi character
+    # must contain the UTF-8 lead byte \302 or \342 respectively, so testing
+    # for those catches every one. The test is deliberately conservative
+    # rather than exact - ordinary text carrying one of those lead bytes (an
+    # em dash, say) falls through to the exact check and is then found
+    # clean and printed verbatim, which costs a little time and changes
+    # nothing.
+    local LC_ALL=C
+    case "$v" in
+        "$HEX_MARK"*) ;;
+        *[[:cntrl:]]*|*$'\302'*|*$'\342'*) ;;
+        *) printf '%s' "$v"; return ;;
+    esac
     if [ "$(sanitize "$v")" = "$v" ]; then
         case "$v" in "$HEX_MARK"*) ;; *) printf '%s' "$v"; return ;; esac
     fi
@@ -268,16 +289,25 @@ hash_value() {
 }
 
 hash_paths() {
-    # path<TAB>sha for each existing monitored path, sorted by path
+    # encoded-path<TAB>sha for each existing monitored path, sorted by path.
+    #
+    # Encoded (see enc_id) rather than raw, because this record is itself
+    # TAB-delimited and line-based: a filename containing a TAB would
+    # otherwise be silently truncated at it by the `cut -f1` that reads this
+    # back, and reported under a name no file on disk has - unackable for
+    # exactly the reason enc_id exists, and CRITICAL if the truncation still
+    # lands under .git/hooks/. TAB and newline are both in the set enc_id
+    # encodes, so an encoded path can never contain either. Ordinary paths
+    # encode to themselves, so this record is unchanged for them.
     local ws="$1" p
     {
         for p in .mcp.json .envrc; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
         done
         for dir in .claude .vscode .git/hooks; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
-                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                    printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
         done
@@ -285,19 +315,20 @@ hash_paths() {
 }
 
 tcb_snapshot() {
-    # path<TAB>sha for the sandbox's own trusted computing base, but only
-    # when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
+    # encoded-path<TAB>sha for the sandbox's own trusted computing base, but
+    # only when $ws IS the sandbox's repo (self-mount) - see AUDIT_REPO_ROOT.
     # Empty otherwise, so a normal (non-self) workspace is unaffected.
+    # Encoded for the same reason as hash_paths above.
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
         for p in install.sh; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$p" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
         done
         for dir in bin hooks docker test; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
-                    printf '%s\t%s\n' "${f#"$ws"/}" "$(hash_entry "$f")"
+                    printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
         done
@@ -458,18 +489,23 @@ case "$cmd" in
         # change emits both an old-hash and new-hash line; dedupe by path
         # so each changed path is reported once)
         while IFS= read -r line; do
+            # $line arrives encoded (see hash_paths). Everything that has to
+            # reach the real file, classify it, or match a baseline entry
+            # needs the raw name; only the report body keeps the encoded
+            # form, which is what enc_id would produce for it anyway.
+            rline="$(dec_id "$line")"
             cur_sha=""
-            [ -e "$ws/$line" ] && cur_sha="$(hash_entry "$ws/$line")"
-            baseline_suppresses "$line" "$cur_sha" && continue
-            case "$(path_severity "$line")" in
-                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(enc_id "$line")") ;;
-                WARNING)  warn+=("changed workspace file: $(enc_id "$line")") ;;
+            [ -e "$ws/$rline" ] && cur_sha="$(hash_entry "$ws/$rline")"
+            baseline_suppresses "$rline" "$cur_sha" && continue
+            case "$(path_severity "$rline")" in
+                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
+                WARNING)  warn+=("changed workspace file: $line") ;;
                 # Currently unreachable: hash_paths() only monitors
                 # .mcp.json/.envrc/.claude/.vscode/.git/hooks, and every path
                 # under those matches an earlier CRITICAL/WARNING pattern in
                 # path_severity(). Kept as the defensive default for
                 # surfaces monitored by a future task.
-                *)        info+=("changed workspace file: $(enc_id "$line")") ;;
+                *)        info+=("changed workspace file: $line") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
@@ -494,9 +530,11 @@ case "$cmd" in
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         while IFS= read -r line; do
-            tid="tcb:$line"; tsha=""; [ -e "$ws/$line" ] && tsha="$(hash_entry "$ws/$line")"
+            # Encoded on arrival, same as the path loop above.
+            rline="$(dec_id "$line")"
+            tid="tcb:$rline"; tsha=""; [ -e "$ws/$rline" ] && tsha="$(hash_entry "$ws/$rline")"
             baseline_suppresses "$tid" "$tsha" && continue
-            crit+=("TCB (sandbox self) modified: $(enc_id "$line")")
+            crit+=("TCB (sandbox self) modified: $line")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
