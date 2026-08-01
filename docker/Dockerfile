@@ -200,10 +200,16 @@ RUN mkdir /commandhistory && \
 # Create the ssh directory and set permissions. The project directory itself
 # is bind-mounted at runtime at its real host path (see docker-compose.yml),
 # not a fixed /workspace, so it can share ~/.claude project/session history
-# with the host. ~/.claude is bind-mounted too, not baked in here.
-RUN mkdir -p $SANDBOX_HOME/.ssh && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
-  chmod 700 $SANDBOX_HOME/.ssh
+# with the host.
+#
+# ~/.claude itself is baked in here rather than bind-mounted (see the mount
+# inventory in docker-compose.yml): only enumerated paths *inside* it come
+# from the host, and Docker creates the parents of a mount point root-owned
+# if they don't already exist - which would leave the sandbox user unable to
+# write the caches and history it keeps directly in ~/.claude.
+RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
+  chmod 700 $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude
 
 # Pre-create the nvim data/state/cache dirs owned by the sandbox user,
 # since they're mounted as named volumes in docker-compose.yml: Docker
