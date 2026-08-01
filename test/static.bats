@@ -279,6 +279,19 @@ setup() {
     grep -q '.worktrees/' "$REPO_ROOT/hooks/sandbox-context.sh"
 }
 
+@test "sandbox-context.sh tells the agent to close issues via the PR body" {
+    # The session ends at the PR and the merge happens later, without the
+    # agent - so anything it defers to "after the merge" is something it
+    # won't be there to do, and an issue a merged PR fixed just stays open.
+    # A closing keyword in the body is the only part of that it can control.
+    grep -q 'Fixes #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # And the counterpart, so partial work doesn't close anything.
+    grep -q 'Refs #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # The short form specifically: an issue's full URL renders as the same
+    # link but does not trigger the close.
+    grep -q "not the issue's URL" "$REPO_ROOT/hooks/sandbox-context.sh"
+}
+
 @test "entrypoint runs as root and drops to node via gosu, not a baked-in USER node" {
     # The whole privilege-drop model depends on entrypoint.sh itself starting
     # as root (to set up the firewall) - a stray `USER node` before
@@ -1023,7 +1036,7 @@ EOF
 # This catches address- and hostname-shaped leaks only. A personal domain
 # that looks like any other public one is not mechanically distinguishable
 # and still rests on review.
-SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd)
+SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd .gitea)
 
 @test "no private or link-local address is used as a documentation example" {
     run grep -rnIE '\b(10|127\.0\.0\.[2-9]|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' \

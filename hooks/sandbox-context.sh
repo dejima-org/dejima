@@ -216,6 +216,17 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   as the actual workflow to follow, not just a filter to route around.
   Merging is the operator's call, not yours - a \`gitea-merge-guard.sh\`
   hook blocks it here. Report the PR URL and stop.
+- Name the issues a PR resolves in its body: \`Fixes #N\` (\`Closes\` and
+  \`Resolves\` work too) tells Gitea to close them when it merges. Use
+  \`Refs #N\` for work that is partial or merely related, so those stay
+  open. Prefer the keyword to closing anything yourself once it lands,
+  because of the line above - you stop at the PR, and the merge happens
+  later without you, so whatever you left for "after the merge" is not
+  something you will be there to do. Write \`#N\` and not the issue's URL:
+  they render alike, but only the short form triggers the close. Read the
+  whole issue before claiming it, since the ask is often wider than the
+  title, and a closing keyword closes it whether or not you covered all
+  of it.
 - Write PR and issue bodies to a file and pass \`--body-file FILE\`, rather
   than \`--body "..."\` or a heredoc. Both of those put the entire body into
   the Bash command string, where \`deny-dangerous-bash.sh\` reads it - and

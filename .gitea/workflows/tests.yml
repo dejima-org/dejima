@@ -1,0 +1,268 @@
+# Runs the bats suite on every pull request and on every push to one.
+# `pull_request` fires on opened/reopened/synchronize, and synchronize is the
+# push-to-an-open-PR event, so both are covered without listing types.
+#
+# Split in two because the halves cost wildly different amounts: everything
+# except runtime.bats is seconds and needs nothing but a shell, while
+# runtime.bats builds the image and boots real containers. Splitting means a
+# typo in a doc test doesn't wait on a full image build to tell you.
+name: tests
+
+on:
+  pull_request:
+
+# No `concurrency:` block. Gitea does not implement one - the word appears
+# nowhere in its actions models or services as of 1.25 - so writing it here
+# would only claim a cancellation that never happens. It doesn't: pushing
+# twice in a minute left the superseded run going and queued the new one
+# behind it. On a single-capacity runner, expect a backlog rather than a
+# supersede, and cancel the stale run by hand if it is in the way.
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    container:
+      # Debian bookworm plus a node binary - node is what actions/checkout
+      # needs to run at all, and apt-get is what everything below needs.
+      image: node:20-bookworm
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates
+      - uses: actions/checkout@v4
+      # As an ordinary user, not root. One test leaves a directory mode 500 and
+      # asserts that the CLI's rm -rf refuses it and says so; root walks
+      # through that on CAP_DAC_OVERRIDE and the test fails for a reason that
+      # has nothing to do with what it checks. Nobody runs these CLIs as root.
+      #
+      # TERM because the job container has none, and six tests drive a real pty
+      # through `script`: the picker drops colour on TERM=dumb by design, and
+      # tmux will not start a client for a terminal it has no entry for, so
+      # they fail on the terminal rather than on anything they mean to check.
+      # xterm-256color ships in ncurses-base, which is Essential - nothing to
+      # install. Set on the command rather than in env: so it survives su.
+      - run: |
+          chown -R node:node .
+          su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
+
+  runtime:
+    # Not ubuntu-latest, unlike the job above. This one only works on a runner
+    # configured for it - host network namespace, the Docker socket, and the
+    # shared volume below - and none of that is anything the workflow can ask
+    # for. On a generic runner it fails the preflight check outright.
+    #
+    # ubuntu-latest is a label every runner carries, so which one picked this
+    # up was a coin flip, and a re-run that happened to land on an unconfigured
+    # runner failed on a repo that had not changed. A label only the configured
+    # runner has makes that unrepresentable rather than merely diagnosable: no
+    # runner matching it means this job queues instead of running somewhere it
+    # cannot work. The fast job stays on ubuntu-latest, because it genuinely
+    # does run anywhere.
+    runs-on: dejima-runtime
+    container:
+      image: node:20-bookworm
+      # One volume, and it is load-bearing - see TMPDIR on the bats step for
+      # what it is for. It has to be listed in container.valid_volumes in
+      # act_runner's config.yaml too: a volume this file asks for and the
+      # runner has not been told to allow does not arrive.
+      volumes:
+        - /tmp/dejima-ci:/tmp/dejima-ci
+      # Nothing else, though - no `options: --network host`, and no request
+      # for the docker socket. Both of the other things this job needs beyond
+      # an ordinary one are settled by the runner, not by this file, and
+      # asking for them here does nothing:
+      #
+      # The docker socket, for building the image and running containers,
+      # act_runner binds in by itself - GetBindsAndMounts appends
+      # /var/run/docker.sock unless container.docker_host is set to "-", and
+      # it adds that same path to valid_volumes on the way past. Requesting it
+      # again here would at best duplicate a bind that already exists.
+      #
+      # The host network namespace has to come from container.network: host in
+      # act_runner's config.yaml. Gitea's act fork ignores --network in a
+      # workflow's container options outright (it logs "--network and --net in
+      # the options will be ignored" and then overwrites NetworkMode), so this
+      # is not something the repo can ask for. It is needed because of one
+      # test: "a host service bound to loopback is unreachable from inside the
+      # container, one bound to the bridge gateway is reachable". Its positive
+      # control has bats itself bind a listener to the test network's bridge
+      # gateway address, which lives on a host interface and cannot be bound
+      # from any other netns - the control would fail for a reason that has
+      # nothing to do with what the test asserts. That test is the containment
+      # argument for the ttyd front door, so it is not one to skip in CI.
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats jq python3 ca-certificates curl
+          # The CLI only - the daemon is the host's, reached over the socket
+          # above. Debian ships no docker-cli package (docker.io drags in a
+          # daemon this job would never start), so take the static binary.
+          curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
+            | tar -xzC /usr/local/bin --strip-components=1 docker/docker
+          # buildx ships separately from that tarball, and `docker build` picks
+          # the builder by whether this plugin is present: with it, BuildKit;
+          # without it, the legacy builder, which creates, commits and removes a
+          # real container per instruction. That cost ~10s x 56 steps here - more
+          # of the build than the downloads and compiles it was wrapping.
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-$(dpkg --print-architecture)"
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+          # Because that choice is silent, check it rather than assume it. A
+          # download that returned an error page instead of a binary still
+          # chmods fine, and the only symptom would be the slow builds this is
+          # meant to fix - which look like nothing being wrong.
+          docker buildx version || {
+            echo "The buildx plugin did not load, so docker build would quietly use the" >&2
+            echo "legacy builder instead of BuildKit. Check the download URL above still" >&2
+            echo "resolves for this architecture." >&2
+            exit 1
+          }
+        env:
+          DOCKER_CLI_VERSION: 27.5.1
+          BUILDX_VERSION: 0.36.0
+
+      # Fails here, with the fix in the message, rather than thirty tests deep
+      # in a suite that cannot work. Both of these are runner configuration,
+      # not anything a change to this repo can cause.
+      - name: Check the runner granted Docker, the host netns, and a shared /tmp
+        run: |
+          docker info >/dev/null 2>&1 || {
+            echo "No Docker daemon reachable from this job." >&2
+            echo "In act_runner's config.yaml, container.docker_host must not be \"-\" - that is the" >&2
+            echo "one value that stops the socket being mounted into job containers." >&2
+            exit 1
+          }
+          # Read sysfs rather than shell out to `ip`: /sys/class/net is
+          # per-netns and always there, while iproute2 is not in this image.
+          # The first version of this check ran `ip -o addr show 2>/dev/null`,
+          # which turned "the tool is missing" into "the host netns is
+          # missing" - a check against obscure failures failing obscurely.
+          [ -e /sys/class/net/docker0 ] || {
+            echo "This job is not in the host network namespace - docker0 is not visible." >&2
+            echo "The bridge-gateway test cannot pass here. Set container.network: host in" >&2
+            echo "act_runner's config.yaml (and make sure CONFIG_FILE points the runner at" >&2
+            echo "that file - without it the config is not read at all)." >&2
+            exit 1
+          }
+          # Probe the shared directory the same way the suite will use it:
+          # write a file in here, read it back through the host daemon. If it
+          # is not really shared, the daemon invents an empty directory for
+          # the mount rather than refusing it, and the probe comes back empty
+          # - which is exactly how all of runtime.bats would fail. Reuses
+          # this job's own image, so there is nothing to pull.
+          mkdir -p /tmp/dejima-ci
+          # bats only clears its own tmpdir on a normal exit, so fixtures
+          # from a killed run would otherwise pile up on the host forever.
+          # `find -delete` rather than a glob: it covers dotfiles, doesn't
+          # misfire on an empty directory, and still fails loudly.
+          find /tmp/dejima-ci -mindepth 1 -delete
+          echo shared-ok > /tmp/dejima-ci/probe
+          probe=$(docker run --rm -v /tmp/dejima-ci/probe:/probe:ro node:20-bookworm cat /probe 2>/dev/null || true)
+          [ "$probe" = shared-ok ] || {
+            echo "/tmp/dejima-ci is not shared with the host - the probe read back empty." >&2
+            echo "Add it to container.valid_volumes in act_runner's config.yaml. Without" >&2
+            echo "that the runner drops the volume this job asks for, and every fixture" >&2
+            echo "mount in runtime.bats silently becomes an empty directory instead." >&2
+            exit 1
+          }
+
+      # The token raises the api.github.com/meta ceiling from 60 requests an
+      # hour to 5000, and nothing about a run looks different when it stops
+      # doing that. A misspelled secret name, a revoked token and an expiry a
+      # year from now all present identically: green for a while, then
+      # containers failing to boot in init-firewall.sh - which reads as a
+      # regression in the firewall rather than as a lapsed credential. So ask
+      # the API what the ceiling actually is, rather than checking that a
+      # variable is non-empty and assuming the rest.
+      - name: Check the GitHub ranges lookup is authenticated
+        env:
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+        run: |
+          # Not a failure. Without the secret the suite still runs, it just
+          # spends the anonymous quota - which is the right default for a
+          # fork, and only a problem once runs get frequent.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No GH_META_TOKEN secret is configured, so GitHub's IP ranges will be"
+            echo "fetched anonymously: 60 requests an hour for this entire runner host,"
+            echo "against thirteen container starts per run. Fine occasionally, and on a"
+            echo "busy day the containers stop booting instead. See issue #37."
+            exit 0
+          fi
+          # No -f. A rejected token still answers with the header this reads,
+          # and the anonymous ceiling it reports is a far better diagnostic
+          # than curl exiting silently on the 401.
+          limit=$(curl -sI --connect-timeout 10 -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/meta | tr -d '\r' \
+            | awk -F': ' 'tolower($1)=="x-ratelimit-limit" {print $2}')
+          if [ -z "$limit" ]; then
+            echo "No x-ratelimit-limit came back from api.github.com/meta at all, so the" >&2
+            echo "request itself did not complete. This one is about reachability from" >&2
+            echo "the runner, not about the token." >&2
+            exit 1
+          fi
+          if [ "$limit" -lt 5000 ]; then
+            echo "GH_META_TOKEN is set, but GitHub reports a ceiling of $limit/hour - that" >&2
+            echo "is the anonymous quota, so the token is not being accepted. Expired or" >&2
+            echo "revoked is the likely cause; a wrong secret name would have arrived" >&2
+            echo "empty and been reported above instead. Replace it with a fine-grained" >&2
+            echo "PAT with no permissions - /meta is public data and needs none." >&2
+            exit 1
+          fi
+          echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
+
+      - uses: actions/checkout@v4
+
+      # The build dominates this job, and inside setup_file it is a `docker
+      # build -q` that prints nothing at all - so tens of minutes of ordinary
+      # building is indistinguishable from a hang, which is exactly how it
+      # read the first time this ran here. Hoisted out, it gets its own
+      # progress output and its own duration in the run summary.
+      #
+      # SKIP_BUILD below then reuses this image rather than skipping a build.
+      # The image is still built fresh from this commit, so the property the
+      # test file defaults to - never assert against a stale image - holds.
+      - name: Build the sandbox image
+        run: docker build -t dejima:latest -f docker/Dockerfile .
+
+      - run: bats test/runtime.bats
+        env:
+          SKIP_BUILD: 1
+          # Every container this suite starts fetches GitHub's IP ranges from
+          # api.github.com/meta in init-firewall.sh, and unauthenticated that
+          # endpoint allows 60 requests an hour per source IP - shared with
+          # everything else on this runner host. Thirteen starts per run means
+          # two runs an hour exhausts it, after which containers fail to boot
+          # and tests fail on the quota rather than on anything they assert.
+          #
+          # This became reachable when the build got fast: at ~48 minutes a
+          # run the starts were spread thin enough to stay under, and at ~4
+          # minutes they are not. Any token authenticates the fetch and raises
+          # the ceiling to 5000/hour; /meta is public data and needs no scopes
+          # at all, so the secret behind this should be a fine-grained PAT
+          # with no permissions and no repository access - not a token that
+          # can do anything else. It reaches `gh auth setup-git` inside the
+          # containers, so a scope granted here is a scope handed to every
+          # sandbox the suite starts.
+          #
+          # Unset is fine and the suite still runs - it just spends the
+          # anonymous quota, so expect the failure above on a busy day.
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+          # runtime.bats builds fixtures on disk - ssh keys, statusline
+          # scripts, .claude.json copies, a proxy socket - and bind-mounts
+          # them into containers it starts. Those containers are siblings of
+          # this one rather than children: the host daemon creates them, over
+          # the socket, so it resolves every -v source against the host's
+          # filesystem and not this container's. A fixture at a path that
+          # exists only in here therefore does not resolve - and Docker's
+          # answer to a missing bind source is not an error, it is to create
+          # an empty directory and mount that. Seven tests failed that way,
+          # and an eighth passed while being just as broken, because an empty
+          # read-only directory satisfies exactly what it asserts.
+          #
+          # Pointing TMPDIR at the shared mount puts `mktemp -d` and bats'
+          # own BATS_*_TMPDIR on paths that mean the same thing on both sides
+          # of the socket, which is all any of those mounts need.
+          TMPDIR: /tmp/dejima-ci

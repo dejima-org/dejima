@@ -73,12 +73,25 @@ setup_file() {
     docker network rm "$network" >/dev/null 2>&1 || true
     docker network create "$network" >/dev/null
 
-    # No GITEA_*/GH_TOKEN/LOKI_URL: this suite only asserts the default
-    # allowlist and enforcement, which shouldn't depend on any of them.
+    # No GITEA_*/LOKI_URL: this suite only asserts the default allowlist and
+    # enforcement, which shouldn't depend on either.
+    #
+    # GH_TOKEN is forwarded rather than dropped, and every container start in
+    # this file does the same. It doesn't change the allowlist - it only
+    # authenticates init-firewall.sh's api.github.com/meta fetch, which
+    # returns the same ranges either way. What it changes is the quota: that
+    # endpoint allows 60 requests an hour per source IP unauthenticated, and
+    # this file starts thirteen containers, so two runs in an hour exhaust it
+    # and every container after that dies in init-firewall.sh with a rate
+    # limit error rather than anything to do with what was being tested.
+    # Locally it's usually unset and expands empty, which both init-firewall
+    # and entrypoint treat exactly as absent - so the no-token path stays the
+    # default here and only CI, where the volume is, passes a real one.
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$network" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -147,6 +160,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$test_image" >/dev/null
 
@@ -174,6 +188,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -228,6 +243,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$mounted_copy:/home/node/.claude.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -286,6 +302,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ALLOW_GITHUB_PUSH=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -304,6 +321,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e GITEA_SSH_HOST=gitea.internal.example \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -331,6 +349,7 @@ dexec_node() {
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$src/skills:/home/node/.claude/skills:ro" \
         -v "$src/commands:/home/node/.claude/commands:ro" \
         -v "$src/agents:/home/node/.claude/agents:ro" \
@@ -361,11 +380,19 @@ dexec_node() {
     local dotclaude; dotclaude="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
     chmod +x "$dotclaude/statusline.sh"
+    # mktemp -d is mode 700, which only works because the uid running these
+    # tests is usually the same one the container's node maps to. Where it
+    # isn't - CI runs as root, node is 1000 - node cannot even traverse this
+    # directory, and the read below fails having proved nothing. Writable
+    # rather than merely readable so that the :ro mount stays the only
+    # reason the two writes above it fail.
+    chmod 777 "$dotclaude"
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude:/home/node/.claude" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -428,11 +455,18 @@ dexec_node() {
     chmod +x "$target_dir/statusline.sh"
     dotclaude="$(mktemp -d)"
     ln -s "$target_dir/statusline.sh" "$dotclaude/statusline.sh"
+    # Both mode 700 from mktemp -d; see the regular-file test above. This one
+    # asserts the overwrite *succeeds*, so node needs to be able to unlink
+    # and create in $dotclaude and write through the symlink into
+    # $target_dir - otherwise the confirmed gap this documents would look
+    # closed for a reason that has nothing to do with the gap.
+    chmod 777 "$target_dir" "$dotclaude"
 
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude:/home/node/.claude" \
         -v "$target_dir:$target_dir:ro" \
         -v "$dotclaude/statusline.sh:/home/node/.claude/statusline.sh:ro" \
@@ -569,12 +603,22 @@ EOF
         --upstream "http://127.0.0.1:$(cat "$TD/port")" &
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
+    # UnixStreamServer binds at umask default, so the socket lands 755, and
+    # connecting to a unix socket needs *write* permission on it. In the real
+    # flow the connecting uid is the one that bound it, so that is fine;
+    # under CI it is root binding and node connecting, and the whole chain
+    # this test follows fails at its first hop. Widened rather than left to
+    # dejima-anthropic-proxy, which has no such problem in production.
+    # Unconditional: if the loop above timed out, "No such file" here says so
+    # more clearly than a test that fails on a bare false condition.
+    chmod 666 "$TD/proxy.sock"
 
     container="dejima-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
@@ -634,6 +678,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$TD/dotclaude:/home/node/.claude" \
         -v "$mask_file:/home/node/.claude/.credentials.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -717,13 +762,22 @@ EOF
     printf 'declared-not-allowed.example\n' > "$ws/.dejima/allowed-domains"
     chmod -R 755 "$ws"
 
+    # Mounted from a copy, not straight out of the checkout. Whatever daemon
+    # starts this container resolves -v sources against its own host, and
+    # under CI the checkout lives in a volume that has no host path at all -
+    # so the repo copy would mount as an empty directory rather than fail.
+    # $BATS_TEST_TMPDIR sits under TMPDIR, which CI points somewhere shared.
+    local hook="$BATS_TEST_TMPDIR/sandbox-context.sh"
+    cp "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh" "$hook"
+
     local test_container="dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$ws:$ws" \
-        -v "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh:/usr/local/bin/sandbox-context.sh:ro" \
+        -v "$hook:/usr/local/bin/sandbox-context.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
@@ -765,6 +819,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$derived" >/dev/null
     wait_ready "$test_container"
