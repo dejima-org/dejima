@@ -10,14 +10,31 @@ setup() {
     git -C "$WS" config user.email t@t; git -C "$WS" config user.name t
     STATE="$(mktemp)"
     PROJDIR="$(mktemp -d)"
-    export DEJIMA_AUDIT_PROJECTS_DIR="$PROJDIR"
     CURRENT_SLUG="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     STATUSLINE_DIR="$(mktemp -d)"
-    export DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
-    AUDITDIR="$(mktemp -d)"; export DEJIMA_AUDIT_DIR="$AUDITDIR"
-    BASEDIR="$(mktemp -d)"; export DEJIMA_AUDIT_BASELINE_DIR="$BASEDIR"
+    DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
+    AUDITDIR="$(mktemp -d)"
+    BASEDIR="$(mktemp -d)"
+    # These directories now come from the config file, not the environment
+    # (dejima-audit sources dejima-config-lib.sh and reads them via
+    # config_get) - so a dedicated config dir/file replaces the old env-var
+    # overrides as the mechanism, while every test below still refers to the
+    # same PROJDIR/STATUSLINE_DIR/AUDITDIR/BASEDIR paths it always did.
+    CONFIG_DIR="$(mktemp -d)"
+    export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
+    cat > "$CONFIG_DIR/config" <<EOF
+[harness.claude-code]
+projects_dir = $PROJDIR
+statusline_path = $DEJIMA_AUDIT_STATUSLINE
+[audit]
+dir = $AUDITDIR
+baselines_dir = $BASEDIR
+EOF
 }
-teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; rm -rf "$AUDITDIR"; rm -rf "$BASEDIR"; }
+teardown() {
+    rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"
+    rm -rf "$AUDITDIR"; rm -rf "$BASEDIR"; rm -rf "$CONFIG_DIR"
+}
 
 snap() { "$AUDIT" snapshot "$WS" "$STATE"; }
 cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
@@ -524,14 +541,15 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *"-CRITICAL.txt"* ]]
 }
 
-@test "rotation keeps DEJIMA_AUDIT_KEEP clean reports" {
+@test "rotation keeps audit.keep clean reports" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$AUDITDIR/$slug"
     for i in $(seq 1 12); do
         touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"
     done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
-    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
+    cmp_ >/dev/null 2>&1
     run bash -c "ls '$AUDITDIR/$slug' | wc -l"
     [ "$output" -le 10 ]
 }
@@ -541,9 +559,10 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     mkdir -p "$AUDITDIR/$slug"
     touch "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt"
     for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
-    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
-    # rotation actually ran: 12 planted clean reports + this run's own, trimmed to KEEP
+    cmp_ >/dev/null 2>&1
+    # rotation actually ran: 12 planted clean reports + this run's own, trimmed to keep
     clean_n="$(find "$AUDITDIR/$slug" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | wc -l)"
     [ "$clean_n" -le 10 ]
     # ...and the unacknowledged CRITICAL report survived it
@@ -554,9 +573,10 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$AUDITDIR/$slug"
     for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
     chmod 500 "$AUDITDIR/$slug"
-    run timeout 5 env DEJIMA_AUDIT_KEEP=10 "$AUDIT" compare "$WS" "$STATE"
+    run timeout 5 "$AUDIT" compare "$WS" "$STATE"
     result="$status"
     chmod 700 "$AUDITDIR/$slug"
     [ "$result" -ne 124 ]

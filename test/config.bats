@@ -448,3 +448,64 @@ write_config() {
     [[ "$output" == *"core.command"* ]]
     rm -rf "$FAKE_HOME" "$workspace"
 }
+
+@test "dejima-audit takes its directories from the config" {
+    store="$(mktemp -d)"
+    write_config '[audit]' "dir = $store/reports" "baselines_dir = $store/base" 'keep = 4'
+    run "$REPO_ROOT/bin/dejima-audit" --print-paths
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$store/reports"* ]]
+    [[ "$output" == *"$store/base"* ]]
+    rm -rf "$store"
+}
+
+@test "dejima-audit no longer reads its retired variables" {
+    run grep -n 'DEJIMA_AUDIT_DIR\|DEJIMA_AUDIT_BASELINE_DIR\|DEJIMA_AUDIT_KEEP\|DEJIMA_AUDIT_STATUSLINE\|DEJIMA_AUDIT_PROJECTS_DIR' \
+        "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ]
+}
+
+@test "dejima-audit keeps its repo-root test hook" {
+    run grep -q 'DEJIMA_AUDIT_REPO_ROOT' "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -eq 0 ]
+}
+
+# The bug this guards against: before dejima-audit read the config too, it
+# fell back to its own ${XDG_DATA_HOME:-...} formula while bin/dejima read
+# the config - two different answers for the same directory, so the
+# exit-time audit could snapshot/report into a store bin/dejima's own
+# startup warning never looks at. An explicit config value and a case that
+# only exercises the default would each have passed against that broken
+# code (the divergence needs an unset-in-config default AND a non-default
+# XDG_DATA_HOME to surface), so both are exercised here.
+@test "bin/dejima and dejima-audit agree on audit and baseline directories with an explicit config" {
+    store="$(mktemp -d)"
+    write_config '[audit]' "dir = $store/reports" "baselines_dir = $store/base"
+    run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    dejima_dir="$(printf '%s\n' "$output" | grep '^audit.dir=' | cut -d= -f2-)"
+    dejima_base="$(printf '%s\n' "$output" | grep '^audit.baselines_dir=' | cut -d= -f2-)"
+    run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima-audit" --print-paths
+    [ "$status" -eq 0 ]
+    audit_dir="$(printf '%s\n' "$output" | grep '^audit_dir=' | cut -d= -f2-)"
+    audit_base="$(printf '%s\n' "$output" | grep '^baselines_dir=' | cut -d= -f2-)"
+    [ "$dejima_dir" = "$audit_dir" ]
+    [ "$dejima_base" = "$audit_base" ]
+    [ "$dejima_dir" = "$store/reports" ]
+    [ "$dejima_base" = "$store/base" ]
+    rm -rf "$store"
+}
+
+@test "bin/dejima and dejima-audit agree on the default audit directory even with XDG_DATA_HOME set" {
+    write_config '[core]' 'firewall = on'
+    run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    dejima_dir="$(printf '%s\n' "$output" | grep '^audit.dir=' | cut -d= -f2-)"
+    dejima_base="$(printf '%s\n' "$output" | grep '^audit.baselines_dir=' | cut -d= -f2-)"
+    run env XDG_DATA_HOME=/tmp/some-other-xdg "$REPO_ROOT/bin/dejima-audit" --print-paths
+    [ "$status" -eq 0 ]
+    audit_dir="$(printf '%s\n' "$output" | grep '^audit_dir=' | cut -d= -f2-)"
+    audit_base="$(printf '%s\n' "$output" | grep '^baselines_dir=' | cut -d= -f2-)"
+    [ "$dejima_dir" = "$audit_dir" ]
+    [ "$dejima_base" = "$audit_base" ]
+}
