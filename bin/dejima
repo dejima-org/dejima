@@ -163,17 +163,33 @@ mkdir -p "$SANDBOX_SHARE_DIR"
 # never used one still gets the read-only overlay instead of a writable gap.
 mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"
 
+# Same for settings.json, which install.sh normally creates. Docker would
+# otherwise make a *directory* at the mount source, leaving that junk on the
+# host and the session with no settings at all.
+[ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
+
 # Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
 # "sandbox" block) is redundant here - it can't even function inside this
 # container (bwrap can't create a namespace, and getting it to would need
 # privilege escalation approaching --privileged, undoing this container's own
 # hardening), and this container is already a real, working sandbox on its
-# own. settings.json is mounted read-only precisely so a session can't
-# tamper with it, so it can't be patched from inside - generate a sandbox-
-# specific copy here instead and mount that in place of the real one.
-# Everything else in it (hooks, permissions, plugins) carries over unchanged.
+# own. A session can't be trusted to turn it off itself, so the override is
+# generated here, on the host, and reaches Claude Code as an extra settings
+# layer: docker-compose.yml mounts this file read-only at a container-local
+# path and claude-wrapper.sh passes it as --settings, which loads above
+# ~/.claude/settings.json in the precedence order. Everything else in the
+# operator's real settings (hooks, permissions, plugins) still applies from
+# there, so this file holds only what the sandbox overrides.
+#
+# The earlier arrangement - a full modified copy of the operator's settings,
+# mounted over ~/.claude/settings.json - detached itself whenever the host
+# rewrote the real file, because that mount point sits inside the read-write
+# ~/.claude mount and a rename unlinks the dentry the mount is pinned to. The
+# session then silently fell back to the operator's settings, with sandboxing
+# back on and the notify hooks below gone. Mounting outside ~/.claude removes
+# that: nothing on the host can rename over a container-local path. See #47.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
-jq '.sandbox.enabled = false' "$HOME/.claude/settings.json" > "$SANDBOX_SETTINGS_FILE"
+jq -n '{sandbox: {enabled: false}}' > "$SANDBOX_SETTINGS_FILE"
 
 # ~/.claude.json mixes live app state (project registry, usage stats,
 # caches) with config (mcpServers) that can't be split at the mount level -
@@ -612,16 +628,19 @@ if remote_enabled; then
     # own ID.
     extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
 
-    # The notify hook is registered per session, into the generated copy from
+    # The notify hook is registered per session, into the override layer from
     # above and nowhere else: registering it in the operator's real
     # settings.json would run it for every sandbox and for the host's own
     # Claude Code, which share that file, when it is only meaningful for a
     # session that has a marker directory. $SANDBOX_SETTINGS_FILE is
-    # already a throwaway mktemp copy, so this rewrite cannot reach the
-    # operator's real settings.json; the copy is mounted read-only, so the
-    # session cannot unregister itself either. $HOME is left unexpanded for
-    # Claude Code to resolve at hook-run time - inside the container, not
-    # here - matching the convention install.sh already uses.
+    # already a throwaway mktemp file, so this rewrite cannot reach the
+    # operator's real settings.json; it is mounted read-only, so the
+    # session cannot unregister itself either. Claude Code merges hooks
+    # across settings layers rather than letting the higher one replace the
+    # lower, so these are added to whatever the operator already has rather
+    # than displacing it. $HOME is left unexpanded for Claude Code to resolve
+    # at hook-run time - inside the container, not here - matching the
+    # convention install.sh already uses.
     SANDBOX_REMOTE_SETTINGS_TMP="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
     jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
       | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \

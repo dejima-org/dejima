@@ -213,7 +213,7 @@ one can't happen.
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
   Instead, `dejima` generates a throwaway copy of the file at
   launch (seeded from the real file, same "generate a sandbox-specific
-  file on the host" pattern as the generated `settings.json` copy above)
+  file on the host" pattern as the generated settings override layer)
   and mounts *that* read-write in its place; the copy is discarded,
   unmodified in the real file, when the session ends. A compromised
   session can add whatever it wants to `mcpServers` (or anything else in

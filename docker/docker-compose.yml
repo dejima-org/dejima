@@ -105,15 +105,7 @@ services:
       # mount above (Docker applies more specific mounts on top of broader
       # ones); everything else under ~/.claude (session/project history,
       # caches, etc.) still needs to stay read-write.
-      #
-      # settings.json specifically comes from $SANDBOX_SETTINGS_FILE (a
-      # bin/dejima-generated copy with sandbox.enabled forced to
-      # false), not the real file directly - Claude Code's own internal
-      # per-command sandboxing is redundant on top of this container (and
-      # can't actually function inside it anyway), and mounting it read-only
-      # means it can't be patched from inside, so the substitution has to
-      # happen on the host before the container ever starts.
-      - ${SANDBOX_SETTINGS_FILE:?set by bin/dejima}:${HOME}/.claude/settings.json:ro
+      - ${HOME}/.claude/settings.json:${HOME}/.claude/settings.json:ro
       - ${HOME}/.claude/CLAUDE.md:${HOME}/.claude/CLAUDE.md:ro
       - ${HOME}/.claude/plugins:${HOME}/.claude/plugins:ro
       # ~/.claude/hooks holds hook *code* too (install.sh symlinks this
@@ -143,6 +135,17 @@ services:
       # output-styles is prompt text loaded into a later host session's
       # system prompt, same class as commands/agents above.
       - ${HOME}/.claude/output-styles:${HOME}/.claude/output-styles:ro
+      # The sandbox's own settings overrides (sandbox.enabled off, plus the
+      # remote-access notify hooks when that's on), generated per run by
+      # bin/dejima and reaching Claude Code as claude-wrapper.sh's
+      # --settings argument. Deliberately mounted here, outside ~/.claude,
+      # rather than over ~/.claude/settings.json: the overlays above are
+      # nested inside the read-write ~/.claude mount, where a host-side
+      # rename of the underlying file detaches them mid-session (#48). That
+      # is survivable for a read-only overlay whose only job is to block
+      # writes, but it silently reverted these overrides (#47). Nothing on
+      # the host can rename over a container-local path.
+      - ${SANDBOX_SETTINGS_FILE:?set by bin/dejima}:/etc/dejima-settings.json:ro
       # A throwaway per-session copy, not the real file - see
       # bin/dejima and README "Throwaway ~/.claude.json". A plain
       # read-only mount hangs Claude Code on startup (it writes to this

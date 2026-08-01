@@ -131,10 +131,7 @@ setup() {
 
 @test "~/.claude settings/CLAUDE.md/plugins are layered read-only over the read-write parent mount" {
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude:\$\{HOME\}/\.claude\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    # settings.json specifically comes from a generated $SANDBOX_SETTINGS_FILE
-    # (see below), not the real file directly - it still has to be read-only
-    # in the container, just from a different, sandbox-specific source.
-    grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/\.claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/settings\.json:\$\{HOME\}/\.claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/CLAUDE\.md:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
@@ -253,13 +250,48 @@ setup() {
     grep -q 'extra_mounts+=(-v "\$path:\$path:ro")' "$REPO_ROOT/bin/dejima"
 }
 
-@test "bin/dejima forces sandbox.enabled to false in the generated settings.json" {
+@test "bin/dejima forces sandbox.enabled to false in the generated override layer" {
     # Claude Code's own internal per-command sandboxing is redundant on top
     # of this container and can't actually function inside it (bwrap can't
-    # create a namespace here) - settings.json is read-only precisely so it
-    # can't be patched from inside, so this has to happen in the generation
-    # step on the host, before the container starts.
-    grep -qE '\.sandbox\.enabled\s*=\s*false' "$REPO_ROOT/bin/dejima"
+    # create a namespace here) - a session can't be trusted to turn it off
+    # itself, so this has to happen in the generation step on the host,
+    # before the container starts.
+    grep -qE 'jq -n .\{sandbox: \{enabled: false\}\}' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the generated override layer is a delta, not a copy of the operator's settings" {
+    # jq -n reads no input: what ships is only what the sandbox overrides,
+    # and everything else still comes from the operator's real settings.json
+    # through Claude Code's own layering. A copy would go stale the moment
+    # the host edited the original, and would duplicate every hook it
+    # carried across two layers that get merged.
+    #
+    # The operator's settings.json is therefore never read here at all - its
+    # one remaining mention is the pre-create guard below, not a jq input.
+    run grep -c 'HOME/\.claude/settings\.json' "$REPO_ROOT/bin/dejima"
+    [ "$output" = "1" ]
+}
+
+@test "the override layer is mounted outside ~/.claude and passed as --settings" {
+    # Mounting it over ~/.claude/settings.json put the mount point inside the
+    # read-write ~/.claude mount, where a host-side rename of the real file
+    # detached it mid-session and silently reverted every override (#47).
+    # A container-local path can't be renamed over from the host.
+    grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:/etc/dejima-settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    run grep -E '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    # Which only takes effect if the flag is actually passed. It goes in the
+    # wrapper rather than the entrypoint so it also covers invocations the
+    # entrypoint never sees (an interactive shell, claudecode.nvim).
+    grep -qE -- '--settings /etc/dejima-settings\.json' "$SANDBOX_DIR/claude-wrapper.sh"
+    grep -qE -- '"\$\{settings\[@\]\}"' "$SANDBOX_DIR/claude-wrapper.sh"
+}
+
+@test "bin/dejima pre-creates ~/.claude/settings.json so the overlay never mounts a directory" {
+    # Docker creates a missing bind source as a directory - without this, a
+    # host that has never run install.sh gets a junk directory at
+    # ~/.claude/settings.json and a session with no settings at all.
+    grep -qE '\[ -f "\$HOME/\.claude/settings\.json" \] \|\| echo' "$REPO_ROOT/bin/dejima"
 }
 
 @test "Dockerfile never installs bubblewrap or socat" {
