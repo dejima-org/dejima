@@ -281,6 +281,12 @@ that gets deferred rather than done: `list`, `view`, `create`, `comment`,
 `close` and `reopen`, so a problem found mid-session becomes a ticket instead
 of a footnote on an unrelated PR.
 
+Because the session stops at the PR and you merge afterwards, the sandbox
+context tells Claude to put `Fixes #N` in the PR body rather than to close
+issues by hand once they land — the merge is the last step in that sequence
+that still happens, and it happens when the agent is gone. `Refs #N` is the
+deliberate opposite, for work that touches a ticket without finishing it.
+
 Both take `--body-file FILE` (or `-` for stdin) as well as `--body`. Prefer it
 for anything with an apostrophe, a backtick or a code fence in it — a body
 passed on a command line has to survive shell quoting first.
