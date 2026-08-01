@@ -222,3 +222,150 @@ _config_valid_value() {
             ;;
     esac
 }
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+config_exists() {
+    [ -f "$(config_path)" ]
+}
+
+# Phase 1 knows one harness and one forge. Phase 2 replaces the two
+# provider-section branches with a directory lookup under harnesses/ and
+# forges/; the shape of the check does not change, only where the list of
+# legal names comes from.
+_config_section_known() {
+    case "$1" in
+        core|github|mounts|credentials|logging|audit|remote-access) return 0 ;;
+        harness.claude-code|forge.gitea) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_config_trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# Validates the whole file. Returns 1 and explains the FIRST problem found -
+# reporting one actionable line beats a list the operator has to read
+# bottom-up.
+config_validate() {
+    local conf line section="" key value type
+    conf="$(config_path)"
+    if [ ! -f "$conf" ]; then
+        echo "no dejima config at $conf" >&2
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(_config_trim "$line")"
+        case "$line" in
+            ''|'#'*|';'*)
+                continue
+                ;;
+            '['*']')
+                section="${line#\[}"
+                section="${section%\]}"
+                section="$(_config_trim "$section")"
+                if ! _config_section_known "$section"; then
+                    echo "unknown section [$section] in $conf" >&2
+                    return 1
+                fi
+                continue
+                ;;
+            *=*)
+                ;;
+            *)
+                echo "malformed line in $conf: $line" >&2
+                return 1
+                ;;
+        esac
+        if [ -z "$section" ]; then
+            echo "key outside any section in $conf: $line" >&2
+            return 1
+        fi
+        key="$(_config_trim "${line%%=*}")"
+        value="$(_config_trim "${line#*=}")"
+        if ! type="$(config_type "$section.$key")"; then
+            echo "unknown key in $conf: [$section] $key" >&2
+            return 1
+        fi
+        if ! _config_valid_value "$type" "$value"; then
+            echo "invalid value for [$section] $key in $conf: $value" >&2
+            return 1
+        fi
+    done < "$conf"
+    return 0
+}
+
+# Expands a leading "~" to $HOME, per element for a list type. Only for path
+# types: a tilde inside a URL is a legal path character and must survive.
+_config_expand() {
+    local type="$1" value="$2" element out=""
+    case "$type" in
+        \?*) type="${type:1}" ;;
+    esac
+    case "$type" in
+        path)
+            printf '%s' "${value/#\~/$HOME}"
+            ;;
+        list:path)
+            [ -n "$value" ] || return 0
+            local -a elements=()
+            IFS=':' read -ra elements <<< "$value"
+            for element in "${elements[@]}"; do
+                out="${out:+$out:}${element/#\~/$HOME}"
+            done
+            printf '%s' "$out"
+            ;;
+        *)
+            printf '%s' "$value"
+            ;;
+    esac
+}
+
+# config_get <section> <key>
+# The value, or the schema default when the key is absent from the file.
+# "Absent" and "present but empty" are deliberately different: `ssh_key =`
+# means no key, while omitting the line entirely means the default. Tracking
+# that with a separate flag rather than testing the value for emptiness is
+# what keeps `share_dir =` from silently becoming the default path.
+config_get() {
+    local section="$1" want="$2" conf line cur="" key value type
+    local found="" seen=0
+    if ! type="$(config_type "$section.$want")"; then
+        echo "unknown config key: [$section] $want" >&2
+        return 1
+    fi
+    config_validate || return 1
+    conf="$(config_path)"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(_config_trim "$line")"
+        case "$line" in
+            ''|'#'*|';'*) continue ;;
+            '['*']')
+                cur="${line#\[}"
+                cur="$(_config_trim "${cur%\]}")"
+                continue
+                ;;
+        esac
+        [ "$cur" = "$section" ] || continue
+        key="$(_config_trim "${line%%=*}")"
+        [ "$key" = "$want" ] || continue
+        value="$(_config_trim "${line#*=}")"
+        # Last assignment wins, so keep going rather than break.
+        found="$value"
+        seen=1
+    done < "$conf"
+    [ "$seen" = 1 ] || found="$(config_default "$section.$want")"
+    _config_expand "$type" "$found"
+}
+
+config_get_bool() {
+    local value
+    value="$(config_get "$1" "$2")" || return 1
+    [ "$value" = "on" ] && printf '1' || printf '0'
+}

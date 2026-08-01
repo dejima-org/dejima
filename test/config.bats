@@ -170,3 +170,127 @@ EOF
     run lib _config_valid_value path '/home/someone/My Documents/proj'
     [ "$status" -eq 0 ]
 }
+
+write_config() {
+    printf '%s\n' "$@" > "$CONFIG_DIR/config"
+}
+
+@test "config_get returns the schema default when the key is absent" {
+    write_config '[core]' 'firewall = on'
+    run lib config_get audit keep
+    [ "$status" -eq 0 ]
+    [ "$output" = "10" ]
+}
+
+@test "config_get returns an explicitly empty value rather than the default" {
+    write_config '[core]' 'ssh_key ='
+    run lib config_get core ssh_key
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+    # Distinct from absence, which yields the default.
+    write_config '[core]' 'firewall = on'
+    run lib config_get core known_hosts
+    [ "$output" = "$HOME/.ssh/known_hosts" ]
+}
+
+@test "config_get expands a leading tilde on path types only" {
+    write_config '[core]' 'share_dir = ~/somewhere' '[logging]' 'loki_url = https://x.example/~y'
+    run lib config_get core share_dir
+    [ "$output" = "$HOME/somewhere" ]
+    run lib config_get logging loki_url
+    [ "$output" = "https://x.example/~y" ]
+}
+
+@test "config_get expands a tilde in every element of a list" {
+    write_config '[mounts]' 'readonly = ~/a:/b'
+    run lib config_get mounts readonly
+    [ "$output" = "$HOME/a:/b" ]
+}
+
+@test "comments, blank lines and surrounding whitespace are ignored" {
+    write_config '# leading comment' '' '  [core]  ' '; semicolon comment' \
+                 '   firewall   =   off   ' ''
+    run lib config_get core firewall
+    [ "$status" -eq 0 ]
+    [ "$output" = "off" ]
+}
+
+@test "a later assignment of the same key wins" {
+    write_config '[core]' 'firewall = on' 'firewall = off'
+    run lib config_get core firewall
+    [ "$output" = "off" ]
+}
+
+@test "an unknown section is fatal" {
+    write_config '[nonesuch]' 'x = y'
+    run lib config_validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown section"* ]]
+    [[ "$output" == *"nonesuch"* ]]
+}
+
+@test "an unknown key is fatal and names the section" {
+    write_config '[core]' 'nonesuch = 1'
+    run lib config_validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown key"* ]]
+    [[ "$output" == *"core"* ]]
+    [[ "$output" == *"nonesuch"* ]]
+}
+
+@test "an invalid value is fatal and names the key" {
+    write_config '[audit]' 'keep = 0'
+    run lib config_validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value"* ]]
+    [[ "$output" == *"keep"* ]]
+}
+
+@test "a key outside any section is fatal" {
+    write_config 'firewall = on'
+    run lib config_validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"outside any section"* ]]
+}
+
+@test "a line that is neither a section nor an assignment is fatal" {
+    write_config '[core]' 'this is not an assignment'
+    run lib config_validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed"* ]]
+}
+
+@test "config_get refuses a key the schema does not define" {
+    write_config '[core]' 'firewall = on'
+    run lib config_get core nonesuch
+    [ "$status" -ne 0 ]
+}
+
+@test "config_get validates the whole file, not just the requested key" {
+    write_config '[core]' 'firewall = on' '[audit]' 'keep = 99999'
+    run lib config_get core firewall
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value"* ]]
+}
+
+@test "config_get_bool maps on and off to 1 and 0" {
+    write_config '[core]' 'firewall = off'
+    run lib config_get_bool core firewall
+    [ "$output" = "0" ]
+    write_config '[core]' 'firewall = on'
+    run lib config_get_bool core firewall
+    [ "$output" = "1" ]
+}
+
+@test "config_exists reports whether the file is there" {
+    run lib config_exists
+    [ "$status" -ne 0 ]
+    write_config '[core]' 'firewall = on'
+    run lib config_exists
+    [ "$status" -eq 0 ]
+}
+
+@test "a missing config file is not silently an all-defaults config" {
+    run lib config_get core firewall
+    [ "$status" -ne 0 ]
+}
