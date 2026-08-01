@@ -1219,3 +1219,28 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # SANDBOX_CREDENTIAL_PROXY=0 path.
     ! grep -q 'extra_hosts' "$SANDBOX_DIR/docker-compose.yml"
 }
+
+@test "bin/dejima defaults to the tls transport and exports it" {
+    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$REPO_ROOT/bin/dejima"
+    grep -q 'export .*SANDBOX_ANTHROPIC_TRANSPORT' "$REPO_ROOT/bin/dejima"
+}
+
+@test "tls mode mounts a fake credential, never the real one, and sets no ANTHROPIC_* pair" {
+    # The mask file stops being empty in tls mode: Claude Code reads
+    # .credentials.json directly when there is no ANTHROPIC_AUTH_TOKEN, so it
+    # needs a well-formed document - with the secrets faked and the
+    # non-secret fields (scopes/subscriptionType/rateLimitTier/clientId)
+    # copied so the session's own UI state stays accurate.
+    grep -q 'sandbox-credential-proxy-placeholder' "$REPO_ROOT/bin/dejima"
+    grep -q 'subscriptionType' "$REPO_ROOT/bin/dejima"
+    grep -q 'rateLimitTier' "$REPO_ROOT/bin/dejima"
+    # Expiry is deliberately NOT mirrored from the real credential: a
+    # near-term expiresAt makes Claude Code refresh with the fake refresh
+    # token, fail, and log the session out.
+    grep -q 'refreshTokenExpiresAt' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the loopback transport still sets the base URL and placeholder token" {
+    grep -q 'SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"' "$REPO_ROOT/bin/dejima"
+    grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
+}
