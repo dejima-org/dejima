@@ -78,9 +78,15 @@ BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/
 #                       for CRITICAL, so approving a hook today does not
 #                       approve a different hook tomorrow.
 baseline_suppresses() {
-    local id="$1" sha="$2" bf verb rest bid bsha
+    local id="$1" sha="$2" bf verb rest bid bsha eid
     bf="$BASELINE_DIR/$(ws_slug "$ws")"
     [ -f "$bf" ] || return 1
+    # Callers pass the RAW id; the baseline file stores the encoded form (see
+    # enc_id). Encoded once here, outside the loop - it does not vary per
+    # line, and this runs for every finding. For an ordinary id the encoding
+    # is the identity, so baseline files written before this existed keep
+    # matching unchanged.
+    eid="$(enc_id "$id")"
     while read -r verb rest; do
         case "$verb" in ''|'#'*) continue ;; esac
         # An id may itself contain spaces (e.g. "file 2.md"), so it can't be
@@ -99,7 +105,7 @@ baseline_suppresses() {
                   esac ;;
             *)    continue ;;              # unknown verb
         esac
-        [ "$bid" = "$id" ] || continue
+        [ "$bid" = "$eid" ] || continue
         case "$verb" in
             # `ack` refusing to write `spam` for a CRITICAL surface is
             # convenience; this is the actual boundary - it holds even
@@ -174,6 +180,60 @@ id_severity() {
 sanitize() {
     printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' \
         | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g'
+}
+
+# sanitize() is lossy, so it must never be what an ID passes through.
+#
+# `ack` derives the baseline id it records from the report's text, and the
+# next `compare` matches that id against the RAW bytes on disk. An id
+# containing anything sanitize() strips therefore could not round-trip at
+# all: the surface stayed permanently unsuppressible and its report
+# permanently unclearable, so bin/dejima's startup warning fired forever -
+# the alert fatigue this whole feature exists to end, reached from the other
+# side. Ids are encoded instead, and the encoded form is canonical
+# everywhere it is written down: in the report AND in the baseline file.
+#
+# An id that survives sanitize() unchanged is already display-safe and is
+# written verbatim - that is every ordinary id, so reports and existing
+# baseline files are byte-for-byte what they were. Anything else is
+# hex-encoded behind a marker, which is ASCII by construction and reverses
+# exactly.
+#
+# An id that merely LOOKS encoded is encoded too, so that decoding stays
+# unambiguous: the marker's presence always means this encoder put it there.
+# Without that, a workspace could present an id that `ack` decoded into one
+# of the attacker's choosing - baselining something other than the finding
+# while still counting it acknowledged, the same shape as the id-derivation
+# hijacks the anchored case arms in `ack` guard against. Only the START of
+# an id is significant, and no monitored path can begin with the marker
+# (they are all rooted at .claude/.vscode/.git/.envrc/.mcp.json), but a git
+# config section name is free text in a file the session can write and the
+# audit parses that file directly rather than through git.
+#
+# The encoded form is also the honest rendering. sanitize() DELETES those
+# bytes, so a planted ".git/hooks/pre<U+202E>commit" displayed as
+# "precommit" sends an operator grepping for a name no file on disk has.
+HEX_MARK='{hex}'
+enc_id() {
+    local v="$1"
+    if [ "$(sanitize "$v")" = "$v" ]; then
+        case "$v" in "$HEX_MARK"*) ;; *) printf '%s' "$v"; return ;; esac
+    fi
+    printf '%s%s' "$HEX_MARK" "$(printf '%s' "$v" | od -An -tx1 | tr -d ' \n')"
+}
+# Inverse of enc_id. Built with parameter expansion and one printf rather
+# than a pipeline, so no command substitution inside can eat a trailing
+# byte. printf '%b' consumes the escapes left to right in a single pass,
+# which is what makes "\\x41" decode to a literal backslash followed by x41
+# instead of to "A".
+dec_id() {
+    local h="$1" esc=""
+    case "$h" in
+        "$HEX_MARK"*) h="${h#"$HEX_MARK"}" ;;
+        *) printf '%s' "$h"; return ;;
+    esac
+    while [ -n "$h" ]; do esc="$esc\\x${h:0:2}"; h="${h:2}"; done
+    printf '%b' "$esc"
 }
 
 # Undo git's config-file quoting of a value (git wraps values containing
@@ -370,20 +430,26 @@ case "$cmd" in
         while IFS= read -r line; do
             key="${line%%=*}"
             key_nopfx="${key#worktree:}"
+            # The key is the id-bearing half and is encoded; the value is
+            # display-only and is sanitized. Splitting them keeps a value
+            # full of control bytes from dragging its key into the opaque
+            # hex form, where the operator could no longer read which
+            # setting had changed.
+            body="$(enc_id "$key")=$(sanitize "${line#*=}")"
             if is_exec_key "$key_nopfx"; then
                 gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                 baseline_suppresses "$gid" "$gsha" && continue
-                crit+=("COMMAND-EXECUTION git config: $(sanitize "$line")")
+                crit+=("COMMAND-EXECUTION git config: $body")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
                     '!'*) gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                           baseline_suppresses "$gid" "$gsha" && continue
-                          crit+=("COMMAND-EXECUTION git alias: $(sanitize "$line")") ;;
-                    *)    warn+=("changed git config: $(sanitize "$line")") ;;
+                          crit+=("COMMAND-EXECUTION git alias: $body") ;;
+                    *)    warn+=("changed git config: $body") ;;
                 esac
             else
-                warn+=("changed git config: $(sanitize "$line")")
+                warn+=("changed git config: $body")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
@@ -396,14 +462,14 @@ case "$cmd" in
             [ -e "$ws/$line" ] && cur_sha="$(hash_entry "$ws/$line")"
             baseline_suppresses "$line" "$cur_sha" && continue
             case "$(path_severity "$line")" in
-                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(sanitize "$line")") ;;
-                WARNING)  warn+=("changed workspace file: $(sanitize "$line")") ;;
+                CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $(enc_id "$line")") ;;
+                WARNING)  warn+=("changed workspace file: $(enc_id "$line")") ;;
                 # Currently unreachable: hash_paths() only monitors
                 # .mcp.json/.envrc/.claude/.vscode/.git/hooks, and every path
                 # under those matches an earlier CRITICAL/WARNING pattern in
                 # path_severity(). Kept as the defensive default for
                 # surfaces monitored by a future task.
-                *)        info+=("changed workspace file: $(sanitize "$line")") ;;
+                *)        info+=("changed workspace file: $(enc_id "$line")") ;;
             esac
         done < <(comm -3 <(sed -n '/^### paths/,/^### projects/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
@@ -430,7 +496,7 @@ case "$cmd" in
         while IFS= read -r line; do
             tid="tcb:$line"; tsha=""; [ -e "$ws/$line" ] && tsha="$(hash_entry "$ws/$line")"
             baseline_suppresses "$tid" "$tsha" && continue
-            crit+=("TCB (sandbox self) modified: $(sanitize "$line")")
+            crit+=("TCB (sandbox self) modified: $(enc_id "$line")")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -443,7 +509,7 @@ case "$cmd" in
         while IFS= read -r line; do
             sid="statusline:$line"; ssha=""; [ -e "$STATUSLINE_PATH" ] && ssha="$(hash_entry "$STATUSLINE_PATH")"
             baseline_suppresses "$sid" "$ssha" && continue
-            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(sanitize "$line")")
+            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(enc_id "$line")")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -598,18 +664,32 @@ case "$cmd" in
             # which would truncate the derived id to everything after that
             # planted separator - the case match being anchored doesn't
             # protect the extraction that follows it.
-            ackable=0; id=""
+            #
+            # Two forms come out of this, because the two consumers need
+            # different ones (see enc_id): $id is the ENCODED id exactly as
+            # the report carries it, and is what gets written to the
+            # baseline file, which stores that form. $rid is the same id
+            # decoded back to the raw bytes on disk, for current_sha_for_id
+            # to stat and hash and for id_severity to classify. Only the
+            # id-bearing portion is decoded - never the namespace prefix
+            # this code adds itself.
+            ackable=0; id=""; rid=""
             case "$body" in
                 "HOST-CODE-EXECUTION workspace file: "*)
-                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }" ;;
+                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }"
+                    rid="$(dec_id "$id")" ;;
                 "changed workspace file: "*)
-                    ackable=1; id="${body#changed workspace file: }" ;;
+                    ackable=1; id="${body#changed workspace file: }"
+                    rid="$(dec_id "$id")" ;;
                 "COMMAND-EXECUTION git config: "*|"COMMAND-EXECUTION git alias: "*)
-                    ackable=1; cfgline="${body#*: }"; id="gitconfig:${cfgline%%=*}" ;;
+                    ackable=1; cfgline="${body#*: }"; ekey="${cfgline%%=*}"
+                    id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
                 "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "*)
-                    ackable=1; id="statusline:${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }" ;;
+                    ackable=1; esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
+                    id="statusline:$esl"; rid="statusline:$(dec_id "$esl")" ;;
                 "TCB (sandbox self) modified: "*)
-                    ackable=1; id="tcb:${body#TCB (sandbox self) modified: }" ;;
+                    ackable=1; etcb="${body#TCB (sandbox self) modified: }"
+                    id="tcb:$etcb"; rid="tcb:$(dec_id "$etcb")" ;;
                 *) ackable=0 ;;
             esac
             # Defence in depth: even an anchored arm above should never
@@ -617,6 +697,7 @@ case "$cmd" in
             # crit_acked (and thus whether a report can shed -CRITICAL.txt)
             # must only ever advance when a real, non-empty id was derived.
             [ -n "$id" ] || ackable=0
+            [ -n "$rid" ] || ackable=0
             echo ""
             echo "  [$tier] $body"
             if [ "$ackable" -ne 1 ]; then
@@ -642,7 +723,7 @@ case "$cmd" in
                     if [ "$ackable" -ne 1 ]; then
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
                     else
-                        sha="$(current_sha_for_id "$id")"
+                        sha="$(current_sha_for_id "$rid")"
                         if [ -z "$sha" ]; then
                             # Nothing left to pin the approval to: current_sha_for_id
                             # returning empty means $id no longer exists (deleted

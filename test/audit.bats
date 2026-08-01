@@ -407,22 +407,80 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *"core.pager"* ]]
 }
 
-@test "strips terminal escapes from a planted path" {
+@test "keeps terminal escapes in a planted path out of the report" {
     snap
     mkdir -p "$WS/.claude"
     touch "$WS/.claude/$(printf 'evil\033[2Jfile')"
     run cmp_
     [[ "$output" != *$'\033'* ]]
-    [[ "$output" == *".claude/evil"* ]]
+    [[ "$output" == *"{hex}"* ]]
 }
 
-@test "strips a bidi override from a planted path instead of letting it visually reverse the report" {
+@test "keeps a bidi override in a planted path from visually reversing the report" {
     snap
     mkdir -p "$WS/.claude"
     touch "$WS/.claude/$(printf 'evil%sfile' $'\xe2\x80\xae')"
     run cmp_
     [[ "$output" != *$'\xe2\x80\xae'* ]]
-    [[ "$output" == *".claude/evilfile"* ]]
+    # Encoded, not silently stripped: rendering this as ".claude/evilfile"
+    # would send the operator grepping for a name no file on disk has, and
+    # is the id `ack` used to record - one that could never match again.
+    [[ "$output" != *".claude/evilfile"* ]]
+    [[ "$output" == *"{hex}2e636c617564652f6576696ce280ae66696c65"* ]]
+}
+
+@test "a path whose real bytes contain a bidi override can be acknowledged and stays acknowledged" {
+    # The round trip this encoding exists for. compare wrote sanitized text,
+    # ack derived the baseline id from it, and the next compare matched that
+    # id against the RAW bytes on disk - so this path could never be
+    # acknowledged, its report never cleared, and the startup warning fired
+    # on it forever.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/.claude"
+    snap
+    printf 'x' > "$WS/.claude/$(printf 'evil%sfile' $'\xe2\x80\xae')"
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    [[ "$output" != *"no longer exists"* ]]
+    grep -q '^safe {hex}2e636c617564652f6576696ce280ae66696c65 ' "$BASEDIR/$slug"
+    # Same unchanged state file, so the same finding is rediscovered - and
+    # is now suppressed by what ack recorded.
+    run cmp_
+    [ "$output" = "" ]
+}
+
+@test "a file whose name merely contains the hex marker is left alone and still round-trips" {
+    # The marker is only meaningful at the START of an id, so this one is
+    # display-safe and is passed through verbatim - the encoding must not
+    # reach for it here, and dec_id must not mistake it for encoded text.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$WS/.claude"
+    snap
+    printf 'x' > "$WS/.claude/{hex}6576696c"
+    run cmp_
+    [[ "$output" == *".claude/{hex}6576696c"* ]]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    grep -q '^safe \.claude/{hex}6576696c ' "$BASEDIR/$slug"
+    run cmp_
+    [ "$output" = "" ]
+}
+
+@test "an id that starts with the hex marker is encoded rather than passed through" {
+    # Otherwise a workspace could hand `ack` an id that decodes to one of its
+    # choosing - baselining something other than the finding while still
+    # counting the finding acknowledged. No monitored path can reach this
+    # (they are all rooted at .claude/.vscode/.git/.envrc/.mcp.json), but a
+    # git config section name is free text in a file the session can write,
+    # and the audit parses that file directly rather than through git.
+    snap
+    printf '[{hex}6576696c]\n\tkey = v\n' >> "$WS/.git/config"
+    run cmp_
+    [[ "$output" != *"{hex}6576696c.key"* ]]   # not passed through verbatim...
+    [[ "$output" == *"{hex}7b6865787d36353736363936632e6b6579"* ]]   # ...encoded
 }
 
 @test "writes a timestamped report file containing the full finding list" {
