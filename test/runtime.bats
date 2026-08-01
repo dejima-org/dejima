@@ -277,8 +277,19 @@ dexec_node() {
 }
 
 @test "an allowlisted domain resolves via the DNS proxy" {
-    run dexec dig +short api.anthropic.com
+    run dexec dig +short registry.npmjs.org
     [ -n "$output" ]
+}
+
+@test "api.anthropic.com does not resolve - the proxy is the only path to the API" {
+    # Deliberately not allowlisted. A session with the credential proxy on
+    # reaches the API through the in-container TLS terminator, via an
+    # /etc/hosts entry that getaddrinfo honours without consulting DNS at
+    # all - so anything asking DNS for this name is trying to go around the
+    # proxy, and must fail closed. (This file's shared container runs with no
+    # proxy socket, so it has no hosts entry either: DNS is all that's left.)
+    run dexec dig api.anthropic.com
+    [[ "$output" == *"status: REFUSED"* ]]
 }
 
 @test "a non-allowlisted destination is unreachable" {

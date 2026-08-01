@@ -1244,3 +1244,11 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q 'SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"' "$REPO_ROOT/bin/dejima"
     grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
 }
+
+@test "api.anthropic.com is not in the firewall allowlist" {
+    # The container reaches the API only through the credential proxy now:
+    # /etc/hosts sends the name to loopback, so allowlisting it would only
+    # ever help something trying to bypass the proxy. Removing it makes that
+    # bypass fail closed.
+    ! grep -q '"api.anthropic.com"' "$SANDBOX_DIR/fixed-domains.sh"
+}

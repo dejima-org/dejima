@@ -1,9 +1,12 @@
 # Sourced by both init-firewall.sh (IP-based ipset allowlist) and
 # dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
+# api.anthropic.com is deliberately absent: entrypoint.sh points it at the
+# in-container TLS terminator via /etc/hosts, so the credential proxy is the
+# only path to the API - and a session trying to reach the real endpoint
+# directly, by name or by IP, fails closed.
 FIXED_DOMAINS=(
     "registry.npmjs.org"
     "platform.claude.com"
-    "api.anthropic.com"
     "gitlab.com"
     "pypi.org"
     "files.pythonhosted.org"
