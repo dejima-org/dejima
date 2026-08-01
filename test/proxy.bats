@@ -184,6 +184,7 @@ teardown() {
 @test "forwarder bridges TCP to the proxy's unix socket" {
     start_proxy
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
+        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
@@ -241,4 +242,81 @@ PYEOF
     [ "$output" = "200" ]
     run cat "$TD/stderr"
     [[ "$output" != *"501"* ]]
+}
+
+# The forwarder is the container-side half of the chain. In tls mode it
+# terminates TLS for api.anthropic.com on loopback so Claude Code needs no
+# ANTHROPIC_BASE_URL at all, then pipes raw bytes into the same unix socket
+# the loopback mode uses - the host proxy cannot tell the two apart.
+start_forwarder() {  # start_forwarder <transport> <port>; extra env passes through
+    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" \
+    SANDBOX_ANTHROPIC_TRANSPORT="$1" \
+    SANDBOX_ANTHROPIC_PROXY_PORT="$2" \
+    SANDBOX_ANTHROPIC_TLS_CERT="$TD/cert.pem" \
+    SANDBOX_ANTHROPIC_TLS_KEY="$TD/key.pem" \
+        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" 2>"$TD/fwd-stderr" &
+    FWD_PID=$!
+    for _ in $(seq 1 50); do
+        (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+make_cert() {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -keyout "$TD/key.pem" -out "$TD/cert.pem" \
+        -subj "/CN=api.anthropic.com" \
+        -addext "subjectAltName=DNS:api.anthropic.com" >/dev/null 2>&1
+}
+
+@test "forwarder tls mode: https to api.anthropic.com reaches the proxy, which injects the real token" {
+    make_cert
+    start_proxy
+    start_forwarder tls 18443
+    # --resolve is what stands in for the container's /etc/hosts entry: the
+    # name must really be api.anthropic.com for certificate verification to
+    # be a meaningful check, not a hostname the test picked to be easy.
+    run curl -s --cacert "$TD/cert.pem" \
+        --resolve "api.anthropic.com:18443:127.0.0.1" \
+        -X POST "https://api.anthropic.com:18443/v1/messages" -d '{}'
+    kill "$FWD_PID" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
+    # No Authorization header was sent at all - the proxy supplied it. This is
+    # the auth fingerprint closing: no placeholder token in the container.
+    [[ "$output" != *"$PLACEHOLDER"* ]]
+}
+
+@test "forwarder tls mode pins ALPN to http/1.1 so the client cannot negotiate h2" {
+    # The upstream is a Python http.server, which speaks only HTTP/1.1: an h2
+    # negotiation would deliver frames it cannot parse, and the byte pipe has
+    # no HTTP awareness to catch it.
+    make_cert
+    start_proxy
+    start_forwarder tls 18444
+    run openssl s_client -connect 127.0.0.1:18444 -alpn h2,http/1.1 \
+        -servername api.anthropic.com -CAfile "$TD/cert.pem" </dev/null
+    kill "$FWD_PID" 2>/dev/null || true
+    [[ "$output" == *"ALPN protocol: http/1.1"* ]]
+}
+
+@test "forwarder loopback mode is unchanged: plaintext http on the old port" {
+    start_proxy
+    start_forwarder loopback 18445
+    run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
+    kill "$FWD_PID" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
+}
+
+@test "forwarder tls mode refuses to start without a cert, rather than silently downgrading" {
+    start_proxy
+    # `run env ...`, not a `VAR=x run ...` prefix: an assignment prefixed to a
+    # shell *function* persists in the calling shell rather than scoping to
+    # the call, so it would leak into every later test in this file.
+    run env SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
+        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
 }
