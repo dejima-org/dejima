@@ -965,6 +965,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -1023,6 +1024,7 @@ EOF
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$container"
