@@ -81,7 +81,7 @@ setup_file() {
     # authenticates init-firewall.sh's api.github.com/meta fetch, which
     # returns the same ranges either way. What it changes is the quota: that
     # endpoint allows 60 requests an hour per source IP unauthenticated, and
-    # this file starts fifteen containers, so two runs in an hour exhaust it
+    # this file starts sixteen containers, so two runs in an hour exhaust it
     # and every container after that dies in init-firewall.sh with a rate
     # limit error rather than anything to do with what was being tested.
     # Locally it's usually unset and expands empty, which both init-firewall
