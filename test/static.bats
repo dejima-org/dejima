@@ -1246,9 +1246,10 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
 }
 
 @test "api.anthropic.com is in the fixed domains only when the proxy is off" {
-    # Not unconditionally allowlisted: with the proxy on, entrypoint.sh pins
-    # the name in /etc/hosts and leaving it unresolvable defeats a bypass of
-    # that pin which looks the name up by DNS. When the proxy is off (kill
+    # Not unconditionally allowlisted: with the proxy on, the session reaches
+    # the API through the forwarder rather than by resolving this name, so
+    # leaving it unresolvable defeats a bypass that looks it up by DNS. When
+    # the proxy is off (kill
     # switch or API-key auth) DNS is the only path to the API, so it has to be
     # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
     # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
@@ -1262,7 +1263,9 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
-    run bash -c "unset SANDBOX_ANTHROPIC_PROXY_SOCKET; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    # Under `set -u`, as both consumers run, so that dropping the `:-` default
+    # fails here rather than at container start.
+    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 

@@ -13,9 +13,10 @@ FIXED_DOMAINS=(
 
 # api.anthropic.com is allowlisted only when this session has no credential
 # proxy (kill switch or API-key auth), where DNS is the only path to the API.
-# With the proxy on, entrypoint.sh pins the name to loopback in /etc/hosts, and
-# leaving it unresolvable defeats a bypass of that pin which looks the name up
-# by DNS. It is not a route block: the API's address stays reachable as an IP
+# With the proxy on, the session reaches the API through the forwarder rather
+# than by resolving this name (under the tls transport, via entrypoint.sh's
+# /etc/hosts pin), so leaving it unresolvable defeats a bypass that looks the
+# name up by DNS. It is not a route block: the API's address stays reachable as an IP
 # literal for as long as platform.claude.com above resolves to the same one.
 # Appended here rather than to EXTRA_ALLOWED_DOMAINS because it is a public
 # SaaS name: dns-proxy.sh exempts the extra list from stop-dns-rebind, and

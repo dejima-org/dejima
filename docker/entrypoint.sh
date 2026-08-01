@@ -125,8 +125,8 @@ case "$SANDBOX_ANTHROPIC_TRANSPORT" in
     *)
         echo "FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to '$SANDBOX_ANTHROPIC_TRANSPORT'." >&2
         echo "The only valid values are 'tls' (the default) and 'loopback'; they are" >&2
-        echo "case-sensitive. Not starting the session - the host and container halves" >&2
-        echo "of the credential proxy would disagree about which transport is in use." >&2
+        echo "case-sensitive. Not starting the session - an unrecognised value would" >&2
+        echo "otherwise be read as one transport here and the other by bin/dejima." >&2
         exit 1
         ;;
 esac
