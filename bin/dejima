@@ -158,15 +158,21 @@ fi
 SANDBOX_SHARE_DIR="${SANDBOX_SHARE_DIR:-$HOME/.local/share/dejima/shared}"
 mkdir -p "$SANDBOX_SHARE_DIR"
 
-# skills/commands/agents/output-styles overlays (see docker-compose.yml) can
-# only apply if the source dirs exist - pre-create them so a host that has
-# never used one still gets the read-only overlay instead of a writable gap.
-mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"
+# ~/.claude is no longer mounted as a whole (see the mount inventory in
+# docker-compose.yml) - every path that crosses into the container is named
+# individually, and Docker answers a missing bind source by creating a
+# root-owned *directory* at it. That would leave junk on the host and, for
+# the read-only config dirs, a writable gap instead of an overlay. Pre-create
+# them all: empty is fine, existence is what matters.
+mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" \
+    "$HOME/.claude/output-styles" "$HOME/.claude/hooks" "$HOME/.claude/plugins"
+mkdir -p "$HOME/.claude/projects" "$HOME/.claude/file-history" "$HOME/.claude/backups" \
+    "$HOME/.claude/tasks" "$HOME/.claude/plans" "$HOME/.claude/sessions"
 
-# Same for settings.json, which install.sh normally creates. Docker would
-# otherwise make a *directory* at the mount source, leaving that junk on the
-# host and the session with no settings at all.
+# Same for settings.json, which install.sh normally creates, and CLAUDE.md,
+# which many hosts don't have at all.
 [ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
+[ -f "$HOME/.claude/CLAUDE.md" ] || : > "$HOME/.claude/CLAUDE.md"
 
 # Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
 # "sandbox" block) is redundant here - it can't even function inside this
@@ -260,8 +266,8 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_CREDENTIALS_MASK_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
-    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
@@ -337,14 +343,16 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 # path for this - discover what's actually needed here instead, so it's
 # correct regardless of what's installed or where this repo itself was
 # cloned to.
-# "." covers top-level symlinked files directly under ~/.claude itself -
-# e.g. ~/.claude/statusline.sh -> dotfiles' statusline script, referenced
-# by settings.json's statusLine.command. Same trust model as hook code:
-# the target executes on the host too, so read-only is the right mount.
+# Only the directories that are actually mounted in: the top-level files
+# (settings.json, CLAUDE.md, statusline.sh) are staged as copies instead, and
+# Docker resolves any symlink among them when it sets up that staging mount,
+# so their targets don't need to be reachable from inside at all. Scanning
+# "." here too would mount a whole config checkout read-only into the
+# container for nothing.
 extra_mounts=()
 mounted_dirs=""
-for overlay_dir in . hooks skills commands agents output-styles; do
-    dir="$HOME/.claude/$overlay_dir"
+for mounted_dir in hooks skills commands agents output-styles; do
+    dir="$HOME/.claude/$mounted_dir"
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do
         [ -L "$entry" ] || continue
@@ -418,41 +426,28 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
-# ~/.claude/statusline.sh is the same class of file as the compose overlays
-# on settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/output-
-# styles above (see docker-compose.yml's comments on those): settings.json's
-# statusLine.command points at it, and Claude Code executes it on the host.
-# Unlike those, it has no overlay of its own - it's a top-level *file*
-# directly on the read-write ~/.claude mount, so a compromised session can
-# unlink it and drop its own script in its place. The symlink-target scan
-# above (the "." entry in overlay_dir) only protects the case where
-# statusline.sh is a symlink by mounting read-only where it *points* - it
-# doesn't touch the symlink/file itself, which still lives on the writable
-# mount. Conditional on existence because not every host has one, and
-# mounting a nonexistent source would make Docker create a root-owned
-# directory at the target instead - worse than the gap this closes.
+# ~/.claude/statusline.sh is the same class of file as the config staged at
+# /etc/dejima-claude by docker-compose.yml: settings.json's statusLine.command
+# points at it, and Claude Code executes it on the host. Staged the same way,
+# for entrypoint.sh to copy into place, rather than mounted at its real path.
 #
-# Confirmed against a live container (test/runtime.bats), not just reasoned
-# about: this mount reliably protects only the plain-regular-file case. When
-# statusline.sh itself is a symlink (the common case - typically into a
-# dotfiles checkout), it does NOT protect it. The parent ~/.claude mount
-# above is established first, so by the time this mount is processed the
-# destination already has that symlink sitting on it, and bind-mount
-# destination resolution (runc's SecureJoin) follows symlinks within the
-# container's rootfs - so this :ro mount resolves through the symlink to the
-# target directory (already read-only from the symlink-target scan above,
-# making this mount a no-op there) instead of binding to the symlink dentry
-# itself, which stays on the writable ~/.claude mount and remains
-# replaceable. There is no mount-based fix for this: ~/.claude can't be made
-# read-only (session history has to stay writable), and mounting over the
-# resolved target instead of the symlink path isn't an option either, since
-# bin/dejima has no way to force the *destination* resolution to stop
-# at the symlink. The compensating control is detection, not prevention:
-# bin/dejima-audit hashes the symlink's target string (so a
-# repointed or replaced statusline.sh is caught) and reports it as a
-# host-code-execution finding after the session exits. Keep this mount
-# anyway - it's a real, verified fix for the regular-file case, and a no-op
-# rather than a regression for the symlink case.
+# It used to be mounted read-only at $HOME/.claude/statusline.sh, and that
+# protected only the plain-regular-file case - confirmed against a live
+# container, not just reasoned about. When statusline.sh was itself a symlink
+# (the common case - typically into a dotfiles checkout), the read-write
+# ~/.claude mount was established first, so the destination already had that
+# symlink sitting on it, and bind-mount destination resolution (runc's
+# SecureJoin) followed it: the :ro mount landed on the target directory
+# instead of the symlink dentry, which stayed writable and replaceable. There
+# was no mount-based fix while ~/.claude was mounted whole, and the
+# compensating control was detection after the fact (bin/dejima-audit hashes
+# the symlink's target string). Staging closes it outright: Docker resolves
+# the symlink when it sets up the staging mount, so entrypoint.sh copies the
+# real content to a path nothing on the host can reach.
+#
+# Conditional on existence because not every host has one, and mounting a
+# nonexistent source would make Docker create a root-owned directory at the
+# target instead - worse than the gap this closes.
 #
 # A *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
 # isn't present) is neither "exists" nor safely mountable, so it gets its own
@@ -464,30 +459,32 @@ fi
 if [ -L "$HOME/.claude/statusline.sh" ] && [ ! -e "$HOME/.claude/statusline.sh" ]; then
     echo "$HOME/.claude/statusline.sh is a symlink to a target that doesn't" >&2
     echo "exist. Docker can't bind-mount a dangling symlink, and skipping the" >&2
-    echo "mount would leave it unprotected on the read-write ~/.claude mount." >&2
+    echo "mount would leave the session with no statusline at all." >&2
     echo "Fix or remove the symlink, then retry." >&2
     exit 1
 elif [ -e "$HOME/.claude/statusline.sh" ]; then
-    extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh:ro")
+    extra_mounts+=(-v "$HOME/.claude/statusline.sh:/etc/dejima-claude/statusline.sh:ro")
 fi
 
 # Keep the real Anthropic OAuth credential out of the container entirely:
 # run a host-side proxy that injects it per-request (see
-# bin/dejima-anthropic-proxy and docs/security.md), mount an
-# empty file over ~/.claude/.credentials.json and an empty read-only
-# directory over ~/.claude/.credentials-proxy-tmp (the proxy's write-back
-# staging directory - the parent ~/.claude mount must stay read-write, so
-# masking these two paths individually is the mechanism), and hand Claude
-# Code a placeholder token pointed at a loopback forwarder.
+# bin/dejima-anthropic-proxy and docs/security.md) and hand Claude Code a
+# placeholder token pointed at a loopback forwarder. Nothing needs masking
+# any more - ~/.claude isn't mounted as a whole, so the credential (and the
+# proxy's .credentials-proxy-tmp staging directory beside it) simply never
+# crosses into the container. That masking is what #50 was: both masks were
+# single-file/-directory mounts nested in the read-write ~/.claude mount,
+# and the proxy's own write-back renamed the credential out from under them,
+# detaching the mask and exposing the real token from the first refresh on.
+#
 # Skipped when there's no claudeAiOauth block to protect (API-key setups),
-# or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch - both restore the old
-# behavior exactly (credential mounted in with the rest of ~/.claude).
+# or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch. Both then mount the real
+# credential in explicitly, which used to come free with the whole-directory
+# mount and now has to be stated.
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
-SANDBOX_CREDENTIALS_MASK_FILE=""
-SANDBOX_CREDENTIALS_TMPDIR_MASK=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
@@ -510,18 +507,15 @@ if [ "${SANDBOX_CREDENTIAL_PROXY:-1}" != "0" ] \
         echo "credential is then mounted into the container, as before)." >&2
         exit 1
     fi
-    SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-credentials-mask.XXXXXX")"
-    SANDBOX_CREDENTIALS_TMPDIR_MASK="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credentials-tmpdir-mask.XXXXXX")"
     extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
-    extra_mounts+=(-v "$SANDBOX_CREDENTIALS_MASK_FILE:$HOME/.claude/.credentials.json")
-    # Mount target must exist first, same as the skills/commands/etc. overlays
-    # above - otherwise Docker auto-creates it root-owned, and the proxy
-    # (running as the unprivileged host user) can't write its staging temp
-    # file there on the next refresh.
-    mkdir -p -m 700 "$HOME/.claude/.credentials-proxy-tmp"
-    extra_mounts+=(-v "$SANDBOX_CREDENTIALS_TMPDIR_MASK:$HOME/.claude/.credentials-proxy-tmp:ro")
     SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
     SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+elif [ -f "$HOME/.claude/.credentials.json" ]; then
+    # No proxy: the session authenticates with the real credential, so it has
+    # to be mounted in. Read-write because Claude Code refreshes it in place.
+    # This is the documented downgrade, not an oversight - see the kill-switch
+    # message above and docs/security.md.
+    extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
 
