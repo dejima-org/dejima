@@ -349,14 +349,22 @@ forge_hosts() {
 # means the value is the CONTENTS of the file the config key names - a token
 # reaches the container without its path being mistaken for the secret.
 forge_env_exports() {
-    local forge="$1" pair name ref value
+    local forge="$1" pair name ref value path
     for pair in $(manifest_get forge "$forge" env_export); do
         name="${pair%%=*}"
         ref="${pair#*=}"
         if [ "${ref:0:1}" = "@" ]; then
             value="$(config_get "forge.$forge" "${ref:1}")" || return 1
             if [ -n "$value" ] && [ -f "$value" ]; then
-                value="$(<"$value")"
+                path="$value"
+                value="$(<"$path")"
+                if [ "$value" != "${value%%$'\n'*}" ]; then
+                    echo "refusing [forge.$forge] ${ref:1}: the file at $path contains a" >&2
+                    echo "newline. A credential cannot carry one - it would truncate here and" >&2
+                    echo "leave a bare -e argument, which docker reads as 'pass through the" >&2
+                    echo "host variable of that name'." >&2
+                    return 1
+                fi
             else
                 value=""
             fi

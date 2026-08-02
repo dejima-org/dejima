@@ -298,6 +298,13 @@ write_config() {
     [ "$status" -ne 0 ]
 }
 
+@test "config_is_set refuses an unknown key, like config_get does" {
+    write_config '[core]' 'firewall = on'
+    run lib config_is_set core nonesuch
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown config key"* ]]
+}
+
 @test "config_get validates the whole file, not just the requested key" {
     write_config '[core]' 'firewall = on' '[audit]' 'keep = 99999'
     run lib config_get core firewall

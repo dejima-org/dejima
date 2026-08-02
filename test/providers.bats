@@ -197,3 +197,27 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [[ "$output" != *"https"* ]]
     [[ "$output" != *"/v1"* ]]
 }
+
+@test "a token file containing an embedded newline makes forge_env_exports fail" {
+    printf '[forge.gitea]\ntoken_file = %s/token\n' "$CONFIG_DIR" > "$CONFIG_DIR/config"
+    printf 'line1\nline2\n' > "$CONFIG_DIR/token"
+    run lib forge_env_exports gitea
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"newline"* ]]
+    # The secret must never appear in the error message.
+    [[ "$output" != *"line1"* ]]
+    [[ "$output" != *"line2"* ]]
+}
+
+@test "a single-line token file with trailing newline works and yields one record" {
+    printf '[forge.gitea]\ntoken_file = %s/token\n' "$CONFIG_DIR" > "$CONFIG_DIR/config"
+    printf 'my-secret-token\n' > "$CONFIG_DIR/token"
+    run lib forge_env_exports gitea
+    [ "$status" -eq 0 ]
+    # $(<file) strips trailing newlines, so the GITEA_TOKEN line should have no
+    # embedded newline - the output includes the api and ssh_host lines too, and
+    # the test is specifically about the token line surviving a trailing newline.
+    # grep for just the line with content and verify it has no embedded newlines.
+    token_line="$(printf '%s\n' "$output" | grep '^GITEA_TOKEN=')"
+    [ "$token_line" = "GITEA_TOKEN=my-secret-token" ]
+}

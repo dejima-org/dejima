@@ -390,6 +390,10 @@ config_get() { _config_get_from_file "$@"; }
 # the wrong question for anything asking what the operator configured.
 config_is_set() {
     local section="$1" want="$2" conf line cur="" key
+    if ! config_type "$section.$want" >/dev/null; then
+        echo "unknown config key: [$section] $want" >&2
+        return 1
+    fi
     config_exists || return 1
     config_validate || return 1
     conf="$(config_path)"
