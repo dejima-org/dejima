@@ -121,3 +121,79 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
+
+@test "a workflow requiring a capability its forge lacks is refused" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/bare" "$FAKE_ROOT/workflows/needy" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities =\n' > "$FAKE_ROOT/forges/bare/forge.conf"
+    printf 'requires = pr\npush = off\n' > "$FAKE_ROOT/workflows/needy/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+        bash -c 'source "$1"; provider_validate_selection bare needy h' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pr"* ]]
+    [[ "$output" == *"bare"* ]]
+    [[ "$output" == *"needy"* ]]
+}
+
+@test "a pushing workflow on a forge with no hosts is not refused - rule 3 is deferred to Phase 3" {
+    # gitea's ssh_host/api have no schema default and install.sh writes them
+    # commented out, so refusing this would refuse a fresh install - see the
+    # comment above provider_validate_selection's push check. Phase 3 adds
+    # `forge = none` and this becomes a refusal then.
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/hostless" "$FAKE_ROOT/workflows/pusher" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities =\n' > "$FAKE_ROOT/forges/hostless/forge.conf"
+    printf 'requires =\npush = on\n' > "$FAKE_ROOT/workflows/pusher/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+        bash -c 'source "$1"; provider_validate_selection hostless pusher h' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the shipped selection validates" {
+    # provider_validate_selection runs after bin/dejima's own config_exists
+    # gate in real use, so a config file is always present by then - gitea's
+    # requires (ssh_host, api) need real values here for the same reason.
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\n' \
+        > "$CONFIG_DIR/config"
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a wholly unconfigured forge produces no warning and still validates" {
+    # The supported "I don't use a forge" case (rule 3's comment, README
+    # "Skip this if you only push to GitHub") - a test asserting only the
+    # warning below would pass against a version that refused this instead.
+    # gitea's requires includes token_file, which has a schema default
+    # (~/.config/gitea/token) and so ALWAYS resolves to a non-empty value
+    # via config_get, even though nothing here sets it - this must still
+    # count as "unset" (config_is_set, not config_get) or a config that sets
+    # none of gitea's keys would look partly configured and warn.
+    printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
+    run lib config_default forge.gitea.token_file
+    [ -n "$output" ] || { echo "test premise broken: token_file has no default"; return 1; }
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Warning"* ]] || { echo "unexpected warning: $output"; return 1; }
+}
+
+@test "a partially configured forge warns but still validates" {
+    printf '[forge.gitea]\nssh_host = git.example\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"partly configured"* ]]
+    [[ "$output" == *"api"* ]]
+}
+
+@test "forge_hosts unions literal host keys, URL-derived hosts and fixed hosts" {
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\n' \
+        > "$CONFIG_DIR/config"
+    run lib forge_hosts gitea
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"git.example"* ]]
+    [[ "$output" == *"api.example"* ]]
+    # The scheme and path never survive into a firewall entry.
+    [[ "$output" != *"https"* ]]
+    [[ "$output" != *"/v1"* ]]
+}

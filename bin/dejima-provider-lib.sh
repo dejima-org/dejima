@@ -72,6 +72,21 @@ provider_dir() {
     printf '%s' "$dir_real"
 }
 
+# Overrides the stub in dejima-config-lib.sh. Deliberately not an enum baked
+# into the schema: the point of the axes is that adding a provider is adding a
+# directory, and a schema that had to be edited too would defeat it.
+_config_extra_type_valid() {
+    local type="$1" value="$2"
+    case "$type" in
+        provider:*)
+            valid_provider_name "$value" || return 1
+            [ -d "$(provider_root)/$(_provider_axis_dir "${type#provider:}")/$value" ] || return 1
+            return 0
+            ;;
+        *) return 2 ;;
+    esac
+}
+
 provider_list() {
     local axis="$1" sub entry name
     sub="$(_provider_axis_dir "$axis")" || return 1
@@ -246,4 +261,108 @@ manifest_get() {
     done < "$file"
     [ "$seen" = 1 ] || found="$(_manifest_default "$axis" "$want")"
     printf '%s' "$found"
+}
+
+# Space-separated set membership, for capability and requirement lists.
+_set_contains() {
+    local haystack=" $1 " needle="$2"
+    [[ "$haystack" == *" $needle "* ]]
+}
+
+provider_validate_selection() {
+    local forge="$1" workflow="$2" harness="$3"
+    local caps requires need key set_n unset_n missing
+
+    manifest_validate forge "$forge" || return 1
+    manifest_validate workflow "$workflow" || return 1
+    manifest_validate harness "$harness" || return 1
+
+    caps="$(manifest_get forge "$forge" capabilities)"
+    requires="$(manifest_get workflow "$workflow" requires)"
+    for need in $requires; do
+        if ! _set_contains "$caps" "$need"; then
+            echo "workflow '$workflow' requires the '$need' capability, which forge" >&2
+            echo "'$forge' does not provide (it offers: ${caps:-none})." >&2
+            return 1
+        fi
+    done
+
+    # Rule 3 ("a pushing workflow needs a forge that resolves to a host") is
+    # deliberately NOT checked here. gitea's ssh_host/api have no schema
+    # default and install.sh writes them commented out, so a fresh install
+    # would be refused by this rule today - while it launches fine as-is,
+    # with git-push-guard.sh blocking pushes at runtime (see README "Skip
+    # this if you only push to GitHub"). An unconfigured forge is supported,
+    # not broken, until Phase 3 adds `forge = none` as the honest way to say
+    # so - only then does this rule have a correct alternative to point an
+    # operator at, and it becomes a refusal alongside rule 5 below.
+
+    # config_is_set, not config_get: the question is "did the operator set
+    # this key", not "does it have a value" - token_file has a schema
+    # default, so it always has a value, and testing the value would make a
+    # wholly unconfigured gitea (nothing in [forge.gitea] at all) look
+    # partly configured.
+    set_n=0 unset_n=0 missing=""
+    for key in $(manifest_get forge "$forge" requires); do
+        if config_is_set "forge.$forge" "$key"; then
+            set_n=$((set_n + 1))
+        else
+            unset_n=$((unset_n + 1))
+            missing="${missing:+$missing }$key"
+        fi
+    done
+    # A warning, not a refusal (rule 5), and only when the forge is PARTLY
+    # configured. Wholly unconfigured is the same supported "I don't use
+    # this forge" case rule 3 above defers to Phase 3 for, and must stay
+    # silent; a partial configuration is almost certainly a typo, and saying
+    # so costs nothing. Becomes a refusal in Phase 3 alongside rule 3.
+    if [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
+        echo "Warning: forge '$forge' is partly configured - [forge.$forge] is" >&2
+        echo "missing: $missing. Pushes and PRs will fail until it is set." >&2
+    fi
+    return 0
+}
+
+# Every hostname this forge needs reachable: literal host keys, the host part
+# of URL keys, and any fixed hosts. Derivation lives here rather than in a
+# manifest because it is the same sed bin/dejima and the guards would each
+# otherwise repeat - a provider says WHICH keys, never HOW to parse them.
+forge_hosts() {
+    local forge="$1" key value out=""
+    for key in $(manifest_get forge "$forge" host_keys); do
+        value="$(config_get "forge.$forge" "$key")" || return 1
+        [ -n "$value" ] && out="${out:+$out }$value"
+    done
+    for key in $(manifest_get forge "$forge" url_keys); do
+        value="$(config_get "forge.$forge" "$key")" || return 1
+        [ -n "$value" ] || continue
+        value="$(printf '%s' "$value" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')"
+        [ -n "$value" ] && out="${out:+$out }$value"
+    done
+    for value in $(manifest_get forge "$forge" fixed_hosts); do
+        out="${out:+$out }$value"
+    done
+    printf '%s' "$out"
+}
+
+# Prints one "KEY=VALUE" per line for the container environment. The "@" form
+# means the value is the CONTENTS of the file the config key names - a token
+# reaches the container without its path being mistaken for the secret.
+forge_env_exports() {
+    local forge="$1" pair name ref value
+    for pair in $(manifest_get forge "$forge" env_export); do
+        name="${pair%%=*}"
+        ref="${pair#*=}"
+        if [ "${ref:0:1}" = "@" ]; then
+            value="$(config_get "forge.$forge" "${ref:1}")" || return 1
+            if [ -n "$value" ] && [ -f "$value" ]; then
+                value="$(<"$value")"
+            else
+                value=""
+            fi
+        else
+            value="$(config_get "forge.$forge" "$ref")" || return 1
+        fi
+        printf '%s=%s\n' "$name" "$value"
+    done
 }

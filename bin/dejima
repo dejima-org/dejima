@@ -19,6 +19,8 @@ REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
+# shellcheck source=dejima-provider-lib.sh
+source "$SCRIPT_DIR/dejima-provider-lib.sh"
 
 # Flags come first, then the optional workspace path, then "--" and
 # everything after that reaches the container command untouched - including a
@@ -131,6 +133,14 @@ _warn_legacy_env() {
     fi
 }
 _warn_legacy_env
+# GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) - forge_env_exports
+# computes their replacements fresh from the manifest further down and passes
+# them as -e flags, but a value already exported by the operator's shell is
+# otherwise inherited by the docker subprocess unchanged since nothing else
+# here reassigns these three names. Cleared, not just unread, for the same
+# reason the old hardcoded GITEA_TOKEN computation started from "" rather
+# than the inherited value.
+unset GITEA_TOKEN GITEA_SSH_HOST GITEA_API
 
 if ! config_exists; then
     echo "No dejima config at $(config_path)." >&2
@@ -151,6 +161,34 @@ if [ "$PRINT_CONFIG" = 1 ]; then
         printf '%s=%s\n' "$_key" "$(config_get "$_section" "$_leaf")"
     done < <(_config_keys)
     exit 0
+fi
+
+# The selected forge/workflow/harness combination, resolved and validated
+# before anything is built or mounted. provider_validate_selection enforces
+# rules 1, 2 and 6 as refusals and rule 5 (a partly-configured forge) as a
+# warning - see its definition. Rule 3 ("a pushing workflow needs a forge
+# that resolves to a host") is deliberately NOT enforced here: it is
+# deferred to Phase 3, which adds `forge = none` as the honest way to say
+# "no forge" - enforcing it now would refuse the supported "I don't use a
+# forge" configuration that git-push-guard.sh already handles at runtime
+# (see README "Skip this if you only push to GitHub").
+DEJIMA_FORGE_NAME="$(config_get core forge)"
+DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
+DEJIMA_HARNESS_NAME="$(config_get core harness)"
+provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"
+DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
+if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
+    DEJIMA_PUSH_HOSTS="$DEJIMA_FORGE_HOSTS"
+else
+    DEJIMA_PUSH_HOSTS=""
+fi
+DEJIMA_BLOCKED_BRANCHES="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" blocked_branches)"
+if [ "$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" block_merge)" = "on" ]; then
+    DEJIMA_MERGE_BLOCK="$(manifest_get forge "$DEJIMA_FORGE_NAME" merge_block)"
+else
+    DEJIMA_MERGE_BLOCK=""
 fi
 
 WORKSPACE_DIR="${1:-$(pwd)}"
@@ -250,7 +288,10 @@ if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK}" ]; then
     have_forwarded_agent=0
 fi
 
-if [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
+# Rule 4: a workflow that never pushes has no use for either - skip the
+# requirement entirely rather than force an operator doing local-only work
+# to set up an agent or a deploy key for nothing.
+if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
     echo "SSH_AUTH_SOCK is not set or not a valid socket, and [core] ssh_key is not set." >&2
     echo "Either start ssh-agent and run ssh-add, or set [core] ssh_key in $(config_path) to a" >&2
     echo "dedicated key for headless use - see README 'Headless git push' section." >&2
@@ -266,16 +307,6 @@ if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
     echo "git-over-ssh (e.g. pushing to Gitea) will fail until you ssh-add a key," >&2
     echo "unless [core] ssh_key is also set." >&2
-fi
-
-# Plain assignment, not left unset: a stale GITEA_TOKEN already exported by
-# the operator's shell must not survive a missing/renamed token file and
-# flow straight through to the export below - the configured file is the
-# only source.
-GITEA_TOKEN=""
-GITEA_TOKEN_FILE="$(config_get forge.gitea token_file)"
-if [ -f "$GITEA_TOKEN_FILE" ]; then
-    GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
 fi
 
 # Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
@@ -480,12 +511,13 @@ export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
 export SANDBOX_GITCONFIG_DIR
+# Rule 4's other half: a workflow that never pushes gets no agent socket
+# forwarded either - left empty here, docker-compose.yml's
+# ${SSH_AUTH_SOCK:-/dev/null} mounts nothing.
+[ "$DEJIMA_WORKFLOW_PUSH" = "on" ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
-export GITEA_TOKEN="${GITEA_TOKEN:-}"
-export GITEA_SSH_HOST="$(config_get forge.gitea ssh_host)"
-export GITEA_API="$(config_get forge.gitea api)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # --allow-github-push is the only way to grant this - same principle as
@@ -540,6 +572,29 @@ export LOKI_URL="$(config_get logging loki_url)"
 # "." here too would mount a whole config checkout read-only into the
 # container for nothing.
 extra_mounts=()
+
+# The forge's own env vars (GITEA_API, GITEA_SSH_HOST, GITEA_TOKEN today),
+# generated from its manifest rather than hardcoded - see forge_env_exports.
+# -e here, same as DEJIMA_RW_MOUNTS below: passed straight through to
+# `docker compose run`, which takes -e alongside -v.
+while IFS= read -r _forge_env; do
+    [ -n "$_forge_env" ] || continue
+    extra_mounts+=(-e "$_forge_env")
+done < <(forge_env_exports "$DEJIMA_FORGE_NAME")
+
+# The resolved combination, for the briefing and the hooks Phase 2's later
+# tasks wire up to read them (git-push-guard.sh's host allowlist and
+# no-direct-push branches, gitea-merge-guard.sh's block) - computed here,
+# unconditionally passed through the same way, so those tasks only need to
+# start reading them.
+extra_mounts+=(-e "DEJIMA_FORGE_NAME=$DEJIMA_FORGE_NAME")
+extra_mounts+=(-e "DEJIMA_WORKFLOW_NAME=$DEJIMA_WORKFLOW_NAME")
+extra_mounts+=(-e "DEJIMA_HARNESS_NAME=$DEJIMA_HARNESS_NAME")
+extra_mounts+=(-e "DEJIMA_FORGE_HOSTS=$DEJIMA_FORGE_HOSTS")
+extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
+extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
+extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
+
 mounted_dirs=""
 for mounted_dir in hooks skills commands agents output-styles; do
     dir="$HOME/.claude/$mounted_dir"

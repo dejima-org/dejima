@@ -30,15 +30,16 @@
 # meaningfully absent (ssh_key, loki_url) and one that must always have a
 # value (firewall, share_dir).
 #
-# The three axis keys accept exactly one value each in this phase. They exist
-# now so a config written today stays valid when Phase 2 widens them to a
-# directory lookup.
+# The three axis keys are `provider:<axis>` - validated by looking the name
+# up under the provider root (see _config_extra_type_valid below and
+# dejima-provider-lib.sh) rather than a fixed enum, so adding a provider is
+# adding a directory, not editing this schema.
 # ---------------------------------------------------------------------------
 _config_table() {
     cat <<'EOF'
-core.harness	enum:claude-code	claude-code
-core.forge	enum:gitea	gitea
-core.workflow	enum:worktree-pr	worktree-pr
+core.harness	provider:harness	claude-code
+core.forge	provider:forge	gitea
+core.workflow	provider:workflow	worktree-pr
 core.command	identifier	claude
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
@@ -128,6 +129,14 @@ config_path() {
 valid_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
 }
+
+# Extension point for types this layer cannot judge on its own. A stub here,
+# overridden by dejima-provider-lib.sh when that is sourced - which is what
+# lets the schema name a provider: type without this file having to know what
+# a provider is. Returns 0 valid, 1 invalid, 2 "not a type I handle", so an
+# unknown type stays fatal rather than being waved through by a hook that
+# simply did not recognise it.
+_config_extra_type_valid() { return 2; }
 
 _config_valid_value() {
     local type="$1" value="$2" optional=0
@@ -219,8 +228,12 @@ _config_valid_value() {
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
             ;;
         *)
-            echo "config: unknown schema type: $type" >&2
-            return 1
+            _config_extra_type_valid "$type" "$value"
+            case $? in
+                0) return 0 ;;
+                1) return 1 ;;
+                *) echo "config: unknown schema type: $type" >&2; return 1 ;;
+            esac
             ;;
     esac
 }
@@ -370,6 +383,32 @@ _config_get_from_file() {
 # config_get itself, after sourcing this file, to consult per-launch flag
 # overrides first and fall back to _config_get_from_file.
 config_get() { _config_get_from_file "$@"; }
+
+# config_is_set <section> <key>
+# Whether the key APPEARS in the config file, as distinct from having a
+# value: a key with a schema default always has a value, so "has a value" is
+# the wrong question for anything asking what the operator configured.
+config_is_set() {
+    local section="$1" want="$2" conf line cur="" key
+    config_exists || return 1
+    config_validate || return 1
+    conf="$(config_path)"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(_config_trim "$line")"
+        case "$line" in
+            ''|'#'*|';'*) continue ;;
+            '['*']')
+                cur="${line#\[}"
+                cur="$(_config_trim "${cur%\]}")"
+                continue
+                ;;
+        esac
+        [ "$cur" = "$section" ] || continue
+        key="$(_config_trim "${line%%=*}")"
+        [ "$key" = "$want" ] && return 0
+    done < "$conf"
+    return 1
+}
 
 config_get_bool() {
     local value

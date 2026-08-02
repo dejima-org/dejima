@@ -218,6 +218,27 @@ write_config() {
     [ "$output" = "$HOME/a:/b" ]
 }
 
+@test "config_is_set distinguishes absent, empty and defaulted" {
+    write_config '[core]' 'ssh_key =' 'known_hosts = ~/x'
+    # Absent entirely - not in the file at all.
+    run lib config_is_set core firewall
+    [ "$status" -ne 0 ]
+    # Present with a value.
+    run lib config_is_set core known_hosts
+    [ "$status" -eq 0 ]
+    # Present but empty - still "set", distinct from absent.
+    run lib config_is_set core ssh_key
+    [ "$status" -eq 0 ]
+    # A schema default is not the same as being set: audit.keep has a
+    # default (10) and config_get returns it, but it never appears in this
+    # file, so config_is_set must say so - this is the whole point of the
+    # function, and the bug it exists to prevent (see provider_validate_selection).
+    run lib config_get audit keep
+    [ "$output" = "10" ]
+    run lib config_is_set audit keep
+    [ "$status" -ne 0 ]
+}
+
 @test "comments, blank lines and surrounding whitespace are ignored" {
     write_config '# leading comment' '' '  [core]  ' '; semicolon comment' \
                  '   firewall   =   off   ' ''
