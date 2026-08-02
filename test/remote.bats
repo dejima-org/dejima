@@ -1394,7 +1394,7 @@ EOF
     assert_argv 'myproject needs input' 'Session is waiting for you.' \
         'https://dejima.example.invalid/?arg=0123456789abcdef'
     marker 0123456789abcdef waiting
-    DEJIMA_DEBOUNCE_SECONDS=3600 run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
     [ "$status" -eq 0 ]
     # Still that one push and no other: the vector is compared whole, so a
     # second would appear as trailing arguments and fail here.

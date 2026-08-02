@@ -788,3 +788,65 @@ run_install() {
             || { echo "README never documents section $section"; return 1; }
     done
 }
+
+@test "no shipped file still instructs setting a variable dejima retired" {
+    # Same idea as the README test above, generalized: driven off
+    # _warn_legacy_env's own table in bin/dejima, not a hardcoded list here,
+    # so a future addition there is covered automatically instead of the two
+    # copies drifting apart.
+    local names
+    names="$(sed -n '/^_warn_legacy_env() {/,/^}/p' "$REPO_ROOT/bin/dejima" \
+        | grep -oE '"[A-Z_]+=' | tr -d '"=')"
+    [ -n "$names" ]
+
+    local func_start func_end
+    func_start="$(grep -n '^_warn_legacy_env() {' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)"
+    func_end="$(awk -v s="$func_start" 'NR>=s && /^}/ { print NR; exit }' "$REPO_ROOT/bin/dejima")"
+
+    local name out hit=0
+
+    # docs/ and systemd/ are pure operator-facing prose - nothing there is
+    # live shell plumbing, so any mention of a retired name is either the
+    # deliberate "no longer read" notice (install.sh's remote.conf one lives
+    # outside these two directories, but the exclusion is kept here too in
+    # case a future doc adds one) or a stale instruction.
+    while IFS= read -r name; do
+        out="$(grep -rnE "\b${name}\b" "$REPO_ROOT/docs" "$REPO_ROOT/systemd" 2>/dev/null \
+            | grep -v 'no longer read' || true)"
+        if [ -n "$out" ]; then
+            echo "$out" >&2
+            hit=1
+        fi
+    done <<< "$names"
+
+    # bin/ and docker/entrypoint.sh still use several of these exact names as
+    # live internal plumbing between bin/dejima and the container (exported
+    # here, read there), so a bare mention alone is not an error - the same
+    # name in docker-compose.yml's `NAME: ${NAME:-default}` form is exactly
+    # that plumbing and needs no separate exclusion, since it never matches
+    # either alternative below. What IS an error is a comment or a printed
+    # message that hands the name to the reader as something to type:
+    # "NAME=value", or "set ... NAME".
+    local pattern
+    while IFS= read -r name; do
+        pattern="^\\s*#.*((?<!\\\$)\\b${name}=|\\bset (the )?\\\$?${name}\\b)"
+        pattern="${pattern}|echo .*((?<!\\\$)\\b${name}=|\\bset (the )?\\\$?${name}\\b)"
+        pattern="${pattern}|printf .*((?<!\\\$)\\b${name}=|\\bset (the )?\\\$?${name}\\b)"
+        out="$(grep -nPi "$pattern" \
+            "$REPO_ROOT"/bin/dejima "$REPO_ROOT"/bin/dejima-audit "$REPO_ROOT"/bin/dejima-ttyd \
+            "$REPO_ROOT"/bin/dejima-notify-watch "$REPO_ROOT"/bin/dejima-attach \
+            "$REPO_ROOT"/docker/entrypoint.sh 2>/dev/null || true)"
+        if [ -n "$out" ]; then
+            # _warn_legacy_env's own table names every retired variable this
+            # way by design - allowed to match, so exclude only that range.
+            out="$(printf '%s\n' "$out" | awk -F: -v f="$REPO_ROOT/bin/dejima" -v s="$func_start" -v e="$func_end" \
+                '{ if ($1 == f && $2+0 >= s && $2+0 <= e) next; print }')"
+        fi
+        if [ -n "$out" ]; then
+            echo "$out" >&2
+            hit=1
+        fi
+    done <<< "$names"
+
+    [ "$hit" = 0 ]
+}

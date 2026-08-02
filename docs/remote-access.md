@@ -54,10 +54,11 @@ glyph wider than the viewport renders a terminal that shows nothing, which
 reads as a broken front door rather than as a typo three sections away.
 
 `dejima-ttyd` and `dejima-notify-watch` are the two scripts that read a
-*value* out of the config. `dejima-attach` and `dejima` only ask
-`remote_enabled` - deliberately bypassing the whole-file validation above, so
-a typo elsewhere in the config can't lock you out of the terminal you'd fix
-it from.
+*value* out of the config, so a typo anywhere in the file refuses their
+start. `dejima` reads values too (`audit dir` among them) and refuses the
+same way. `dejima-attach` alone only asks `remote_enabled` - deliberately
+bypassing the whole-file validation, so a typo elsewhere in the config can't
+lock you out of the terminal you'd fix it from.
 
 ```
 # ~/.config/dejima/config - substitute your own topic and hostname

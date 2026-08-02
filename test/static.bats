@@ -621,7 +621,7 @@ setup() {
     # Falling back to mounting the real credential would be a silent
     # security downgrade - the failure must be loud and the launch aborted.
     grep -q 'Credential proxy failed to start' "$REPO_ROOT/bin/dejima"
-    grep -q 'SANDBOX_CREDENTIAL_PROXY=0' "$REPO_ROOT/bin/dejima"
+    grep -q '\[credentials\] proxy = off' "$REPO_ROOT/bin/dejima"
 }
 
 @test "cleanup reaps the proxy and its socket dir and mask file" {
@@ -1179,7 +1179,7 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # port with nothing behind it - every API call then fails with a
     # connection error that gives no hint where it came from.
     grep -q 'the credential-proxy forwarder never bound' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT=loopback' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q '\[credentials\] transport = loopback' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test "the hosts entry is written only when the proxy is actually running" {

@@ -821,7 +821,7 @@ The other three need no Docker either. `project.bats` covers the
 declaration/approval split - what `.dejima/` may ask for, what only the host
 can grant, and that the approval store is never mounted. `remote.bats`
 covers everything in [docs/remote-access.md](docs/remote-access.md):
-`remote.conf` parsing, the session registry, and the properties the
+the `[remote-access]` config section, the session registry, and the properties the
 feature's security rests on - that the
 notification path carries no sandbox-controlled byte, and that no marker
 name outside `waiting`/`done` is ever acted on. `audit.bats` covers

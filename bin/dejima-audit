@@ -10,6 +10,7 @@ set -uo pipefail
 
 # shellcheck source=dejima-config-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-config-lib.sh"
+config_validate || exit 1
 
 cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
 

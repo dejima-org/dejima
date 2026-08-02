@@ -1,8 +1,8 @@
 #!/bin/bash
 # Launch the dejima container, with a project directory bind-mounted
 # at its real host path. Defaults to running bare `claude` inside (with
-# --dangerously-skip-permissions); set SANDBOX_CMD to run something else
-# instead (see README).
+# --dangerously-skip-permissions); set [core] command in the config file,
+# or pass --cmd, to run something else instead (see README).
 #
 # Usage: dejima [path-to-project] [-- extra args...]
 #   dejima                      # sandbox the current directory
@@ -20,11 +20,15 @@ COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 
-# Flags come before the optional workspace path and stop at "--", so
+# Flags come first, then the optional workspace path, then "--" and
 # everything after that reaches the container command untouched - including a
-# token that looks like one of our own flags. Each flag's value is validated
-# against the same schema type its config key uses, so `--cmd 'rm -rf /'`
-# fails here for the same reason it would fail in the file.
+# token that looks like one of our own flags. The "--" must come AFTER the
+# workspace path: a bare "--" here, before any positional argument, is still
+# consumed by this loop, so `dejima -- --resume` treats --resume as the
+# workspace ("Not a directory: --resume") rather than passing it through.
+# Each flag's value is validated against the same schema type its config key
+# uses, so `--cmd 'rm -rf /'` fails here for the same reason it would fail in
+# the file.
 FLAG_OVERRIDES=()
 _set_override() {
     local key="$1" value="$2" type entry
@@ -204,7 +208,10 @@ warn_if_inside_workspace() {
 }
 warn_if_inside_workspace "approval store" "$(config_root)" \
     "the global approvals and every project's under it can be edited," \
-    "so a session can approve its own domains and dependencies."
+    "so a session can approve its own domains and dependencies - and the" \
+    "config file lives here too, so it can flip core.firewall off, add" \
+    "mounts.readonly entries of its own choosing, rewrite any token_file," \
+    "or turn remote-access.enabled on."
 warn_if_inside_workspace "audit report store" "$AUDIT_DIR" \
     "a session can delete the exit-time reports of earlier runs," \
     "including unacknowledged CRITICAL ones it is named in."
@@ -214,7 +221,7 @@ warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
 
 SANDBOX_SSH_KEY="$(config_get core ssh_key)"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
-    echo "SANDBOX_SSH_KEY is set but not a file: $SANDBOX_SSH_KEY" >&2
+    echo "[core] ssh_key is set but not a file: $SANDBOX_SSH_KEY" >&2
     exit 1
 fi
 if [ -n "$SANDBOX_SSH_KEY" ]; then
@@ -244,9 +251,9 @@ if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK}" ]; then
 fi
 
 if [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
-    echo "SSH_AUTH_SOCK is not set or not a valid socket, and SANDBOX_SSH_KEY is not set." >&2
-    echo "Either start ssh-agent and run ssh-add, or set SANDBOX_SSH_KEY to a dedicated" >&2
-    echo "key for headless use - see README 'Headless git push' section." >&2
+    echo "SSH_AUTH_SOCK is not set or not a valid socket, and [core] ssh_key is not set." >&2
+    echo "Either start ssh-agent and run ssh-add, or set [core] ssh_key in $(config_path) to a" >&2
+    echo "dedicated key for headless use - see README 'Headless git push' section." >&2
     exit 1
 fi
 
@@ -258,7 +265,7 @@ fi
 if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
     echo "git-over-ssh (e.g. pushing to Gitea) will fail until you ssh-add a key," >&2
-    echo "unless SANDBOX_SSH_KEY is also set." >&2
+    echo "unless [core] ssh_key is also set." >&2
 fi
 
 # Plain assignment, not left unset: a stale GITEA_TOKEN already exported by
@@ -517,13 +524,13 @@ for overlay_dir in . hooks skills commands agents output-styles; do
     done
 done
 
-# Optional: bring in a real nvim config to pair with SANDBOX_CMD=nvim (see
-# entrypoint.sh). Not baked into the image - this repo has no opinion on
+# Optional: bring in a real nvim config to pair with [core] command = nvim
+# (see entrypoint.sh). Not baked into the image - this repo has no opinion on
 # anyone's personal editor config.
 SANDBOX_NVIM_CONFIG="$(config_get mounts nvim_config)"
 if [ -n "$SANDBOX_NVIM_CONFIG" ]; then
     if [ ! -d "$SANDBOX_NVIM_CONFIG" ]; then
-        echo "SANDBOX_NVIM_CONFIG is set but not a directory: $SANDBOX_NVIM_CONFIG" >&2
+        echo "[mounts] nvim_config is set but not a directory: $SANDBOX_NVIM_CONFIG" >&2
         exit 1
     fi
     extra_mounts+=(-v "$SANDBOX_NVIM_CONFIG:$HOME/.config/nvim:ro")
@@ -555,7 +562,7 @@ if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
     for path in "${extra_paths[@]}"; do
         [ -n "$path" ] || continue
         if [ ! -e "$path" ]; then
-            echo "SANDBOX_EXTRA_MOUNTS entry does not exist: $path" >&2
+            echo "[mounts] readonly entry does not exist: $path" >&2
             exit 1
         fi
         extra_mounts+=(-v "$path:$path:ro")
@@ -635,11 +642,11 @@ fi
 # How the container then reaches the proxy depends on the transport. In the
 # default tls one, entrypoint.sh points api.anthropic.com at an in-container
 # TLS terminator, so no ANTHROPIC_* value is set at all and the session is
-# indistinguishable from a stock install. SANDBOX_ANTHROPIC_TRANSPORT=loopback
+# indistinguishable from a stock install. [credentials] transport = loopback
 # is the documented fallback if certificate pinning ever makes that
 # impossible: an explicit base URL at a plaintext forwarder, as before.
 # Skipped when there's no claudeAiOauth block to protect (API-key setups),
-# or via the SANDBOX_CREDENTIAL_PROXY=0 kill switch - both restore the old
+# or via the [credentials] proxy = off kill switch - both restore the old
 # behavior exactly (credential mounted in with the rest of ~/.claude).
 SANDBOX_ANTHROPIC_TRANSPORT="$(config_get credentials transport)"
 SANDBOX_ANTHROPIC_BASE_URL=""
@@ -666,8 +673,8 @@ if [ "$(config_get_bool credentials proxy)" != "0" ] \
         # Falling back to a session with the real credential mounted would
         # be a silent security downgrade - stop loudly instead.
         echo "Credential proxy failed to start - not launching. Fix the error above," >&2
-        echo "or set SANDBOX_CREDENTIAL_PROXY=0 to launch without it (the real OAuth" >&2
-        echo "credential is then mounted into the container, as before)." >&2
+        echo "or set [credentials] proxy = off in $(config_path) to launch without it" >&2
+        echo "(the real OAuth credential is then mounted into the container, as before)." >&2
         exit 1
     fi
     SANDBOX_CREDENTIALS_MASK_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-credentials-mask.XXXXXX")"

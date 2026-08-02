@@ -6,8 +6,8 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now dejima-notify-watch.service
 #
-# It does nothing useful until ~/.config/dejima/remote.conf exists and sets
-# NTFY_URL; without that dejima-notify-watch exits 1 and the restart limit
+# It does nothing useful until ~/.config/dejima/config sets [remote-access]
+# ntfy_url; without that dejima-notify-watch exits 1 and the restart limit
 # below stops the unit instead of retrying forever.
 #
 # This unit must be a USER unit, and its environment is load-bearing: both
@@ -22,7 +22,7 @@
 # check that they match.
 [Unit]
 Description=dejima notification watcher (marker files to ntfy)
-# A missing remote.conf or NTFY_URL fails every start identically, so give up
+# A missing config or ntfy_url fails every start identically, so give up
 # visibly rather than restarting for the life of the login session. A failed
 # push is not a failed start: the watcher warns and carries on, so a network
 # that is not up yet costs nothing here.
@@ -30,8 +30,8 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-# NTFY_URL, BASE_URL and the marker root all come from remote.conf, read by
-# the script - do not repeat any of them here, or the two will drift.
+# ntfy_url, base_url and the marker root all come from ~/.config/dejima/config,
+# read by the script - do not repeat any of them here, or the two will drift.
 # %h, not an absolute path: this file is the same for every operator.
 ExecStart=%h/.local/bin/dejima-notify-watch
 Restart=on-failure
