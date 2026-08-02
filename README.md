@@ -467,6 +467,30 @@ full shell access as the container's own user regardless.
 
 ## Sandbox self-awareness
 
+### Project instructions: `.dejima.md`
+
+`.dejima.md` at a project's root is that project's agent-instruction file —
+the same role `CLAUDE.md` plays for Claude Code — under a name that doesn't
+name a harness. dejima loads it into the session's opening context the way the
+harness would load its own, so a project's instructions apply whichever agent
+is running.
+
+The reason for a second name: Claude Code finds a `CLAUDE.md` by itself, and
+nothing else does. As dejima grows the ability to run agents that aren't Claude
+Code, a project that wants to say "here is how to work on me" needs one file
+that reaches all of them — so dejima delivers it rather than leaving each
+harness to go looking for its own.
+
+Loaded verbatim, capped at 16 KB with any truncation noted in the text. It
+carries no authority over the sandbox itself: the file sits on the read-write
+workspace mount, so nothing in it widens the firewall, relaxes a guard, or
+authorises a push, and the text delivered around it says so.
+
+This repo ships one, describing which half of its own test suite a sandboxed
+session can run.
+
+### The session briefing
+
 A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
 reminder when `DEJIMA` is set: the session is running in a
 disposable, firewalled container and should stay within the task at hand —
@@ -861,7 +885,8 @@ likely to collide with a real container you have running.
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
-| `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
+| `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
+| `.dejima.md` | Project-level agent instructions, harness-agnostic — `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
 | `hooks/gitea-merge-guard.sh` | `PreToolUse` hook: blocks `gitea-pr merge` in the sandbox — merging is a human decision |
