@@ -177,7 +177,9 @@ DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
 
-DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"
+if ! DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"; then
+    exit 1
+fi
 DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
 if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
     DEJIMA_PUSH_HOSTS="$DEJIMA_FORGE_HOSTS"
@@ -577,10 +579,17 @@ extra_mounts=()
 # generated from its manifest rather than hardcoded - see forge_env_exports.
 # -e here, same as DEJIMA_RW_MOUNTS below: passed straight through to
 # `docker compose run`, which takes -e alongside -v.
+_forge_env_lines=""
+if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
+    # forge_env_exports has already explained why on stderr. It can fail
+    # partway, having printed some records, so nothing it produced can be
+    # trusted - refuse rather than launch with a partial forge environment.
+    exit 1
+fi
 while IFS= read -r _forge_env; do
     [ -n "$_forge_env" ] || continue
     extra_mounts+=(-e "$_forge_env")
-done < <(forge_env_exports "$DEJIMA_FORGE_NAME")
+done <<< "$_forge_env_lines"
 
 # The resolved combination, for the briefing and the hooks Phase 2's later
 # tasks wire up to read them (git-push-guard.sh's host allowlist and

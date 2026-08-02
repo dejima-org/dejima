@@ -1068,3 +1068,30 @@ EOF
     ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
     [[ "$ctx" != *"outlive the container too"* ]]
 }
+
+@test "a token file with an embedded newline makes bin/dejima exit non-zero, before docker is invoked" {
+    # A refusal in forge_env_exports that gets swallowed by a process
+    # substitution would launch anyway with a partial environment - this test
+    # exercises the real launch path to verify the refusal actually stops it.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # Configure gitea forge with a valid config plus a token file with a newline.
+    printf '[core]\nfirewall = on\nssh_key = %s\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+        "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
+    printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "DOCKER WAS CALLED - TEST SHOULD HAVE FAILED" >&2
+exit 1
+EOF
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -ne 0 ] || { echo "bin/dejima did not fail"; return 1; }
+    [[ "$output" == *"newline"* ]] || { echo "no refusal message: $output"; return 1; }
+    # docker must not have been invoked at all.
+    [[ "$output" != *"DOCKER WAS CALLED"* ]] \
+        || { echo "docker was invoked despite the refusal"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$STUB_DIR"
+}
