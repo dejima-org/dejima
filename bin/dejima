@@ -88,7 +88,9 @@ _warn_legacy_env() {
         "GITEA_SSH_HOST=[forge.gitea] ssh_host" \
         "GITEA_API=[forge.gitea] api" \
         "GITEA_TOKEN_FILE=[forge.gitea] token_file" \
+        "GITEA_TOKEN=[forge.gitea] token_file (set the path, not the token)" \
         "GH_TOKEN_FILE=[github] token_file" \
+        "GH_TOKEN=[github] token_file (set the path, not the token)" \
         "SANDBOX_CMD=[core] command" \
         "SANDBOX_SSH_KEY=[core] ssh_key" \
         "SANDBOX_SHARE_DIR=[core] share_dir" \
@@ -259,6 +261,11 @@ if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "unless SANDBOX_SSH_KEY is also set." >&2
 fi
 
+# Plain assignment, not left unset: a stale GITEA_TOKEN already exported by
+# the operator's shell must not survive a missing/renamed token file and
+# flow straight through to the export below - the configured file is the
+# only source.
+GITEA_TOKEN=""
 GITEA_TOKEN_FILE="$(config_get forge.gitea token_file)"
 if [ -f "$GITEA_TOKEN_FILE" ]; then
     GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
@@ -268,6 +275,8 @@ fi
 # auth login` session is write-capable, which would defeat the point.
 # This should be a dedicated read-only fine-grained PAT (Contents +
 # Metadata: read-only), generated separately for this sandbox.
+# Plain assignment, same reason as GITEA_TOKEN above.
+GH_TOKEN=""
 GH_TOKEN_FILE="$(config_get github token_file)"
 if [ -f "$GH_TOKEN_FILE" ]; then
     GH_TOKEN="$(<"$GH_TOKEN_FILE")"
@@ -434,12 +443,19 @@ export GITEA_SSH_HOST="$(config_get forge.gitea ssh_host)"
 export GITEA_API="$(config_get forge.gitea api)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
-# --allow-github-push is a per-launch convenience over setting the
-# environment variable directly - it wins when passed, same as any other flag.
+# --allow-github-push is the only way to grant this - same principle as
+# ALLOWED_DOMAINS above: this opens a push path, so an exported value already
+# sitting in the operator's shell profile must not be able to silently grant
+# it, with nothing recording that it did.
 if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
     export ALLOW_GITHUB_PUSH=1
 else
-    export ALLOW_GITHUB_PUSH="${ALLOW_GITHUB_PUSH:-0}"
+    # Plain assignment, not "${ALLOW_GITHUB_PUSH:-0}" - same reason
+    # ALLOWED_DOMAINS above is plain. This opens a push path, so an exported
+    # value in a shell profile must not be able to grant it silently; the
+    # --allow-github-push flag is the only way in, and it is recorded in the
+    # command that used it.
+    export ALLOW_GITHUB_PUSH=0
 fi
 export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')}"
 

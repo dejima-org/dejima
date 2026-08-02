@@ -13,8 +13,8 @@ setup() {
     # shell (a dejima session itself sets several of these) - clear them so
     # tests see a hermetic baseline instead of depending on the invoking
     # environment.
-    unset GITEA_SSH_HOST GITEA_API GITEA_TOKEN_FILE GH_TOKEN_FILE \
-        SANDBOX_CMD SANDBOX_SSH_KEY SANDBOX_SHARE_DIR SANDBOX_EXTRA_MOUNTS \
+    unset GITEA_SSH_HOST GITEA_API GITEA_TOKEN_FILE GITEA_TOKEN GH_TOKEN_FILE \
+        GH_TOKEN SANDBOX_CMD SANDBOX_SSH_KEY SANDBOX_SHARE_DIR SANDBOX_EXTRA_MOUNTS \
         SANDBOX_NVIM_CONFIG SANDBOX_CREDENTIAL_PROXY SANDBOX_ANTHROPIC_TRANSPORT \
         SANDBOX_LOG_CONVERSATION LOKI_URL ENABLE_FIREWALL SSH_KNOWN_HOSTS \
         ALLOW_GITHUB_PUSH DEJIMA_AUDIT_DIR DEJIMA_AUDIT_BASELINE_DIR \
@@ -616,10 +616,88 @@ write_config() {
             | sed 's/^=\[//; s/\] /./')"
     # Asserted explicitly so a grep that silently stops matching anything
     # (e.g. after the table is reformatted) fails loudly instead of passing
-    # vacuously over an empty list.
-    [ "$(printf '%s\n' "$keys" | wc -l)" -eq 22 ]
+    # vacuously over an empty list. 24, not 22: GITEA_TOKEN and GH_TOKEN each
+    # also point at [forge.gitea]/[github] token_file, alongside the
+    # corresponding _FILE row.
+    [ "$(printf '%s\n' "$keys" | wc -l)" -eq 24 ]
     while IFS= read -r key; do
         run lib _config_spec "$key"
         [ "$status" -eq 0 ] || { echo "detector names unknown key: $key"; return 1; }
     done <<< "$keys"
+}
+
+@test "ALLOW_GITHUB_PUSH in the environment does not open the push path" {
+    write_config '[core]' 'firewall = on'
+    ALLOW_GITHUB_PUSH=1 run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ALLOW_GITHUB_PUSH"* ]]
+    [[ "$output" == *"no longer read"* ]]
+    # --print-config exits before ALLOW_GITHUB_PUSH is exported, so this
+    # exercises the real launch path far enough to reach it - same technique
+    # as the core.command leading-dash test above.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' "ssh_key = $key"
+    workspace="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "ALLOW_GITHUB_PUSH=$ALLOW_GITHUB_PUSH" >> "$SANDBOX_TEST_DOCKER_LOG"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" ALLOW_GITHUB_PUSH=1 \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ]
+    grep -q '^ALLOW_GITHUB_PUSH=0$' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "a stale exported GITEA_TOKEN does not survive a missing token file" {
+    write_config '[core]' 'firewall = on'
+    GITEA_TOKEN=stale-secret run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GITEA_TOKEN"* ]]
+    [[ "$output" == *"no longer read"* ]]
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' "ssh_key = $key" \
+        '[forge.gitea]' 'token_file = /nonexistent/gitea-token'
+    workspace="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "GITEA_TOKEN=$GITEA_TOKEN" >> "$SANDBOX_TEST_DOCKER_LOG"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" GITEA_TOKEN=stale-secret \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ]
+    grep -q '^GITEA_TOKEN=$' "$docker_log"
+    ! grep -q 'stale-secret' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "GITEA_TOKEN and GH_TOKEN are both named by the detector, pointing at the token file setting" {
+    write_config '[core]' 'firewall = on'
+    GITEA_TOKEN=x GH_TOKEN=y run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GITEA_TOKEN"* ]]
+    [[ "$output" == *"GH_TOKEN"* ]]
+    [[ "$output" == *"[forge.gitea] token_file"* ]]
+    [[ "$output" == *"[github] token_file"* ]]
+    [[ "$output" == *"set the path, not the token"* ]]
 }
