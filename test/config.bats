@@ -931,6 +931,79 @@ EOF
     rm -rf "$workspace" "$RW_HOME"
 }
 
+@test "a guarded path that does not exist yet is still guarded" {
+    # readlink -f yields nothing unless at most the final component is
+    # missing, so skipping an unresolvable guarded path would leave the audit
+    # stores unprotected exactly when their parents have not been created -
+    # letting a session mount a writable ancestor of the store dejima-audit is
+    # about to write findings into.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    mkdir -p "$RW_HOME/data"
+    write_config '[core]' "ssh_key = $RW_KEY" "share_dir = $RW_HOME/share" \
+                 '[audit]' "dir = $RW_HOME/data/store/audit" \
+                 '[mounts]' "read_write = $RW_HOME/data"
+    [ ! -e "$RW_HOME/data/store" ]
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "mounted a writable ancestor of the audit store"; return 1; }
+    [[ "$output" == *"Refusing"* ]]
+    rm -rf "$workspace" "$RW_HOME"
+}
+
+@test "the audit and baseline stores are guarded, not just the obvious paths" {
+    # Named explicitly because a regression that dropped them from the guarded
+    # list would otherwise pass every other test here.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    store="$(mktemp -d)"
+    # Created first, or the entry is rejected as a missing directory and the
+    # overlap rule under test never runs.
+    mkdir -p "$store/audit"
+    for key in dir baselines_dir; do
+        write_config '[core]' "ssh_key = $RW_KEY" \
+                     '[audit]' "$key = $store/audit" \
+                     '[mounts]' "read_write = $store/audit"
+        _rw_launch "$workspace"
+        [ "$status" -ne 0 ] || { echo "accepted a mount over [audit] $key"; return 1; }
+        [[ "$output" == *"Refusing"* ]] || { echo "wrong failure for [audit] $key"; return 1; }
+    done
+    rm -rf "$workspace" "$store" "$RW_HOME"
+}
+
+@test "overlap is caught in the containment direction, not only on equality" {
+    # Every other overlap case here names the guarded path exactly, which the
+    # equality fast path catches without ever reaching the containment logic.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    outer="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" \
+                 '[audit]' "dir = $outer/nested/audit" \
+                 '[mounts]' "read_write = $outer"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "entry containing a guarded path was accepted"; return 1; }
+    [[ "$output" == *"Refusing"* ]]
+    rm -rf "$workspace" "$outer" "$RW_HOME"
+}
+
+@test "the same directory spelled two ways is still refused in both lists" {
+    # The duplicate check compares canonical paths, so a trailing slash, a
+    # "." component or a doubled slash cannot smuggle one directory into both
+    # lists and leave Docker to decide which mount wins.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    for spelling in "/" "/." "//"; do
+        d="$(mktemp -d)"
+        write_config '[core]' "ssh_key = $RW_KEY" \
+                     '[mounts]' "readonly = $d" "read_write = ${d}${spelling}"
+        _rw_launch "$workspace"
+        [ "$status" -ne 0 ] || { echo "both lists accepted '$d' vs '${d}${spelling}'"; return 1; }
+        [[ "$output" == *"both name the same"* ]] \
+            || { echo "wrong failure for spelling '$spelling': $output"; return 1; }
+        rm -rf "$d"
+    done
+    rm -rf "$workspace" "$RW_HOME"
+}
+
 @test "a path in both read_write and readonly is refused rather than resolved by mount order" {
     _rw_setup
     d="$(mktemp -d)"
@@ -938,7 +1011,7 @@ EOF
     write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $d" "readonly = $d"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"both list"* ]]
+    [[ "$output" == *"both name the same"* ]]
     rm -rf "$d" "$workspace" "$RW_HOME"
 }
 

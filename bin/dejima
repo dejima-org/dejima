@@ -638,11 +638,19 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
             echo "[mounts] read_write entry is not an existing directory: $path" >&2
             exit 1
         fi
-        rw_real="$(readlink -f "$path")"
+        # readlink -m, not -f: -f yields nothing unless at most the final
+        # component is missing, and a guarded path that does not exist YET is
+        # exactly the one worth refusing. An empty result would otherwise be
+        # skipped, so an operator whose [audit] dir sits two levels below a
+        # directory nothing has created could mount a writable ancestor of the
+        # store dejima-audit is about to write findings into. -m also folds
+        # away trailing slashes and "."/".." components, so the comparisons
+        # below are between canonical paths rather than whatever spelling the
+        # config happened to use.
+        rw_real="$(readlink -m "$path")"
         for guarded in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
             "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
-            guarded_real="$(readlink -f "$guarded" 2>/dev/null || true)"
-            [ -n "$guarded_real" ] || continue
+            guarded_real="$(readlink -m "$guarded")"
             _paths_overlap "$rw_real" "$guarded_real" || continue
             echo "Refusing [mounts] read_write entry: $path" >&2
             echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
@@ -652,13 +660,21 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
             exit 1
         done
         # A path in both lists would be resolved by whichever mount Docker
-        # applies last, which is not something to decide by ordering.
-        case ":$SANDBOX_EXTRA_MOUNTS:" in
-            *":$path:"*)
-                echo "[mounts] read_write and [mounts] readonly both list: $path" >&2
+        # applies last, which is not something to decide by ordering. Compared
+        # canonically rather than as config text: "$d" and "$d/" are the same
+        # directory, and a raw string match would pass them both through and
+        # emit two -v flags for it, leaving the read-only one to win or lose
+        # by accident.
+        if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
+            IFS=':' read -ra ro_paths <<< "$SANDBOX_EXTRA_MOUNTS"
+            for ro_path in "${ro_paths[@]}"; do
+                [ -n "$ro_path" ] || continue
+                [ "$(readlink -m "$ro_path")" = "$rw_real" ] || continue
+                echo "[mounts] read_write and [mounts] readonly both name the same" >&2
+                echo "directory: $path and $ro_path both resolve to $rw_real." >&2
                 exit 1
-                ;;
-        esac
+            done
+        fi
         extra_mounts+=(-v "$path:$path")
         rw_mount_list="${rw_mount_list:+$rw_mount_list }$path"
     done
