@@ -16,6 +16,8 @@
 # shellcheck source=dejima-config-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/dejima-config-lib.sh"
 
+MAX_MANIFEST_LINES=200
+
 # DEJIMA_PROVIDER_ROOT is a test hook, not user configuration - the real root
 # is always this repo, since providers ship with the code that reads them.
 provider_root() {
@@ -50,18 +52,24 @@ valid_provider_name() {
 }
 
 provider_dir() {
-    local axis="$1" name="$2" sub
+    local axis="$1" name="$2" sub axis_root dir_real
     sub="$(_provider_axis_dir "$axis")" || return 1
     if ! valid_provider_name "$name"; then
         echo "invalid $axis name: $name" >&2
         return 1
     fi
-    local dir="$(provider_root)/$sub/$name"
-    if [ ! -d "$dir" ]; then
+    axis_root="$(readlink -m "$(provider_root)/$sub")"
+    dir_real="$(readlink -m "$(provider_root)/$sub/$name")"
+    case "$dir_real/" in
+        "$axis_root"/*) ;;
+        *)  echo "refusing $axis '$name': it resolves outside $axis_root" >&2
+            return 1 ;;
+    esac
+    if [ ! -d "$dir_real" ]; then
         echo "no such $axis: $name" >&2
         return 1
     fi
-    printf '%s' "$dir"
+    printf '%s' "$dir_real"
 }
 
 provider_list() {
@@ -173,11 +181,16 @@ _provider_valid_value() {
 }
 
 manifest_validate() {
-    local axis="$1" name="$2" dir file line key value type
+    local axis="$1" name="$2" dir file line key value type line_count
     dir="$(provider_dir "$axis" "$name")" || return 1
     file="$dir/$(_provider_manifest_name "$axis")"
     if [ ! -f "$file" ]; then
         echo "$axis $name has no manifest at $file" >&2
+        return 1
+    fi
+    line_count=$(wc -l < "$file")
+    if [ "$line_count" -gt "$MAX_MANIFEST_LINES" ]; then
+        echo "$file exceeds $MAX_MANIFEST_LINES lines" >&2
         return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do

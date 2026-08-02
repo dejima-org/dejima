@@ -64,3 +64,24 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     run lib manifest_get forge gitea nonesuch
     [ "$status" -ne 0 ]
 }
+
+@test "provider_dir refuses a symlink pointing outside the axis directory" {
+    REPO_ROOT="$BATS_TEST_DIRNAME/.."
+    TARGET="$(mktemp -d)"
+    mkdir -p "$TARGET/forges/planted"
+    printf 'capabilities = pr\n' > "$TARGET/forges/planted/forge.conf"
+    ln -sf "$TARGET/forges/planted" "$REPO_ROOT/forges/evil-link"
+    run lib provider_dir forge evil-link
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing"* ]]
+    rm -f "$REPO_ROOT/forges/evil-link"
+    rm -rf "$TARGET"
+}
+
+@test "provider_dir refuses a dangling symlink" {
+    REPO_ROOT="$BATS_TEST_DIRNAME/.."
+    ln -sf /nonexistent/path "$REPO_ROOT/forges/dangling-link"
+    run lib provider_dir forge dangling-link
+    [ "$status" -ne 0 ]
+    rm -f "$REPO_ROOT/forges/dangling-link"
+}
