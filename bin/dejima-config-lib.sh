@@ -51,6 +51,7 @@ forge.gitea.api	?url
 forge.gitea.token_file	path	~/.config/gitea/token
 github.token_file	path	~/.config/gh/sandbox-token
 mounts.readonly	?list:path
+mounts.read_write	?list:path
 mounts.nvim_config	?path
 credentials.proxy	bool	on
 credentials.transport	enum:tls|loopback	tls

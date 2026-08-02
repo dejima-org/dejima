@@ -131,6 +131,7 @@ see the whole resolved schema, real values included.
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
 | `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
+| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
@@ -358,6 +359,34 @@ path (a helper script in a dotfiles `bin/`, say), bring it in with
 readonly = ~/dotfiles/bin
 ```
 
+### Writable host directories
+
+`[mounts] read_write` is the same thing without `:ro` — for a directory a
+session is meant to write to and whose contents should outlive the container:
+
+```
+[mounts]
+read_write = ~/specs
+```
+
+Both lists mount at the host path they name, which is the point: a convention
+that says "specs live in `~/specs`" keeps working inside the container without
+being rewritten. That is the difference from `[core] share_dir`, which is
+mounted at `~/shared` regardless of where it lives on the host because its job
+is to be a well-known handoff point.
+
+An entry is **refused, not warned about**, if it overlaps anything dejima
+relies on being out of a session's reach: the approval store, either audit
+store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
+(already read-write, so listing it again is a mistake worth surfacing). A
+writable mount over any of those would let a session approve its own domains,
+delete the audit findings naming it, or plant code that runs unsandboxed on the
+host next time you start an agent. Overlap is checked in both directions after
+resolving symlinks, so `read_write = ~` is caught too.
+
+Sessions are told which directories these are, so "everything else is
+disposable" stays true in the briefing rather than becoming a trap.
+
 ## Config parity with your host Claude Code setup
 
 Global `CLAUDE.md`, settings, hooks, skills, and plugins all carry over
@@ -435,12 +464,17 @@ from the project mount, for passing files (screenshots, temp scripts) in and
 out of a session without touching the actual checkout. Persists across
 sessions since it's a real directory, not a container volume.
 
-It's also the answer if your own `CLAUDE.md` tells agents to put something at
-a fixed host path — design docs, scratch notes, anything meant to outlive the
-session but stay out of the project checkout. Point that convention at
-`~/shared` (or set `[core] share_dir` to wherever you keep it) rather than
-expecting some other host directory to be present in the container: this is
-the only writable host path mounted besides the project itself.
+Treat it as a handoff point, not as general-purpose storage. If your own
+project instructions tell agents to write somewhere at a fixed host path —
+design docs, scratch notes, anything meant to outlive the session but stay out
+of the project checkout — mount that directory instead, with
+`[mounts] read_write`. It arrives at its own absolute path, so a convention
+that says "put specs in `~/specs`" keeps working inside the container without
+being rewritten to point at `~/shared`.
+
+`~/shared`, the project mount, and anything in `[mounts] read_write` are the
+only writable host paths in the container. Everything else a session writes
+goes away with it.
 
 ## Testing frontend changes
 

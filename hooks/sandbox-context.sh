@@ -159,6 +159,22 @@ if [ -n "$requirements" ]; then
 This project declares requirements this session does not satisfy:$requirements"
 fi
 
+# Writable host mounts, named by bin/dejima (see its [mounts] read_write
+# handling). Without this the sentence that follows in the briefing -
+# "everything else is disposable" - is false whenever an operator configures
+# one, and false in the direction that loses work: an agent told a path is
+# disposable has no reason to treat it carefully.
+# Leading and trailing newlines rather than spaces, so the fixed prose either
+# side keeps its own wrapping instead of being reflowed around a list whose
+# length nobody here knows.
+rw_mounts_line=""
+if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
+    rw_mounts_line="
+  These host directories are bind-mounted read-write at their own paths and
+  outlive the container too: ${DEJIMA_RW_MOUNTS}.
+ "
+fi
+
 # The project's agent-instruction file - CLAUDE.md's role, under a name that
 # doesn't name a harness. Claude Code finds a CLAUDE.md on its own and nothing
 # else does, so as dejima grows the ability to run other agents, a project that
@@ -215,9 +231,9 @@ What this means:
   they left there for you. ~/.claude is bind-mounted too, so this session's
   transcript and its project memory outlive the container - the work is
   recoverable on the host with the \`--resume\` command at the end of this
-  briefing. Everything else is disposable: installed system packages,
-  anything outside the mounted paths, and the container itself go away when
-  this run ends.
+  briefing.$rw_mounts_line Everything else is disposable: installed system
+  packages, anything outside the mounted paths, and the container itself go
+  away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, GitHub read-only, the configured Gitea host, plus anything
   approved via dejima-allow). Requests to anything else will simply

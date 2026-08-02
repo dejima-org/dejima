@@ -850,3 +850,120 @@ run_install() {
 
     [ "$hit" = 0 ]
 }
+
+
+# --- [mounts] read_write -----------------------------------------------------
+
+# A fake HOME with a settings.json and an ssh key, so bin/dejima gets far
+# enough to build its mount arguments. Sets RW_HOME and RW_KEY for the caller
+# to reference in its config - the key has to exist before the config naming
+# it is written, which is why this is separate from _rw_launch below.
+_rw_setup() {
+    RW_HOME="$(mktemp -d)"
+    mkdir -p "$RW_HOME/.claude"
+    echo '{}' > "$RW_HOME/.claude/settings.json"
+    RW_KEY="$RW_HOME/sandbox-key"
+    : > "$RW_KEY"
+    chmod 600 "$RW_KEY"
+}
+
+# Drives the real launch path with a stubbed docker that records every
+# argument. A test that only read --print-config would pass against a version
+# that validated the value and then never mounted it.
+_rw_launch() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$1"
+}
+
+@test "a read_write entry is mounted without :ro, unlike a readonly one" {
+    _rw_setup
+    rw="$(mktemp -d)"
+    ro="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" \
+                 '[mounts]' "read_write = $rw" "readonly = $ro"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$rw:$rw" "$docker_log" \
+        || { echo "read_write not mounted read-write:"; cat "$docker_log"; return 1; }
+    grep -qxF "$ro:$ro:ro" "$docker_log" \
+        || { echo "readonly lost its :ro"; return 1; }
+    grep -qxF "DEJIMA_RW_MOUNTS=$rw" "$docker_log" \
+        || { echo "session never told which paths persist"; return 1; }
+    rm -rf "$rw" "$ro" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "a read_write entry overlapping a protected path is refused, not warned" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # Guarded paths that may not exist on a given host are created first:
+    # otherwise the entry is rejected as a missing directory and the overlap
+    # rule never runs, which would pass this test for the wrong reason.
+    mkdir -p "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin"
+    for guarded in "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin" "$REPO_ROOT"; do
+        write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $guarded"
+        _rw_launch "$workspace"
+        [ "$status" -ne 0 ] || { echo "accepted a writable mount over $guarded"; return 1; }
+        [[ "$output" == *"Refusing"* ]] \
+            || { echo "wrong failure for $guarded: $output"; return 1; }
+    done
+    # The workspace is already mounted read-write; naming it again is a config
+    # error worth surfacing, not a harmless duplicate.
+    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $workspace"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Refusing"* ]]
+    # A bare home directory contains several guarded paths, so the same
+    # both-directions rule catches it without needing an entry of its own.
+    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $RW_HOME"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Refusing"* ]]
+    rm -rf "$workspace" "$RW_HOME"
+}
+
+@test "a path in both read_write and readonly is refused rather than resolved by mount order" {
+    _rw_setup
+    d="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $d" "readonly = $d"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"both list"* ]]
+    rm -rf "$d" "$workspace" "$RW_HOME"
+}
+
+@test "a read_write entry that is not an existing directory is refused" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' 'read_write = /nonexistent/nowhere'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not an existing directory"* ]]
+    rm -rf "$workspace" "$RW_HOME"
+}
+
+@test "the briefing names writable mounts so nothing survives being called disposable" {
+    run env DEJIMA=1 DEJIMA_RW_MOUNTS="/srv/one /srv/two" bash -c \
+        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
+        "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -eq 0 ]
+    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
+    [[ "$ctx" == *"/srv/one /srv/two"* ]]
+    [[ "$ctx" == *"outlive the container too"* ]]
+    # And says nothing at all when there are none, rather than an empty list.
+    run env DEJIMA=1 bash -c \
+        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
+        "$REPO_ROOT/hooks/sandbox-context.sh"
+    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
+    [[ "$ctx" != *"outlive the container too"* ]]
+}
