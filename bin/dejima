@@ -479,6 +479,7 @@ export SANDBOX_CMD
 # firewall by default.
 export ENABLE_FIREWALL="$(config_get_bool core firewall)"
 export SANDBOX_LOG_CONVERSATION="$(config_get_bool logging conversation)"
+export LOKI_URL="$(config_get logging loki_url)"
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'

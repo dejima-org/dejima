@@ -702,6 +702,32 @@ EOF
     [[ "$output" == *"set the path, not the token"* ]]
 }
 
+@test "logging.loki_url reaches the launch environment" {
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' "ssh_key = $key" \
+        '[logging]' 'loki_url = https://loki.example.invalid'
+    workspace="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "LOKI_URL=$LOKI_URL" >> "$SANDBOX_TEST_DOCKER_LOG"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ]
+    grep -q '^LOKI_URL=https://loki.example.invalid$' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
 run_install() {
     stub_docker
     run env PATH="$STUB_DIR:$PATH" DEJIMA_CONFIG_DIR="$CONFIG_DIR" HOME="$CONFIG_DIR" \
