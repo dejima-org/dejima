@@ -492,10 +492,12 @@ what the outer proxy sends.
 ## Notifications
 
 `dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
-`Stop` hook for a remote-enabled session - into the throwaway settings copy
-it already generates for that session, never into your real
-`~/.claude/settings.json`, which every sandbox's copy derives from and your
-host's own Claude Code reads directly. That copy is mounted read-only, so a
+`Stop` hook for a remote-enabled session - into the throwaway settings
+override layer it already generates for that session, never into your real
+`~/.claude/settings.json`, which every sandbox and your host's own Claude
+Code read directly. Your own `Notification` and `Stop` hooks keep running
+alongside it: Claude Code merges hooks across settings layers rather than
+letting the higher one replace the lower. That layer is mounted read-only, so a
 session cannot unregister its own hook. The hook writes one empty file, named `waiting` or
 `done`, into this run's own bind-mounted marker directory. No content, no
 stdin, no network.
@@ -586,8 +588,10 @@ the next one is worth checking.
    container with remote access off - `[remote-access] enabled` was off at
    launch, and no later change affects a session already running.
 2. **Is the hook registered?** The `Notification` and `Stop` entries live in
-   the throwaway settings copy, not in your real `settings.json`:
-   `grep -c dejima-notify ~/.claude/settings.json` from inside should be 2.
+   the throwaway override layer, not in your real `settings.json`:
+   `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 2.
+   That file is passed to Claude Code as `--settings` by `claude-wrapper.sh`;
+   if it is missing entirely, this container was not started by `dejima`.
 3. **Does the marker reach the host?** This is the one worth knowing, because
    it splits the chain cleanly in half. From inside the sandbox:
 

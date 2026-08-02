@@ -99,6 +99,44 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
+# ~/.claude config files arrive staged read-only under /etc/dejima-claude
+# (see the mount inventory in docker-compose.yml) and get copied into place
+# here rather than bind-mounted at their real paths. A copy can't be
+# detached by a host-side rename the way a single-file mount can (#47, #48),
+# and it closes the one case no mount could: a statusline.sh that is a
+# symlink into a dotfiles checkout. Docker resolves the symlink when it sets
+# up the staging mount, so what lands here is already the real content.
+#
+# Root-owned and read-only, so the `#` memory shortcut and /memory keep
+# failing visibly against ~/.claude/CLAUDE.md instead of appearing to
+# succeed. A compromised session can still unlink and replace them - they
+# sit in a directory it owns - but that change is now container-local and
+# can't reach the host, which is the whole reason these were read-only.
+if [ -d /etc/dejima-claude ]; then
+    for staged in settings.json CLAUDE.md; do
+        if [ -f "/etc/dejima-claude/$staged" ]; then
+            install -o root -g root -m 444 "/etc/dejima-claude/$staged" "$SANDBOX_HOME/.claude/$staged"
+        fi
+    done
+    if [ -f /etc/dejima-claude/statusline.sh ]; then
+        install -o root -g root -m 555 /etc/dejima-claude/statusline.sh "$SANDBOX_HOME/.claude/statusline.sh"
+    fi
+fi
+
+# The real OAuth credential no longer enters the container at all - ~/.claude
+# isn't mounted wholesale any more, so there is nothing to mask (#50). What
+# lands at this path instead depends on the transport: the tls one needs a
+# well-formed fake credential, because Claude Code authenticates from this
+# file rather than from an ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
+# Nothing is mounted for the loopback transport, so give Claude Code the
+# empty file the old mask used to provide rather than betting that an absent
+# credentials file behaves the same as an empty one. Either way this is
+# skipped when something is already there - which also covers
+# [credentials] proxy = off mounting the real credential in deliberately.
+if [ ! -e "$SANDBOX_HOME/.claude/.credentials.json" ]; then
+    install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 /dev/null "$SANDBOX_HOME/.claude/.credentials.json"
+fi
+
 # TCP front door for the host-side credential proxy (see bin/dejima and
 # bin/dejima-anthropic-proxy): the proxy listens on a bind-mounted unix
 # socket, and anthropic-proxy-forwarder.js pipes bytes into it. Only started

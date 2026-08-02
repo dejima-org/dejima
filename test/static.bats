@@ -129,25 +129,64 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-@test "~/.claude settings/CLAUDE.md/plugins are layered read-only over the read-write parent mount" {
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude:\$\{HOME\}/\.claude\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    # settings.json specifically comes from a generated $SANDBOX_SETTINGS_FILE
-    # (see below), not the real file directly - it still has to be read-only
-    # in the container, just from a different, sandbox-specific source.
-    grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/\.claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/CLAUDE\.md:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:.*:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+@test "~/.claude is not mounted as a whole - its contents are enumerated" {
+    # It used to be, read-write, with the config inside it layered back
+    # read-only on top. Every one of those overlays was a mount point nested
+    # inside a host-writable mount, and a single-file bind mount is pinned to
+    # the dentry at that path: a host-side rename unlinks it, the mount
+    # silently detaches, and the path falls through to the real writable host
+    # file (#47, #48). The mask over .credentials.json went the same way,
+    # handing the sandbox the operator's real OAuth token (#50). With no
+    # parent mount, a detachment falls through to container-local emptiness.
+    run grep -E '^\s*-\s*\$\{HOME\}/\.claude:\$\{HOME\}/\.claude\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/\.credentials' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
 }
 
-@test "~/.claude/hooks is layered read-only over the read-write parent mount" {
-    # Same persistence-path rationale as the settings/CLAUDE.md/plugins
-    # overlay above, but for the directory install.sh's hook symlinks live
-    # in - see docker-compose.yml's comment on this mount line. Without
-    # this, a compromised session can unlink a hook symlink and drop a
-    # plain malicious file in its place, which the dynamic-mount logic in
-    # bin/dejima never sees (it only protects symlink targets that
-    # resolve outside ~/.claude).
+@test "the image bakes in a user-owned ~/.claude for the enumerated mounts to land in" {
+    # Nothing mounts the directory itself any more, so it has to exist and be
+    # writable by the sandbox user - otherwise Docker auto-creates it root
+    # owned while setting up the mounts nested under it, and the session
+    # can't write its own cache or the config entrypoint.sh copies in.
+    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
+    grep -qE 'chown -R \$SANDBOX_USER:\$SANDBOX_USER .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "~/.claude runtime state that has to survive the session is mounted read-write" {
+    # Directories, which is what makes them safe: a directory bind mount
+    # can't detach the way a file one does, because a rename replaces an
+    # entry *within* the mounted directory rather than the mount point.
+    # projects/ is what host-side `claude --resume` reads; the rest is the
+    # edit-undo record and the task/plan state skills write.
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/projects:\$\{HOME\}/\.claude/projects\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/file-history:\$\{HOME\}/\.claude/file-history\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/backups:\$\{HOME\}/\.claude/backups\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/tasks:\$\{HOME\}/\.claude/tasks\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plans:\$\{HOME\}/\.claude/plans\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/sessions:\$\{HOME\}/\.claude/sessions\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "~/.claude config files are staged for copying, not mounted at their real paths" {
+    # A copy can't be detached by a host-side rename at all. entrypoint.sh
+    # installs them root-owned and read-only; see its comment and the mount
+    # inventory in docker-compose.yml.
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/settings\.json:/etc/dejima-claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/CLAUDE\.md:/etc/dejima-claude/CLAUDE\.md:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    grep -q 'install -o root -g root -m 444 "/etc/dejima-claude/\$staged"' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "~/.claude/hooks and plugins are mounted read-only" {
+    # Hooks run automatically with no approval gate, and plugins carry code a
+    # later unsandboxed host session loads - see docker-compose.yml's comment
+    # on these mount lines. Without them, a compromised session can unlink a
+    # hook symlink and drop a plain malicious file in its place, which the
+    # dynamic-mount logic in bin/dejima never sees (it only protects symlink
+    # targets that resolve outside ~/.claude).
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/hooks:\$\{HOME\}/\.claude/hooks:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:\$\{HOME\}/\.claude/plugins:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
 @test "~/.claude.json is a throwaway per-session copy, not the real file mounted directly" {
@@ -253,13 +292,49 @@ setup() {
     grep -q 'extra_mounts+=(-v "\$path:\$path:ro")' "$REPO_ROOT/bin/dejima"
 }
 
-@test "bin/dejima forces sandbox.enabled to false in the generated settings.json" {
+@test "bin/dejima forces sandbox.enabled to false in the generated override layer" {
     # Claude Code's own internal per-command sandboxing is redundant on top
     # of this container and can't actually function inside it (bwrap can't
-    # create a namespace here) - settings.json is read-only precisely so it
-    # can't be patched from inside, so this has to happen in the generation
-    # step on the host, before the container starts.
-    grep -qE '\.sandbox\.enabled\s*=\s*false' "$REPO_ROOT/bin/dejima"
+    # create a namespace here) - a session can't be trusted to turn it off
+    # itself, so this has to happen in the generation step on the host,
+    # before the container starts.
+    grep -qE 'jq -n .\{sandbox: \{enabled: false\}\}' "$REPO_ROOT/bin/dejima"
+}
+
+@test "the generated override layer is a delta, not a copy of the operator's settings" {
+    # jq -n reads no input: what ships is only what the sandbox overrides,
+    # and everything else still comes from the operator's real settings.json
+    # through Claude Code's own layering. A copy would go stale the moment
+    # the host edited the original, and would duplicate every hook it
+    # carried across two layers that get merged.
+    grep -qE '^jq -n .* > "\$SANDBOX_SETTINGS_FILE"$' "$REPO_ROOT/bin/dejima"
+    # The operator's settings.json is read only to check that it parses. It
+    # must never become an input to the override layer.
+    run grep -E 'HOME/\.claude/settings\.json.*SANDBOX_SETTINGS_FILE' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ]
+}
+
+@test "the override layer is mounted outside ~/.claude and passed as --settings" {
+    # Mounting it over ~/.claude/settings.json put the mount point inside the
+    # read-write ~/.claude mount, where a host-side rename of the real file
+    # detached it mid-session and silently reverted every override (#47).
+    # A container-local path can't be renamed over from the host.
+    grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:/etc/dejima-settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    run grep -E '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    # Which only takes effect if the flag is actually passed. It goes in the
+    # wrapper rather than the entrypoint so it also covers invocations the
+    # entrypoint never sees (an interactive shell, claudecode.nvim).
+    grep -qE -- '--settings /etc/dejima-settings\.json' "$SANDBOX_DIR/claude-wrapper.sh"
+    grep -qE -- '"\$\{settings\[@\]\}"' "$SANDBOX_DIR/claude-wrapper.sh"
+}
+
+@test "bin/dejima pre-creates the ~/.claude config files so neither is mounted as a directory" {
+    # Docker creates a missing bind source as a directory - without this, a
+    # host that has never run install.sh gets a junk directory at
+    # ~/.claude/settings.json and a session with no settings at all.
+    grep -qE '\[ -f "\$HOME/\.claude/settings\.json" \] \|\| echo' "$REPO_ROOT/bin/dejima"
+    grep -qE '\[ -f "\$HOME/\.claude/CLAUDE\.md" \] \|\|' "$REPO_ROOT/bin/dejima"
 }
 
 @test "Dockerfile never installs bubblewrap or socat" {
@@ -500,20 +575,29 @@ setup() {
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
 }
 
-@test "~/.claude skills/commands/agents/output-styles are layered read-only over the read-write parent mount" {
-    # Same persistence-path rationale as the hooks overlay: these carry
+@test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
+    # Same persistence-path rationale as the hooks mount: these carry
     # executable skill scripts / injectable command, agent, and output-style
     # prompts that a later unsandboxed host session would run or load.
-    # Without an overlay (and without pre-creation, since they may not
-    # exist) a compromised session can create and populate them.
+    # Read-only, and pre-created by bin/dejima since existence is what lets
+    # Docker mount them at all.
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/skills:\$\{HOME\}/\.claude/skills:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/commands:\$\{HOME\}/\.claude/commands:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/agents:\$\{HOME\}/\.claude/agents:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/output-styles:\$\{HOME\}/\.claude/output-styles:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
-@test "bin/dejima pre-creates the code-carrying ~/.claude overlay dirs" {
-    grep -q 'mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" "$HOME/.claude/output-styles"' "$REPO_ROOT/bin/dejima"
+@test "bin/dejima pre-creates every enumerated ~/.claude mount source" {
+    # Docker answers a missing bind source by creating a root-owned directory
+    # in its place - on the host for the source, and at the destination for
+    # the code-carrying dirs, which would leave a session with no skills or
+    # hooks and junk on the host either way.
+    for dir in skills commands agents output-styles hooks plugins \
+        projects file-history backups tasks plans sessions; do
+        grep -q "\"\$HOME/.claude/$dir\"" "$REPO_ROOT/bin/dejima"
+    done
+    grep -q 'mkdir -p "$HOME/.claude/skills"' "$REPO_ROOT/bin/dejima"
+    grep -q 'mkdir -p "$HOME/.claude/projects"' "$REPO_ROOT/bin/dejima"
 }
 
 @test "bin/dejima overlays the workspace .git/hooks read-only when .git is a real dir" {
@@ -597,24 +681,46 @@ setup() {
     grep -Pq 'credentials\.proxy\tbool\ton' "$REPO_ROOT/bin/dejima-config-lib.sh"
 }
 
-@test "bin/dejima masks the credentials file and mounts the proxy socket dir" {
-    # The mask is what keeps the real token out of the (otherwise read-write)
-    # ~/.claude mount; the socket dir is how API traffic gets back out to the
-    # host-side proxy that holds the real credential.
-    grep -q 'mktemp.*dejima-credentials-mask' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIALS_MASK_FILE:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
+@test "bin/dejima mounts the proxy socket dir and masks nothing" {
+    # The socket dir is how API traffic gets back out to the host-side proxy
+    # that holds the real credential. The credential itself, and the
+    # .credentials-proxy-tmp staging directory the proxy writes rotated
+    # tokens through, used to be covered by empty-file/-directory masks
+    # mounted into the read-write ~/.claude mount. That was #50: the proxy's
+    # own write-back renamed the credential out from under its mask,
+    # detaching it and exposing the real token from the first refresh on.
+    # Neither path is mounted at all now, so there is nothing left to mask -
+    # the fake credential the tls transport mounts (see below) is a file the
+    # container would otherwise not have, not a mask over the operator's.
     grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
+    run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ]
 }
 
-@test "bin/dejima also masks the proxy's write-back staging subdirectory" {
-    # _write() in bin/dejima-anthropic-proxy stages the rotated
-    # credential in ~/.claude/.credentials-proxy-tmp before the atomic
-    # rename - that subdirectory is inside the otherwise read-write ~/.claude
-    # mount, so without its own mask a sibling temp file would be
-    # container-readable for the whole write window (see proxy.bats).
-    grep -q 'mktemp -d.*dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIALS_TMPDIR_MASK:\$HOME/\.claude/\.credentials-proxy-tmp:ro")' "$REPO_ROOT/bin/dejima"
-    grep -q '"\${SANDBOX_CREDENTIALS_TMPDIR_MASK:-}"' "$REPO_ROOT/bin/dejima"
+@test "bin/dejima mounts the real credential only when the proxy is off" {
+    # With ~/.claude no longer mounted as a whole, the documented
+    # SANDBOX_CREDENTIAL_PROXY=0 downgrade no longer gets the credential for
+    # free - it has to be stated. Read-write, because Claude Code refreshes
+    # it in place. The only mount of it anywhere, and it sits under the
+    # proxy-disabled branch.
+    run grep -c 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
+    [ "$output" = "1" ]
+    local mount_line branch_line
+    mount_line=$(grep -n 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    branch_line=$(grep -n 'elif \[ -f "\$HOME/\.claude/\.credentials\.json" \]; then' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    [ -n "$branch_line" ]
+    [ "$branch_line" -lt "$mount_line" ]
+}
+
+@test "entrypoint.sh gives the container an empty credentials file of its own" {
+    # The mask used to provide one; Claude Code shouldn't have to be trusted
+    # to treat an absent credentials file the same as an empty one. Guarded
+    # on non-existence so it can't clobber either of the credentials
+    # bin/dejima does mount - the fake one under the tls transport, the real
+    # one under SANDBOX_CREDENTIAL_PROXY=0 - since mounts are established
+    # before the entrypoint runs.
+    grep -q 'if \[ ! -e "\$SANDBOX_HOME/\.claude/\.credentials\.json" \]; then' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'install -o "\$SANDBOX_USER" -g "\$SANDBOX_USER" -m 600 /dev/null "\$SANDBOX_HOME/\.claude/\.credentials\.json"' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test "bin/dejima refuses to launch when the proxy fails to start" {
@@ -624,9 +730,8 @@ setup() {
     grep -q '\[credentials\] proxy = off' "$REPO_ROOT/bin/dejima"
 }
 
-@test "cleanup reaps the proxy and its socket dir and mask file" {
+@test "cleanup reaps the proxy and its socket dir" {
     grep -q 'kill "\$SANDBOX_ANTHROPIC_PROXY_PID"' "$REPO_ROOT/bin/dejima"
-    grep -q '"\${SANDBOX_CREDENTIALS_MASK_FILE:-}"' "$REPO_ROOT/bin/dejima"
     grep -q '"\${SANDBOX_ANTHROPIC_PROXY_DIR:-}"' "$REPO_ROOT/bin/dejima"
 }
 
@@ -672,27 +777,34 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-@test "bin/dejima mounts targets of top-level ~/.claude symlinks (statusline.sh)" {
-    # settings.json's statusLine points at ~/.claude/statusline.sh, which on
-    # this setup is a symlink into dotfiles - previously only the five
-    # overlay subdirectories were scanned for symlinks, so the target dir
-    # never got mounted and the statusline silently died in the sandbox.
-    grep -q 'for overlay_dir in \. hooks skills commands agents output-styles' "$REPO_ROOT/bin/dejima"
+@test "bin/dejima scans only the mounted ~/.claude dirs for symlink targets" {
+    # A symlink inside one of these has to have its target reachable, or the
+    # hook/skill it points at can't run in the container. Top-level files
+    # (settings.json, CLAUDE.md, statusline.sh) are staged as copies instead,
+    # and Docker resolves any symlink among them when it sets up that mount -
+    # so scanning "." as well would mount a whole config checkout read-only
+    # into the container for nothing.
+    grep -q 'for mounted_dir in hooks skills commands agents output-styles' "$REPO_ROOT/bin/dejima"
 }
 
-@test "bin/dejima mounts ~/.claude/statusline.sh itself read-only, when present" {
-    # statusline.sh is a top-level file directly on the read-write ~/.claude
-    # mount (unlike settings.json/CLAUDE.md/plugins/hooks/skills/commands/
-    # agents/output-styles, none of which have this gap) - settings.json's
-    # statusLine.command points at it and Claude Code executes it on the
-    # host. Mounting a symlink's *target* dir read-only (the test above)
-    # doesn't help: the symlink/file at ~/.claude/statusline.sh itself still
-    # lives on the writable mount and a compromised session can unlink it and
-    # drop its own script in its place. Must be conditional on existence
-    # (not every host has a statusline, and mounting a nonexistent source
-    # would make Docker create a root-owned directory at the target
-    # instead).
-    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:\$HOME/\.claude/statusline\.sh:ro")' "$REPO_ROOT/bin/dejima"
+@test "bin/dejima stages ~/.claude/statusline.sh for copying, when present" {
+    # settings.json's statusLine.command points at it and Claude Code
+    # executes it on the host, so it's the same class of file as the config
+    # staged at /etc/dejima-claude by docker-compose.yml, and staged the same
+    # way. A read-only mount at its real path protected only the
+    # plain-regular-file case: when statusline.sh is itself a symlink (the
+    # common case, into a dotfiles checkout), bind-mount destination
+    # resolution followed it, so the mount landed on the target and left the
+    # symlink dentry writable and replaceable. Docker resolves that symlink
+    # when it sets up the staging mount instead, so what entrypoint.sh copies
+    # in is the real content at a path nothing on the host can reach. Still
+    # conditional on existence: not every host has a statusline, and mounting
+    # a nonexistent source would make Docker create a root-owned directory at
+    # the target instead.
+    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:/etc/dejima-claude/statusline\.sh:ro")' "$REPO_ROOT/bin/dejima"
+    grep -q 'install -o root -g root -m 555 /etc/dejima-claude/statusline\.sh' "$SANDBOX_DIR/entrypoint.sh"
+    run grep -F 'extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ]
 }
 
 @test "bin/dejima refuses to launch rather than silently skip a dangling statusline.sh symlink" {
@@ -710,10 +822,11 @@ setup() {
 }
 
 @test "bin/dejima-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
-    # The read-only mount above does not reliably protect statusline.sh when
-    # it's a symlink (confirmed live-container gap - see test/runtime.bats
-    # and bin/dejima's comment on the mount) - detection is the
-    # compensating control. Full behavioral coverage (snapshot/compare
+    # Staging it (the test above) is what actually closes the symlink gap the
+    # old read-only mount left open; this stays as defence in depth, since a
+    # session reaching the host statusline by some other route is exactly the
+    # kind of thing an exit-time audit exists to surface. Full behavioral
+    # coverage (snapshot/compare
     # against real fixtures, including the symlink-swap exploit) lives in
     # test/audit.bats; this just confirms the wiring exists.
     grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/dejima-audit"
@@ -1232,11 +1345,14 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
 }
 
 @test "tls mode mounts a fake credential, never the real one, and sets no ANTHROPIC_* pair" {
-    # The mask file stops being empty in tls mode: Claude Code reads
-    # .credentials.json directly when there is no ANTHROPIC_AUTH_TOKEN, so it
-    # needs a well-formed document - with the secrets faked and the
-    # non-secret fields (scopes/subscriptionType/rateLimitTier/clientId)
-    # copied so the session's own UI state stays accurate.
+    # tls mode is the one case that puts a credentials file into the
+    # container: Claude Code reads .credentials.json directly when there is no
+    # ANTHROPIC_AUTH_TOKEN, so the empty container-local file entrypoint.sh
+    # would otherwise leave isn't enough - it needs a well-formed document,
+    # with the secrets faked and the non-secret fields
+    # (scopes/subscriptionType/rateLimitTier/clientId) copied so the session's
+    # own UI state stays accurate.
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_FAKE_CREDENTIALS_FILE:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
     grep -q 'sandbox-credential-proxy-placeholder' "$REPO_ROOT/bin/dejima"
     grep -q 'subscriptionType' "$REPO_ROOT/bin/dejima"
     grep -q 'rateLimitTier' "$REPO_ROOT/bin/dejima"

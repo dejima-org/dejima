@@ -21,9 +21,22 @@ from urllib.parse import urlsplit
 
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_BETA = "oauth-2025-04-20"
+# Hop-by-hop headers describe the connection to this proxy rather than the
+# request, so they stop here (RFC 9110 7.6.1). Host is deliberately not in
+# this set: it has to be rewritten for the upstream, and is replaced in place
+# rather than dropped and re-added, which keeps the header block in the order
+# the client wrote it - see _upstream.
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "trailers", "transfer-encoding", "upgrade", "host",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade",
+}
+# Casing for the few headers this proxy has to supply when the client sent
+# none of its own. Everything the client did send keeps the client's casing.
+SUPPLIED_NAMES = {
+    "host": "Host",
+    "authorization": "Authorization",
+    "anthropic-beta": "anthropic-beta",
+    "content-length": "Content-Length",
 }
 
 
@@ -82,15 +95,20 @@ class Credentials:
     def _write(self, data):
         # Atomic and permission-preserving: host-side Claude Code reads this
         # same file and must never observe a partial write or a looser mode.
-        # Staged in a dedicated subdirectory, not ~/.claude directly - that
-        # directory is bind-mounted read-write into the sandbox container, and
-        # only the single ~/.claude/.credentials.json path is masked from it
-        # (see bin/dejima); a sibling temp file created directly in
-        # ~/.claude would be container-readable for the whole write window.
-        # bin/dejima masks this subdirectory entirely (empty read-only
-        # overlay), and the rename below stays same-filesystem (a subdirectory
-        # of the same parent), so atomicity is unaffected either way - what the
-        # container's own bind mount shows is irrelevant to a host-side rename.
+        # Staged in a dedicated subdirectory rather than ~/.claude directly,
+        # which keeps the plaintext window out of any directory the sandbox
+        # can see, and keeps the rename below same-filesystem (a subdirectory
+        # of the same parent) so atomicity is unaffected.
+        #
+        # This used to lean on bin/dejima masking both paths with bind mounts,
+        # on the reasoning that "what the container's own bind mount shows is
+        # irrelevant to a host-side rename". That was backwards, and it was
+        # #50: the rename is unaffected by the container's mount, but the
+        # container's mount is destroyed by the rename. Replacing the file
+        # unlinks the dentry the mask was pinned to, so the mask detached and
+        # the sandbox saw the real token from the first refresh on. ~/.claude
+        # is no longer bind-mounted as a whole, so neither this directory nor
+        # the credential reaches the container and there is nothing to mask.
         directory = os.path.join(os.path.dirname(self.path) or ".", ".credentials-proxy-tmp")
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory)
@@ -145,18 +163,63 @@ class Handler(BaseHTTPRequestHandler):
         u = self.server.upstream
         cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
         conn = cls(u.netloc, timeout=600)
-        headers = {
-            k.lower(): v for k, v in self.headers.items()
-            if k.lower() not in HOP_BY_HOP
-            and k.lower() not in ("authorization", "x-api-key", "content-length")
+        # Emitted header by header rather than handed to conn.request() as a
+        # dict, so what the API receives is the client's own header block -
+        # same names, same casing, same order, duplicates intact - with only
+        # the values that must change changed. The container half of this
+        # sandbox goes to some length to make the session indistinguishable
+        # from a stock install (no ANTHROPIC_* variables, no explicit base
+        # URL - see docs/security.md); a request rewritten into CPython's
+        # house style would put the fingerprint straight back on the wire,
+        # where it is visible to the API rather than only to the client.
+        #
+        # conn.request() does exactly that in three ways: a dict collapses
+        # repeated headers to the last one, dict order puts every header this
+        # proxy touches at the end of the block, and putrequest() supplies
+        # `Accept-Encoding: identity` - a CPython tell no browser or Node
+        # client sends - whenever the caller passed no accept-encoding. The
+        # skip_* flags below suppress that and the generated Host header,
+        # which is re-emitted in the client's own position instead.
+        conn.putrequest(self.command, self.path,
+                        skip_host=True, skip_accept_encoding=True)
+        supplied = {
+            "host": u.netloc,
+            "authorization": "Bearer " + token,
+            "content-length": str(len(body)),
         }
-        headers["authorization"] = "Bearer " + token
-        betas = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip()]
+        # anthropic-beta is left completely alone when the OAuth value is
+        # already among the client's own - which it is in the tls transport,
+        # where Claude Code believes it holds an OAuth credential. Re-joining
+        # a list that needs no change would normalize the client's spacing,
+        # which is the same class of tell as the casing.
+        betas = [b.strip() for v in self.headers.get_all("anthropic-beta", [])
+                 for b in v.split(",")]
         if OAUTH_BETA not in betas:
-            betas.append(OAUTH_BETA)
-        headers["anthropic-beta"] = ",".join(betas)
-        headers["content-length"] = str(len(body))
-        conn.request(self.command, self.path, body=body, headers=headers)
+            first = self.headers.get("anthropic-beta")
+            supplied["anthropic-beta"] = first + "," + OAUTH_BETA if first else OAUTH_BETA
+        seen = set()
+        for name, value in self.headers.items():
+            low = name.lower()
+            if low in HOP_BY_HOP or low == "x-api-key":
+                continue
+            if low in supplied:
+                # One replacement even for a repeated header, or the injected
+                # token would be sent as many times as the client sent its
+                # placeholder.
+                if low in seen:
+                    continue
+                value = supplied[low]
+            seen.add(low)
+            conn.putheader(name, value)
+        for low, name in SUPPLIED_NAMES.items():
+            if low in supplied and low not in seen:
+                # Content-Length only when there is a body: a bodyless GET
+                # that carried none must not gain one. A chunked request has
+                # been de-framed by now, so it lands here and does gain one.
+                if low == "content-length" and not body:
+                    continue
+                conn.putheader(name, supplied[low])
+        conn.endheaders(body)
         return conn, conn.getresponse()
 
     def _proxy(self):

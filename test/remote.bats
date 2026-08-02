@@ -1175,26 +1175,30 @@ EOF
     [ ! -e "$missing" ]
 }
 
-@test "notify hooks are registered only in the throwaway settings copy" {
+@test "notify hooks are registered only in the throwaway override layer" {
     stub_launch
     write_remote_config
     launch "$PROJ"
     grep -q 'dejima-notify.sh waiting' "$LAUNCH_DIR/settings-copy.json"
     grep -q 'dejima-notify.sh done' "$LAUNCH_DIR/settings-copy.json"
-    # The copy is a throwaway, so the operator's real settings.json - which
+    # The layer is a throwaway, so the operator's real settings.json - which
     # nothing registers this hook into - is left byte-for-byte alone.
     cmp -s "$LAUNCH_DIR/settings-seed.json" "$LAUNCH_DIR/home/.claude/settings.json"
-    # And what the copy carried before is still there: this appends, it does
+    # And what the layer carried before is still there: this appends, it does
     # not replace the file bin/dejima generated.
     [ "$(jq '.sandbox.enabled' "$LAUNCH_DIR/settings-copy.json")" = "false" ]
-    # Including the operator's OWN Notification and Stop hooks - a desktop
-    # notifier, a TTS reader, a logger. Replacing rather than appending would
-    # silently disable them in every remote-enabled sandbox. They come first,
-    # ahead of the appended dejima entries.
-    [ "$(jq '.hooks.Notification | length' "$LAUNCH_DIR/settings-copy.json")" = "2" ]
-    [ "$(jq '.hooks.Stop | length' "$LAUNCH_DIR/settings-copy.json")" = "2" ]
-    [ "$(jq -r '.hooks.Notification[0].hooks[0].command' "$LAUNCH_DIR/settings-copy.json")" = "operator-desktop-notify.sh" ]
-    [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$LAUNCH_DIR/settings-copy.json")" = "operator-tts.sh" ]
+    # The operator's OWN Notification and Stop hooks - a desktop notifier, a
+    # TTS reader - are deliberately NOT copied in here. They keep applying
+    # from their own settings.json, which Claude Code loads as the lower
+    # layer and merges hooks from rather than letting this one replace it.
+    # Copying them would run each of them twice. Verified against Claude Code
+    # 2.1.220: a SessionStart hook in a --settings file and one in
+    # ~/.claude/settings.json both fire.
+    [ "$(jq '.hooks.Notification | length' "$LAUNCH_DIR/settings-copy.json")" = "1" ]
+    [ "$(jq '.hooks.Stop | length' "$LAUNCH_DIR/settings-copy.json")" = "1" ]
+    run jq -r '[.hooks[][].hooks[].command] | join(" ")' "$LAUNCH_DIR/settings-copy.json"
+    [[ "$output" != *operator-desktop-notify.sh* ]]
+    [[ "$output" != *operator-tts.sh* ]]
     rm -rf "$PROJ"
 }
 

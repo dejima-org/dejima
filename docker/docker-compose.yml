@@ -105,58 +105,76 @@ services:
       # (based on cwd) lines up with the host, letting a session started
       # here be resumed on the host with `claude --resume`.
       - ${WORKSPACE_DIR:?set WORKSPACE_DIR to the project directory to mount}:${WORKSPACE_DIR}
-      - ${HOME}/.claude:${HOME}/.claude
-      # settings.json/CLAUDE.md/plugins are config and hook/plugin *code*,
-      # not runtime state - hooks run automatically with no approval gate,
-      # so a compromised session writing to them would plant something that
-      # then executes unsandboxed on the host next time Claude Code starts
-      # there. Layer them back read-only on top of the read-write parent
-      # mount above (Docker applies more specific mounts on top of broader
-      # ones); everything else under ~/.claude (session/project history,
-      # caches, etc.) still needs to stay read-write.
+      # ~/.claude is deliberately not mounted as a whole. It used to be,
+      # read-write, with the config inside it layered back read-only on top.
+      # Every one of those overlays was a mount point nested in a
+      # host-writable mount, and a single-file bind mount is pinned to the
+      # dentry at that path: a host-side rename of the underlying file - a
+      # sync daemon, or Claude Code's own atomic writes - unlinks it, the
+      # mount silently detaches, and the path falls through to the real,
+      # writable host file (#47, #48). The same thing happened to the mask
+      # over .credentials.json, handing the sandbox the operator's real
+      # OAuth token on the first refresh (#50).
       #
-      # settings.json specifically comes from $SANDBOX_SETTINGS_FILE (a
-      # bin/dejima-generated copy with sandbox.enabled forced to
-      # false), not the real file directly - Claude Code's own internal
-      # per-command sandboxing is redundant on top of this container (and
-      # can't actually function inside it anyway), and mounting it read-only
-      # means it can't be patched from inside, so the substitution has to
-      # happen on the host before the container ever starts.
-      - ${SANDBOX_SETTINGS_FILE:?set by bin/dejima}:${HOME}/.claude/settings.json:ro
-      - ${HOME}/.claude/CLAUDE.md:${HOME}/.claude/CLAUDE.md:ro
+      # So the contents are enumerated instead. Anything not listed below is
+      # container-local: writable during the session, gone with the
+      # container. That is the safer default - a config file a future Claude
+      # Code version adds simply doesn't persist, instead of sitting
+      # unprotected on a writable mount - but it does mean new state that
+      # *should* persist has to be added here deliberately.
+      #
+      # Runtime state that has to survive the session, read-write. All
+      # directories, which is what makes them safe: a directory bind mount
+      # can't detach the way a file one does, because a rename replaces an
+      # entry *within* the mounted directory rather than the mount point.
+      # projects/ is what host-side `claude --resume` reads (and what
+      # log-shipper.sh tails); the rest is Claude Code's edit-undo record
+      # and the task/plan state skills write.
+      - ${HOME}/.claude/projects:${HOME}/.claude/projects
+      - ${HOME}/.claude/file-history:${HOME}/.claude/file-history
+      - ${HOME}/.claude/backups:${HOME}/.claude/backups
+      - ${HOME}/.claude/tasks:${HOME}/.claude/tasks
+      - ${HOME}/.claude/plans:${HOME}/.claude/plans
+      - ${HOME}/.claude/sessions:${HOME}/.claude/sessions
+      # Hook/plugin/skill *code*, and prompt text that a later host session
+      # loads. Hooks run automatically with no approval gate, a skill can
+      # ship an executable script, and a command/agent/output-style is text
+      # loaded into an unsandboxed host session's context - so a compromised
+      # session writing to any of these plants something that then runs on
+      # the host. Read-only, and no longer nested inside a writable parent:
+      # if one of these ever did detach, the path falls through to an empty
+      # container-local directory rather than to the host's copy. They may
+      # not exist on a given host at all - bin/dejima pre-creates them,
+      # since existence is what lets Docker mount them.
       - ${HOME}/.claude/plugins:${HOME}/.claude/plugins:ro
-      # ~/.claude/hooks holds hook *code* too (install.sh symlinks this
-      # repo's hooks/ files into it) - same rationale as settings.json/
-      # CLAUDE.md/plugins above, but for a gap those three don't cover:
-      # without this, the directory itself stays part of the read-write
-      # ~/.claude mount, so a compromised session could unlink one of
-      # install.sh's symlinks and drop a plain file in its place. The
-      # dynamic per-symlink-target mounts bin/dejima adds at
-      # launch (see below) only protect targets that resolve *outside*
-      # ~/.claude - they never cover this directory itself, and a plain
-      # file dropped here wouldn't be a symlink for that logic to even
-      # notice. That file would then run unsandboxed on the host as a
-      # hook the next time Claude Code starts there - the same
-      # persistence path the other three overlays exist to close.
       - ${HOME}/.claude/hooks:${HOME}/.claude/hooks:ro
-      # skills/commands/agents carry the same execute-or-load-on-host risk as
-      # hooks/plugins above: a skill can ship an executable script, and a
-      # command/agent is prompt text loaded into a later, unsandboxed host
-      # session. Unlike those, they may not exist on a given host at all -
-      # bin/dejima pre-creates them (empty is fine; existence is what
-      # lets Docker overlay them) so a compromised session can't create-then-
-      # populate one under the read-write parent mount.
       - ${HOME}/.claude/skills:${HOME}/.claude/skills:ro
       - ${HOME}/.claude/commands:${HOME}/.claude/commands:ro
       - ${HOME}/.claude/agents:${HOME}/.claude/agents:ro
-      # output-styles is prompt text loaded into a later host session's
-      # system prompt, same class as commands/agents above.
       - ${HOME}/.claude/output-styles:${HOME}/.claude/output-styles:ro
+      # Config *files* are staged here for entrypoint.sh to copy into
+      # ~/.claude, rather than mounted at their real paths. A copy can't
+      # detach at all, and it closes a gap no mount could: when
+      # statusline.sh is itself a symlink (the common case, into whatever
+      # config checkout the host keeps it in), bind-mount destination
+      # resolution follows it, so a :ro mount landed on the target and left
+      # the symlink itself replaceable.
+      # statusline.sh is staged by bin/dejima, since not every host has one.
+      - ${HOME}/.claude/settings.json:/etc/dejima-claude/settings.json:ro
+      - ${HOME}/.claude/CLAUDE.md:/etc/dejima-claude/CLAUDE.md:ro
+      # The sandbox's own settings overrides (sandbox.enabled off, plus the
+      # remote-access notify hooks when that's on), generated per run by
+      # bin/dejima and reaching Claude Code as claude-wrapper.sh's
+      # --settings argument. A container-local path, like the staged config
+      # above and for the same reason (#47) - and separate from that staging
+      # directory because this file is generated per run rather than copied
+      # from the host, and it stays mounted rather than being copied in.
+      - ${SANDBOX_SETTINGS_FILE:?set by bin/dejima}:/etc/dejima-settings.json:ro
       # A throwaway per-session copy, not the real file - see
       # bin/dejima and README "Throwaway ~/.claude.json". A plain
       # read-only mount hangs Claude Code on startup (it writes to this
       # file before login completes), so this can't just be layered
-      # read-only the way settings.json/CLAUDE.md/plugins/hooks are above;
+      # read-only the way plugins/hooks/skills are above;
       # a generated, discarded copy is what actually stops a compromised
       # session's changes (e.g. a malicious mcpServers entry) from ever
       # reaching the real file.
