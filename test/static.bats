@@ -480,10 +480,11 @@ setup() {
     # runs alongside agents that read process listings.
     #
     # Both files, because they are deliberate copies of each other rather
-    # than a shared library (see bin/gitea-issue's header for why), and a
-    # duplicated security property is exactly the kind that drifts.
+    # than a shared library (see forges/gitea/bin/gitea-issue's header for
+    # why), and a duplicated security property is exactly the kind that
+    # drifts.
     local f
-    for f in bin/gitea-pr bin/gitea-issue; do
+    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue; do
         run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
         [ "$status" -ne 0 ]
         grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
@@ -495,7 +496,7 @@ setup() {
     # apostrophe or a backtick is the common case, not the edge one. A body
     # that arrives via a file never enters argv at all.
     local f
-    for f in bin/gitea-pr bin/gitea-issue; do
+    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue; do
         grep -q -- '--body-file' "$REPO_ROOT/$f"
         # '-' means stdin, so a heredoc works without a temp file.
         grep -q 'file" = "-"' "$REPO_ROOT/$f"
@@ -509,14 +510,16 @@ setup() {
     # Gitea's issues endpoint returns PRs too - a PR is an issue with a
     # branch attached - so without type=issues every open PR shows up as an
     # issue and the work list reads as twice as long as it is.
-    grep -q 'type=issues' "$REPO_ROOT/bin/gitea-issue"
+    grep -q 'type=issues' "$REPO_ROOT/forges/gitea/bin/gitea-issue"
 }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
-    grep -qx 'COPY bin/gitea-issue /usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
-    # Copied without the executable bit surviving is the failure that only
-    # shows up at runtime, so the chmod list is checked too.
-    grep -q 'chmod +x .*/usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
+    grep -q 'COPY forges/' "$SANDBOX_DIR/Dockerfile"
+    # install -m 755, not a plain cp, so the executable bit surviving isn't
+    # a separate chmod line that can fall out of sync.
+    grep -q -- '-exec install -m 755' "$SANDBOX_DIR/Dockerfile"
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
 @test "gitea-merge-guard.sh blocks a sandbox merge and is a no-op on the host" {

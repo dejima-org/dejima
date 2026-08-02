@@ -86,3 +86,38 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
         bash -c 'source "$1"; provider_dir forge dangling-link' _ "$LIB"
     [ "$status" -ne 0 ]
 }
+
+@test "gitea's manifest names the CLIs it actually ships" {
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        [ -f "$REPO_ROOT/forges/gitea/$rel" ] \
+            || { echo "install names a missing file: $rel"; return 1; }
+        [ -x "$REPO_ROOT/forges/gitea/$rel" ] \
+            || { echo "install names a non-executable file: $rel"; return 1; }
+    done < <(lib manifest_get forge gitea install | tr ' ' '\n')
+}
+
+@test "a forge's pr_command resolves to something the image will have" {
+    # Either a file the forge ships, or a binary the Dockerfile installs.
+    for f in $(lib provider_list forge); do
+        cmd="$(lib manifest_get forge "$f" pr_command)"
+        [ -n "$cmd" ] || continue
+        word0="${cmd%% *}"
+        if [ -f "$REPO_ROOT/forges/$f/bin/$word0" ]; then continue; fi
+        grep -q "$word0" "$REPO_ROOT/docker/Dockerfile" \
+            || { echo "$f: pr_command '$cmd' is neither shipped nor installed"; return 1; }
+    done
+}
+
+@test "the Dockerfile copies every forge's bin, not one forge by name" {
+    grep -q 'COPY forges/' "$REPO_ROOT/docker/Dockerfile"
+    run grep -n 'COPY bin/gitea' "$REPO_ROOT/docker/Dockerfile"
+    [ "$status" -ne 0 ]
+}
+
+@test "gitea's CLIs moved out of bin/ and into its forge" {
+    [ ! -e "$REPO_ROOT/bin/gitea-pr" ]
+    [ ! -e "$REPO_ROOT/bin/gitea-issue" ]
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
+}
