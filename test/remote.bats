@@ -2507,18 +2507,18 @@ remote_doc() {
         }
     }
 
-    # Opt-in, and the file whose mere existence is the switch.
-    has -F 'remote.conf'
-    has -F '~/.config/dejima/remote.conf'
+    # Opt-in, and the config key whose value is the switch.
+    has -F '[remote-access]'
+    has -F 'enabled = on'
+    has -F '~/.config/dejima/config'
 
-    # Every key the (now retired) remote.conf parser accepted. This list used
-    # to be derived from valid_remote_key(); that function is gone along with
-    # remote.conf itself (see bin/dejima-project-lib.sh), and this doc still
-    # describes the old file - rewriting it to the [remote-access] config
-    # section is docs' job, not this task's. Pinned here rather than derived
-    # so this still catches the doc losing one of them in the meantime.
+    # Every key the [remote-access] section accepts. This list used to be
+    # derived from valid_remote_key(); that function and remote.conf are both
+    # gone (see bin/dejima-project-lib.sh), and the keys now live in the
+    # config schema (_config_table in bin/dejima-config-lib.sh). Pinned here
+    # rather than derived so this still catches the doc losing one of them.
     local keys key
-    keys='NTFY_URL BASE_URL TTYD_PORT TTYD_FONT_SIZE'
+    keys='enabled ntfy_url base_url ttyd_port ttyd_font_size'
     for key in $keys; do has -F "\`$key\`"; done
 
     # The port default, taken from the library so the two cannot drift.

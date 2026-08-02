@@ -701,3 +701,64 @@ EOF
     [[ "$output" == *"[github] token_file"* ]]
     [[ "$output" == *"set the path, not the token"* ]]
 }
+
+run_install() {
+    stub_docker
+    run env PATH="$STUB_DIR:$PATH" DEJIMA_CONFIG_DIR="$CONFIG_DIR" HOME="$CONFIG_DIR" \
+        "$@" bash "$REPO_ROOT/install.sh"
+}
+
+@test "install.sh writes a starter config that validates" {
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$CONFIG_DIR/config" ]
+    run lib config_validate
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "install.sh seeds the starter config from a legacy variable" {
+    run_install GITEA_SSH_HOST=git.example
+    [ "$status" -eq 0 ]
+    grep -q '^ssh_host = git.example$' "$CONFIG_DIR/config"
+    # A seeded config must still validate - the seeded line is written
+    # uncommented, so a bad legacy value would otherwise ship a config that
+    # refuses every later launch.
+    run lib config_validate
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "install.sh never overwrites an existing config" {
+    write_config '[core]' 'firewall = off'
+    run_install
+    grep -q 'firewall = off' "$CONFIG_DIR/config"
+    [[ "$output" == *"already"* ]]
+}
+
+@test "install.sh reports an existing remote.conf as no longer read" {
+    printf 'BASE_URL=https://old.example\n' > "$CONFIG_DIR/remote.conf"
+    run_install
+    [[ "$output" == *"remote.conf"* ]]
+    [[ "$output" == *"no longer read"* ]]
+    # Reported, not deleted - it is the operator's file.
+    [ -f "$CONFIG_DIR/remote.conf" ]
+}
+
+@test "the fast CI suite includes config.bats" {
+    grep -q 'test/config.bats' "$REPO_ROOT/.gitea/workflows/tests.yml"
+}
+
+@test "the README documents the config file, not the retired variables" {
+    # The retired variables must be gone from the setup instructions...
+    run grep -nE '^\| `(SANDBOX_CMD|SANDBOX_EXTRA_MOUNTS|SANDBOX_NVIM_CONFIG|SANDBOX_SHARE_DIR|SANDBOX_CREDENTIAL_PROXY|LOKI_URL|ENABLE_FIREWALL|GITEA_SSH_HOST|GITEA_API|GITEA_TOKEN)`' \
+        "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ] || { echo "README still tables retired vars:"; echo "$output"; return 1; }
+    run grep -qE 'Export `GITEA_SSH_HOST`' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+    # ...and the config file must be documented in their place, by path and
+    # with real section names, not merely mentioned.
+    grep -q '~/.config/dejima/config' "$REPO_ROOT/README.md"
+    for section in '\[core\]' '\[forge.gitea\]' '\[remote-access\]' '\[audit\]'; do
+        grep -qE "$section" "$REPO_ROOT/README.md" \
+            || { echo "README never documents section $section"; return 1; }
+    done
+}
