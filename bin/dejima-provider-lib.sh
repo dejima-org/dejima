@@ -374,3 +374,302 @@ forge_env_exports() {
         printf '%s=%s\n' "$name" "$value"
     done
 }
+
+# ---------------------------------------------------------------------------
+# Session briefing composition
+#
+# Assembled host-side, never inside the container: hooks/sandbox-context.sh
+# runs inside it, and giving it the provider directories to compose from
+# would mean mounting them in - the opposite of "providers are DATA, never
+# sourced". Composing here also means the result can be mounted read-only,
+# so a session can never rewrite its own next briefing (see bin/dejima).
+#
+# The output still carries two placeholders forward - {{session_id}} and
+# {{container_id}} become @@SESSION_ID@@ and @@CONTAINER_ID@@ rather than
+# being resolved - because neither is known until the container is actually
+# running. hooks/sandbox-context.sh (Task 5) substitutes those two at
+# SessionStart, against the mounted file this function produces.
+# ---------------------------------------------------------------------------
+
+# Provider fragments are prose, not code, but they are still attacker-
+# reachable if a provider directory is ever untrusted - same reasoning as
+# MAX_MANIFEST_LINES above. Capped per-fragment, not for the assembled
+# total, so one oversized fragment can't crowd out the rest of the briefing.
+BRIEFING_FRAGMENT_MAX=16384
+
+# The only placeholders a fragment or the core text may use. Anything else
+# is a hard refusal (_briefing_substitute below), not a literal passthrough -
+# an unrecognized {{key}} reaching an agent's context verbatim is exactly the
+# kind of silent drift this whole function exists to prevent.
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts"
+
+_briefing_whitelisted() {
+    _set_contains "$_BRIEFING_WHITELIST" "$1"
+}
+
+# The preamble: what the sandbox is, what survives it, and why the network
+# allowlist is load-bearing for the agent too. Lives here, not in any
+# provider directory - see the module-level comment. A quoted heredoc, so
+# backticks and $ signs are literal and need no escaping.
+_briefing_core_preamble() {
+    cat <<'BRIEFING_EOF'
+You are running inside the dejima Docker container, not directly on
+the user's machine, with
+--dangerously-skip-permissions active (no tool-use confirmations).
+
+What this means:
+- The workspace directory is bind-mounted read-write and is the real
+  project. ~/shared is also a real, persistent host directory (not part of
+  the project) - use it to hand the user a file (a screenshot, a temp
+  script) without touching the project checkout, or to pick up something
+  they left there for you. ~/.claude is bind-mounted too, so this session's
+  transcript and its project memory outlive the container - the work is
+  recoverable on the host with the `--resume` command at the end of this
+  briefing.{{writable_mounts}} Everything else is disposable: installed system
+  packages, anything outside the mounted paths, and the container itself go
+  away when this run ends.
+- Outbound network is restricted to an allowlist (Anthropic's API, the npm
+  registry, GitHub read-only, the configured {{forge_name}} host{{forge_ssh_host}}, plus anything
+  approved via dejima-allow). Requests to anything else will simply
+  fail to connect. That restriction is not only a limit on your reach: it
+  is also what bounds where a prompt injection or a compromised dependency
+  in this session could send the user's code or fetch its next instruction
+  from. You cannot audit yourself for that from the inside, so the
+  allowlist is load-bearing for you too, not just for the host - working
+  around it would give up that protection, not merely lift the one limit
+  it appears to. If a task needs one more domain and nothing else, that's
+  a quick fix, not a reason to stop: tell the user to run
+  `bin/dejima-allow <domain> --container {{container_id}}` (add
+  `--global` to persist it past this session) from a terminal outside the
+  sandbox, then continue. Quote that --container value exactly as written
+  here - it is this container's real ID, not something to infer.
+- Stay within the task you were given. Since there are no permission
+  prompts here, be more conservative than usual about anything destructive,
+  irreversible, or outside the project directory.
+BRIEFING_EOF
+}
+
+# The worktree-under-the-mount paragraph. It reads like workflow advice but
+# is a containment fact - get it wrong and real work is silently discarded
+# when the container exits - so it is core, not provider prose, and a
+# workflow can only opt into it (requires_worktree = on), never edit or omit
+# it. _briefing_resolve_worktree splices this into the workflow fragment at
+# its `<!-- core: worktree -->` marker.
+_briefing_core_worktree() {
+    cat <<'BRIEFING_EOF'
+- The worktree MUST live under the mounted project directory itself, e.g.
+  `git worktree add .worktrees/<branch> -b <branch>` run from the project
+  root - never `../<branch>` or any other path outside it, including
+  anywhere under $HOME. Only the exact directory bind-mounted into this
+  container is backed by real storage on the host - what looks like the
+  project's own parent directory is not, so a worktree created there is
+  real work that just gets thrown away. Add
+  `.worktrees/` to `.git/info/exclude` (not `.gitignore` - this is
+  sandbox-local, not something to commit) so it doesn't clutter `git
+  status` for the user's real checkout.
+BRIEFING_EOF
+}
+
+_briefing_core_closing_a() {
+    cat <<'BRIEFING_EOF'
+If a task genuinely needs something else the sandbox can't provide -
+broader network access than a domain or two, host-level or system changes,
+GUI/hardware access - stop and explain clearly to the user what you need
+and why, instead of trying to work around the firewall or sandbox yourself.
+They can continue this exact session outside the container by running on
+the host:
+BRIEFING_EOF
+}
+
+# $requirements and $project_doc (the missing-dependency report and
+# .dejima.md) stay hook-computed and hook-appended after this - they read
+# container-local and workspace-local state a host-side compose has no
+# business resolving, and moving them is Task 5's job, not this one.
+_briefing_core_closing_b() {
+    cat <<'BRIEFING_EOF'
+(session history is shared via the bind-mounted ~/.claude, so it will pick
+up right where this left off).
+BRIEFING_EOF
+}
+
+# Reads a provider's optional briefing fragment (the `briefing` manifest key
+# on the workflow/harness axes), capped at BRIEFING_FRAGMENT_MAX bytes.
+# Prints nothing, successfully, when the axis has no briefing key set - a
+# provider is not required to add prose to the session briefing.
+_briefing_provider_fragment() {
+    local axis="$1" name="$2" rel dir file
+    rel="$(manifest_get "$axis" "$name" briefing)" || return 1
+    if [ -z "$rel" ]; then
+        printf ''
+        return 0
+    fi
+    dir="$(provider_dir "$axis" "$name")" || return 1
+    file="$dir/$rel"
+    if [ ! -f "$file" ]; then
+        echo "$axis '$name' names a briefing fragment that does not exist: $file" >&2
+        return 1
+    fi
+    head -c "$BRIEFING_FRAGMENT_MAX" "$file"
+}
+
+# Splices the core worktree-containment paragraph into the workflow
+# fragment's `<!-- core: worktree -->` marker when the workflow opts in
+# (requires_worktree = on). The workflow can only turn this on or off - the
+# marker's position in its own prose is the only say it gets, and the text
+# itself always comes from _briefing_core_worktree, never from the fragment.
+# A workflow that opts in but omits the marker is refused outright, not
+# silently short a paragraph.
+_briefing_resolve_worktree() {
+    local workflow="$1" text="$2" requires
+    requires="$(manifest_get workflow "$workflow" requires_worktree)" || return 1
+    if [ "$requires" != "on" ]; then
+        printf '%s' "$text"
+        return 0
+    fi
+    case "$text" in
+        *'<!-- core: worktree -->'*) ;;
+        *)
+            echo "workflow '$workflow' sets requires_worktree = on but its briefing" >&2
+            echo "fragment has no '<!-- core: worktree -->' marker" >&2
+            return 1
+            ;;
+    esac
+    awk -v repl="$(_briefing_core_worktree)" '
+        $0 == "<!-- core: worktree -->" { print repl; next }
+        { print }
+    ' <<< "$text"
+}
+
+# Resolves `<!-- requires: CONDITION -->` ... `<!-- end -->` spans: the
+# enclosed provider prose survives only when CONDITION holds, and both
+# marker lines are always dropped. Two condition shapes: a bare word is a
+# forge capability (checked against $caps), `autonomy=VALUE` checks the
+# workflow's own autonomy setting ($autonomy). One marker syntax for both,
+# per the brief - visible to whoever edits the prose, not hidden in here.
+_briefing_apply_gates() {
+    local text="$1" caps="$2" autonomy="$3"
+    awk -v caps=" $caps " -v autonomy="$autonomy" '
+        /^<!-- requires: .* -->$/ {
+            cond = $0
+            sub(/^<!-- requires: /, "", cond)
+            sub(/ -->$/, "", cond)
+            if (index(cond, "autonomy=") == 1) {
+                skip = (substr(cond, 10) == autonomy) ? 0 : 1
+            } else {
+                skip = (index(caps, " " cond " ") > 0) ? 0 : 1
+            }
+            next
+        }
+        /^<!-- end -->$/ { skip = 0; next }
+        { if (!skip) print }
+    ' <<< "$text"
+}
+
+# Resolves one whitelisted key to its literal value. forge_ssh_host is the
+# one deliberately lenient case: it is informational, not load-bearing, so a
+# missing config file (composing without one, as some tests and a fresh
+# checkout do) yields an empty substitution rather than the hard failure
+# config_get would otherwise give - the parenthetical it renders just
+# disappears rather than composition refusing altogether.
+_briefing_resolve_key() {
+    local key="$1" forge="$2" workflow="$3" harness="$4" host=""
+    case "$key" in
+        pr_command)       manifest_get forge "$forge" pr_command ;;
+        issue_command)    manifest_get forge "$forge" issue_command ;;
+        forge_name)       printf '%s' "$forge" ;;
+        forge_ssh_host)
+            if config_exists 2>/dev/null; then
+                host="$(config_get "forge.$forge" ssh_host 2>/dev/null)" || host=""
+            fi
+            [ -z "$host" ] || printf ' (%s)' "$host"
+            ;;
+        blocked_branches) manifest_get workflow "$workflow" blocked_branches ;;
+        project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;
+        workspace_dir)    printf '%s' "${WORKSPACE_DIR:-}" ;;
+        resume_command)   manifest_get harness "$harness" resume_command ;;
+        writable_mounts)
+            if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
+                printf '\n  These host directories are bind-mounted read-write at their own paths and\n  outlive the container too: %s.\n ' "$DEJIMA_RW_MOUNTS"
+            fi
+            ;;
+        *)
+            echo "internal error: no resolver for whitelisted briefing key: $key" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Substitutes every {{key}} in the assembled text. session_id and
+# container_id are deliberately NOT resolved here - see the module comment -
+# they are rewritten to the @@...@@ markers hooks/sandbox-context.sh (Task 5)
+# fills in at SessionStart. Everything else must be in the whitelist or this
+# refuses outright; nothing unrecognized ever reaches the container as a
+# literal {{key}}.
+_briefing_substitute() {
+    local text="$1" forge="$2" workflow="$3" harness="$4"
+    local -a tokens
+    local tok key value
+
+    mapfile -t tokens < <(printf '%s' "$text" | grep -oE '\{\{[a-z_]+\}\}' | sort -u)
+    for tok in ${tokens[@]+"${tokens[@]}"}; do
+        key="${tok#\{\{}"
+        key="${key%\}\}}"
+        case "$key" in
+            session_id|container_id) continue ;;
+        esac
+        if ! _briefing_whitelisted "$key"; then
+            echo "refusing unknown briefing placeholder: $tok" >&2
+            return 1
+        fi
+        value="$(_briefing_resolve_key "$key" "$forge" "$workflow" "$harness")" || return 1
+        text="${text//$tok/$value}"
+    done
+
+    text="${text//\{\{session_id\}\}/@@SESSION_ID@@}"
+    text="${text//\{\{container_id\}\}/@@CONTAINER_ID@@}"
+
+    case "$text" in
+        *'{{'*|*'}}'*)
+            echo "refusing: an unresolved placeholder remains after briefing composition" >&2
+            return 1
+            ;;
+    esac
+    printf '%s' "$text"
+}
+
+# briefing_compose FORGE WORKFLOW HARNESS
+# Prints the assembled session briefing: the core preamble, the workflow
+# fragment (with the worktree paragraph and capability/autonomy gates
+# resolved), the core closing text, and the harness fragment (today, just
+# the resume command) - in that reading order. Every {{key}} is substituted
+# except {{session_id}}/{{container_id}}, deferred as @@SESSION_ID@@ and
+# @@CONTAINER_ID@@ for the hook that mounts this at session start.
+briefing_compose() {
+    local forge="$1" workflow="$2" harness="$3"
+    local caps autonomy workflow_frag harness_frag text
+
+    manifest_validate forge "$forge" || return 1
+    manifest_validate workflow "$workflow" || return 1
+    manifest_validate harness "$harness" || return 1
+
+    caps="$(manifest_get forge "$forge" capabilities)" || return 1
+    autonomy="$(manifest_get workflow "$workflow" autonomy)" || return 1
+
+    workflow_frag="$(_briefing_provider_fragment workflow "$workflow")" || return 1
+    workflow_frag="$(_briefing_resolve_worktree "$workflow" "$workflow_frag")" || return 1
+    workflow_frag="$(_briefing_apply_gates "$workflow_frag" "$caps" "$autonomy")"
+
+    harness_frag="$(_briefing_provider_fragment harness "$harness")" || return 1
+
+    text="$(_briefing_core_preamble)"
+    text+=$'\n\n'
+    text+="$workflow_frag"
+    text+=$'\n\n'
+    text+="$(_briefing_core_closing_a)"
+    text+=$'\n\n'
+    text+="$harness_frag"
+    text+=$'\n\n'
+    text+="$(_briefing_core_closing_b)"
+
+    _briefing_substitute "$text" "$forge" "$workflow" "$harness"
+}

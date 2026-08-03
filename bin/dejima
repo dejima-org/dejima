@@ -55,11 +55,13 @@ _need_value() {
 }
 
 PRINT_CONFIG=0
+PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
         --print-config)      PRINT_CONFIG=1; shift ;;
+        --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
@@ -176,6 +178,16 @@ DEJIMA_FORGE_NAME="$(config_get core forge)"
 DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+# --print-briefing composes and exits, the same way --print-config does -
+# before anything is built or mounted, and before a workspace argument is
+# required. It exists so the composed briefing can be inspected (and, per
+# test/providers.bats's parity check, diffed against the pre-composition
+# text) without booting a container.
+if [ "$PRINT_BRIEFING" = 1 ]; then
+    briefing_compose "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+    exit 0
+fi
 
 if ! DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"; then
     exit 1
@@ -454,7 +466,7 @@ cleanup() {
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
@@ -748,6 +760,19 @@ fi
 # "everything else is disposable" would be false, and false in the direction
 # that gets work thrown away.
 extra_mounts+=(-e "DEJIMA_RW_MOUNTS=$rw_mount_list")
+DEJIMA_RW_MOUNTS="$rw_mount_list"
+
+# The session briefing, composed host-side from the core text and the
+# selected workflow/harness fragments (see briefing_compose) and mounted
+# read-only, so a session can never rewrite its own next briefing. The two
+# runtime placeholders it still carries (@@SESSION_ID@@, @@CONTAINER_ID@@)
+# are hooks/sandbox-context.sh's job to fill in at SessionStart.
+SANDBOX_BRIEFING_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-briefing.XXXXXX")"
+if ! briefing_compose "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" > "$SANDBOX_BRIEFING_FILE"; then
+    exit 1
+fi
+extra_mounts+=(-v "$SANDBOX_BRIEFING_FILE:/etc/dejima/briefing:ro")
+extra_mounts+=(-e "DEJIMA_BRIEFING_FILE=/etc/dejima/briefing")
 
 # Block the workspace's own git hooks from being rewritten to run on the
 # host at the next `git` invocation. Only when .git is a real directory - a

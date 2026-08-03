@@ -221,3 +221,72 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     token_line="$(printf '%s\n' "$output" | grep '^GITEA_TOKEN=')"
     [ "$token_line" = "GITEA_TOKEN=my-secret-token" ]
 }
+
+@test "composition substitutes the whitelist and defers the two runtime keys" {
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\ntoken_file = /dev/null\n' \
+        > "$CONFIG_DIR/config"
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"gitea-pr create"* ]]
+    [[ "$output" == *"git.example"* ]]
+    [[ "$output" == *"@@SESSION_ID@@"* ]]
+    [[ "$output" == *"@@CONTAINER_ID@@"* ]]
+    # No placeholder survives composition in either spelling.
+    [[ "$output" != *"{{"* ]]
+    [[ "$output" != *"}}"* ]]
+}
+
+@test "an unknown placeholder is refused rather than emitted literally" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/f" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities = pr\npr_command = x\n' > "$FAKE_ROOT/forges/f/forge.conf"
+    printf 'requires = pr\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    printf 'Run {{nonesuch}} to proceed.\n' > "$FAKE_ROOT/workflows/w/briefing.md"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; briefing_compose f w h' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nonesuch"* ]]
+}
+
+@test "the core fragment is present and is not provider-supplied" {
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ]
+    # The containment reasoning a provider must not be able to remove.
+    [[ "$output" == *"allowlist"* ]]
+    [[ "$output" == *"Stay within the task"* ]]
+    # And it is not reachable as a file any provider ships.
+    run bash -c 'ls "$1"/workflows/*/core* "$1"/forges/*/core* 2>/dev/null' _ "$REPO_ROOT"
+    [ -z "$output" ]
+}
+
+@test "a provider briefing fragment is capped" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/f" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities = pr\npr_command = x\n' > "$FAKE_ROOT/forges/f/forge.conf"
+    printf 'requires = pr\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    head -c 40000 /dev/zero | tr '\0' 'x' > "$FAKE_ROOT/workflows/w/briefing.md"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; briefing_compose f w h' _ "$LIB"
+    [ "${#output}" -lt 40000 ]
+}
+
+@test "every placeholder in every shipped fragment is in the whitelist" {
+    found=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        while IFS= read -r ph; do
+            [ -n "$ph" ] || continue
+            found=1
+            case "$ph" in
+                pr_command|issue_command|forge_name|forge_ssh_host|blocked_branches) ;;
+                container_id|project_dir|workspace_dir|session_id) ;;
+                resume_command|writable_mounts) ;;
+                *) echo "$f uses unknown placeholder: $ph"; return 1 ;;
+            esac
+        done < <(grep -oE '\{\{[a-z_]+\}\}' "$f" | tr -d '{}')
+    done < <(find "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$REPO_ROOT/forges" -name '*.md' -o -name '*.conf')
+    # Guards against a grep that silently matches nothing.
+    [ "$found" = 1 ]
+}
