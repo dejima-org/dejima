@@ -246,8 +246,8 @@ done
 if [ -n "${EXTRA_ALLOWED_DOMAINS:-}" ]; then
     # The script-wide IFS above drops plain space to tighten word splitting
     # elsewhere, but EXTRA_ALLOWED_DOMAINS is a space-separated list by
-    # construction (entrypoint.sh joins GITEA_SSH_HOST/GITEA_API host/
-    # LOKI_URL host/ALLOWED_DOMAINS with spaces) - restore it just for this
+    # construction (entrypoint.sh joins DEJIMA_FORGE_HOSTS/LOKI_URL host/
+    # ALLOWED_DOMAINS with spaces) - restore it just for this
     # loop, or a multi-entry value silently collapses into one bogus token.
     IFS=' '
     for domain in $EXTRA_ALLOWED_DOMAINS; do
@@ -306,8 +306,8 @@ iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Then allow only specific outbound traffic to allowed domains. This isn't
-# port-restricted, so it also covers git-over-ssh (port 22) to
-# GITEA_SSH_HOST/GITEA_API, which are already in the ipset above - no
+# port-restricted, so it also covers git-over-ssh (port 22) to the
+# configured forge's hosts, which are already in the ipset above - no
 # separate "TCP/22 to anywhere" rule needed (that would allow SSH, or any
 # raw TCP posing as it, to any host on the internet).
 #
