@@ -880,19 +880,41 @@ source_hint() {
     esac
 }
 
-# The whole display block for one finding. Task 6 extends this to prefer a
-# retained diff; today it always shows live current content.
+# The display block for one finding, preferring the diff retained beside this
+# report and degrading, in order, to: the full content of a surface that is
+# new; the live content with the reason no diff was kept; and - for a report
+# written before retention existed at all - the live content alone.
 render_finding() {
-    local id="$1" tmp
+    local id="$1" sc="$2" key tmp
+    key="$(id_key "$id")"
+
+    if [ -n "$sc" ] && [ -f "$sc/$key.diff" ]; then
+        echo "  --- what changed while the session ran ---"
+        show_capped "$sc/$key.diff"
+        source_hint "$id"
+        return 0
+    fi
+    if [ -n "$sc" ] && [ -f "$sc/$key.removed" ]; then
+        echo "  --- this surface was removed; its pre-session content was not retained ---"
+        return 0
+    fi
+    if [ -n "$sc" ] && [ -f "$sc/$key.withheld" ]; then
+        echo "  --- no diff retained: $(sanitize "$(head -n1 "$sc/$key.withheld" 2>/dev/null)") ---"
+    elif [ -n "$sc" ] && [ -f "$sc/$key.new" ]; then
+        echo "  --- new surface; full current content ---"
+    else
+        echo "  --- no pre-session record; current content ---"
+    fi
+
     tmp="$(mktemp)" || return 0
     if current_content_for_id "$id" > "$tmp" 2>/dev/null; then
-        echo "  --- current content ---"
         show_capped "$tmp"
         source_hint "$id"
     else
-        echo "  --- this surface no longer exists ---"
+        echo "    (this surface no longer exists)"
     fi
     rm -f "$tmp"
+    return 0
 }
 
 projects_snapshot() {
@@ -1215,6 +1237,11 @@ case "$cmd" in
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
         report="$(select_report "$report_dir")" \
             || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        sc="$(sidecar_dir "$report")"
+        # Removed only at the end, and only for findings actually
+        # acknowledged - an abort must leave the operator exactly where they
+        # were, retained diffs included.
+        sc_done=()
 
         # Accumulate in memory and write once at the end: an ack interrupted
         # partway (q/Esc/EOF/Ctrl-C) must not leave a CRITICAL surface
@@ -1315,7 +1342,7 @@ case "$cmd" in
             [ -n "$rid" ] || ackable=0
             echo ""
             echo "  [$tier] $body"
-            [ "$ackable" -eq 1 ] && render_finding "$rid"
+            [ "$ackable" -eq 1 ] && render_finding "$rid" "$sc"
             if [ "$ackable" -ne 1 ]; then
                 printf '  [c] skip  [q] quit (this finding cannot be acknowledged): '
             elif [ "$tier" = CRITICAL ]; then
@@ -1333,6 +1360,7 @@ case "$cmd" in
                         echo "  cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."
                     else
                         pending+=("spam $id")
+                        sc_done+=("$rid")
                     fi
                     ;;
                 a)
@@ -1355,6 +1383,7 @@ case "$cmd" in
                             echo "  cannot approve: $id no longer exists"
                         else
                             pending+=("safe $id $sha")
+                            sc_done+=("$rid")
                             [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
                         fi
                     fi
@@ -1369,6 +1398,11 @@ case "$cmd" in
         fi
         mkdir -p "$BASELINE_DIR"
         printf '%s\n' "${pending[@]}" >> "$bf"
+        for rid in ${sc_done[@]+"${sc_done[@]}"}; do
+            rm -f "$sc/$(id_key "$rid")".diff "$sc/$(id_key "$rid")".new \
+                  "$sc/$(id_key "$rid")".removed "$sc/$(id_key "$rid")".withheld
+        done
+        rmdir "$sc" 2>/dev/null || true
         # Only rename off -CRITICAL.txt (making the report evictable by
         # rotation) when every CRITICAL finding this report carried was
         # actually approved - not just when something was approved.

