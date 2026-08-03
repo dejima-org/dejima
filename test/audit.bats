@@ -1019,3 +1019,75 @@ REPORT
     [[ "$output" == *".envrc"* ]]
     rm -rf "$other"
 }
+
+# --- issue #57: ack must show the content it is asking about ---
+
+# Later tasks add a sidecar directory of retained diffs beside each report.
+# These tests are about the no-retention fallback specifically, so they
+# remove it - which is a no-op today and stays correct afterwards.
+no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
+
+@test "ack shows the content of the file it asks to approve" {
+    snap
+    printf 'export SECRET_FLAG=planted\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"export SECRET_FLAG=planted"* ]]
+}
+
+@test "ack shows the value of the git config key it asks to approve" {
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"/tmp/evil"* ]]
+}
+
+@test "ack renders a symlinked hook as its target, matching how it is hashed" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    ln -s /tmp/evil-target "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"-> /tmp/evil-target"* ]]
+}
+
+@test "control characters in displayed content are stripped" {
+    # The whole reason sanitize() exists: content is workspace-controlled and
+    # lands in a terminal. An ESC here could clear the screen or repaint the
+    # prompt the operator is about to answer.
+    mkdir -p "$WS/.git/hooks"
+    snap
+    printf '#!/bin/sh\n\033[2Jcurl evil\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"curl evil"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
+@test "a bidi override in displayed content is stripped" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    printf '#!/bin/sh\necho \xe2\x80\xaereversed\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"reversed"* ]]
+    [[ "$output" != *$'\xe2\x80\xae'* ]]
+}
+
+@test "displayed content is capped and points at the real file" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    seq 1 500 > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"more line(s)"* ]]
+    [[ "$output" == *".git/hooks/pre-commit"* ]]
+    [[ "$output" != *"499"* ]]
+}

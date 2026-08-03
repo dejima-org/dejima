@@ -443,6 +443,94 @@ current_sha_for_id() {
     esac
 }
 
+# How many lines of content or diff `ack` prints before truncating. Fixed,
+# like CRIT_CAP/WARN_CAP: a predictable prompt is worth more than tunability,
+# and the truncation notice names the real paths so the full text is one
+# command away.
+DISPLAY_LINE_CAP=40
+
+# Live content of a raw namespaced id, mirroring current_sha_for_id's
+# dispatch arm for arm so that what is DISPLAYED and what gets PINNED can
+# never disagree about the meaning of "this exact content". Symlinks render
+# as their target, because that is what hash_entry() hashes for them - the
+# link's own content is not what changed.
+current_content_for_id() {
+    local id="$1" f
+    case "$id" in
+        gitconfig:*)  gitconfig_value_for_key "$ws" "${id#gitconfig:}" ;;
+        statusline:*) f="$STATUSLINE_PATH" ;;
+        tcb:*)        f="$ws/${id#tcb:}" ;;
+        *)            f="$ws/$id" ;;
+    esac
+    case "$id" in gitconfig:*) return ;; esac
+    [ -e "$f" ] || [ -L "$f" ] || return 1
+    if [ -L "$f" ]; then
+        printf '%s\n' "-> $(readlink "$f")"
+    else
+        cat -- "$f" 2>/dev/null || return 1
+    fi
+}
+
+# The raw (unquoted) value currently set for a git config key, or a failing
+# return if the key is gone. Same parse as gitconfig_sha_for_key, which
+# hashes this exact string.
+gitconfig_value_for_key() {
+    local ws="$1" key="$2" line lkey
+    while IFS= read -r line; do
+        lkey="${line%%=*}"
+        [ "$lkey" = "$key" ] || continue
+        printf '%s\n' "$(unquote_value "${line#*=}")"
+        return 0
+    done < <(git_config_snapshot "$ws")
+    return 1
+}
+
+# Print a file for the operator: sanitized per line (this is
+# workspace-controlled text reaching a terminal - see sanitize), indented so
+# it cannot be mistaken for the audit's own output, and capped. Sanitizing
+# line by line rather than whole-file keeps a planted NUL or newline run from
+# collapsing separate lines into one.
+show_capped() {
+    local f="$1" n=0 total line
+    total="$(wc -l < "$f" 2>/dev/null)" || total=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [ "$n" -le "$DISPLAY_LINE_CAP" ] || break
+        printf '    %s\n' "$(sanitize "$line")"
+    done < "$f"
+    if [ "$total" -gt "$DISPLAY_LINE_CAP" ]; then
+        printf '    ... +%s more line(s)\n' "$(( total - DISPLAY_LINE_CAP ))"
+    fi
+}
+
+# Where the operator can read the whole thing, when the display was capped.
+# Never sanitized through a path that would make it unfindable: it is the
+# audit's OWN text about a location, not workspace-controlled content.
+source_hint() {
+    local id="$1"
+    case "$id" in
+        gitconfig:*)  printf '%s\n' "    (full value: git -C $ws config --get ${id#gitconfig:})" ;;
+        statusline:*) printf '%s\n' "    (full text: $STATUSLINE_PATH)" ;;
+        tcb:*)        printf '%s\n' "    (full text: $ws/$(sanitize "${id#tcb:}"))" ;;
+        *)            printf '%s\n' "    (full text: $ws/$(sanitize "$id"))" ;;
+    esac
+}
+
+# The whole display block for one finding. Task 6 extends this to prefer a
+# retained diff; today it always shows live current content.
+render_finding() {
+    local id="$1" tmp
+    tmp="$(mktemp)" || return 0
+    if current_content_for_id "$id" > "$tmp" 2>/dev/null; then
+        echo "  --- current content ---"
+        show_capped "$tmp"
+        source_hint "$id"
+    else
+        echo "  --- this surface no longer exists ---"
+    fi
+    rm -f "$tmp"
+}
+
 projects_snapshot() {
     # slug<TAB>maxmtime for each immediate subdir of PROJECTS_DIR, sorted by
     # slug; maxmtime is 0 if the slug dir has no files.
@@ -778,6 +866,7 @@ case "$cmd" in
             [ -n "$rid" ] || ackable=0
             echo ""
             echo "  [$tier] $body"
+            [ "$ackable" -eq 1 ] && render_finding "$rid"
             if [ "$ackable" -ne 1 ]; then
                 printf '  [c] skip  [q] quit (this finding cannot be acknowledged): '
             elif [ "$tier" = CRITICAL ]; then
