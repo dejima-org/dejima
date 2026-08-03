@@ -961,3 +961,61 @@ REPORT
     [ -f "$BASEDIR/$slug" ]
     ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug"
 }
+
+# --- issue #57: the workspace argument is optional ---
+
+@test "show finds the workspace when run from the repo root" {
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show finds the workspace when run from a subdirectory" {
+    mkdir -p "$WS/src/deep"
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS/src/deep' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show finds the parent repo when run from a linked worktree" {
+    # The sandbox's own workflow: work happens in WORKSPACE/.worktrees/<branch>,
+    # but bin/dejima mounted (and keyed the reports to) the parent repo. A
+    # worktree-local lookup would report "no reports" while the startup
+    # warning kept firing on the parent's.
+    git -C "$WS" commit -q --allow-empty -m init
+    git -C "$WS" worktree add -q "$WS/.worktrees/wt" -b wt
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show names the path it resolved when that workspace has no reports" {
+    # A wrong guess must be visible, not silent - the operator has to be able
+    # to tell "nothing happened here" from "you are looking at the wrong repo".
+    other="$(mktemp -d)"; git -C "$other" init -q
+    run bash -c "cd '$other' && '$AUDIT' show 2>&1"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no reports for"* ]]
+    [[ "$output" == *"$other"* ]]
+    rm -rf "$other"
+}
+
+@test "an explicit workspace argument still wins over detection" {
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    other="$(mktemp -d)"; git -C "$other" init -q
+    run bash -c "cd '$other' && '$AUDIT' show '$WS' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+    rm -rf "$other"
+}

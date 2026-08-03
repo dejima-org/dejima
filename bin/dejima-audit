@@ -8,7 +8,7 @@
 # `claude` in that repo again. See docs/security.md.
 set -uo pipefail
 
-cmd="${1:-}"; ws="${2:-}"; state="${3:-}"
+cmd="${1:-}"; ws_arg="${2:-}"; state="${3:-}"
 
 PROJECTS_DIR="${DEJIMA_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
 
@@ -69,6 +69,46 @@ select_report() {
 }
 
 BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+
+# The workspace argument is optional: `dejima-audit show` inside a repo
+# should mean that repo. bin/dejima always passes an explicit path, so this
+# only ever fires for a hand-run show/ack.
+#
+# Candidates in order, first one that already HAS reports wins - existence of
+# a report directory is the only evidence available about which path
+# bin/dejima was actually invoked with, and the three candidates can
+# genuinely differ:
+#   1. the enclosing repo's toplevel (the ordinary case, and from a subdir);
+#   2. the MAIN worktree root, when cwd is a linked worktree - the sandbox's
+#      own .worktrees/<branch> workflow keys reports to the parent repo;
+#   3. $PWD, which covers a non-git directory and the case where the path
+#      bin/dejima was given (logical, via `cd && pwd`) differs from git's
+#      physical toplevel because of a symlinked path component.
+# Falling back to candidate 1 when none of them has reports is purely so the
+# "no reports for X" message can name a concrete path: a wrong guess must be
+# visible rather than silent.
+resolve_ws() {
+    local given="$1" top common main c
+    if [ -n "$given" ]; then
+        ( cd "$given" 2>/dev/null && pwd ) || printf '%s' "$given"
+        return
+    fi
+    top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=""
+    main=""
+    common="$(git rev-parse --git-common-dir 2>/dev/null)" || common=""
+    if [ -n "$common" ]; then
+        common="$(readlink -f "$common" 2>/dev/null)" || common=""
+        [ -n "$common" ] && main="$(dirname "$common")"
+    fi
+    for c in "$top" "$main" "$PWD"; do
+        [ -n "$c" ] || continue
+        [ -d "$AUDIT_DIR/$(ws_slug "$c")" ] || continue
+        printf '%s' "$c"
+        return
+    done
+    printf '%s' "${top:-$PWD}"
+}
+ws="$(resolve_ws "$ws_arg")"
 
 # Two acknowledgement forms, deliberately distinct:
 #   spam <id>         - this changes routinely; count it, never list it.
@@ -803,7 +843,8 @@ case "$cmd" in
         exit 0
         ;;
     *)
-        echo "usage: dejima-audit {snapshot|compare|show|ack} <workspace> [state-file]" >&2
+        echo "usage: dejima-audit {snapshot|compare|show|ack} [workspace] [state-file]" >&2
+        echo "  workspace defaults to the enclosing git repository, else the current directory" >&2
         exit 2
         ;;
 esac
