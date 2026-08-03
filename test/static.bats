@@ -1100,6 +1100,13 @@ EOF
     grep -qx 'link_bin dejima-project' "$REPO_ROOT/install.sh"
 }
 
+@test "install.sh puts the exit-time audit CLI on PATH" {
+    # bin/dejima's own startup warning tells the operator to run
+    # `dejima-audit ack ...` by name; that instruction is only true if the
+    # installer links it like every other user-facing CLI here.
+    grep -qx 'link_bin dejima-audit' "$REPO_ROOT/install.sh"
+}
+
 @test "README documents the declaration/approval split" {
     grep -q '\.dejima/' "$REPO_ROOT/README.md"
     grep -q 'dejima-project approve' "$REPO_ROOT/README.md"

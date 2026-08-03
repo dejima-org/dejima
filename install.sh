@@ -143,6 +143,10 @@ link_bin dejima
 link_bin dejima-allow
 link_bin dejima-dep
 link_bin dejima-project
+# The exit-time audit is a user-facing CLI, not just bin/dejima's helper:
+# the startup warning about unacknowledged CRITICAL findings tells the
+# operator to run `dejima-audit ack`, which is only true once it is on PATH.
+link_bin dejima-audit
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
 # without ~/.config/dejima/remote.conf - they refuse to run at all - so linking
