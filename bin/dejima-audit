@@ -110,6 +110,145 @@ resolve_ws() {
 }
 ws="$(resolve_ws "$ws_arg")"
 
+# Retention of pre-session CONTENT (as bounded diffs) is separable from the
+# audit itself: an operator who wants zero content at rest sets this to 0 and
+# still gets every finding, just without before/after.
+DIFFS_ENABLED="${DEJIMA_AUDIT_DIFFS:-1}"
+
+# Per-file cap on what is staged. Bounded because staging is the one place
+# WHOLE files (rather than diffs) exist on disk, so its size is the size of
+# the exposure if a session is SIGKILLed before compare can clear it.
+STAGE_FILE_CAP=1048576
+
+# Set only by `snapshot`, deliberately. `compare` calls hash_paths() too, to
+# build the after-side; if this were set there, that call would overwrite the
+# staged BEFORE content with the AFTER content and every diff would come out
+# empty.
+STAGE_DIR=""
+
+# Filename for a raw namespaced id in the staging and sidecar directories.
+# Hashed rather than encoded because these are real filenames: an id can be
+# any length and contain '/', and enc_id's output for an ordinary path still
+# does.
+id_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+# Surfaces whose CONTENT is never retained, matched on the workspace-relative
+# path. These hold credentials by convention, and a retained diff of one
+# would put them in a store that outlives the session.
+#
+# .claude/settings.json is deliberately NOT here: it is the shared, commonly
+# committed file, and it is also a CRITICAL surface whose diffs are worth
+# having. The `.local` convention is what marks the personal one.
+#
+# This is the reliable half of the secret defence; looks_secret() (used at
+# promote time) is the best-effort half.
+diff_denied() {
+    case "${1#tcb:}" in
+        .envrc|.mcp.json|.claude/settings.local.json) return 0 ;;
+        .env|.env.*)                                  return 0 ;;
+    esac
+    return 1
+}
+
+# The audit store is only beyond the sandbox's reach while it sits outside
+# the mounted workspace - inside it, it lands in the read-write
+# ${WORKSPACE_DIR}:${WORKSPACE_DIR} mount, where a session can read the
+# retained content of every earlier run and delete the evidence of its own.
+# bin/dejima already WARNS about this; for retained content it is a hard gate,
+# because the whole premise of storing bytes here is that the container
+# cannot read them.
+store_reachable() {
+    local d
+    for d in "$AUDIT_DIR" "$BASELINE_DIR"; do
+        case "$d/" in "$ws"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+# Field 22 of /proc/<pid>/stat is the process start time in clock ticks.
+# Fields 1 and 2 are the pid and the comm, and comm is parenthesised and may
+# itself contain spaces and ')' - so everything up to and including the LAST
+# ') ' is stripped first, after which starttime is field 20.
+proc_starttime() {
+    local st rest
+    [ -r "/proc/$1/stat" ] || return 1
+    st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    rest="${st##*) }"
+    set -- $rest
+    [ "$#" -ge 20 ] || return 1
+    printf '%s' "${20}"
+}
+
+# pid:starttime of the process that owns a staging directory - bin/dejima,
+# which lives for the whole session (this script exits immediately). The
+# start time is what makes it exact: a bare pid could be reused by an
+# unrelated process and make a dead owner look alive forever.
+owner_token() {
+    local st
+    st="$(proc_starttime "$PPID")" || return 1
+    printf '%s:%s' "$PPID" "$st"
+}
+
+# Remove staging directories left behind by sessions that died without
+# running `compare` - SIGKILL, an OOM kill, or power loss, none of which run
+# bin/dejima's EXIT trap. Confined to a directory inside our own 0700 store,
+# so unlike a /tmp sweep it can never touch a path another local user
+# controls.
+reap_staging() {
+    local root="$1" d owner pid start
+    for d in "$root"/*/; do
+        [ -d "$d" ] || continue
+        owner="$(cat "$d/.owner" 2>/dev/null)" || owner=""
+        pid="${owner%%:*}"; start="${owner#*:}"
+        if [ -n "$owner" ] && [ "$pid" != "$owner" ] && [ -n "$pid" ]; then
+            # Owner recorded: reap only if it is provably gone. A live owner
+            # is a concurrent session whose staging must survive.
+            [ "$(proc_starttime "$pid" 2>/dev/null)" = "$start" ] && continue
+            rm -rf "$d"
+            continue
+        fi
+        # No usable owner record: liveness is undecidable, so fall back to
+        # age rather than guessing. 24h is far longer than any session.
+        [ -n "$(find "$d" -maxdepth 0 -mmin +1440 2>/dev/null)" ] && rm -rf "$d"
+    done
+}
+
+# Copy one surface's current bytes into the staging directory, to become the
+# BEFORE side of a diff after the session ends. No-op unless `snapshot` set
+# STAGE_DIR. Symlinks stage their target string, matching what hash_entry()
+# hashes for them.
+stage_entry() {
+    [ -n "$STAGE_DIR" ] || return 0
+    local id="$1" src="$2" key sz
+    diff_denied "$id" && return 0
+    key="$(id_key "$id")"
+    if [ -L "$src" ]; then
+        printf '%s\n' "-> $(readlink "$src")" > "$STAGE_DIR/$key" 2>/dev/null || return 0
+        return 0
+    fi
+    [ -f "$src" ] || return 0
+    sz="$(stat -c %s "$src" 2>/dev/null)" || return 0
+    [ "$sz" -le "$STAGE_FILE_CAP" ] || return 0
+    cp -- "$src" "$STAGE_DIR/$key" 2>/dev/null || rm -f "$STAGE_DIR/$key"
+    return 0
+}
+
+# Create this session's staging directory and return its path, or nothing if
+# retention is off, the store is sandbox-reachable, or the store cannot be
+# written. Every one of those degrades to "no diffs", never to an error.
+open_staging() {
+    local root token d
+    [ "$DIFFS_ENABLED" = "1" ] || return 0
+    store_reachable && return 0
+    root="$AUDIT_DIR/$(ws_slug "$ws")/.staging"
+    ( umask 077; mkdir -p "$root" ) 2>/dev/null || return 0
+    reap_staging "$root"
+    d="$( umask 077; mktemp -d "$root/XXXXXX" 2>/dev/null )" || return 0
+    [ -n "$d" ] || return 0
+    token="$(owner_token)" && printf '%s\n' "$token" > "$d/.owner" 2>/dev/null
+    printf '%s' "$d"
+}
+
 # Two acknowledgement forms, deliberately distinct:
 #   spam <id>         - this changes routinely; count it, never list it.
 #                       Refused for CRITICAL surfaces (see `ack`).
@@ -342,11 +481,12 @@ hash_paths() {
     local ws="$1" p
     {
         for p in .mcp.json .envrc; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && { stage_entry "$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
         for dir in .claude .vscode .git/hooks; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
+                    stage_entry "${f#"$ws"/}" "$f"
                     printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
@@ -363,11 +503,12 @@ tcb_snapshot() {
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
         for p in install.sh; do
-            [ -f "$ws/$p" ] && printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"
+            [ -f "$ws/$p" ] && { stage_entry "tcb:$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
         for dir in bin hooks docker test; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
+                    stage_entry "tcb:${f#"$ws"/}" "$f"
                     printf '%s\t%s\n' "$(enc_id "${f#"$ws"/}")" "$(hash_entry "$f")"
                 done < <(find "$ws/$dir" \( -type f -o -type l \) -print0)
             fi
@@ -557,12 +698,19 @@ statusline_snapshot() {
     # monitored on its own rather than as part of hash_paths.
     local f="$1"
     [ -e "$f" ] || return 0
+    stage_entry "statusline:statusline.sh" "$f"
     printf 'statusline.sh\t%s\n' "$(hash_entry "$f")"
 }
 
 case "$cmd" in
     snapshot)
-        { echo "### gitconfig"; git_config_snapshot "$ws";
+        STAGE_DIR="$(open_staging)"
+        # First section, so the existing ranges (anchored at ### gitconfig
+        # and ### statusline) are unaffected. Written even when empty, so
+        # `compare` can tell "retention was off" from "state file predates
+        # this" without guessing.
+        { echo "### staging $STAGE_DIR";
+          echo "### gitconfig"; git_config_snapshot "$ws";
           echo "### paths";     hash_paths "$ws";
           echo "### projects";  projects_snapshot "$PROJECTS_DIR";
           echo "### tcb";       tcb_snapshot "$ws";

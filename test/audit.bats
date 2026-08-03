@@ -1130,3 +1130,105 @@ no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
     [[ "$output" == *".git/hooks/pre-commit"* ]]
     [[ "$output" != *"499"* ]]
 }
+
+# --- issue #57: pre-session staging, inside the store and nowhere else ---
+
+stage_root() { printf '%s/%s/.staging' "$AUDITDIR" "$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"; }
+staged_dirs() { find "$(stage_root)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null; }
+key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+@test "snapshot stages pre-session content inside the audit store" {
+    mkdir -p "$WS/.git/hooks"
+    printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.git/hooks/pre-commit')" ]
+    grep -q original "$d/$(key_of '.git/hooks/pre-commit')"
+}
+
+@test "snapshot writes nothing under TMPDIR" {
+    # Staging is the one place whole files (not diffs) exist on disk. /tmp is
+    # world-writable and survives an uncleaned exit, so it must never be used.
+    t="$(mktemp -d)"
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    TMPDIR="$t" "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(find "$t" -mindepth 1 2>/dev/null)" ]
+    rm -rf "$t"
+}
+
+@test "snapshot records the staging path as the first section of the state file" {
+    snap
+    head -1 "$STATE" | grep -q '^### staging /'
+    # The existing section ranges are anchored at ### gitconfig and
+    # ### statusline, so putting staging first must leave them untouched.
+    grep -q '^### gitconfig$' "$STATE"
+    grep -q '^### statusline$' "$STATE"
+}
+
+@test "denylisted surfaces are never staged, not even transiently" {
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    printf '{}\n' > "$WS/.mcp.json"
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.local.json"
+    printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ ! -e "$d/$(key_of '.envrc')" ]
+    [ ! -e "$d/$(key_of '.mcp.json')" ]
+    [ ! -e "$d/$(key_of '.claude/settings.local.json')" ]
+    # ...but the shared, commonly-committed settings.json still is
+    [ -f "$d/$(key_of '.claude/settings.json')" ]
+}
+
+@test "nothing is staged when the audit store is inside the workspace" {
+    # The store is only out of the sandbox's reach while it is outside the
+    # mounted workspace. Inside it, retained content is readable AND
+    # deletable from within the container, so none is produced.
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
+}
+
+@test "nothing is staged when DEJIMA_AUDIT_DIFFS=0" {
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(staged_dirs)" ]
+}
+
+@test "a file over the staging cap is not staged" {
+    mkdir -p "$WS/.claude"
+    head -c 2000000 /dev/zero | tr '\0' 'a' > "$WS/.claude/big.md"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ ! -e "$d/$(key_of '.claude/big.md')" ]
+}
+
+@test "a staging directory whose owner is dead is reaped on the next snapshot" {
+    mkdir -p "$(stage_root)/orphan"
+    # PID 2**22 + 1 is above every Linux pid_max, so it cannot be live.
+    printf '4194305:1\n' > "$(stage_root)/orphan/.owner"
+    snap
+    [ ! -d "$(stage_root)/orphan" ]
+}
+
+@test "a staging directory whose owner is alive is left alone" {
+    # A concurrent dejima session against the same workspace must not have its
+    # staging deleted out from under it.
+    mkdir -p "$(stage_root)/live"
+    sleep 30 &
+    live=$!
+    printf '%s:%s\n' "$live" "$(bash -c 'st=$(cat /proc/'"$live"'/stat); r=${st##*) }; set -- $r; echo ${20}')" \
+        > "$(stage_root)/live/.owner"
+    snap
+    [ -d "$(stage_root)/live" ]
+    kill "$live" 2>/dev/null || true
+}
+
+@test "a staging directory with no owner record is reaped only once it is old" {
+    mkdir -p "$(stage_root)/nameless"
+    snap
+    [ -d "$(stage_root)/nameless" ]      # fresh: liveness undecidable, keep
+    touch -d '2 days ago' "$(stage_root)/nameless"
+    snap
+    [ ! -d "$(stage_root)/nameless" ]    # stale: reap
+}
