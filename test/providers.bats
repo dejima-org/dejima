@@ -87,6 +87,42 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ "$status" -ne 0 ]
 }
 
+@test "a briefing fragment that is a symlink escaping its provider directory is refused" {
+    # File-level counterpart to the directory-level checks above:
+    # provider_dir contains the *directory*, but the manifest's `briefing`
+    # relpath still names a filesystem entry that can itself be a symlink -
+    # e.g. a compromised session on the read-write project mount replacing a
+    # provider's briefing.md with a symlink to an arbitrary host file (an SSH
+    # key, say). Confirmed this leaks without the fix: composing against the
+    # unpatched _briefing_provider_fragment printed the planted secret text
+    # verbatim, with exit 0.
+    FAKE_ROOT="$(mktemp -d)"
+    TARGET="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/f" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities = pr\npr_command = x\n' > "$FAKE_ROOT/forges/f/forge.conf"
+    printf 'requires = pr\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    printf 'FAKE-HOST-SECRET-abc123\n' > "$TARGET/secret"
+    ln -s "$TARGET/secret" "$FAKE_ROOT/workflows/w/briefing.md"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; briefing_compose f w h' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"FAKE-HOST-SECRET"* ]]
+    rm -rf "$TARGET"
+}
+
+@test "a briefing fragment that is a dangling symlink is refused" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/f" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities = pr\npr_command = x\n' > "$FAKE_ROOT/forges/f/forge.conf"
+    printf 'requires = pr\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    ln -s /nonexistent/target "$FAKE_ROOT/workflows/w/briefing.md"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; briefing_compose f w h' _ "$LIB"
+    [ "$status" -ne 0 ]
+}
+
 @test "gitea's manifest names the CLIs it actually ships" {
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
@@ -220,6 +256,26 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     # grep for just the line with content and verify it has no embedded newlines.
     token_line="$(printf '%s\n' "$output" | grep '^GITEA_TOKEN=')"
     [ "$token_line" = "GITEA_TOKEN=my-secret-token" ]
+}
+
+@test "an '&' in a substituted value survives composition literally" {
+    # Regression check: bash 5.2's patsub_replacement (on by default) makes a
+    # literal "&" in a ${var//pat/rep} replacement expand to the matched
+    # text - here the {{writable_mounts}} token itself - which leaves the
+    # marker in place instead of substituting it. [mounts] read_write's own
+    # `path` type explicitly permits "&", so a value like /tmp/x/R&D made
+    # bin/dejima refuse to launch with "an unresolved placeholder remains
+    # after briefing composition" - confirmed directly against the unpatched
+    # _briefing_substitute before this fix, which fails closed only by luck
+    # of the marker containing braces.
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\ntoken_file = /dev/null\n' \
+        > "$CONFIG_DIR/config"
+    run env DEJIMA_RW_MOUNTS='/tmp/x/R&D' bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *'/tmp/x/R&D'* ]]
+    [[ "$output" != *"{{"* ]]
+    [[ "$output" != *"}}"* ]]
 }
 
 @test "composition substitutes the whitelist and defers the two runtime keys" {

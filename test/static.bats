@@ -1541,6 +1541,12 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
                 # A citation of an external issue URL, the same category as
                 # hooks/sandbox-context.sh:3 below.
                 matches="$(grep -vE 'claude-code/issues/29162' <<< "$matches" || true)"
+                # --allow-github-push widening DEJIMA_PUSH_HOSTS with
+                # github.com/ssh.github.com - the identical "GitHub read-only
+                # [here, push], independent of forge selection" exception
+                # docker/entrypoint.sh and docker-compose.yml already get
+                # below, not a forge coupling.
+                matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
                 ;;
             */bin/dejima-config-lib.sh)
                 # core.forge's schema DEFAULT - real data (today there is

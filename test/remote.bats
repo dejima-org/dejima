@@ -1923,6 +1923,38 @@ PY
     [[ "$output" != *"ttyd is not installed"* ]]
 }
 
+@test "dejima-ttyd starts against a config containing a [forge.<name>] section" {
+    # Regression test: dejima-project-lib.sh used to source only
+    # dejima-config-lib.sh, leaving _config_extra_section_known's refuse-
+    # everything stub in place, so any config with a [forge.*]/[harness.*]
+    # section - including the one install.sh itself generates - died with
+    # "unknown section [forge.gitea]" in every remote-access CLI. Confirmed
+    # directly against the unpatched source before this fix.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    write_remote_config '[forge.gitea]' 'ssh_host = git.example' \
+        'api = https://api.example/v1'
+    STUB_DIR="$(mktemp -d)"
+    for tool in readlink dirname cat; do
+        ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
+    done
+    run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown section"* ]]
+    # Got past config validation to the next check, same as the missing-ttyd
+    # test above - proof the section itself was accepted, not that this
+    # particular failure mode is silent about it.
+    [[ "$output" == *"ttyd is not installed"* ]]
+}
+
+@test "dejima-notify-watch starts against a config containing a [forge.<name>] section" {
+    conf_with_ntfy
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\n' \
+        >> "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unknown section"* ]]
+}
+
 @test "a malformed config takes down the scripts that read a value, not dejima-attach" {
     # dejima-attach reads no VALUE out of the config - remote_enabled only
     # asks whether [remote-access] enabled is on, through its own parser

@@ -683,8 +683,16 @@ BRIEFING_EOF
 # on the workflow/harness axes), capped at BRIEFING_FRAGMENT_MAX bytes.
 # Prints nothing, successfully, when the axis has no briefing key set - a
 # provider is not required to add prose to the session briefing.
+#
+# `rel` is already validated traversal-free (relpath), but the filesystem
+# entry it names can still itself be a symlink - e.g. a compromised session
+# on the read-write project mount replacing a provider's briefing.md with a
+# symlink to an arbitrary host file. provider_dir only contains the
+# directory; the file within it gets the same readlink -m / prefix-check
+# treatment here, refusing anything that resolves outside that directory,
+# dangling included, before head -c ever reads through it.
 _briefing_provider_fragment() {
-    local axis="$1" name="$2" rel dir file
+    local axis="$1" name="$2" rel dir file file_real
     rel="$(manifest_get "$axis" "$name" briefing)" || return 1
     if [ -z "$rel" ]; then
         printf ''
@@ -692,11 +700,17 @@ _briefing_provider_fragment() {
     fi
     dir="$(provider_dir "$axis" "$name")" || return 1
     file="$dir/$rel"
-    if [ ! -f "$file" ]; then
+    file_real="$(readlink -m "$file")"
+    case "$file_real" in
+        "$dir"/*) ;;
+        *)  echo "refusing $axis '$name' briefing fragment: '$rel' resolves outside $dir" >&2
+            return 1 ;;
+    esac
+    if [ ! -f "$file_real" ]; then
         echo "$axis '$name' names a briefing fragment that does not exist: $file" >&2
         return 1
     fi
-    head -c "$BRIEFING_FRAGMENT_MAX" "$file"
+    head -c "$BRIEFING_FRAGMENT_MAX" "$file_real"
 }
 
 # Splices the core worktree-containment paragraph into the workflow
@@ -786,6 +800,25 @@ _briefing_resolve_key() {
     esac
 }
 
+# Substitutes every literal occurrence of $marker in $text with $value.
+# Deliberately not ${text//marker/value}: bash 5.2's patsub_replacement (on
+# by default) makes a literal "&" in the replacement expand to the matched
+# text, so e.g. a [mounts] read_write value like /tmp/x/R&D (the path type
+# explicitly permits "&") would leave the marker in place instead of being
+# substituted, and _briefing_substitute's own trailing check would then
+# refuse the whole composition as an unresolved placeholder. Same fix as
+# hooks/sandbox-context.sh's _briefing_subst, and for the same reason - the
+# two never share a process, so this is a second copy rather than a shared
+# one.
+_briefing_subst() {
+    local text="$1" marker="$2" value="$3" out=""
+    while [ "$text" != "${text#*"$marker"}" ]; do
+        out="$out${text%%"$marker"*}$value"
+        text="${text#*"$marker"}"
+    done
+    printf '%s%s' "$out" "$text"
+}
+
 # Substitutes every {{key}} in the assembled text. session_id and
 # container_id are deliberately NOT resolved here - see the module comment -
 # they are rewritten to the @@...@@ markers hooks/sandbox-context.sh (Task 5)
@@ -809,11 +842,11 @@ _briefing_substitute() {
             return 1
         fi
         value="$(_briefing_resolve_key "$key" "$forge" "$workflow" "$harness")" || return 1
-        text="${text//$tok/$value}"
+        text="$(_briefing_subst "$text" "$tok" "$value")"
     done
 
-    text="${text//\{\{session_id\}\}/@@SESSION_ID@@}"
-    text="${text//\{\{container_id\}\}/@@CONTAINER_ID@@}"
+    text="$(_briefing_subst "$text" '{{session_id}}' '@@SESSION_ID@@')"
+    text="$(_briefing_subst "$text" '{{container_id}}' '@@CONTAINER_ID@@')"
 
     case "$text" in
         *'{{'*|*'}}'*)

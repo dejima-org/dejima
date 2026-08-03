@@ -30,9 +30,13 @@ The session briefing text (what `hooks/sandbox-context.sh` injects at
 `SessionStart`) is composed the same way: **host-side**, from a fixed core
 fragment no provider can override plus the selected workflow's and
 harness's own prose, then mounted **read-only** into the container - so a
-compromised session can never rewrite what the *next* session, even a
-resumed one, even one running against this repo's own checkout, is told.
-See [docs/providers.md](providers.md) for the full manifest contract.
+compromised session cannot rewrite what it is *currently* being told. That
+guarantee does not reach into the *next* session: a workflow's or harness's
+briefing fragment (e.g. `workflows/worktree-pr/briefing.md`) lives in the
+checkout itself and needs no symlink to edit, so a session with write access
+to this repo's own checkout can change what the next launch composes and
+hands to whichever session starts against it. See
+[docs/providers.md](providers.md) for the full manifest contract.
 
 - `--dangerously-skip-permissions` removes your chance to review tool calls
   before they run. Only point this at trusted repositories.

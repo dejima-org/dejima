@@ -9,7 +9,7 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   push regardless), and never push directly to main/master, on any remote.
   A `git-push-guard.sh` hook enforces both as a backstop, but treat them
   as the actual workflow to follow, not just a filter to route around.
-  Merging is the operator's call, not yours - a `gitea-merge-guard.sh`
+  Merging is the operator's call, not yours - a `merge-guard.sh`
   hook blocks it here. Report the PR URL and stop.
 <!-- requires: autonomy=open-pr -->
 - Do the push and the `{{pr_command}} create` WITHOUT asking first. Once the

@@ -307,6 +307,13 @@ if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
 else
     DEJIMA_PUSH_HOSTS=""
 fi
+# --allow-github-push's actual effect: git-push-guard.sh only ever checks
+# DEJIMA_PUSH_HOSTS, so granting it a github.com push means adding these
+# hosts to that list, not just exporting ALLOW_GITHUB_PUSH (which nothing
+# reads anymore now that the guard is forge/workflow-driven).
+if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+    DEJIMA_PUSH_HOSTS="${DEJIMA_PUSH_HOSTS:+$DEJIMA_PUSH_HOSTS }github.com ssh.github.com"
+fi
 DEJIMA_BLOCKED_BRANCHES="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" blocked_branches)"
 if [ "$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" block_merge)" = "on" ]; then
     DEJIMA_MERGE_BLOCK="$(manifest_get forge "$DEJIMA_FORGE_NAME" merge_block)"
