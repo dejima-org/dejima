@@ -1,9 +1,10 @@
 #!/bin/bash
 # Idempotent installer for dejima. Symlinks this repo's hooks into
 # ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
-# bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project and the
-# opt-in remote-access scripts on PATH. Safe to re-run - every step is a
-# no-op if already done, and every change is printed as it happens.
+# bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
+# bin/dejima-audit and the opt-in remote-access scripts on PATH. Safe to
+# re-run - every step is a no-op if already done, and every change is
+# printed as it happens.
 #
 # It never enables anything: the remote-access scripts do nothing without
 # ~/.config/dejima/remote.conf, and the user units in systemd/ are left for

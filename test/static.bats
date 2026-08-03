@@ -1410,3 +1410,17 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ "$check" -lt "$guard" ]
 }
+
+@test "no container mount covers the audit store" {
+    # The audit now keeps retained diffs of pre-session content under
+    # ~/.local/share/dejima. Everything about that is premised on the
+    # container not being able to read them - so a future mount that reaches
+    # it must break a test rather than silently opening the boundary.
+    # ~/.local/share/nvim is mounted (a named volume); its PARENT must not be.
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share/dejima' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+}
