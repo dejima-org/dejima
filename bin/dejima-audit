@@ -434,13 +434,19 @@ gitconfig_sha_for_key() {
 # that namespace, so the id/sha pair ack records is exactly what
 # baseline_suppresses will later compare against.
 current_sha_for_id() {
-    local id="$1"
+    local id="$1" f
     case "$id" in
-        gitconfig:*)  gitconfig_sha_for_key "$ws" "${id#gitconfig:}" ;;
-        statusline:*) [ -e "$STATUSLINE_PATH" ] && hash_entry "$STATUSLINE_PATH" ;;
-        tcb:*)        [ -e "$ws/${id#tcb:}" ] && hash_entry "$ws/${id#tcb:}" ;;
-        *)            [ -e "$ws/$id" ] && hash_entry "$ws/$id" ;;
+        gitconfig:*)  gitconfig_sha_for_key "$ws" "${id#gitconfig:}"; return ;;
+        statusline:*) f="$STATUSLINE_PATH" ;;
+        tcb:*)        f="$ws/${id#tcb:}" ;;
+        *)            f="$ws/$id" ;;
     esac
+    # -e alone follows a symlink and misses one whose target is gone - but a
+    # dangling symlink is exactly what hash_entry() below can still hash (the
+    # link's target string, never the target's content), so excluding it here
+    # would make this function and current_content_for_id disagree about
+    # whether the surface still exists.
+    { [ -e "$f" ] || [ -L "$f" ]; } && hash_entry "$f"
 }
 
 # How many lines of content or diff `ack` prints before truncating. Fixed,
@@ -509,7 +515,7 @@ show_capped() {
 source_hint() {
     local id="$1"
     case "$id" in
-        gitconfig:*)  printf '%s\n' "    (full value: git -C $ws config --get ${id#gitconfig:})" ;;
+        gitconfig:*)  printf '%s\n' "    (full value: git -C $ws config --get $(sanitize "${id#gitconfig:}"))" ;;
         statusline:*) printf '%s\n' "    (full text: $STATUSLINE_PATH)" ;;
         tcb:*)        printf '%s\n' "    (full text: $ws/$(sanitize "${id#tcb:}"))" ;;
         *)            printf '%s\n' "    (full text: $ws/$(sanitize "$id"))" ;;

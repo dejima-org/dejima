@@ -1037,12 +1037,34 @@ no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
 }
 
 @test "ack shows the value of the git config key it asks to approve" {
+    # The finding's own body line already carries the value (it's not
+    # opaque like a file-content finding), so asserting on the whole output
+    # would pass even with render_finding never called. Scope the assertion
+    # to the content block itself to actually exercise this task's code.
     snap
     git -C "$WS" config core.hooksPath /tmp/evil
     cmp_ >/dev/null
     no_sidecar
     run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"/tmp/evil"* ]]
+    after_marker="${output#*--- current content ---}"
+    [ "$after_marker" != "$output" ]
+    [[ "$after_marker" == *"/tmp/evil"* ]]
+}
+
+@test "control characters in a git config key are stripped from the source hint" {
+    # source_hint's gitconfig arm builds a "git config --get <key>" hint
+    # from the decoded raw id ($rid) - a crafted subsection name (still a
+    # valid CRITICAL finding via filter.*.smudge) must go through sanitize
+    # here exactly like the tcb/default arms already do, not reach the
+    # terminal verbatim.
+    mkdir -p "$WS/.git"
+    snap
+    printf '[filter "evil\033[31mx"]\n\tsmudge = cat\n' >> "$WS/.git/config"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"full value: git -C"* ]]
+    [[ "$output" != *$'\033'* ]]
 }
 
 @test "ack renders a symlinked hook as its target, matching how it is hashed" {
@@ -1053,6 +1075,23 @@ no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
     no_sidecar
     run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
     [[ "$output" == *"-> /tmp/evil-target"* ]]
+}
+
+@test "ack can approve a dangling symlink it just displayed, and the approval is recorded" {
+    # current_content_for_id and current_sha_for_id must agree that a
+    # dangling symlink (target does not exist) still counts as present -
+    # otherwise the operator approves content they were just shown and is
+    # told the surface vanished, and the CRITICAL report can never clear.
+    mkdir -p "$WS/.git/hooks"
+    snap
+    ln -s /tmp/does-not-exist-anywhere "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"-> /tmp/does-not-exist-anywhere"* ]]
+    [[ "$output" != *"no longer exists"* ]]
+    grep -q '^safe \.git/hooks/pre-commit ' "$BASEDIR/$slug"
 }
 
 @test "control characters in displayed content are stripped" {
