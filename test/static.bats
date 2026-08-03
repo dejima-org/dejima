@@ -1421,6 +1421,8 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -ne 0 ]
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share/dejima' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
     run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
 }

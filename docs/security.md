@@ -122,7 +122,13 @@ one can't happen.
   the only net for, `.claude/settings.json`'s `env` block, conventionally
   holds its keys upper-case). That screen is still explicitly best-effort
   and has real false negatives - the denylist above is the reliable half
-  of the defence, this is the second net.
+  of the defence, this is the second net. A generated diff can also come
+  out empty - before and after compare equal even though the finding was
+  reported as a change - for a multi-valued git config key, where the
+  value used for comparison is only the *first* one but git itself acts
+  on the *last*; that case withholds too, saying plainly that the
+  comparison came out empty rather than silently showing nothing, since
+  an empty diff for a reported change would otherwise read as a bug.
 
   A per-report **retention budget** (`RETAIN_BUDGET`, 1 MiB) also bounds
   the total diff bytes one report may keep. Once it is spent, remaining
