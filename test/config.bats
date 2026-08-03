@@ -925,9 +925,28 @@ EOF
         || { echo "read_write not mounted read-write:"; cat "$docker_log"; return 1; }
     grep -qxF "$ro:$ro:ro" "$docker_log" \
         || { echo "readonly lost its :ro"; return 1; }
-    grep -qxF "DEJIMA_RW_MOUNTS=$rw" "$docker_log" \
-        || { echo "session never told which paths persist"; return 1; }
+    # The session learns which paths persist through the composed briefing
+    # now (see "--print-briefing names a configured read_write directory"
+    # below), not a raw DEJIMA_RW_MOUNTS env var - nothing inside the
+    # container reads that any more, since hooks/sandbox-context.sh only
+    # substitutes runtime placeholders into whatever briefing it is handed.
+    run grep -qxF "DEJIMA_RW_MOUNTS=$rw" "$docker_log"
+    [ "$status" -ne 0 ] || { echo "DEJIMA_RW_MOUNTS is still forwarded into the container"; return 1; }
     rm -rf "$rw" "$ro" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "--print-briefing names a configured read_write directory" {
+    # Regression check: --print-briefing used to compose before
+    # DEJIMA_RW_MOUNTS was resolved (that happened later, only on the real
+    # launch path), so the diagnostic silently dropped this sentence even
+    # though an actual session was told correctly. briefing_compose now
+    # reads the same DEJIMA_RW_MOUNTS a real launch would.
+    rw="$(mktemp -d)"
+    write_config '[mounts]' "read_write = $rw"
+    run "$REPO_ROOT/bin/dejima" --print-briefing
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"outlive the container too: $rw"* ]]
+    rm -rf "$rw"
 }
 
 @test "a read_write entry overlapping a protected path is refused, not warned" {
