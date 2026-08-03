@@ -1099,6 +1099,20 @@ EOF
     run timeout 120 docker wait "$container"
     exit_code=$output
     logs=$(settled_logs "$container")
+    # Captured before the container is removed, because it answers the question
+    # the log alone cannot: whether the script exited or the container was
+    # killed. A log that stops mid-startup with no error looks the same either
+    # way, and this test has now produced exactly that four times running -
+    # including from an image whose init-firewall.sh cannot fail silently (it
+    # carries an ERR trap and a resolver that reports on every path). Something
+    # other than a script abort is ending this container, and OOMKilled/Error
+    # are where that shows.
+    state=$(docker inspect \
+        --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' \
+        "$container" 2>&1 || true)
+    # Timestamps on the tail, so a container that stopped dead is
+    # distinguishable from one that stalled first.
+    stamped=$(docker logs -t "$container" 2>&1 | tail -3 || true)
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
@@ -1115,6 +1129,9 @@ EOF
     dump() {
         echo "$1" >&2
         echo "exit code: $exit_code" >&2
+        echo "container state: $state" >&2
+        echo "last lines, timestamped:" >&2
+        echo "$stamped" >&2
         echo "container log (${#logs} bytes):" >&2
         echo "$logs" >&2
         false
