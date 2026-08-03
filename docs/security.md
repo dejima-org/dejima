@@ -73,6 +73,104 @@ one can't happen.
   session, another host process, or you editing the same files by hand
   during the run all land in the same diff and get reported identically -
   the tool has no way to tell them apart.
+- `dejima-audit ack` shows what it is asking you to approve. For a surface
+  that changed during the session it prints a unified diff of the
+  pre-session content against the current content; for one created during
+  the session it prints the whole current content. To make that possible,
+  `snapshot` stages a copy of each monitored surface's bytes for the
+  duration of the session, and `compare` turns those into **bounded
+  diffs** stored in a `<report>.d/` directory beside the report. What
+  persists after the session is only the diff of a *modified* surface -
+  never a whole file. A created surface stores a marker (its content is
+  live on disk); a removed one stores nothing at all, because a deletion
+  diff *is* the whole former file.
+
+  Both the staging directory and the retained diffs live under
+  `$AUDIT_DIR` (`~/.local/share/dejima/audit` by default), never under
+  `/tmp`. That is the boundary the whole scheme rests on:
+  `docker-compose.yml` mounts nothing covering it, so the container cannot
+  read the retained content of earlier runs - `test/static.bats` pins that
+  as a regression guard. If the store is configured *inside* the mounted
+  workspace it becomes readable and deletable from within the sandbox, so
+  in that case no content is retained at all - only a note saying why. A
+  session killed with `SIGKILL` (no EXIT trap runs, so no `compare`)
+  leaves its staging directory behind; the next run against that
+  workspace reaps it, identifying dead owners by pid and process start
+  time recorded in an `.owner` file, so a concurrent session against the
+  same workspace is never mistaken for dead and disturbed. A directory
+  whose owner record is missing or unreadable falls back to a 24-hour age
+  check instead of guessing liveness.
+
+  Content is withheld from the store in several further cases, and in
+  every one `ack` prints the reason in place of the diff - so an absent
+  diff is never mistaken for an absent change - and still shows the live
+  current content on your terminal, because withholding is about the
+  persistent store, not about what you are shown while deciding. Surfaces
+  that hold credentials by convention are never staged in the first
+  place, so their bytes are never even copied transiently: `.envrc`,
+  `.mcp.json` and `.claude/settings.local.json` by exact path, and
+  `.env`/`.env.*` by *basename*, at any depth - so a nested `.claude/.env`
+  is caught too, not just one at the workspace root. A surface that
+  existed before the session but was too large to have been staged (over
+  1 MiB) withholds with "no pre-session copy", not a false claim that it
+  is new. The *current* side is bounded by that same 1 MiB cap, and - like
+  the staged side - the size is checked *before* any copy is taken: a file
+  the session grew past it withholds with "change too large to retain"
+  rather than being copied through `$TMPDIR` first. That ordering is the
+  point, not the cap: `compare` runs from the exit trap on every session
+  exit and the size is the session's own choice, so copying first would
+  let a session turn "I filled my own workspace" into that many bytes
+  written to `$TMPDIR` - frequently a tmpfs, i.e. host RAM - at exit, and
+  into a whole copy of the file left sitting there if that exit was a
+  `SIGKILL`. A generated diff is withheld if it is binary, over 200 lines
+  or 64 KiB (and is bounded to that as it is generated, for the same
+  reason), or matches a best-effort credential screen - vendor prefixes
+  including `sk-ant-`, `sk-proj-`, `ghp_`, `gho_`, `github_pat_`,
+  `glpat-`, Slack's `xox[baprs]-`, `AIza`, `AKIA`, `_authToken`,
+  `Authorization: Bearer`, and PEM private-key headers, matched
+  case-insensitively (deliberately: the one high-value surface this is
+  the only net for, `.claude/settings.json`'s `env` block, conventionally
+  holds its keys upper-case). That screen is still explicitly best-effort
+  and has real false negatives - the denylist above is the reliable half
+  of the defence, this is the second net. A git config key holding more
+  than one value on either side of the session is not compared at all:
+  git resolves such a key to its *last* value in *file* order, and the
+  audit does not resolve it - it parses the config files and sorts, so
+  lexicographically-last is not the value git will run, and the
+  pre-session side is every value the key had rather than one. Comparing
+  anyway produced a diff over values git does not use: with two
+  pre-session values it read as a deletion that never happened, while the
+  value the session actually appended - the one git now executes -
+  appeared nowhere in it. That case withholds with "this key has multiple
+  values and git uses the last", and must be compared by hand;
+  `include.path` is legitimately multi-valued, so this is an ordinary
+  shape, not only a planted one. A generated diff can also still come out
+  empty - before and after compare equal even though the finding was
+  reported as a change - when the config file's *text* changed while the
+  parsed value did not, e.g. a value that was re-quoted; that case
+  withholds too, saying plainly that the comparison came out empty rather
+  than silently showing nothing, since an empty diff for a reported
+  change would otherwise read as a bug.
+
+  A per-report **retention budget** (`RETAIN_BUDGET`, 1 MiB) also bounds
+  the total diff bytes one report may keep. Once it is spent, remaining
+  findings in that report withhold with a note that the budget ran out,
+  and both the report and the exit-time stderr summary add an alarm line:
+  that many changed host-persistence surfaces in one session is treated
+  as a signal in its own right, not merely a limit worth raising - an
+  ordinary session changes few enough of these surfaces that the budget
+  is never in practice a constraint. `DEJIMA_AUDIT_DIFFS=0` disables
+  retention (and staging) entirely.
+
+  Two residual limits worth knowing on top of the credential screen's
+  false negatives above. The prompt shows at most 40 lines of a diff or
+  of new content before truncating, naming the file so you can read the
+  rest - a large planted change is truncated exactly where you would most
+  want it whole. And the `SIGKILL` case above is a real exposure window,
+  not just a cleanup mechanic: until the next run against that workspace
+  reaps it, the staging directory sits on disk holding whole pre-session
+  file copies (not diffs) of every monitored surface, for as long as the
+  workspace goes unused.
 - Report findings name a path or config key that a session may itself have
   chosen, so those names reach your terminal as untrusted text. One that
   contains an ASCII control character, a C1 control, or a Unicode bidi
