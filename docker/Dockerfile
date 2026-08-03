@@ -306,6 +306,12 @@ COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-c
 COPY docker/entrypoint.sh /usr/local/bin/
 COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
 COPY docker/claude-wrapper.sh /usr/local/bin/claude
+# Back to root before the first RUN that writes outside /home/node. The npm
+# installs above run as node deliberately; COPY writes as root regardless of
+# USER, so the copies above are unaffected, but the install(1) below is a RUN
+# and would inherit node and fail on /usr/local/bin.
+USER root
+
 # Every forge's CLIs, not just the selected one: a forge CLI is inert without
 # its API URL and token, and an image that is identical regardless of which
 # forge is configured is one less thing for the exit audit to explain.
@@ -313,7 +319,6 @@ COPY forges/ /tmp/forges/
 RUN find /tmp/forges -type f -path '*/bin/*' -exec install -m 755 {} /usr/local/bin/ \; \
     && rm -rf /tmp/forges
 
-USER root
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/claude && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
