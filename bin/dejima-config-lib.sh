@@ -86,20 +86,53 @@ _config_extra_spec() { return 1; }
 
 # Prints "TYPE<TAB>DEFAULT" for a known key; returns 1 for anything else,
 # which is what makes an unknown key in the config file fatal.
-_config_spec() {
-    local want="$1" key type default
+# The schema table, read into memory once per process. _config_table is a
+# heredoc, so every call forked a `cat`; _config_spec called it per lookup and
+# the validator called _config_spec per line, so a single config_get forked it
+# dozens of times. The table is a compile-time constant - reading it more than
+# once per process cannot produce a different answer.
+declare -gA _CFG_TYPE=() _CFG_DEF=()
+_CFG_SCHEMA_LOADED=0
+_config_load_schema() {
+    [ "$_CFG_SCHEMA_LOADED" = 1 ] && return 0
+    local key type default
     while IFS=$'\t' read -r key type default; do
-        [ "$key" = "$want" ] || continue
-        printf '%s\t%s' "$type" "$default"
-        return 0
+        [ -n "$key" ] || continue
+        _CFG_TYPE["$key"]="$type"
+        _CFG_DEF["$key"]="$default"
     done < <(_config_table)
-    _config_extra_spec "$want"
+    _CFG_SCHEMA_LOADED=1
+}
+
+_config_spec() {
+    _config_load_schema
+    if [ -n "${_CFG_TYPE[$1]+x}" ]; then
+        printf '%s\t%s' "${_CFG_TYPE[$1]}" "${_CFG_DEF[$1]}"
+        return 0
+    fi
+    _config_extra_spec "$1"
+}
+
+# config_type/config_default without the command substitution, for the two
+# hot callers (the validator and the getter, both once per line). A core key
+# is answered straight out of the schema map; only a provider key still pays
+# for a subshell, and there are a handful of those rather than one per line.
+_config_type_into() {
+    local _spec
+    _config_load_schema
+    if [ -n "${_CFG_TYPE[$2]+x}" ]; then
+        printf -v "$1" '%s' "${_CFG_TYPE[$2]}"
+        return 0
+    fi
+    _spec="$(_config_extra_spec "$2")" || return 1
+    [ -n "$_spec" ] || return 1
+    printf -v "$1" '%s' "${_spec%%$'\t'*}"
 }
 
 config_type() {
-    local spec
-    spec="$(_config_spec "$1")" || return 1
-    printf '%s' "${spec%%$'\t'*}"
+    local _t
+    _config_type_into _t "$1" || return 1
+    printf '%s' "$_t"
 }
 
 config_default() {
@@ -292,18 +325,71 @@ _config_trim() {
     printf '%s' "$s"
 }
 
+# The same trim, in place, into the named variable. Identical semantics; the
+# difference is that it costs nothing. `$(_config_trim ...)` forks a subshell
+# per call, and the parser calls it twice per line - so on a thirty-line
+# config that was sixty forks per pass, and the file used to be walked twice
+# for every single config_get. printf -v is a builtin, so this forks not at
+# all. _config_trim is kept because it is a published shape other scripts and
+# tests call.
+_config_trim_into() {
+    local _s="${2-}"
+    _s="${_s#"${_s%%[![:space:]]*}"}"
+    _s="${_s%"${_s##*[![:space:]]}"}"
+    printf -v "$1" '%s' "$_s"
+}
+
 # Validates the whole file. Returns 1 and explains the FIRST problem found -
 # reporting one actionable line beats a list the operator has to read
 # bottom-up.
+# Parsed once per process, into _CFG_VAL/_CFG_SEEN. Every read used to walk
+# the whole file twice - once to validate it and once to find the key - so a
+# launch's ~30 reads meant ~60 passes over the same unchanged bytes, each
+# forking twice per line. Parsing once preserves the property the header
+# describes exactly: every read still sees a fully validated file, and no read
+# can succeed against a file another read would reject, because within a
+# process there is now only one parse for them all to agree with.
+#
+# Keyed on the config path so a test that repoints DEJIMA_CONFIG_DIR mid-
+# process re-parses rather than answering from the previous file's cache.
+# config_reset() is for the rarer case of the same path being rewritten in
+# place; nothing shipped does that today (install.sh writes the file but never
+# reads a value back).
+declare -gA _CFG_VAL=() _CFG_SEEN=()
+_CFG_PARSED_PATH=""
+_CFG_PARSE_STATUS=1
+
+config_reset() {
+    _CFG_VAL=()
+    _CFG_SEEN=()
+    _CFG_PARSED_PATH=""
+    _CFG_PARSE_STATUS=1
+}
+
 config_validate() {
-    local conf line section="" key value type
+    local conf
     conf="$(config_path)"
+    if [ "$_CFG_PARSED_PATH" = "$conf" ]; then
+        return "$_CFG_PARSE_STATUS"
+    fi
+    # $? captured before anything else runs - an assignment would reset it to
+    # 0 and cache every malformed config as valid.
+    _config_parse "$conf"
+    _CFG_PARSE_STATUS=$?
+    _CFG_PARSED_PATH="$conf"
+    return "$_CFG_PARSE_STATUS"
+}
+
+_config_parse() {
+    local conf="$1" line section="" key value type
+    _CFG_VAL=()
+    _CFG_SEEN=()
     if [ ! -f "$conf" ]; then
         echo "no dejima config at $conf" >&2
         return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_config_trim "$line")"
+        _config_trim_into line "$line"
         case "$line" in
             ''|'#'*|';'*)
                 continue
@@ -311,7 +397,7 @@ config_validate() {
             '['*']')
                 section="${line#\[}"
                 section="${section%\]}"
-                section="$(_config_trim "$section")"
+                _config_trim_into section "$section"
                 if ! _config_section_known "$section"; then
                     echo "unknown section [$section] in $conf" >&2
                     return 1
@@ -329,9 +415,9 @@ config_validate() {
             echo "key outside any section in $conf: $line" >&2
             return 1
         fi
-        key="$(_config_trim "${line%%=*}")"
-        value="$(_config_trim "${line#*=}")"
-        if ! type="$(config_type "$section.$key")"; then
+        _config_trim_into key "${line%%=*}"
+        _config_trim_into value "${line#*=}"
+        if ! _config_type_into type "$section.$key"; then
             echo "unknown key in $conf: [$section] $key" >&2
             return 1
         fi
@@ -339,6 +425,10 @@ config_validate() {
             echo "invalid value for [$section] $key in $conf: $value" >&2
             return 1
         fi
+        # Last assignment wins, which is why this overwrites rather than
+        # keeping the first.
+        _CFG_VAL["$section.$key"]="$value"
+        _CFG_SEEN["$section.$key"]=1
     done < "$conf"
     return 0
 }
@@ -376,33 +466,17 @@ _config_expand() {
 # that with a separate flag rather than testing the value for emptiness is
 # what keeps `share_dir =` from silently becoming the default path.
 _config_get_from_file() {
-    local section="$1" want="$2" conf line cur="" key value type
-    local found="" seen=0
-    if ! type="$(config_type "$section.$want")"; then
+    local section="$1" want="$2" type found
+    if ! _config_type_into type "$section.$want"; then
         echo "unknown config key: [$section] $want" >&2
         return 1
     fi
     config_validate || return 1
-    conf="$(config_path)"
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_config_trim "$line")"
-        case "$line" in
-            ''|'#'*|';'*) continue ;;
-            '['*']')
-                cur="${line#\[}"
-                cur="$(_config_trim "${cur%\]}")"
-                continue
-                ;;
-        esac
-        [ "$cur" = "$section" ] || continue
-        key="$(_config_trim "${line%%=*}")"
-        [ "$key" = "$want" ] || continue
-        value="$(_config_trim "${line#*=}")"
-        # Last assignment wins, so keep going rather than break.
-        found="$value"
-        seen=1
-    done < "$conf"
-    [ "$seen" = 1 ] || found="$(config_default "$section.$want")"
+    if [ -n "${_CFG_SEEN[$section.$want]+x}" ]; then
+        found="${_CFG_VAL[$section.$want]}"
+    else
+        found="$(config_default "$section.$want")"
+    fi
     _config_expand "$type" "$found"
 }
 
@@ -416,29 +490,14 @@ config_get() { _config_get_from_file "$@"; }
 # value: a key with a schema default always has a value, so "has a value" is
 # the wrong question for anything asking what the operator configured.
 config_is_set() {
-    local section="$1" want="$2" conf line cur="" key
-    if ! config_type "$section.$want" >/dev/null; then
+    local section="$1" want="$2" _t
+    if ! _config_type_into _t "$section.$want"; then
         echo "unknown config key: [$section] $want" >&2
         return 1
     fi
     config_exists || return 1
     config_validate || return 1
-    conf="$(config_path)"
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_config_trim "$line")"
-        case "$line" in
-            ''|'#'*|';'*) continue ;;
-            '['*']')
-                cur="${line#\[}"
-                cur="$(_config_trim "${cur%\]}")"
-                continue
-                ;;
-        esac
-        [ "$cur" = "$section" ] || continue
-        key="$(_config_trim "${line%%=*}")"
-        [ "$key" = "$want" ] && return 0
-    done < "$conf"
-    return 1
+    [ -n "${_CFG_SEEN[$section.$want]+x}" ]
 }
 
 config_get_bool() {
