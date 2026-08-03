@@ -261,7 +261,7 @@ remote_enabled() {
 }
 
 valid_remote_key() {
-    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT|TTYD_FONT_SIZE)$ ]]
+    [[ "$1" =~ ^(NTFY_URL|BASE_URL|TTYD_PORT|TTYD_FONT_SIZE|TTYD_TMUX_PREFIX)$ ]]
 }
 
 # Deliberately narrow. These values end up in a curl -H header, an nginx
@@ -342,4 +342,27 @@ remote_ttyd_font_size() {
         return 1
     fi
     printf '%s' "$size"
+}
+
+# The tmux prefix the terminal page's PREFIX, window and ZOOM buttons send.
+# Empty when unset, which is the signal to pass no option at all and leave the
+# page on stock tmux's C-b - the same "unset means absent, not defaulted here"
+# shape TTYD_FONT_SIZE has.
+#
+# Narrower than tmux's own prefix syntax, and deliberately: every value in this
+# file is first checked against valid_remote_value, whose character class has
+# no room for C-\ or C-]. Widening it for those two would relax NTFY_URL and
+# BASE_URL by the same stroke - the values that end up in a curl header and a
+# URL handed to a phone - which is not a trade worth making for two prefixes
+# that a stock tmux does not use either.
+remote_ttyd_tmux_prefix() {
+    local prefix
+    prefix="$(remote_conf_get TTYD_TMUX_PREFIX)" || return 1
+    [ -n "$prefix" ] || return 0
+    if [[ ! "$prefix" =~ ^[Cc]-([A-Za-z@_?]|[Ss]pace)$ ]]; then
+        echo "TTYD_TMUX_PREFIX must be a control chord - C-a, C-b, C-Space, C-@, C-_ or C-?" >&2
+        echo "- in $(remote_conf_path): $prefix" >&2
+        return 1
+    fi
+    printf '%s' "$prefix"
 }

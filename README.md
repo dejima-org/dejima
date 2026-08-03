@@ -239,9 +239,11 @@ getting it wrong still looks like it works.
    `proxy_set_header Host $http_host`. Make sure the name you pick actually
    resolves to this box and your certificate covers it. →
    [Web front door](docs/remote-access.md#web-front-door)
-5. **If you will read it on a phone**, take the `sub_filter` viewport line
-   from the example config too. `ttyd` ships no viewport meta, so without it
-   the mobile view is unreadably small and will not reflow. →
+5. **If you will read it on a phone**, there is nothing to turn on: the front
+   door serves a touch frontend by default, with gestures for scrolling,
+   selection and pane resizing, and a toolbar carrying Esc, a sticky Ctrl, the
+   arrows and tmux's window switching. Set `TTYD_TMUX_PREFIX` if your tmux
+   prefix is not `C-b`. →
    [Reading it on a phone](docs/remote-access.md#reading-it-on-a-phone). Typing from one has its
    own gotcha, which nothing here can fix. →
    [Typing on a phone](docs/remote-access.md#typing-on-a-phone)

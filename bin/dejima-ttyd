@@ -60,11 +60,16 @@ port="$(remote_ttyd_port)"
 # after that release), so there is no way to give a phone one size and a
 # desktop another from here. Left unset, ttyd keeps its own default.
 #
-# It is the smaller half of the mobile fix, not the fix: ttyd's page carries no
-# viewport meta, so a phone lays it out at a virtual desktop width and scales
-# the result down - a bigger font scales down with everything else. The nginx
-# example injects the meta; see docs/nginx-dejima.conf.example.
+# It reaches the page as an xterm.js option, through the same SET_PREFERENCES
+# message ttyd has always used for -t, so the terminal page below neither knows
+# nor needs to know that this knob exists.
 font_size="$(remote_ttyd_font_size)"
+
+# Consumed by the terminal page's PREFIX, window and ZOOM buttons, which are the
+# only tmux navigation a phone has - the status bar's own window names are a few
+# pixels wide on a phone-width screen. Unset means the page uses stock tmux's
+# C-b; see docs/remote-access.md.
+tmux_prefix="$(remote_ttyd_tmux_prefix)"
 
 # Checked rather than left to exec, whose failure is bash's "ttyd: not found"
 # on a line number - true, and useless to an operator who needs to know that
@@ -113,9 +118,34 @@ if command -v ss >/dev/null 2>&1; then
     fi
 fi
 
+# The terminal page. ttyd serves exactly three paths - a token endpoint, a
+# redirect and the index - so there is no route a separate .js or .css could be
+# fetched from, which is why web/index.html is one self-contained file with
+# everything inlined. It is generated from web/src, and committed, so a plain
+# checkout has it and nothing here has to run a build.
+#
+# Refused rather than skipped when it is missing. Falling back to ttyd's stock
+# page would leave a front door that works and a phone that has quietly lost
+# every gesture, resize and toolbar button, with nothing anywhere saying why.
+index_html="$(cd "$SCRIPT_DIR/.." && pwd)/web/index.html"
+if [ ! -f "$index_html" ]; then
+    echo "The terminal page is missing: $index_html" >&2
+    echo >&2
+    echo "It is a generated file that is committed to this repo, so this means an" >&2
+    echo "incomplete checkout. Rebuild it with:" >&2
+    echo >&2
+    echo "  cd $(dirname "$index_html") && npm ci && node build.mjs" >&2
+    exit 1
+fi
+
 font_opt=()
 [ -z "$font_size" ] || font_opt=(-t "fontSize=$font_size")
 
+prefix_opt=()
+[ -z "$tmux_prefix" ] || prefix_opt=(-t "tmuxPrefix=$tmux_prefix")
+
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
+    --index "$index_html" \
     ${font_opt[@]+"${font_opt[@]}"} \
+    ${prefix_opt[@]+"${prefix_opt[@]}"} \
     "$SCRIPT_DIR/dejima-attach"
