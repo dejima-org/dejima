@@ -92,6 +92,44 @@ wait_ready() {
     return 1
 }
 
+# $IMAGE is a single mutable tag on a shared daemon, and SKIP_BUILD=1 - which
+# CI sets, having built the image in an earlier step - means this file does not
+# build it either. Nothing in that arrangement ties the image to the checkout,
+# and when the two disagree every assertion in this file is being made against
+# code that is not under test.
+#
+# That is not a theoretical worry. It cost six CI rounds: a container kept
+# stopping partway through init-firewall.sh, and the fixes that were supposed
+# to make it explain itself - an ERR trap, a resolver that reports on every
+# path - produced no output at all, because the script running in the container
+# was not the script in the commit. A stale image looks exactly like a bug in
+# the code you are reading, which is the worst way for it to present.
+#
+# One container start, three files, compared by content rather than by any
+# claim about how the image was produced.
+assert_image_matches_checkout() {
+    local expected actual
+    expected=$(cd "$SANDBOX_DIR" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
+    actual=$(docker run --rm --entrypoint sh "$IMAGE" -c \
+        'cd /usr/local/bin && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh' 2>&1 | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+        echo "The image tagged $IMAGE was not built from this checkout." >&2
+        echo >&2
+        echo "checkout (docker/):        $(echo "$expected" | tr '\n' ' ')" >&2
+        echo "image (/usr/local/bin/):   $(echo "$actual" | tr '\n' ' ')" >&2
+        echo >&2
+        echo "Every test in this file would be asserting against different code than" >&2
+        echo "the one in the working tree, so they are not run. Rebuild it:" >&2
+        echo >&2
+        echo "  docker build -t $IMAGE -f docker/Dockerfile ." >&2
+        echo >&2
+        echo "In CI this means the build step and the test step disagreed - most" >&2
+        echo "likely another job retagged $IMAGE in between, since the tag is shared" >&2
+        echo "and carries no version." >&2
+        return 1
+    fi
+}
+
 setup_file() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
@@ -102,6 +140,7 @@ setup_file() {
     if [ "${SKIP_BUILD:-0}" != "1" ]; then
         docker build -q -t "$IMAGE" -f "$SANDBOX_DIR/Dockerfile" "$REPO_ROOT" >&2
     fi
+    assert_image_matches_checkout
 
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
