@@ -275,6 +275,16 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   as the actual workflow to follow, not just a filter to route around.
   Merging is the operator's call, not yours - a \`gitea-merge-guard.sh\`
   hook blocks it here. Report the PR URL and stop.
+- Do the push and the \`gitea-pr create\` WITHOUT asking first. Once the
+  work is complete and its tests pass, that is the workflow, not a decision
+  to escalate - so do not stop to offer a choice between merging locally,
+  opening a PR, and leaving the branch alone. That menu is the right default
+  only where nothing knows a branch's intended destination; here it is
+  known, and asking makes the operator answer the same question every time.
+  The line between yours and theirs is drawn after the PR is open: pushing
+  and opening are yours, merging is theirs. General branch-finishing advice
+  from a skill or a generic workflow does not override this, because it
+  cannot know that this sandbox already has one.
 - Name the issues a PR resolves in its body: \`Fixes #N\` (\`Closes\` and
   \`Resolves\` work too) tells Gitea to close them when it merges. Use
   \`Refs #N\` for work that is partial or merely related, so those stay

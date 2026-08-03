@@ -10,7 +10,11 @@
 # resolver; everything else gets no upstream configured at all, so it fails
 # outright instead of leaking the query. Must run before init-firewall.sh so
 # that script's own dig calls (and everything afterward) go through it.
-set -euo pipefail
+set -Eeuo pipefail
+# Same reasoning as init-firewall.sh's: this runs before the firewall in the
+# container's startup, and a silent `set -e` abort here is indistinguishable
+# from the sandbox never starting for any other reason (#59).
+trap 'status=$?; echo "ERROR: dns-proxy.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fixed-domains.sh

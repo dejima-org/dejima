@@ -36,6 +36,7 @@ approvals):
 | `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
 | `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
 | `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
 `ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
 scheme; a value without one is refused rather than guessed at, because
@@ -51,7 +52,9 @@ value outside that character set, or a line that doesn't parse makes
 was wrong. A `ttyd_port` that isn't a number in 1-65535 is refused the same
 way, as is a `ttyd_font_size` outside 8-72 - a size big enough to make one
 glyph wider than the viewport renders a terminal that shows nothing, which
-reads as a broken front door rather than as a typo three sections away.
+reads as a broken front door rather than as a typo three sections away. A
+`ttyd_tmux_prefix` that is not a control chord is refused here too, rather
+than on the phone, hours later, by whoever presses `PREFIX` and gets nothing.
 
 `dejima-ttyd` and `dejima-notify-watch` are the two scripts that read a
 *value* out of the config, so a typo anywhere in the file refuses their
@@ -67,12 +70,14 @@ enabled = on
 ntfy_url = https://ntfy.example.invalid/your-topic-here
 base_url = https://dejima.example.invalid
 ttyd_port = 7681
-# ttyd_font_size = 20   # optional, and applies to the desktop too
+# ttyd_font_size = 20      # optional, and applies to the desktop too
+# ttyd_tmux_prefix = C-a   # optional; the page assumes stock C-b without it
 ```
 
 **Editing this changes nothing until the services restart.** Every value
-is read once, at process start - `dejima-ttyd` reads `ttyd_port` and
-`ttyd_font_size` and then `exec`s `ttyd` with them baked into its argv. So:
+is read once, at process start - `dejima-ttyd` reads `ttyd_port`,
+`ttyd_font_size` and `ttyd_tmux_prefix` and then `exec`s `ttyd` with them
+baked into its argv. So:
 
 ```sh
 systemctl --user restart dejima-ttyd.service
@@ -320,82 +325,153 @@ and forgotten. What matters in it:
 
 ## Reading it on a phone
 
-Out of the box the phone view is close to unusable: text renders far too
-small to read, and pinch-zooming leaves you panning around a giant canvas
-instead of reflowing anything. That is not a font setting you missed.
+`dejima-ttyd` launches `ttyd` with `--index web/index.html`, which replaces
+`ttyd`'s stock frontend with one written for touch. This is the default and
+there is nothing to turn on.
 
-**`ttyd` serves no viewport meta tag** - not in 1.7.7, not on `main` at the
-time of writing. A mobile browser that finds no `<meta name="viewport">`
-assumes the page was written for a desktop, lays it out at a virtual width
-of around 980 CSS pixels, and scales the result down to fit the screen.
-Everything shrinks together, so raising the font size just gives you a
-larger font scaled down by the same factor. And a terminal is a fixed
-character grid on a canvas: zooming magnifies pixels, it does not re-wrap
-lines the way zooming a text page does.
+`ttyd`'s own page is close to unusable on a phone for anything beyond typing,
+and not because of a setting anyone missed. xterm.js turns a tap into a mouse
+click, but a touch *drag* is consumed by the browser as viewport scrolling and
+never becomes a mouse drag - so nothing downstream ever sees one. tmux binds
+`MouseDrag1Border` to `resize-pane -M` by default and nvim resizes splits from
+separator drags whenever `mouse` is on; both have always worked, and simply
+never received a drag event from a touch client. The same missing drag is why
+selecting text is impossible, and scrolling an application's output with it.
+Then there is no Ctrl key, the tmux status bar's window names are a few pixels
+wide, and `ttyd` serves no viewport meta tag at all - so a phone lays the page
+out at a virtual desktop width and scales the result down, which no font size
+can rescue.
 
-The fix is to supply the tag the page is missing, which the proxy can do on
-the way past. `docs/nginx-dejima.conf.example` ships it:
+### Gestures
 
-```nginx
-sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
-sub_filter_once on;
-proxy_set_header Accept-Encoding "";
-add_header Cache-Control "no-store" always;
+| Gesture | What it does |
+| --- | --- |
+| Tap | Clicks that cell, exactly as before, and focuses the terminal |
+| Two-finger drag | Scrolls. A wheel report when the application is reading the mouse, xterm's own scrollback when it is not |
+| One-finger drag, `DRAG` off | Scrolls, identically |
+| One-finger drag, `DRAG` on | A real mouse drag: press, move, release |
+| Long press ~0.4s, then drag | Selects text; releasing copies it to the phone's clipboard |
+
+`DRAG` is a toolbar toggle rather than something inferred, so the default
+behaviour is unchanged and a finger drag inside a mouse-aware application does
+not start doing something else the moment you meant to scroll. Two-finger
+scrolling works in both states, so a `DRAG` you forgot to turn off can never
+leave you without a way to scroll.
+
+With `DRAG` on, dragging a tmux pane border resizes the pane and dragging an
+nvim split separator resizes the split. Neither needs any server-side
+configuration - they are stock behaviour that had never been reachable.
+
+### Toolbar
+
+```
+ESC   CTRL   TAB   ←   ↓   ↑   →
+PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
 ```
 
-Now the browser lays out at the device's real width, xterm.js fits an honest
-column count to it, and rotating the phone reflows properly. Desktop
-browsers ignore `width=device-width`, so nothing changes there.
+- `CTRL` is sticky: one tap arms it for the next key, a second tap locks it on,
+  a third releases it. Armed and locked are different colours, because they are
+  the same button.
+- `PREFIX` sends the tmux prefix - `C-b` unless `ttyd_tmux_prefix` says
+  otherwise - so tmux's own bindings stay reachable: `PREFIX` then `w` opens
+  the window list, `PREFIX` then `[` enters copy mode.
+- `◀W` and `W▶` are prefix + `p` / prefix + `n`. They are the answer to the
+  window names in the status bar being unhittable on a phone: two large targets
+  that are always in the same place.
+- `ZOOM` is prefix + `z`, toggling tmux's pane zoom - the fastest way to make
+  one pane usable on a small screen.
+- `PASTE` reads the phone's clipboard and sends it, wrapped in bracketed-paste
+  markers when the application has asked for them. It needs a secure context;
+  on an `http://` front door the browser refuses the read and the page says so
+  rather than doing nothing.
+- `KBD` raises the soft keyboard, which is otherwise awkward to get back once
+  it has been dismissed.
 
-Three things that will waste your time if you skip them:
+Copying *out* works through OSC 52: anything that emits it - tmux with
+`set-clipboard on`, nvim, your own yank binding - lands in the phone's
+clipboard. Nothing needs to be installed for that, and nothing here assumes
+any particular relay exists. That is the same path the sandbox already uses
+(`docker/sandbox-clipboard.lua` sets nvim up to emit it), so it is worth being
+explicit about what it means: anything running in the session can put text on
+the clipboard of whatever you are reading it from. A native terminal over the
+SSH front door behaves identically - honouring the sequence here closes a gap
+between the two front doors rather than opening one.
 
-- Your nginx needs the sub module, and a missing one fails *quietly*. Check
-  for it up front, and validate with **`nginx -t`** rather than trusting the
-  reload - a reload whose config does not parse leaves the *old* config
-  running while `systemctl reload nginx` still reports success, so an unknown
-  `sub_filter` directive looks from the outside exactly like a directive that
-  ran and did nothing.
+The toolbar and the gestures appear only for a coarse pointer, so a desktop
+browser gets a plain terminal and behaves exactly as it did before.
+`?toolbar=0` and `?toolbar=1` on the URL override that either way without
+touching any config - useful for a screenshot, or for driving the page from a
+desktop browser deliberately.
 
-  ```sh
-  /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
-  sudo /usr/sbin/nginx -t
-  ```
+### What replacing the frontend costs
 
-  The path is spelled out because Debian and Ubuntu install nginx to
-  `/usr/sbin`, which is on root's `PATH` and not on yours - a bare `nginx -V`
-  answers `command not found` on a box that is running nginx perfectly well.
-  Debian's `nginx-light` is built without the module; `nginx-core`,
-  `nginx-full` and `nginx-extras` have it.
-- `sub_filter` cannot rewrite a compressed response body and passes it
-  through untouched, which looks exactly like the tag not working. Clearing
-  `Accept-Encoding` toward the upstream is what stops that.
-- **Your phone may already be holding the un-injected page.** `ttyd` sends it
-  with no `Cache-Control`, no `ETag` and no `Last-Modified`, and a response
-  with neither freshness information nor a validator is cacheable for as long
-  as the browser feels like it. Fine while the body is served verbatim; a trap
-  once the proxy rewrites it, because the stale copy renders forever and the
-  injection reads as broken long after it works. `add_header Cache-Control
-  "no-store" always;` closes it going forward - to check *right now*, load the
-  front door in a private tab, which bypasses the cache without clearing
-  anything else.
+`ttyd`'s stock page carries zmodem, trzsz and sixel support, and `--index`
+replaces the page, so those go with it. In an agent sandbox they are rarely
+what anyone reaches for, and this is the trade. Removing `--index` from
+`bin/dejima-ttyd` restores the stock client and everything it carries.
 
-Confirm it server-side before blaming the browser, or the other way round -
-the first 220 bytes of the response settle it, and the tag should sit ahead
-of `<meta charset>`:
-
-```sh
-curl -sk -u USER:PASS https://<front-door>/ | head -c 220; echo
-```
+### Font size
 
 If the text is still smaller than you want once the layout is honest, set
 `ttyd_font_size` in `[remote-access]` (8-72). Be aware of what it costs:
 **it applies to every client.** `ttyd` 1.7.7 accepts client options only at
-launch - the URL-query override that would let a deep link carry its own
-size landed upstream after 1.7.7 was cut - so there is no way from here to
-give a phone one size and the desktop another. A larger size also means
-fewer columns, and because attaching shares the window with your desktop
-session, tmux resizes that window to whichever client used it last. Start by
-fixing the viewport and only reach for this if you still need it.
+launch - the URL-query override that would let a deep link carry its own size
+landed upstream after 1.7.7 was cut - so there is no way from here to give a
+phone one size and the desktop another. A larger size also means fewer
+columns, and because attaching shares the window with your desktop session,
+tmux resizes that window to whichever client used it last. Start by fixing the
+viewport and only reach for this if you still need it.
+
+### Rebuilding the page
+
+`web/index.html` is generated from `web/src` and **committed**, so a checkout
+has it and nothing has to run a build to use the front door. It has to be one
+file: `ttyd` serves exactly three paths - a token endpoint, a redirect and the
+index - so there is no route a separate `.js` or `.css` could be fetched from,
+and the sandbox's egress allowlist rules out a CDN. Everything, xterm.js
+included, is inlined.
+
+After editing anything under `web/src`:
+
+```sh
+cd web && npm ci && node build.mjs
+```
+
+The test suite fails if the page is older than its sources, so a rebuild that
+was forgotten is caught rather than shipped. See `web/README.md`.
+
+### Checking it on a real device
+
+Everything below needs a phone; none of it can be automated, and the parts that
+can be checked without one already are (`web/README.md`). Worth walking once
+after any change to `web/`:
+
+1. With `DRAG` on, drag a tmux pane border - the pane resizes.
+2. With `DRAG` on, drag an nvim split separator - the split resizes.
+3. Two-finger scroll in tmux copy mode scrolls it.
+4. Two-finger scroll in a terminal nested inside nvim scrolls *that* terminal,
+   not the outer view.
+5. `◀W` and `W▶` switch tmux windows; `ZOOM` toggles pane zoom.
+6. Long press and drag selects text, and releasing puts it on the clipboard.
+7. `PASTE` inserts the phone's clipboard.
+8. Yanking inside tmux or nvim lands in the phone's clipboard, via OSC 52.
+9. `CTRL` then `c` interrupts; tapping `CTRL` twice locks it on.
+10. Raising the soft keyboard does not cover the prompt, and rotating refits.
+11. On a desktop browser: a plain terminal, no toolbar, mouse unchanged.
+
+Android is the primary target. iOS Safari differs in both touch handling and
+`visualViewport` behaviour and has not been tested.
+
+### If your phone is showing you the old page
+
+`ttyd` sends the index with no `Cache-Control`, no `ETag` and no
+`Last-Modified` - `src/http.c` sets the status, content type, encoding and
+length, and nothing else - and a response carrying neither freshness
+information nor a validator is cacheable for as long as the browser feels like
+it, which on a phone means indefinitely. So a phone that visited the front door
+before this page existed can go on rendering the old one. The nginx example
+sends `Cache-Control: no-store`, which closes it going forward; to check right
+now, load the front door in a private tab.
 
 ## Typing on a phone
 
@@ -424,11 +500,14 @@ So use a keyboard with nothing to correct against. **Unexpected Keyboard**
 suggestions need a dictionary you download yourself, so a fresh install has
 nothing to autocorrect with, and Ctrl, Alt, Esc, Tab, the arrows and the
 function keys are all real keys, reached by swiping a key toward the corner
-the symbol is printed in. That second half matters more than the bug does -
-without Ctrl there is no tmux prefix, and Esc and the arrows are hard to do
-without in anything interactive. Android's keyboard switcher makes it a
-per-session choice rather than a replacement for the keyboard you use for
-everything else.
+the symbol is printed in. Android's keyboard switcher makes it a per-session
+choice rather than a replacement for the keyboard you use for everything else.
+
+The second half of that used to be the stronger reason - without Ctrl there is
+no tmux prefix, and Esc and the arrows are hard to do without in anything
+interactive. The toolbar now carries all of those, so a third-party keyboard is
+no longer the price of admission; it is the fix for the autocorrect bug and
+nothing more.
 
 Turning autocorrect off in the keyboard you already have fixes it too, at the
 cost of losing the correction everywhere else.

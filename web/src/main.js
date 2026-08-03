@@ -1,0 +1,165 @@
+// Wiring. Everything above this file is a layer that can be reasoned about on
+// its own; this is where they are joined to a real Terminal and a real socket.
+(function (D) {
+  'use strict';
+
+  var app = document.getElementById('app');
+  var terminalHost = document.getElementById('terminal');
+  var toolbarRoot = document.getElementById('toolbar');
+  var toastEl = document.getElementById('toast');
+
+  var toastTimer = null;
+  function notify(message, sticky) {
+    toastEl.textContent = message;
+    toastEl.hidden = false;
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    toastTimer = sticky ? null : setTimeout(clearNotice, 6000);
+  }
+  function clearNotice() {
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    toastTimer = null;
+    toastEl.hidden = true;
+  }
+
+  var term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
+    // tmux keeps its own history; this is only for output that never reached
+    // an alternate screen.
+    scrollback: 5000
+  });
+  var fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(terminalHost);
+
+  var mouse = D.mouse.createMouseEngine(term, function (sequence) {
+    client.sendBinary(sequence);
+  });
+  var latch = D.keys.createCtrlLatch();
+  var prefixByte = D.config.parsePrefix(D.config.DEFAULT_TMUX_PREFIX);
+  var toolbar = null;
+
+  function copyToClipboard(text) {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      notify('Copying needs an https:// page; this one is not one.');
+      return;
+    }
+    navigator.clipboard.writeText(text).catch(function () {
+      notify('The browser refused to write to the clipboard.');
+    });
+  }
+
+  function fitNow() {
+    try {
+      fitAddon.fit();
+    } catch (e) {
+      // Fitting a terminal that is momentarily zero-sized (mid rotation, or
+      // before the first paint) is not an error worth surfacing.
+    }
+    if (client.isOpen()) client.sendResize(term.cols, term.rows);
+  }
+
+  var viewport = D.viewport.createViewport({ app: app, onFit: fitNow });
+
+  function applyPreferences(prefs) {
+    var split = D.config.splitPreferences(prefs);
+    Object.keys(split.terminal).forEach(function (key) {
+      try {
+        term.options[key] = split.terminal[key];
+      } catch (e) {
+        // An option this build of xterm.js does not have. ttyd passes -t
+        // options through verbatim, so this is the operator's typo, not a
+        // reason to abandon the rest of the preferences.
+      }
+    });
+
+    var spec = split.page.tmuxPrefix || D.config.DEFAULT_TMUX_PREFIX;
+    var parsed = D.config.parsePrefix(spec);
+    if (parsed === null) {
+      notify('Could not read the configured tmux prefix "' + spec + '" - using C-b.');
+      parsed = D.config.parsePrefix(D.config.DEFAULT_TMUX_PREFIX);
+    }
+    prefixByte = parsed;
+
+    // A font size arriving in the preferences changes the cell size, so the
+    // column count computed before it was applied is now wrong.
+    viewport.refresh();
+  }
+
+  var client = D.protocol.createClient({
+    location: window.location,
+    size: function () { return { cols: term.cols, rows: term.rows }; },
+    onOutput: function (bytes) { term.write(bytes); },
+    onTitle: function (title) { document.title = title; },
+    onPreferences: applyPreferences,
+    onStatus: function (status) {
+      if (status === 'open') {
+        clearNotice();
+        term.focus();
+      } else if (status === 'closed') {
+        notify('Disconnected. Reconnecting...', true);
+      }
+    }
+  });
+
+  // Sticky Ctrl is applied here rather than in attachCustomKeyEventHandler
+  // because the target is a phone: soft keyboards overwhelmingly report
+  // keydown as "Unidentified" and deliver the real character through an input
+  // event instead, so a keydown-based transform would work on a desktop and
+  // silently do nothing where it is actually needed. onData is downstream of
+  // both paths. Sequences (arrows, Enter, Backspace) have no control code and
+  // fall through untouched.
+  term.onData(function (data) {
+    if (latch.armed() && data.length > 0) {
+      var sequence = D.keys.ctrlSequence(data.charAt(0));
+      if (sequence !== null) {
+        latch.consume();
+        if (toolbar) toolbar.refreshLatches();
+        client.sendInput(sequence + data.slice(1));
+        return;
+      }
+    }
+    client.sendInput(data);
+  });
+  term.onBinary(function (data) { client.sendBinary(data); });
+
+  // OSC 52 is how a terminal application says "put this on the clipboard" -
+  // tmux with set-clipboard, nvim, or anything else that emits it. xterm.js
+  // has no handler of its own, so without this a yank goes nowhere.
+  term.parser.registerOscHandler(52, function (data) {
+    var text = D.osc52.decodeOsc52(data);
+    if (text !== null) copyToClipboard(text);
+    return true;
+  });
+
+  // Touch affordances only where there is a touch. A desktop browser gets a
+  // plain terminal, which is what lets this ship as the default frontend.
+  var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  if (D.config.toolbarWanted(window.location.search, coarsePointer)) {
+    document.body.classList.add('touch');
+    toolbar = D.toolbar.createToolbar({
+      root: toolbarRoot,
+      term: term,
+      modes: mouse.modes,
+      latch: latch,
+      // sendInput, not sendBinary: a paste can contain any character, and
+      // sendBinary truncates to a byte. Every sequence these buttons send is
+      // ASCII, which UTF-8 leaves alone.
+      sendText: function (text) { client.sendInput(text); },
+      prefix: function () { return prefixByte; },
+      notify: notify
+    });
+    toolbar.attach();
+
+    D.gestures.createGestures({
+      element: terminalHost,
+      term: term,
+      mouse: mouse,
+      dragMode: toolbar.dragMode,
+      onCopy: copyToClipboard
+    }).attach();
+  }
+
+  viewport.attach();
+  client.connect();
+})((globalThis.DEJIMA = globalThis.DEJIMA || {}));

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Idempotent installer for dejima. Symlinks this repo's hooks into
 # ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
-# bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project and the
-# opt-in remote-access scripts on PATH. Safe to re-run - every step is a
-# no-op if already done, and every change is printed as it happens.
+# bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
+# bin/dejima-audit and the opt-in remote-access scripts on PATH. Safe to
+# re-run - every step is a no-op if already done, and every change is
+# printed as it happens.
 #
 # It never enables anything: the remote-access scripts do nothing without
 # [remote-access] enabled = on in ~/.config/dejima/config, and the user units
@@ -143,6 +144,10 @@ link_bin dejima
 link_bin dejima-allow
 link_bin dejima-dep
 link_bin dejima-project
+# The exit-time audit is a user-facing CLI, not just bin/dejima's helper:
+# the startup warning about unacknowledged CRITICAL findings tells the
+# operator to run `dejima-audit ack`, which is only true once it is on PATH.
+link_bin dejima-audit
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
 # without [remote-access] enabled = on - they refuse to run at all - so

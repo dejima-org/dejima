@@ -104,51 +104,34 @@ server {
         # is ttyd's default to change, not something to depend on here.
         proxy_read_timeout 1d;
 
-        # ---- Phone rendering. Drop this if you only ever connect from a
-        # desktop; it is inert there.
+        # ---- Phone rendering needs nothing here.
         #
-        # ttyd's page ships no viewport meta - not in 1.7.7, not on main - so
-        # a mobile browser assumes a desktop-width layout (~980 CSS px) and
-        # scales the whole thing down to fit. Text lands at a size no font
-        # setting can rescue, because the font is scaled down with everything
-        # else, and pinch-zoom does not reflow a terminal: you get a giant
-        # canvas to pan around. Injecting the tag makes the browser lay out at
-        # the device's real width, which lets xterm.js fit an honest column
-        # count and lets rotating the phone actually reflow.
+        # Earlier versions of this file injected a viewport meta tag with
+        # sub_filter, because ttyd's own page ships none - not in 1.7.7, not on
+        # main - and a mobile browser that finds none assumes a desktop-width
+        # layout and scales the whole thing down. dejima-ttyd now serves its own
+        # page (--index web/index.html), which carries the tag along with the
+        # touch gestures and toolbar, so the injection is gone and with it the
+        # requirement for an nginx built with the sub module.
         #
-        # Needs nginx built with the sub module. Check before relying on it,
-        # and validate with `nginx -t` rather than trusting the reload: a
-        # config that does not parse leaves the OLD one running while
-        # `systemctl reload nginx` still reports success, so an unknown
-        # directive here looks just like one that ran and did nothing.
-        # Spelled out because Debian/Ubuntu install nginx to /usr/sbin, which
-        # is on root's PATH and not yours: a bare `nginx -V` says "command
-        # not found" on a box that is running nginx perfectly well.
-        #     /usr/sbin/nginx -V 2>&1 | tr ' ' '\n' | grep http_sub_module
-        #     sudo /usr/sbin/nginx -t
+        # If you deliberately go back to ttyd's stock frontend by dropping
+        # --index, the old three lines were:
         #
-        # Desktop browsers ignore width=device-width, so this costs them
-        # nothing.
-        sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
-        sub_filter_once on;
-        # sub_filter cannot rewrite a compressed body, and silently passes it
-        # through unchanged - which looks exactly like the tag not working.
-        proxy_set_header Accept-Encoding "";
+        #     sub_filter '<head>' '<head><meta name="viewport" content="width=device-width, initial-scale=1">';
+        #     sub_filter_once on;
+        #     proxy_set_header Accept-Encoding "";   # sub_filter cannot rewrite a compressed body
 
         # ttyd sends this page with no Cache-Control, no ETag and no
         # Last-Modified - src/http.c sets status, content-type,
         # content-encoding and content-length, and nothing else - and a
         # response carrying neither freshness information nor a validator is
         # cacheable at the browser's discretion, which on a phone means
-        # indefinitely. That is harmless while the page is served verbatim and
-        # a trap once it is REWRITTEN here: a phone that cached the
-        # un-injected page goes on rendering it, so the tag reads as broken
-        # long after it works, and no future change to the injection reaches
-        # a browser that has already been here. Nothing is lost by refusing
-        # the cache - with no validator upstream, a revalidation could never
-        # come back 304 anyway - and the page is still gzipped to the client,
-        # since clearing Accept-Encoding above only applies to the request
-        # made to ttyd.
+        # indefinitely. The page is a build artifact that changes when this
+        # repo does, so a phone that has been here before would otherwise go on
+        # rendering whatever it first saw - and a frontend that is a version
+        # behind looks like a broken feature, not like a cache. Nothing is lost
+        # by refusing the cache: with no validator upstream, a revalidation
+        # could never come back 304 anyway.
         add_header Cache-Control "no-store" always;
     }
 }

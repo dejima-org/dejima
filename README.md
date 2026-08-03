@@ -265,9 +265,11 @@ getting it wrong still looks like it works.
    `proxy_set_header Host $http_host`. Make sure the name you pick actually
    resolves to this box and your certificate covers it. →
    [Web front door](docs/remote-access.md#web-front-door)
-5. **If you will read it on a phone**, take the `sub_filter` viewport line
-   from the example config too. `ttyd` ships no viewport meta, so without it
-   the mobile view is unreadably small and will not reflow. →
+5. **If you will read it on a phone**, there is nothing to turn on: the front
+   door serves a touch frontend by default, with gestures for scrolling,
+   selection and pane resizing, and a toolbar carrying Esc, a sticky Ctrl, the
+   arrows and tmux's window switching. Set `ttyd_tmux_prefix` in
+   `[remote-access]` if your tmux prefix is not `C-b`. →
    [Reading it on a phone](docs/remote-access.md#reading-it-on-a-phone). Typing from one has its
    own gotcha, which nothing here can fix. →
    [Typing on a phone](docs/remote-access.md#typing-on-a-phone)
@@ -926,7 +928,7 @@ likely to collide with a real container you have running.
 | `hooks/gitea-merge-guard.sh` | `PreToolUse` hook: blocks `gitea-pr merge` in the sandbox — merging is a human decision |
 | `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see [docs/remote-access.md](docs/remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
-| `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.) |
+| `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
 | `bin/gitea-pr` | Create a PR, read its comments, merge it; baked into the image so the sandbox can open PRs |
 | `bin/gitea-issue` | List, view, create, comment on, close and reopen Gitea issues; also baked into the image |
