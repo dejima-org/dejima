@@ -841,10 +841,25 @@ run_install() {
     # live shell plumbing, so any mention of a retired name is either the
     # deliberate "no longer read" notice (install.sh's remote.conf one lives
     # outside these two directories, but the exclusion is kept here too in
-    # case a future doc adds one) or a stale instruction.
+    # case a future doc adds one), a stale instruction, or one of the two
+    # cases below that are neither:
+    #
+    # - A manifest-field line (`env_export    = GITEA_API=api ...`): this is
+    #   docs/providers.md quoting a forge manifest's `env_export` value
+    #   verbatim, which *declares* a container-side environment variable -
+    #   the exact thing env_export is for - not an instruction to an operator
+    #   to set one. `GITEA_API` and friends are retired only as host-side,
+    #   operator-set variables (what _warn_legacy_env's table is about); they
+    #   are not retired as the container-side names env_export produces, and
+    #   docs/providers.md documenting that mapping is not a regression.
+    # - A backtick-quoted mention (`` `GITEA_API` ``): prose naming a
+    #   variable - "the container gets `GITEA_API`" - reads a value, it
+    #   doesn't tell anyone to set one.
     while IFS= read -r name; do
         out="$(grep -rnE "\b${name}\b" "$REPO_ROOT/docs" "$REPO_ROOT/systemd" 2>/dev/null \
-            | grep -v 'no longer read' || true)"
+            | grep -v 'no longer read' \
+            | grep -vE ':[[:space:]]*env_export[[:space:]]*=' \
+            | grep -vE "\`${name}\`" || true)"
         if [ -n "$out" ]; then
             echo "$out" >&2
             hit=1

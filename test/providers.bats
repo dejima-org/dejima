@@ -347,3 +347,23 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     run grep -ci 'gitea' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$output" = "0" ]
 }
+
+@test "docs/providers.md documents every manifest key" {
+    for axis in forge workflow harness; do
+        while IFS=$'\t' read -r key _rest; do
+            [ -n "$key" ] || continue
+            grep -q "\`$key\`" "$REPO_ROOT/docs/providers.md" \
+                || { echo "$axis key '$key' is undocumented"; return 1; }
+        done < <(bash -c 'source "$1"; _manifest_table "$2"' _ "$LIB" "$axis")
+    done
+}
+
+@test "no doc still points at the old gitea CLI paths" {
+    run grep -rn 'bin/gitea-pr\|bin/gitea-issue' "$REPO_ROOT/README.md" \
+        "$REPO_ROOT/docs" "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the fast CI suite includes providers.bats" {
+    grep -q 'test/providers.bats' "$REPO_ROOT/.gitea/workflows/tests.yml"
+}
