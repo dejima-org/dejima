@@ -1167,11 +1167,24 @@ this line is not json'
     # the container dies mid-startup - which used to surface as flaky,
     # sometimes vacuous tests rather than an obvious failure. See runtime.bats'
     # wait_ready comment.
+    # Detached and foreground starts both count - the transport test runs its
+    # container in the foreground, to read the container's own streams rather
+    # than the daemon's log driver (see its comment), and it needs a network
+    # every bit as much as the detached ones.
+    #
+    # Exempted: runs that replace the entrypoint with a plain shell. Those
+    # never reach dns-proxy.sh, so there is nothing for a resolver to be
+    # missing from - the image/checkout comparison in setup_file is one, and it
+    # only runs md5sum.
     local runs networks
-    runs=$(grep -cE '^\s*docker run -d' "$REPO_ROOT/test/runtime.bats")
+    runs=$(grep -E '^\s*(run timeout [0-9]+ )?docker run ' "$REPO_ROOT/test/runtime.bats" \
+        | grep -vc -- '--entrypoint sh')
     networks=$(grep -cE '^\s*--network ' "$REPO_ROOT/test/runtime.bats")
     [ "$runs" -gt 0 ]
-    [ "$runs" -eq "$networks" ]
+    [ "$runs" -eq "$networks" ] || {
+        echo "$runs container starts that run the real entrypoint, but $networks --network flags" >&2
+        false
+    }
 }
 
 @test "runtime.bats readiness waits for the final sleep infinity, not any startup sleep" {

@@ -1123,55 +1123,59 @@ EOF
     # this container took its loopback one, and every API call in the session
     # would fail with nothing naming the cause.
     container="dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")"
-    docker run -d --name "$container" \
+    docker rm -f "$container" >/dev/null 2>&1 || true
+
+    # Run in the FOREGROUND and read the container's own streams, rather than
+    # detaching and asking the daemon's log driver for them afterwards.
+    #
+    # The detached form spent six CI rounds insisting this container aborted
+    # partway through init-firewall.sh. It had not. Every line those logs ever
+    # contained came from an `echo` to stdout, and not one line written to
+    # stderr appeared in any of them - not init-firewall.sh's ERR trap, not
+    # resolve_domain's per-attempt reports, and not the FATAL message this test
+    # asserts on, which entrypoint.sh writes to stderr as well. The container
+    # was doing the right thing; the stderr half of what it said was not
+    # arriving.
+    #
+    # A foreground `docker run` attaches to the container's streams directly,
+    # so nothing is buffered, flushed or dropped by a log driver in between.
+    # It is also simply less machinery: one command yields both the output and
+    # the exit status, with no wait, no settling and no read-after-exit race.
+    #
+    # The timeout stays: without the transport check the entrypoint runs on
+    # into SANDBOX_TEST_MODE's `sleep infinity` and never exits, and that
+    # regression should fail here rather than hang the suite.
+    run timeout 120 docker run --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$IMAGE"
+    exit_code=$status
+    logs=$output
 
-    # Without the check the entrypoint runs on into SANDBOX_TEST_MODE's `sleep
-    # infinity` and never exits - the timeout turns that regression into a
-    # failure here rather than a hung suite.
-    run timeout 120 docker wait "$container"
-    exit_code=$output
-    logs=$(settled_logs "$container")
-    # Captured before the container is removed, because it answers the question
-    # the log alone cannot: whether the script exited or the container was
-    # killed. A log that stops mid-startup with no error looks the same either
-    # way, and this test has now produced exactly that four times running -
-    # including from an image whose init-firewall.sh cannot fail silently (it
-    # carries an ERR trap and a resolver that reports on every path). Something
-    # other than a script abort is ending this container, and OOMKilled/Error
-    # are where that shows.
+    # Still worth capturing: it answers what the output cannot - whether the
+    # script exited or the container was killed underneath it.
     state=$(docker inspect \
         --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' \
         "$container" 2>&1 || true)
-    # Timestamps on the tail, so a container that stopped dead is
-    # distinguishable from one that stalled first.
-    stamped=$(docker logs -t "$container" 2>&1 | tail -3 || true)
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
-    # Both assertions print the log they were reading, because the container is
-    # gone by the time either can fail and bats prints the expression rather
-    # than the variable. Without this the whole failure is "the container did
-    # not say what we expected" - and the container exiting 1 somewhere EARLIER
-    # in the entrypoint, before the check under test ever runs, presents
-    # identically to the check being broken. That happened, cost two CI rounds,
-    # and was still unresolved at the end of them (#59).
-    # The byte count is printed with the log, because the failure this test has
-    # actually produced is a log that STOPS - and a truncated read and a
-    # container that died mid-startup look identical without it.
+    # Every assertion prints what it was reading. bats prints the failing
+    # expression, not the variable, and the container is gone by then - so
+    # without this the whole failure is "the container did not say what we
+    # expected", which is equally true when the container aborted early, when
+    # it was killed, and when its output never reached us. Those took six CI
+    # rounds to tell apart (#59); the byte count and the state are what
+    # separate them.
     dump() {
         echo "$1" >&2
         echo "exit code: $exit_code" >&2
         echo "container state: $state" >&2
-        echo "last lines, timestamped:" >&2
-        echo "$stamped" >&2
-        echo "container log (${#logs} bytes):" >&2
+        echo "container output (${#logs} bytes):" >&2
         echo "$logs" >&2
         false
     }
