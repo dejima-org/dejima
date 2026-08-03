@@ -180,11 +180,48 @@ done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 
 # Resolve and add other allowed domains (shared with dns-proxy.sh's name
 # allowlist via fixed-domains.sh, so the two can't drift apart)
+# Same treatment as the GitHub fetch above, and for the same reason: this loop
+# was `ips=$(dig ... | awk ...)`, which under `set -o pipefail` dies on the
+# ASSIGNMENT when dig exits non-zero - silently, before the "returned nothing"
+# check below can run. It aborted a CI container twice, at a different domain
+# each time, with the log simply stopping mid-loop (#59).
+#
+# Retried because a lookup here is the first traffic through a dnsmasq that
+# entrypoint.sh started moments ago, and because a CDN's resolver being briefly
+# unavailable should cost a second, not the container. +time/+tries bound each
+# attempt: dig's defaults are 5s x 3 tries, so a single unanswered lookup could
+# spend 15s of a startup budget on its own.
+resolve_domain() {
+    local domain="$1" attempt status answer ips
+    for attempt in 1 2 3; do
+        status=0
+        answer=$(dig +noall +answer +time=3 +tries=1 A "$domain" 2>&1) || status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "  attempt $attempt/3: dig exited $status${answer:+ - $answer}" >&2
+        else
+            ips=$(printf '%s\n' "$answer" | awk '$4 == "A" {print $5}')
+            if [ -n "$ips" ]; then
+                printf '%s\n' "$ips"
+                return 0
+            fi
+            # A CNAME-only answer, an empty one, or a rebind rejection. Printing
+            # what did come back separates "no such name" from "dnsmasq refused
+            # this answer", which look identical from an empty A list.
+            echo "  attempt $attempt/3: no A records${answer:+ - $answer}" >&2
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            sleep "$attempt"
+        fi
+    done
+    return 1
+}
+
 for domain in "${FIXED_DOMAINS[@]}"; do
     echo "Looking up $domain..."
-    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
-    if [ -z "$ips" ]; then
-        echo "ERROR: DNS lookup for $domain returned nothing"
+    if ! ips=$(resolve_domain "$domain"); then
+        echo "ERROR: DNS lookup for $domain failed - each attempt is above." >&2
+        echo "The firewall cannot allowlist a domain it cannot resolve, and the" >&2
+        echo "sandbox would start with that domain unreachable, so this is fatal." >&2
         exit 1
     fi
 
@@ -222,8 +259,12 @@ if [ -n "${EXTRA_ALLOWED_DOMAINS:-}" ]; then
             continue
         fi
         echo "Resolving $domain (extra)..."
-        ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
-        if [ -z "$ips" ]; then
+        # Through resolve_domain like the fixed domains, which is what makes
+        # the comment above true. `ips=$(dig ... | awk ...)` did not merely
+        # fail to warn on a failing dig - under `set -o pipefail` it took the
+        # whole script down on the assignment, so "non-fatal" held for a
+        # domain that resolved to nothing and not for one whose lookup errored.
+        if ! ips=$(resolve_domain "$domain"); then
             echo "WARNING: Failed to resolve extra domain $domain, skipping"
             continue
         fi

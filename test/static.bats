@@ -260,6 +260,100 @@ EOF
     [[ "$output" == *"$(meta_json)"* ]]
 }
 
+# Same harness, for the domain loop - the other place a silent `set -e` abort
+# stopped a container mid-startup, at a different domain each time.
+run_resolve() {
+    local behaviour="$1" domain="${2:-files.pythonhosted.org}"
+    STUB_DIR="$BATS_TEST_TMPDIR/stub"
+    mkdir -p "$STUB_DIR"
+    cp "$behaviour" "$STUB_DIR/dig"
+    chmod +x "$STUB_DIR/dig"
+    PATH="$STUB_DIR:$PATH"
+    sleep() { :; }
+    eval "$(sed -n '/^resolve_domain()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
+    resolve_domain "$domain"
+}
+
+@test "domain resolution returns the A records dig answered with" {
+    cat > "$BATS_TEST_TMPDIR/ok" <<'EOF'
+#!/bin/bash
+echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
+echo "files.pythonhosted.org.	60	IN	A	151.101.128.223"
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/ok"
+    [ "$status" -eq 0 ]
+    [ "$output" = "151.101.64.223
+151.101.128.223" ]
+}
+
+@test "a failing dig is reported rather than killing the script on the assignment" {
+    # This is the one that aborted CI: `ips=$(dig ... | awk ...)` under
+    # pipefail, with dig exiting non-zero. No message, no container.
+    cat > "$BATS_TEST_TMPDIR/servfail" <<'EOF'
+#!/bin/bash
+echo ";; connection timed out; no servers could be reached" >&2
+exit 9
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/servfail"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
+    [[ "$output" == *"attempt 3/3: dig exited 9"* ]]
+    [[ "$output" == *"no servers could be reached"* ]]
+}
+
+@test "an answer with no A records is distinguished from a failing lookup" {
+    # A CNAME-only answer, or one dnsmasq's stop-dns-rebind refused. Both look
+    # like an empty A list, and the raw answer is what tells them apart.
+    cat > "$BATS_TEST_TMPDIR/cname" <<'EOF'
+#!/bin/bash
+echo "release-assets.githubusercontent.com. 60 IN CNAME example.map.fastly.net."
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/cname" release-assets.githubusercontent.com
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no A records"* ]]
+    [[ "$output" == *"CNAME"* ]]
+    [[ "$output" != *"dig exited"* ]]
+}
+
+@test "domain resolution recovers when a later attempt answers" {
+    cat > "$BATS_TEST_TMPDIR/flaky" <<'EOF'
+#!/bin/bash
+n="$BATS_TEST_TMPDIR/digs"
+count=$(cat "$n" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$n"
+if [ "$count" -lt 1 ]; then exit 9; fi
+echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/flaky"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
+    [[ "$output" == *"151.101.64.223"* ]]
+}
+
+@test "each dig attempt is bounded, so one unanswered lookup cannot eat the budget" {
+    # dig's defaults are 5s x 3 tries. Three attempts of that is 45s spent on
+    # one domain, inside a startup the test suite gives 120s in total.
+    grep -qE 'dig .*\+time=[0-9]+ \+tries=[0-9]+' "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "the extra-domains loop resolves through the same path, so non-fatal is true" {
+    # Its comment says failures there are non-fatal. With a bare
+    # `ips=$(dig ... | awk ...)` that held for a domain that resolved to
+    # nothing and not for one whose lookup errored - pipefail took the whole
+    # script down instead of warning and skipping.
+    local bare
+    bare=$(awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ips=\$\(dig/ { print FNR": "$0 }
+    ' "$SANDBOX_DIR/init-firewall.sh")
+    [ -z "$bare" ] || {
+        echo "a dig is still assigned directly, so pipefail can kill the script:" >&2
+        echo "$bare" >&2
+        false
+    }
+    grep -q 'if ! ips=$(resolve_domain "$domain"); then' "$SANDBOX_DIR/init-firewall.sh"
+}
+
 @test "an empty response is reported as empty, not as a missing field" {
     cat > "$BATS_TEST_TMPDIR/empty" <<'EOF'
 #!/bin/bash
