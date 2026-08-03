@@ -52,6 +52,33 @@ network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 # unpacking an image is enough to turn a recovery into a spurious failure. A
 # longer budget only delays reporting a genuinely stuck startup; it cannot hide
 # one, since nothing here passes on a timeout.
+# `docker wait` returns the moment the container exits, but the json-file log
+# driver writes asynchronously - so reading the log right then can return one
+# that stops mid-stream, with everything after some flush boundary missing.
+#
+# That is not hypothetical. It presented as a container "aborting" partway
+# through init-firewall.sh's domain loop, at a slightly different domain each
+# run, and survived three separate fixes to that loop before the giveaway: the
+# log ended with no message from an ERR trap that cannot be bypassed and no
+# output from a retry that prints on every path. Nothing had aborted. The read
+# was short.
+#
+# Two identical consecutive reads means the driver has caught up. Deliberately
+# content-neutral - waiting for an expected string would make the wait pass or
+# fail on the very thing the caller is about to assert.
+settled_logs() {
+    local container="$1" current previous=""
+    for _ in $(seq 1 20); do
+        current=$(docker logs "$container" 2>&1)
+        if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+            break
+        fi
+        previous="$current"
+        sleep 0.25
+    done
+    printf '%s' "$current"
+}
+
 wait_ready() {
     local container="$1"
     for _ in $(seq 1 120); do
@@ -61,7 +88,7 @@ wait_ready() {
         sleep 1
     done
     echo "container $container never reached the post-entrypoint sleep - startup log:" >&2
-    docker logs "$container" >&2
+    settled_logs "$container" >&2
     return 1
 }
 
@@ -1071,7 +1098,7 @@ EOF
     # failure here rather than a hung suite.
     run timeout 120 docker wait "$container"
     exit_code=$output
-    logs=$(docker logs "$container" 2>&1)
+    logs=$(settled_logs "$container")
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
@@ -1082,7 +1109,16 @@ EOF
     # in the entrypoint, before the check under test ever runs, presents
     # identically to the check being broken. That happened, cost two CI rounds,
     # and was still unresolved at the end of them (#59).
-    dump() { echo "$1" >&2; echo "exit code: $exit_code" >&2; echo "container log:" >&2; echo "$logs" >&2; false; }
+    # The byte count is printed with the log, because the failure this test has
+    # actually produced is a log that STOPS - and a truncated read and a
+    # container that died mid-startup look identical without it.
+    dump() {
+        echo "$1" >&2
+        echo "exit code: $exit_code" >&2
+        echo "container log (${#logs} bytes):" >&2
+        echo "$logs" >&2
+        false
+    }
 
     [ "$exit_code" = "1" ] || dump "expected the container to exit 1"
     [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]] \
