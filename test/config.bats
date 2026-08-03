@@ -6,7 +6,11 @@
 
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
-    LIB="$REPO_ROOT/bin/dejima-config-lib.sh"
+    # [forge.<name>]/[harness.<name>] schema now comes from the provider
+    # manifest (dejima-provider-lib.sh), not a row hardcoded in
+    # dejima-config-lib.sh - lib() sources the former, a strict superset of
+    # the latter, so every existing call site still resolves.
+    LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
     # Retired variables may already be exported by whatever launched this

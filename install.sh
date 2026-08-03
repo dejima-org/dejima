@@ -161,6 +161,11 @@ echo
 # anything noticing.
 # shellcheck source=bin/dejima-project-lib.sh
 source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
+# [forge.<name>]/[harness.<name>] keys below come from the selected
+# provider's manifest, not a row hardcoded in dejima-config-lib.sh - needs
+# dejima-provider-lib.sh sourced for that lookup to resolve.
+# shellcheck source=bin/dejima-provider-lib.sh
+source "$SCRIPT_DIR/bin/dejima-provider-lib.sh"
 
 CONFIG_FILE="$(config_path)"
 if config_exists; then
@@ -176,10 +181,11 @@ else
         printf '# dejima configuration. See README.md.\n'
         printf '# Every key below is shown at its default; uncomment to change one.\n\n'
         _section=""
-        while IFS=$'\t' read -r _key _type _default; do
+        while IFS= read -r _key; do
             [ -n "$_key" ] || continue
             _leaf="${_key##*.}"
             _sec="${_key%.*}"
+            _default="$(config_default "$_key")"
             if [ "$_sec" != "$_section" ]; then
                 printf '\n[%s]\n' "$_sec"
                 _section="$_sec"
@@ -213,7 +219,7 @@ else
             else
                 printf '# %s = %s\n' "$_leaf" "$_default"
             fi
-        done < <(_config_table)
+        done < <(_config_keys)
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 fi

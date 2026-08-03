@@ -49,9 +49,15 @@ services:
     sysctls:
       net.ipv4.ip_unprivileged_port_start: 0
     environment:
-      GITEA_SSH_HOST: ${GITEA_SSH_HOST:-}
-      GITEA_API: ${GITEA_API:-}
-      GITEA_TOKEN: ${GITEA_TOKEN:-}
+      # The forge's own env vars (declared by its manifest's env_export) and
+      # the DEJIMA_* resolved values (DEJIMA_FORGE_HOSTS, DEJIMA_PUSH_HOSTS,
+      # ...) are NOT declared here - bin/dejima passes them as `-e` flags at
+      # run time instead (see forge_env_exports in dejima-provider-lib.sh),
+      # so this file never has to know any forge's variable names. Declaring
+      # them here too as ${VAR:-} would only interpolate them to empty, since
+      # bin/dejima no longer exports them into its own environment for
+      # compose to read.
+      #
       # Read-only fine-grained GitHub PAT (Contents + Metadata: read-only,
       # no write scopes). Used by `gh` and, via `gh auth setup-git`, by git
       # itself for github.com over HTTPS - see the firewall/Dockerfile for

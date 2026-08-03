@@ -133,16 +133,22 @@ _warn_legacy_env() {
         echo "Set them in $(config_path) instead, then unset them in your shell profile." >&2
         echo "" >&2
     fi
+
+    # GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) -
+    # forge_env_exports computes their replacements fresh from the manifest
+    # further down and passes them as -e flags, but a value already exported
+    # by the operator's shell is otherwise inherited by the docker subprocess
+    # unchanged since nothing else reassigns these three names. Cleared, not
+    # just unread, for the same reason the old hardcoded GITEA_TOKEN
+    # computation started from "" rather than the inherited value. These
+    # three names, specifically, are the only environment variables dejima
+    # ever read directly for forge configuration before the manifest schema
+    # replaced them - they name no CURRENT forge selection, only that one
+    # retired path, so unlike the rest of this file they stay fixed regardless
+    # of which forge is configured or added later.
+    unset GITEA_TOKEN GITEA_SSH_HOST GITEA_API
 }
 _warn_legacy_env
-# GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) - forge_env_exports
-# computes their replacements fresh from the manifest further down and passes
-# them as -e flags, but a value already exported by the operator's shell is
-# otherwise inherited by the docker subprocess unchanged since nothing else
-# here reassigns these three names. Cleared, not just unread, for the same
-# reason the old hardcoded GITEA_TOKEN computation started from "" rather
-# than the inherited value.
-unset GITEA_TOKEN GITEA_SSH_HOST GITEA_API
 
 if ! config_exists; then
     echo "No dejima config at $(config_path)." >&2
@@ -412,7 +418,7 @@ fi
 # SANDBOX_SSH_KEY (if set) provides its own identity independently of this.
 if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
-    echo "git-over-ssh (e.g. pushing to Gitea) will fail until you ssh-add a key," >&2
+    echo "git-over-ssh (e.g. pushing to the configured forge) will fail until you ssh-add a key," >&2
     echo "unless [core] ssh_key is also set." >&2
 fi
 
@@ -420,7 +426,10 @@ fi
 # auth login` session is write-capable, which would defeat the point.
 # This should be a dedicated read-only fine-grained PAT (Contents +
 # Metadata: read-only), generated separately for this sandbox.
-# Plain assignment, same reason as GITEA_TOKEN above.
+# Plain assignment: stays empty (never inherited from the shell) when
+# GH_TOKEN_FILE doesn't exist, the same "start from empty, not from
+# whatever's already exported" reasoning forge_env_exports applies to a
+# forge's own token further down.
 GH_TOKEN=""
 GH_TOKEN_FILE="$(config_get github token_file)"
 if [ -f "$GH_TOKEN_FILE" ]; then
@@ -680,10 +689,9 @@ export LOKI_URL="$(config_get logging loki_url)"
 # container for nothing.
 extra_mounts=()
 
-# The forge's own env vars (GITEA_API, GITEA_SSH_HOST, GITEA_TOKEN today),
-# generated from its manifest rather than hardcoded - see forge_env_exports.
-# -e here: passed straight through to `docker compose run`, which takes -e
-# alongside -v.
+# The forge's own env vars, generated from its manifest's env_export list
+# rather than hardcoded - see forge_env_exports. -e here: passed straight
+# through to `docker compose run`, which takes -e alongside -v.
 _forge_env_lines=""
 if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
     # forge_env_exports has already explained why on stderr. It can fail
@@ -696,11 +704,10 @@ while IFS= read -r _forge_env; do
     extra_mounts+=(-e "$_forge_env")
 done <<< "$_forge_env_lines"
 
-# The resolved combination, for the briefing and the hooks Phase 2's later
-# tasks wire up to read them (git-push-guard.sh's host allowlist and
-# no-direct-push branches, gitea-merge-guard.sh's block) - computed here,
-# unconditionally passed through the same way, so those tasks only need to
-# start reading them.
+# The resolved combination, for the briefing and the hooks that read it
+# (git-push-guard.sh's host allowlist and no-direct-push branches,
+# merge-guard.sh's block) - computed here, unconditionally passed through
+# the same way, regardless of which forge and workflow are configured.
 extra_mounts+=(-e "DEJIMA_FORGE_NAME=$DEJIMA_FORGE_NAME")
 extra_mounts+=(-e "DEJIMA_WORKFLOW_NAME=$DEJIMA_WORKFLOW_NAME")
 extra_mounts+=(-e "DEJIMA_HARNESS_NAME=$DEJIMA_HARNESS_NAME")

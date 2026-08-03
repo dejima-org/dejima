@@ -20,8 +20,12 @@ MAX_MANIFEST_LINES=200
 
 # DEJIMA_PROVIDER_ROOT is a test hook, not user configuration - the real root
 # is always this repo, since providers ship with the code that reads them.
+# ${BASH_SOURCE[0]%/*} rather than `dirname` - this is now called often
+# enough (see _provider_keys_field) that an external process per call is
+# real, avoidable cost; every caller already invokes this file by a path
+# containing a "/", so the two are equivalent here.
 provider_root() {
-    printf '%s' "${DEJIMA_PROVIDER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    printf '%s' "${DEJIMA_PROVIDER_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}"
 }
 
 _provider_axis_dir() {
@@ -52,14 +56,15 @@ valid_provider_name() {
 }
 
 provider_dir() {
-    local axis="$1" name="$2" sub axis_root dir_real
+    local axis="$1" name="$2" sub root axis_root dir_real
     sub="$(_provider_axis_dir "$axis")" || return 1
     if ! valid_provider_name "$name"; then
         echo "invalid $axis name: $name" >&2
         return 1
     fi
-    axis_root="$(readlink -m "$(provider_root)/$sub")"
-    dir_real="$(readlink -m "$(provider_root)/$sub/$name")"
+    root="$(provider_root)"
+    axis_root="$(readlink -m "$root/$sub")"
+    dir_real="$(readlink -m "$root/$sub/$name")"
     case "$dir_real/" in
         "$axis_root"/*) ;;
         *)  echo "refusing $axis '$name': it resolves outside $axis_root" >&2
@@ -107,7 +112,7 @@ capabilities	?list:identifier
 pr_command	?command
 issue_command	?command
 merge_block	?command
-keys	?list:identifier
+keys	?list:keyspec
 requires	?list:identifier
 host_keys	?list:identifier
 url_keys	?list:identifier
@@ -128,13 +133,36 @@ EOF
             ;;
         harness) cat <<'EOF'
 command	identifier	claude
-keys	?list:identifier
+keys	?list:keyspec
 resume_command	?template
 briefing	?relpath
 EOF
             ;;
         *) return 1 ;;
     esac
+}
+
+# Parses one KEY[:TYPE[=DEFAULT]] element of a forge/harness `keys` manifest
+# value into NAME<TAB>TYPE<TAB>DEFAULT - the same three columns the config
+# schema table itself uses, packed into a single manifest value so a forge or
+# harness declares its own [forge.<name>]/[harness.<name>] schema instead of
+# that schema being hardcoded in core. One parser, used by the value
+# validator below and by dejima-config-lib.sh's _config_extra_spec/
+# _config_extra_keys, so those cannot drift apart on how e.g. a path key
+# with a tilde-expanded default splits. Returns 1 if there is no ':' at all
+# (a bare name, with no type, is not a valid element).
+_provider_keyspec_parse() {
+    local spec="$1" name rest type default=""
+    name="${spec%%:*}"
+    rest="${spec#*:}"
+    [ "$rest" != "$spec" ] || return 1
+    if [[ "$rest" == *=* ]]; then
+        type="${rest%%=*}"
+        default="${rest#*=}"
+    else
+        type="$rest"
+    fi
+    printf '%s\t%s\t%s' "$name" "$type" "$default"
 }
 
 _manifest_spec() {
@@ -156,7 +184,8 @@ _provider_valid_value() {
     case "$type" in
         command)
             # Lands in prose an agent will run. Space-separated words only, so
-            # "gitea-pr" and "gh pr" both fit and nothing shell-active does.
+            # a bare command name and a multi-word one like "gh pr" both fit
+            # and nothing shell-active does.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*( [A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]
             ;;
         relpath)
@@ -174,6 +203,26 @@ _provider_valid_value() {
             # Prose with {{placeholders}}; the placeholder names themselves are
             # checked against the whitelist at composition time, not here.
             [[ "$value" =~ ^[-A-Za-z0-9{}\ ._:/]+$ ]]
+            ;;
+        keyspec)
+            # One element of a forge/harness `keys` list - see
+            # _provider_keyspec_parse. The default is validated against its
+            # own type with the config file's own validator, the same check a
+            # value for this key would get in the config file, so a bad
+            # default is caught here rather than the first time an operator's
+            # config happens to omit the key. A non-optional type (no "?"
+            # prefix) must have a non-empty default, mirroring the invariant
+            # every hardcoded core schema row already holds: "always has a
+            # value" only means something if there is one.
+            local pname ptype pdefault pspec
+            pspec="$(_provider_keyspec_parse "$value")" || return 1
+            IFS=$'\t' read -r pname ptype pdefault <<< "$pspec"
+            [[ "$pname" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+            [ -n "$ptype" ] || return 1
+            if [ "${ptype:0:1}" != "?" ] && [ -z "$pdefault" ]; then
+                return 1
+            fi
+            _config_valid_value "$ptype" "$pdefault"
             ;;
         list:*)
             # SPACE-separated, unlike the config file's colon-separated lists.
@@ -263,6 +312,144 @@ manifest_get() {
     printf '%s' "$found"
 }
 
+# ---------------------------------------------------------------------------
+# [forge.<name>] / [harness.<name>] config schema, derived from each
+# provider's own `keys` manifest entry. Overrides the three
+# dejima-config-lib.sh extension-point stubs (_config_extra_section_known,
+# _config_extra_spec, _config_extra_keys) so the config schema table stays
+# free of any one provider's name - adding a forge or harness is adding a
+# directory whose manifest declares its own keys, not editing core.
+# ---------------------------------------------------------------------------
+
+# config_validate re-parses the WHOLE config file on every config_get call
+# (see its own comment - "on the order of thirty reads" per launch), and each
+# pass through a [forge.<name>]/[harness.<name>] line calls back into here.
+# Going through manifest_get/manifest_validate here would mean thirty-odd
+# full-manifest validations (every field, not just `keys`) for every key in
+# those sections - so this reads and validates only the `keys` field itself,
+# a plain line-scan plus the one type check _provider_valid_value already
+# does for it, skipping fields (pr_command, capabilities, env_export, ...)
+# that this lookup never uses. The manifest's OTHER fields still get their
+# full manifest_validate elsewhere before anything consequential reads them
+# (provider_validate_selection, forge_hosts, forge_env_exports,
+# briefing_compose) - this function only ever feeds a config schema type
+# check, never a forge action.
+#
+# Cached per axis+name for the rest of THIS command substitution: a
+# manifest cannot change mid-launch, so re-deriving it for every key in the
+# same section within one config_validate pass is pure waste. The cache
+# itself does not survive past this subshell (bash forks a new one per
+# config_get call), so it only dedupes the N keys of one section against
+# each other, not across a launch's ~thirty reads - a cheap, safe partial
+# win rather than a cross-process cache this file has no story for
+# invalidating.
+declare -gA _PROVIDER_KEYS_CACHE
+_provider_keys_cached() {
+    local axis="$1" name="$2" cache_key="$axis:$name"
+    if [ -z "${_PROVIDER_KEYS_CACHE[$cache_key]+set}" ]; then
+        _PROVIDER_KEYS_CACHE[$cache_key]="$(_provider_keys_field "$axis" "$name")" || return 1
+    fi
+    printf '%s' "${_PROVIDER_KEYS_CACHE[$cache_key]}"
+}
+
+# Reads and validates only the `keys = ...` line of a forge/harness manifest
+# - see _provider_keys_cached above for why this bypasses manifest_get's
+# full-manifest validation. Trimming is inlined (_config_trim's own logic,
+# not a call to it) and the line count uses bash's own read loop instead of
+# `wc -l`, both to avoid a subshell/external-process fork per manifest line -
+# this runs once per key in a [forge.<name>]/[harness.<name>] section on
+# EVERY config_validate pass (config_validate itself runs on every
+# config_get, "on the order of thirty" times per launch), so a per-line fork
+# here is a per-line fork thirty times over.
+_provider_keys_field() {
+    local axis="$1" name="$2" dir file line key value="" seen=0 type n=0
+    dir="$(provider_dir "$axis" "$name")" || return 1
+    file="$dir/$(_provider_manifest_name "$axis")"
+    [ -f "$file" ] || return 1
+    type="$(_manifest_type "$axis" keys)" || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        [ "$n" -le "$MAX_MANIFEST_LINES" ] || return 1
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in ''|'#'*|';'*) continue ;; *=*) ;; *) continue ;; esac
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [ "$key" = keys ] || continue
+        value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        seen=1
+    done < "$file"
+    [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
+    _provider_valid_value "$type" "$value" || return 1
+    printf '%s' "$value"
+}
+
+# A section is known only when a provider directory for its name actually
+# exists - provider_dir carries the same name/containment checks
+# _config_extra_type_valid already relies on for the provider: config types.
+_config_extra_section_known() {
+    local section="$1" axis name
+    case "$section" in
+        forge.*)   axis=forge;   name="${section#forge.}" ;;
+        harness.*) axis=harness; name="${section#harness.}" ;;
+        *) return 1 ;;
+    esac
+    provider_dir "$axis" "$name" >/dev/null 2>&1
+}
+
+# Looks up one [forge.<name>]/[harness.<name>] key's TYPE<TAB>DEFAULT in that
+# provider's `keys` manifest entry instead of a row hardcoded in core.
+_config_extra_spec() {
+    local want="$1" axis rest name key spec pname ptype pdefault
+    case "$want" in
+        forge.*)   axis=forge ;;
+        harness.*) axis=harness ;;
+        *) return 1 ;;
+    esac
+    rest="${want#*.}"
+    name="${rest%%.*}"
+    key="${rest#*.}"
+    [ "$key" != "$rest" ] || return 1
+    # No separate provider_dir check here - _provider_keys_cached (via
+    # _provider_keys_field) already refuses when the directory doesn't exist,
+    # and this runs often enough (see _provider_keys_field's comment) that a
+    # second containment check per call is real, avoidable cost.
+    for spec in $(_provider_keys_cached "$axis" "$name"); do
+        pname="${spec%%:*}"
+        [ "$pname" = "$key" ] || continue
+        IFS=$'\t' read -r pname ptype pdefault <<< "$(_provider_keyspec_parse "$spec")"
+        printf '%s\t%s' "$ptype" "$pdefault"
+        return 0
+    done
+    return 1
+}
+
+# Enumerates the keys of the SELECTED forge/harness (core.forge/core.harness,
+# falling back to their schema default when no config file exists yet to
+# read a selection from - e.g. an isolated call against a fresh checkout)
+# rather than every installed provider's keys: --print-config is "what is
+# actually in effect", and an unselected forge's keys are not.
+_config_extra_keys() {
+    local forge harness
+    if config_exists && config_validate >/dev/null 2>&1; then
+        forge="$(config_get core forge)"
+        harness="$(config_get core harness)"
+    else
+        forge="$(config_default core.forge)"
+        harness="$(config_default core.harness)"
+    fi
+    _config_extra_keys_for forge "$forge"
+    _config_extra_keys_for harness "$harness"
+}
+
+_config_extra_keys_for() {
+    local axis="$1" name="$2" spec
+    for spec in $(_provider_keys_cached "$axis" "$name"); do
+        printf '%s.%s.%s\n' "$axis" "$name" "${spec%%:*}"
+    done
+}
+
 # Space-separated set membership, for capability and requirement lists.
 _set_contains() {
     local haystack=" $1 " needle="$2"
@@ -288,19 +475,19 @@ provider_validate_selection() {
     done
 
     # Rule 3 ("a pushing workflow needs a forge that resolves to a host") is
-    # deliberately NOT checked here. gitea's ssh_host/api have no schema
-    # default and install.sh writes them commented out, so a fresh install
-    # would be refused by this rule today - while it launches fine as-is,
-    # with git-push-guard.sh blocking pushes at runtime (see README "Skip
-    # this if you only push to GitHub"). An unconfigured forge is supported,
-    # not broken, until Phase 3 adds `forge = none` as the honest way to say
-    # so - only then does this rule have a correct alternative to point an
-    # operator at, and it becomes a refusal alongside rule 5 below.
+    # deliberately NOT checked here. A forge's own host-bearing keys may have
+    # no schema default and install.sh writes them commented out, so a fresh
+    # install would be refused by this rule today - while it launches fine
+    # as-is, with git-push-guard.sh blocking pushes at runtime (see README
+    # "Skip this if you only push to GitHub"). An unconfigured forge is
+    # supported, not broken, until Phase 3 adds `forge = none` as the honest
+    # way to say so - only then does this rule have a correct alternative to
+    # point an operator at, and it becomes a refusal alongside rule 5 below.
 
     # config_is_set, not config_get: the question is "did the operator set
-    # this key", not "does it have a value" - token_file has a schema
+    # this key", not "does it have a value" - a key can have a schema
     # default, so it always has a value, and testing the value would make a
-    # wholly unconfigured gitea (nothing in [forge.gitea] at all) look
+    # wholly unconfigured forge (nothing in [forge.<name>] at all) look
     # partly configured.
     set_n=0 unset_n=0 missing=""
     for key in $(manifest_get forge "$forge" requires); do

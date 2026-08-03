@@ -1419,3 +1419,66 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ "$check" -lt "$guard" ]
 }
+
+@test "core names no forge" {
+    # The single assertion that keeps this separation from decaying: without
+    # it, the first convenient edit puts a forge name back into core. A
+    # whole-file skip or a substring loose enough to stop catching a real
+    # prose leak would both defeat the point, so each file gets its own
+    # narrow, justified exclusion for the specific lines that are not a
+    # forge coupling - everything else in scope must still match nothing.
+    local f matches fail=0
+    for f in "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-config-lib.sh" \
+             "$REPO_ROOT/bin/dejima-provider-lib.sh" "$REPO_ROOT/docker/entrypoint.sh" \
+             "$REPO_ROOT/docker/docker-compose.yml" "$REPO_ROOT/hooks/git-push-guard.sh" \
+             "$REPO_ROOT/hooks/merge-guard.sh" "$REPO_ROOT/hooks/sandbox-context.sh"; do
+        matches="$(grep -inE 'gitea|github\.com' "$f" || true)"
+        case "$f" in
+            */bin/dejima)
+                # _warn_legacy_env's table names the OLD environment
+                # variables (GITEA_SSH_HOST, GITEA_API, ...) dejima read
+                # directly before the manifest schema replaced them - a
+                # one-time migration aid for an operator's existing shell
+                # profile. Those names only ever meant gitea (nothing else
+                # was ever wired that way) and do not change when a forge is
+                # added or removed, so excluding the function body - the same
+                # range test/config.bats isolates by name for its own
+                # "every retired variable" test - is exempting history, not a
+                # live coupling.
+                matches="$(sed '/^_warn_legacy_env()/,/^}/d' "$f" | grep -inE 'gitea|github\.com' || true)"
+                # A citation of an external issue URL, the same category as
+                # hooks/sandbox-context.sh:3 below.
+                matches="$(grep -vE 'claude-code/issues/29162' <<< "$matches" || true)"
+                ;;
+            */bin/dejima-config-lib.sh)
+                # core.forge's schema DEFAULT - real data (today there is
+                # exactly one shipped forge to default to), not a row a new
+                # forge needs to edit. Its TYPE, provider:forge, is what is
+                # structural, and that names no forge; github.token_file
+                # (GitHub as a read-only source, independent of forge
+                # selection - see the identical exception in the briefing
+                # prose below) and the bare "github" section name it lives in
+                # don't contain "github.com" and so never match this pattern
+                # at all.
+                matches="$(grep -vE ':core\.forge	provider:forge	gitea$' <<< "$matches" || true)"
+                ;;
+            */docker/entrypoint.sh|*/docker/docker-compose.yml)
+                # Implements GitHub read-only (git's github.com credential
+                # helper, and the comment on it) - a core feature independent
+                # of which forge is configured, not a coupling to one. Same
+                # feature the "GitHub read-only" prose exception below names.
+                matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                ;;
+            */hooks/sandbox-context.sh)
+                # A citation of Anthropic's own devcontainer, not a forge.
+                matches="$(grep -vE 'anthropics/claude-code/tree' <<< "$matches" || true)"
+                ;;
+        esac
+        if [ -n "$matches" ]; then
+            echo "$f still names a forge:"
+            echo "$matches"
+            fail=1
+        fi
+    done
+    [ "$fail" -eq 0 ]
+}

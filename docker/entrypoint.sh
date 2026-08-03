@@ -1,21 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-# Derive the Gitea API hostname from GITEA_API (a full URL) so it can be
-# firewall-allowlisted alongside GITEA_SSH_HOST.
-gitea_api_host=""
-if [ -n "${GITEA_API:-}" ]; then
-    gitea_api_host=$(echo "$GITEA_API" | sed -E 's#^[a-zA-Z]+://([^/]+).*#\1#')
-fi
-
-# Same for LOKI_URL (also a full URL) - Loki's host needs to be reachable
-# for log-shipper.sh to actually deliver anything.
+# DEJIMA_FORGE_HOSTS is resolved host-side by bin/dejima (forge_hosts, in
+# dejima-provider-lib.sh) from whichever forge is configured, so this file
+# does not derive or name any one forge's hostnames itself.
+#
+# LOKI_URL (a full URL) still needs its own derivation here - Loki's host
+# has to be reachable for log-shipper.sh to actually deliver anything.
 loki_host=""
 if [ -n "${LOKI_URL:-}" ]; then
     loki_host=$(echo "$LOKI_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')
 fi
 
-extra_domains="${GITEA_SSH_HOST:-} ${gitea_api_host} ${loki_host} ${ALLOWED_DOMAINS:-}"
+extra_domains="${DEJIMA_FORGE_HOSTS:-} ${loki_host} ${ALLOWED_DOMAINS:-}"
 
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     # dns-proxy.sh must run first: it repoints /etc/resolv.conf at a local
