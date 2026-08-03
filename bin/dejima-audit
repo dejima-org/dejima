@@ -274,6 +274,161 @@ open_staging() {
     printf '%s' "$d"
 }
 
+# Caps on a RETAINED diff. Separate from DISPLAY_LINE_CAP (what the operator
+# sees): this one bounds what sits on disk after the session.
+DIFF_LINE_CAP=200
+DIFF_BYTE_CAP=65536
+
+# Set only by `compare`, from the state file's ### staging line: where this
+# session's BEFORE content was staged. Distinct from STAGE_DIR (write side)
+# so that compare's own call to hash_paths() cannot overwrite the before
+# content with the after content.
+BEFORE_DIR=""
+
+# The retained-diff directory for a report. Derived with the -CRITICAL suffix
+# stripped first, so `ack`'s rename of a fully-approved report (which drops
+# that suffix) does not orphan the sidecar it was using a moment earlier.
+sidecar_dir() {
+    local r="$1"
+    r="${r%-CRITICAL.txt}"; r="${r%.txt}"
+    printf '%s.d' "$r"
+}
+
+# Best-effort credential detection over a generated diff, run before it is
+# promoted. This is the SECOND net - diff_denied() is the reliable one - and
+# it has real false negatives. False positives only cost a withheld diff, so
+# it is deliberately broad.
+looks_secret() {
+    LC_ALL=C grep -qE \
+        'sk-ant-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|apikey|secret|token|passwd|password)[[:space:]"'"'"']*[:=][[:space:]"'"'"']*[^[:space:]"'"'"']{8,}|[A-Za-z0-9+/]{40,}={0,2}' \
+        "$1"
+}
+
+# A file is binary if it contains a NUL. diff's own output for such a file is
+# useless ("Binary files differ"), and retaining it would be retaining bytes
+# nobody can read at the prompt.
+is_binary() {
+    local total stripped
+    total="$(wc -c < "$1" 2>/dev/null)" || return 1
+    stripped="$(tr -d '\000' < "$1" 2>/dev/null | wc -c)" || return 1
+    [ "$total" != "$stripped" ]
+}
+
+withhold() { printf '%s\n' "$2" > "$1" 2>/dev/null || true; }
+
+# Was this surface present in the pre-session snapshot? Answered from the
+# state file, NOT from "is there a staged before-copy": staging is also empty
+# for a denylisted surface (never staged at all) and for one over
+# STAGE_FILE_CAP, so the staging test would label a MODIFIED .envrc as newly
+# created - the one label that promises there is no earlier version to
+# compare against.
+existed_before() {
+    local rid="$1" range enc
+    case "$rid" in
+        statusline:*) range='/^### statusline/,$p';           enc="$(enc_id "${rid#statusline:}")" ;;
+        tcb:*)        range='/^### tcb/,/^### statusline/p';   enc="$(enc_id "${rid#tcb:}")" ;;
+        *)            range='/^### paths/,/^### projects/p';   enc="$(enc_id "$rid")" ;;
+    esac
+    sed -n "$range" "$state" | grep -v '^### ' | cut -f1 | grep -qxF -- "$enc"
+}
+
+# Bound, screen and retain one diff. Shared by both promote paths - they
+# differ only in where the BEFORE side comes from, and a second copy of these
+# caps would be a second place for them to drift.
+write_diff() {
+    local before="$1" cur="$2" sc="$3" key="$4" d
+    d="$(mktemp)" || return 0
+    diff -U2 --label 'before (pre-session)' --label 'current' "$before" "$cur" > "$d" 2>/dev/null
+    if [ "$(wc -l < "$d")" -gt "$DIFF_LINE_CAP" ] || [ "$(wc -c < "$d")" -gt "$DIFF_BYTE_CAP" ]; then
+        withhold "$sc/$key.withheld" "change too large to retain - compare by hand"
+    elif looks_secret "$d"; then
+        withhold "$sc/$key.withheld" "change appears to contain a credential - diff not retained"
+    else
+        cp -- "$d" "$sc/$key.diff" 2>/dev/null || rm -f "$sc/$key.diff"
+    fi
+    rm -f "$d"
+    return 0
+}
+
+# A git config key is not staged: its pre-session key=value is already in the
+# state file, so the before side is read straight out of it.
+promote_gitconfig() {
+    local rid="$1" sc="$2" key="$3" ckey="${1#gitconfig:}" before cur l
+    before="$(mktemp)" || return 0
+    { while IFS= read -r l; do
+          [ "${l%%=*}" = "$ckey" ] || continue
+          printf '%s\n' "$(unquote_value "${l#*=}")"
+      done < <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -v '^### '); } > "$before"
+    if [ ! -s "$before" ]; then
+        : > "$sc/$key.new" 2>/dev/null || true
+        rm -f "$before"; return 0
+    fi
+    cur="$(mktemp)" || { rm -f "$before"; return 0; }
+    if current_content_for_id "$rid" > "$cur" 2>/dev/null; then
+        write_diff "$before" "$cur" "$sc" "$key"
+    else
+        # Unset between the compare scan and now: the key no longer runs.
+        : > "$sc/$key.removed" 2>/dev/null || true
+    fi
+    rm -f "$before" "$cur"
+    return 0
+}
+
+# Write exactly one sidecar entry for one finding. Every path here degrades
+# to a marker rather than failing: this runs from bin/dejima's EXIT trap and
+# must never change the session's exit status.
+promote_finding() {
+    local rid="$1" sc="$2" key before cur
+    key="$(id_key "$rid")"
+
+    if store_reachable; then
+        withhold "$sc/$key.withheld" "audit store is inside the mounted workspace - retention disabled"
+        return 0
+    fi
+    case "$rid" in
+        gitconfig:*) promote_gitconfig "$rid" "$sc" "$key"; return 0 ;;
+    esac
+
+    # Existence and novelty are settled BEFORE the denylist, because both
+    # answers are markers with no content in them - a denied surface still
+    # gets an honest "this is new" or "this is gone".
+    if [ -z "$(current_sha_for_id "$rid")" ]; then
+        # Gone now. A deletion diff is the entire former file, which is the
+        # whole-file dump this design avoids - and a surface that no longer
+        # exists no longer runs.
+        : > "$sc/$key.removed" 2>/dev/null || true
+        return 0
+    fi
+    if ! existed_before "$rid"; then
+        # New this session: there is no before, and the after is live on disk
+        # for `ack` to read. Nothing to store.
+        : > "$sc/$key.new" 2>/dev/null || true
+        return 0
+    fi
+    if diff_denied "$rid"; then
+        withhold "$sc/$key.withheld" "secret-bearing surface - diff not retained"
+        return 0
+    fi
+
+    before="$BEFORE_DIR/$key"
+    if [ ! -f "$before" ]; then
+        # It existed before but was not staged: over STAGE_FILE_CAP, staging
+        # unavailable this run, or a copy that failed. Say so rather than
+        # claiming it is new.
+        withhold "$sc/$key.withheld" "no pre-session copy - compare by hand"
+        return 0
+    fi
+    cur="$(mktemp)" || return 0
+    current_content_for_id "$rid" > "$cur" 2>/dev/null
+    if is_binary "$before" || is_binary "$cur"; then
+        withhold "$sc/$key.withheld" "binary content - diff not retained"
+    else
+        write_diff "$before" "$cur" "$sc" "$key"
+    fi
+    rm -f "$cur"
+    return 0
+}
+
 # Two acknowledgement forms, deliberately distinct:
 #   spam <id>         - this changes routinely; count it, never list it.
 #                       Refused for CRITICAL surfaces (see `ack`).
@@ -756,6 +911,20 @@ case "$cmd" in
         # "skipping" over it would bury the real failure.
         [ -e "$state" ] || { echo "dejima audit: no snapshot to compare against, skipping." >&2; exit 0; }
         [ -s "$state" ] || exit 0
+
+        BEFORE_DIR="$(sed -n 's/^### staging //p' "$state" | head -1)"
+        # An rm -rf on a path read out of a file gets one sanity check: only
+        # a path our own open_staging() could have produced is removable.
+        case "$BEFORE_DIR" in
+            "$AUDIT_DIR/"*/.staging/*) ;;
+            *) BEFORE_DIR="" ;;
+        esac
+        # Owned from here on regardless of how this script leaves: an early
+        # exit (no findings, or an unwritable report dir) must not leave whole
+        # pre-session files staged on disk.
+        cleanup_staging() { [ -n "$BEFORE_DIR" ] && rm -rf -- "$BEFORE_DIR"; return 0; }
+        trap cleanup_staging EXIT
+
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
                            echo "### projects";  projects_snapshot "$PROJECTS_DIR";
@@ -763,7 +932,9 @@ case "$cmd" in
                            echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
             echo "dejima audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
-        crit=(); warn=(); info=()
+        # One raw namespaced id per finding whose surface has retainable
+        # content, in report order - what promote_finding() works from below.
+        crit=(); warn=(); info=(); finding_ids=()
         # config diffs: added/changed lines present in new but not old
         while IFS= read -r line; do
             key="${line%%=*}"
@@ -778,15 +949,21 @@ case "$cmd" in
                 gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                 baseline_suppresses "$gid" "$gsha" && continue
                 crit+=("COMMAND-EXECUTION git config: $body")
+                finding_ids+=("gitconfig:$key")
             elif [ "$key_nopfx" = "alias" ] || [[ "$key_nopfx" == alias.* ]]; then
                 # alias.<name>=!cmd runs a shell command
                 case "$(unquote_value "${line#*=}")" in
                     '!'*) gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
                           baseline_suppresses "$gid" "$gsha" && continue
-                          crit+=("COMMAND-EXECUTION git alias: $body") ;;
+                          crit+=("COMMAND-EXECUTION git alias: $body")
+                          finding_ids+=("gitconfig:$key") ;;
                     *)    warn+=("changed git config: $body") ;;
                 esac
             else
+                # No id recorded, for the same reason CROSS-PROJECT gets none:
+                # `ack` has no arm for a plain "changed git config" line, so a
+                # diff retained for one would be content at rest that nothing
+                # ever reads. The report body already carries the new value.
                 warn+=("changed git config: $body")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
@@ -804,6 +981,9 @@ case "$cmd" in
             cur_sha=""
             [ -e "$ws/$rline" ] && cur_sha="$(hash_entry "$ws/$rline")"
             baseline_suppresses "$rline" "$cur_sha" && continue
+            # Recorded once for all three arms below: severity decides how the
+            # finding is REPORTED, not whether its content can be retained.
+            finding_ids+=("$rline")
             case "$(path_severity "$rline")" in
                 CRITICAL) crit+=("HOST-CODE-EXECUTION workspace file: $line") ;;
                 WARNING)  warn+=("changed workspace file: $line") ;;
@@ -842,6 +1022,7 @@ case "$cmd" in
             tid="tcb:$rline"; tsha=""; [ -e "$ws/$rline" ] && tsha="$(hash_entry "$ws/$rline")"
             baseline_suppresses "$tid" "$tsha" && continue
             crit+=("TCB (sandbox self) modified: $line")
+            finding_ids+=("$tid")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -855,6 +1036,7 @@ case "$cmd" in
             sid="statusline:$line"; ssha=""; [ -e "$STATUSLINE_PATH" ] && ssha="$(hash_entry "$STATUSLINE_PATH")"
             baseline_suppresses "$sid" "$ssha" && continue
             crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(enc_id "$line")")
+            finding_ids+=("$sid")
         done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
@@ -882,6 +1064,21 @@ case "$cmd" in
                 [ "${#info[@]}" -gt 0 ] && printf 'INFO     %s\n' "${info[@]}"
             } > "$report" 2>/dev/null || true
 
+            # The one place pre-session CONTENT becomes something that
+            # outlives the session, and only ever as a bounded diff or a
+            # marker. 0700, since that content is the thing the sandbox was
+            # not allowed to see. rmdir at the end leaves nothing behind when
+            # every finding declined to retain anything.
+            if [ "$DIFFS_ENABLED" = "1" ] && [ "${#finding_ids[@]}" -gt 0 ]; then
+                sc="$(sidecar_dir "$report")"
+                if ( umask 077; mkdir -p "$sc" ) 2>/dev/null; then
+                    for rid in "${finding_ids[@]}"; do
+                        promote_finding "$rid" "$sc"
+                    done
+                    rmdir "$sc" 2>/dev/null || true
+                fi
+            fi
+
             # Oldest-first, but only clean reports are evictable: a report
             # still carrying an unacknowledged CRITICAL is retained past the
             # cap, so flushing one out cannot be achieved by inducing runs.
@@ -889,6 +1086,9 @@ case "$cmd" in
             while [ "$(find "$report_dir" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | wc -l)" -gt "$AUDIT_KEEP" ]; do
                 oldest="$(find "$report_dir" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | sort | head -1)"
                 [ -n "$oldest" ] || break
+                # The report's retained diffs go with it: they are content at
+                # rest whose only reason to exist is the report that cites it.
+                rm -rf "$(sidecar_dir "$oldest")"
                 rm -f "$oldest" || break
             done
         fi
