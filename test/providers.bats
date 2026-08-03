@@ -305,6 +305,32 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     rm -f "$b"
 }
 
+@test "the hook handles session ids with & / and \\ without mangling them" {
+    # Regression check: bash 5.2's patsub_replacement (on by default) makes "&"
+    # in parameter expansion replacements expand to the matched text. A session
+    # id from the harness payload (untrusted) containing "&" would defeat the
+    # substitution, leaving the marker and corrupting the --resume line. The fix
+    # uses prefix/suffix removal instead, which never interprets the value.
+    # Covering all three special cases (& / \) ensures a future rewrite that
+    # switches to sed or another mechanism doesn't regress on any of them.
+    b="$(mktemp)"
+    printf 'resume-cmd: dejima --resume @@SESSION_ID@@\ncontainer=@@CONTAINER_ID@@\n' > "$b"
+    # Session id crafted to test each special case in the replacement context.
+    # Use printf %s so the value is never interpreted by the shell.
+    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+        'printf "{\"session_id\":%s,\"cwd\":\"%s\"}" "$(printf "%s" "$1" | jq -Rs .)" "$PWD" | bash "$2"' _ \
+        'pr-42&rm -rf /tmp\test/path' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -eq 0 ]
+    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
+    # The session id must appear verbatim
+    [[ "$ctx" == *"pr-42&rm -rf /tmp"* ]] || { echo "session id & not found"; return 1; }
+    [[ "$ctx" == *"test/path"* ]] || { echo "session id path not found"; return 1; }
+    # No marker may remain
+    [[ "$ctx" != *"@@SESSION_ID@@"* ]] || { echo "@@SESSION_ID@@ marker remained"; return 1; }
+    [[ "$ctx" != *"@@CONTAINER_ID@@"* ]] || { echo "@@CONTAINER_ID@@ marker remained"; return 1; }
+    rm -f "$b"
+}
+
 @test "a missing briefing file degrades rather than failing the session" {
     run env DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
         'printf "{\"session_id\":\"x\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \

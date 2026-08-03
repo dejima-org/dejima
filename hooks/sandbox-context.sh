@@ -36,11 +36,26 @@ container_id="${container_id:-<container-id>}"
 # both are known. Missing or unreadable degrades to no briefing rather than
 # failing the hook: a SessionStart hook that exits non-zero drops the whole
 # session's context, which is worse than one missing paragraph.
+# Substitutes every occurrence of a marker without the replacement text ever
+# being interpreted. Deliberately not using ${text//marker/value}: bash 5.2's
+# patsub_replacement (on by default) makes a literal "&" in the replacement
+# expand to the matched text, so a session id containing one would leave the
+# marker in place and corrupt the resume line. The session id comes from the
+# harness payload and is not ours to trust.
+_briefing_subst() {
+    local text="$1" marker="$2" value="$3" out=""
+    while [ "$text" != "${text#*"$marker"}" ]; do
+        out="$out${text%%"$marker"*}$value"
+        text="${text#*"$marker"}"
+    done
+    printf '%s%s' "$out" "$text"
+}
+
 briefing=""
 if [ -n "${DEJIMA_BRIEFING_FILE:-}" ] && [ -f "$DEJIMA_BRIEFING_FILE" ]; then
     briefing="$(cat "$DEJIMA_BRIEFING_FILE")"
-    briefing="${briefing//@@SESSION_ID@@/$resume_id}"
-    briefing="${briefing//@@CONTAINER_ID@@/$container_id}"
+    briefing="$(_briefing_subst "$briefing" "@@SESSION_ID@@" "$resume_id")"
+    briefing="$(_briefing_subst "$briefing" "@@CONTAINER_ID@@" "$container_id")"
 fi
 
 # What the project says it needs, checked against what this container
