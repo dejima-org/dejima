@@ -1774,10 +1774,17 @@ ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 # with a ".." in it does not make this a comparison of two spellings).
 # $2 is the expected TTYD_FONT_SIZE, empty or absent for "no -t at all" - the
 # unset default, which has to stay a genuine absence rather than a value that
-# happens to match ttyd's own, or the option is no longer optional.
+# happens to match ttyd's own, or the option is no longer optional. $3 is the
+# expected TTYD_TMUX_PREFIX, on the same terms.
+#
+# --index is unconditional: it is what replaces ttyd's stock frontend with the
+# touch-capable page in web/, and it is the whole feature rather than an
+# option, so an invocation without it is a regression and not a configuration.
 expect_ttyd_argv() {
     printf '%s\n' --interface 127.0.0.1 --port "$1" --check-origin --url-arg --writable
+    printf '%s\n' --index "$(dirname "$(readlink -f "$REPO_ROOT/bin")")/web/index.html"
     [ -z "${2:-}" ] || printf '%s\n' -t "fontSize=$2"
+    [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
     printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -2002,7 +2009,7 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
-    run grep -c -- '-t' "$STUB_DIR/ttyd-argv"
+    run grep -cx -- '-t' "$STUB_DIR/ttyd-argv"
     [ "$output" = "0" ]
 
     # Set. Checked through the exact vector, not a substring: "fontSize=20
@@ -2035,6 +2042,124 @@ PY
             || { echo "refused ttyd_font_size=$bad without naming it: $output" >&2; false; }
         [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite ttyd_font_size=$bad" >&2; false; }
     done
+}
+
+@test "ttyd_tmux_prefix reaches ttyd as an option, and its absence sends none at all" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # Unset means the page falls back to stock tmux's C-b on its own. Sending
+    # "tmuxPrefix=C-b" here instead would look identical today and diverge the
+    # moment either default moves.
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345
+    run grep -c 'tmuxPrefix' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "0" ]
+
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_tmux_prefix = C-a'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 '' C-a
+
+    # Both knobs at once, since they share the -t mechanism and an array
+    # spliced in the wrong order would still "contain" each of them.
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_font_size = 20' 'ttyd_tmux_prefix = C-Space'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 20 C-Space
+}
+
+@test "dejima-ttyd refuses a ttyd_tmux_prefix it cannot parse rather than launching with one" {
+    # The page refuses an unparseable prefix too, and says so - but it says so
+    # on the phone, hours later, to whoever happens to press PREFIX. Refusing
+    # here names the key and the file while the operator is still looking at
+    # them.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    local bad
+    for bad in b M-b C-ab C- ctrl-a 2 'C-\' ; do
+        stub_ttyd
+        : > "$STUB_DIR/ttyd-argv"
+        write_remote_config 'ttyd_port = 12345' "ttyd_tmux_prefix = $bad"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -ne 0 ] || { echo "accepted ttyd_tmux_prefix=$bad" >&2; false; }
+        [[ "$output" == *"ttyd_tmux_prefix"* ]] \
+            || { echo "refused ttyd_tmux_prefix=$bad without naming it: $output" >&2; false; }
+        [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite ttyd_tmux_prefix=$bad" >&2; false; }
+    done
+}
+
+@test "dejima-ttyd refuses to launch without the terminal page rather than falling back to ttyd's" {
+    # ttyd serves its own frontend when --index is absent, which would leave a
+    # front door that works and a phone that has silently lost every gesture,
+    # the toolbar and pane resizing - with nothing anywhere saying why. So the
+    # missing file has to be a refusal that names it.
+    #
+    # Run from a copy of bin/ with no web/ beside it, which is what an
+    # incomplete checkout looks like from the script's point of view: it
+    # resolves the page relative to its own resolved location.
+    local fake="$BATS_TEST_TMPDIR/incomplete"
+    mkdir -p "$fake/bin"
+    # Every library the launcher sources, so the copy fails on the missing
+    # page rather than on a missing lib - which would pass the status check
+    # below while proving nothing.
+    cp "$REPO_ROOT/bin/dejima-ttyd" "$REPO_ROOT/bin/dejima-project-lib.sh" \
+       "$REPO_ROOT/bin/dejima-attach" "$REPO_ROOT/bin/dejima-config-lib.sh" \
+       "$REPO_ROOT/bin/dejima-provider-lib.sh" "$fake/bin/"
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$fake/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$fake/web/index.html"* ]]
+    [[ "$output" == *"build.mjs"* ]]
+    [ -z "$(ttyd_log)" ]
+}
+
+@test "web/index.html is regenerated whenever the sources it is built from change" {
+    # The page is a build artifact that is COMMITTED, so that a checkout is
+    # usable by copy alone and nobody needs npm to run the front door. The cost
+    # of that is the one failure mode a generated-and-ignored file cannot have:
+    # editing web/src and shipping the stale artifact, which looks like the
+    # edit silently not working. build.mjs writes this manifest beside the page
+    # from the same inputs, so a mismatch means one was not rebuilt.
+    local web="$REPO_ROOT/web"
+    [ -f "$web/index.html" ]
+    [ -f "$web/sources.sha256" ]
+    run bash -c "cd '$web' && sha256sum src/* package-lock.json | LC_ALL=C sort -k2"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(cat "$web/sources.sha256")" ] || {
+        echo "web/index.html is stale. Rebuild it:" >&2
+        echo "  cd web && npm ci && node build.mjs" >&2
+        diff <(printf '%s\n' "$output") "$web/sources.sha256" >&2 || true
+        false
+    }
+}
+
+@test "the terminal page fetches nothing at page load" {
+    # Two reasons, either sufficient. ttyd serves exactly one file - its HTTP
+    # handler answers a token endpoint, a redirect and the index, and nothing
+    # else - so a second asset would 404 rather than load. And the sandbox
+    # restricts outbound traffic to an allowlist, so a CDN reference would not
+    # resolve even from a browser outside it if the operator is on the same
+    # restricted network.
+    local page="$REPO_ROOT/web/index.html"
+    [ -f "$page" ]
+    run grep -nEi '<(script|link|img|iframe)[^>]+(src|href)=' "$page"
+    [ "$status" -ne 0 ] || { echo "the page references an external asset: $output" >&2; false; }
+}
+
+@test "the terminal page's own unit tests pass" {
+    # The pure parts - mouse report encoding, the private-mode tracker, sticky
+    # Ctrl, OSC 52 decoding, prefix parsing - are the parts a browser test
+    # could only reach through a gesture, so they are written to be checkable
+    # without one. Run from here rather than from a second CI job, so they
+    # cannot quietly stop running.
+    command -v node >/dev/null 2>&1 || skip "node is not installed"
+    run node --test "$REPO_ROOT"/web/test/*.test.js
+    [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
 }
 
 @test "ttyd validates the WebSocket origin, and the proxy passes the Host it compares against" {
@@ -2222,48 +2347,34 @@ nginx_blocks() {
     [[ "$output" =~ [0-9]+[hd]$ ]]
 }
 
-@test "the nginx example's viewport injection ships with the thing that makes it work" {
+@test "the terminal page carries the viewport meta the proxy used to inject" {
     # ttyd serves no <meta name="viewport"> - not in 1.7.7, not on main - so a
     # phone lays the page out at a virtual desktop width and scales it down,
-    # which no font size can undo and which zooming cannot reflow. The proxy
-    # supplying the missing tag is the fix.
+    # which no font size can undo and which zooming cannot reflow. The nginx
+    # example used to supply the missing tag with sub_filter. The page now
+    # ships its own, so the property has moved rather than gone away.
+    local page="$REPO_ROOT/web/index.html"
+    [ -f "$page" ]
+    grep -qE '<meta name="viewport"[^>]*width=device-width' "$page"
+    # user-scalable=no is not tidiness: a two-finger drag is this page's scroll
+    # gesture, and pinch-zoom would consume it.
+    grep -qE '<meta name="viewport"[^>]*user-scalable=no' "$page"
+
+    # And the example no longer injects one. Two tags would not conflict, but
+    # the sub_filter would silently reintroduce its own requirements - an nginx
+    # built with the sub module, and Accept-Encoding cleared toward the
+    # upstream - whose only symptom when unmet is the tag appearing not to work.
     local ex="$REPO_ROOT/docs/nginx-dejima.conf.example"
     [ -f "$ex" ]
-    # Asserted against the sub_filter DIRECTIVE, not against the file: the
-    # comment above it names the same tag, so a file-wide grep is satisfied by
-    # the prose explaining the fix even after the fix itself is gone.
-    run grep -E '^[[:space:]]*sub_filter[[:space:]]' "$ex"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'name="viewport"'* ]]
-    [[ "$output" == *'width=device-width'* ]]
+    run grep -nE '^[[:space:]]*sub_filter' "$ex"
+    [ "$status" -ne 0 ]
 
-    # sub_filter cannot rewrite a COMPRESSED body: it passes it through
-    # untouched and says nothing, which looks exactly like the tag not
-    # working. The two directives are only correct together, so shipping the
-    # filter without clearing Accept-Encoding toward the upstream is the bug
-    # this couples against.
-    if grep -qE '^[[:space:]]*sub_filter[[:space:]]' "$ex"; then
-        grep -qE '^[[:space:]]*proxy_set_header[[:space:]]+Accept-Encoding[[:space:]]+"";' "$ex"
-        # ttyd sends the page with no Cache-Control, no ETag and no
-        # Last-Modified, so a browser may cache it indefinitely. Harmless while
-        # the body is served verbatim; once it is rewritten here, a phone that
-        # cached the un-injected page renders it forever and the tag looks
-        # broken long after it works.
-        grep -qE '^[[:space:]]*add_header[[:space:]]+Cache-Control[[:space:]]+"no-store"' "$ex"
-    fi
-
-    # Injected once. Without sub_filter_once, the string is replaced
-    # everywhere it appears in a body that inlines ttyd's whole bundle.
-    grep -qE '^[[:space:]]*sub_filter_once[[:space:]]+on;' "$ex"
-
-    # Belongs to the block that actually serves ttyd. In the reject block it
-    # would be inert, and an operator moving it there would think it was on.
-    local block
-    while IFS= read -r block; do
-        [[ "$block" == *"pass=1"* ]] && continue
-        [[ "$block" != *"sub=1"* ]] \
-            || { echo "a block that proxies nothing carries the viewport filter: $block" >&2; false; }
-    done < <(nginx_blocks "$ex")
+    # The cache header stays, for a reason that survived the change and got
+    # stronger: ttyd sends the page with no Cache-Control, no ETag and no
+    # Last-Modified, so a browser may cache it indefinitely - and the page is
+    # now a build artifact that moves with this repo, so a phone that has been
+    # here before renders whatever it first saw.
+    grep -qE '^[[:space:]]*add_header[[:space:]]+Cache-Control[[:space:]]+"no-store"' "$ex"
 }
 
 @test "the nginx example carries the only authentication there is" {
@@ -2509,7 +2620,11 @@ remote_doc() {
     # making the pattern itself lax.
     ref() { tr '\n' ' ' < "$1" | sed 's/#/ /g; s/  */ /g'; }
     local doc
-    doc="$(ref "$REPO_ROOT/bin/dejima-ttyd" | grep -m1 -oE 'docs/[a-z-]+\.md')"
+    # head -n1 rather than grep -m1: the ref() above joins the file into a
+    # single line, so -m1 stops after the first matching LINE and still prints
+    # every match on it. A script that names the doc twice would otherwise
+    # produce a two-line "path" and fail this on the wrong thing entirely.
+    doc="$(ref "$REPO_ROOT/bin/dejima-ttyd" | grep -oE 'docs/[a-z-]+\.md' | head -n1)"
     [ -n "$doc" ]
     [ -f "$REPO_ROOT/$doc" ]
     # Reachable from the README too, not only from the scripts: the section it
@@ -2554,7 +2669,7 @@ remote_doc() {
     # config schema (_config_table in bin/dejima-config-lib.sh). Pinned here
     # rather than derived so this still catches the doc losing one of them.
     local keys key
-    keys='enabled ntfy_url base_url ttyd_port ttyd_font_size'
+    keys='enabled ntfy_url base_url ttyd_port ttyd_font_size ttyd_tmux_prefix'
     for key in $keys; do has -F "\`$key\`"; done
 
     # The port default, taken from the library so the two cannot drift.

@@ -259,7 +259,7 @@ generate_derived_dockerfile() {
 # access is simply on or off - and refusing it over a typo in an unrelated
 # section would take away the terminal an operator would fix that typo from.
 # That exemption was a deliberate, commented property of the old code, and the
-# blast radius only grew with consolidation: one file now holds 29 keys across
+# blast radius only grew with consolidation: one file now holds 33 keys across
 # nine sections instead of remote.conf's four. Everything that consumes an
 # actual value still goes through config_get and still refuses on a malformed
 # file, which is the contrast the README draws.
@@ -307,4 +307,19 @@ remote_ttyd_port() {
 # for every read rather than only in this accessor.
 remote_ttyd_font_size() {
     config_get remote-access ttyd_font_size
+}
+
+# The tmux prefix the terminal page's PREFIX, window and ZOOM buttons send.
+# Empty when unset, which is the signal to pass no option at all and leave the
+# page on stock tmux's C-b - the same "unset means absent, not defaulted here"
+# shape ttyd_font_size has.
+#
+# The "chord" schema type is what rejects anything that isn't one, at parse
+# time for every read rather than only in this accessor. It is narrower than
+# tmux's own prefix syntax: C-\ and C-] are excluded because this value is
+# interpolated into the page's client options, and a named-chord set is one
+# fewer place an escaping question can be got wrong. A stock tmux does not
+# use either of those two anyway.
+remote_ttyd_tmux_prefix() {
+    config_get remote-access ttyd_tmux_prefix
 }

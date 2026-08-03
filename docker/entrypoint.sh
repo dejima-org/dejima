@@ -1,5 +1,12 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+# The container's startup has to be able to say why it stopped. Under `set -e`
+# alone it cannot: the script aborts with no output, the container exits, and
+# the only symptom anywhere is that the session never appeared - which reads as
+# the sandbox being broken rather than as one command having failed. This is
+# also what makes such a failure distinguishable from the checks below that
+# refuse deliberately, and say so (#59).
+trap 'status=$?; echo "ERROR: entrypoint.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
 # DEJIMA_FORGE_HOSTS is resolved host-side by bin/dejima (forge_hosts, in
 # dejima-provider-lib.sh) from whichever forge is configured, so this file

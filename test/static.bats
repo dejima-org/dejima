@@ -72,6 +72,298 @@ setup() {
     }
 }
 
+# The runtime counterpart of the test above. Build-time downloads have had a
+# retry guard for a while; the fetches that run on every container START had
+# nothing, which is the worse place for it - a dead build is obvious, and a
+# container that never comes up reads as the sandbox being broken.
+@test "every fetch in the container's startup path has a deadline" {
+    # curl has no default overall timeout. --connect-timeout alone is not one
+    # either: it bounds reaching the far end, not a transfer that connects and
+    # then stalls, which is the shape that hangs a startup indefinitely.
+    local unguarded
+    unguarded=$(awk '
+        /^[[:space:]]*#/ { next }
+        /curl/ && /https?:\/\// && !/--max-time [0-9]/ { print FILENAME": "FNR": "$0 }
+    ' "$SANDBOX_DIR"/*.sh)
+    [ -z "$unguarded" ] || {
+        echo "these runtime fetches have no --max-time, so they can hang a container start:" >&2
+        echo "$unguarded" >&2
+        false
+    }
+}
+
+@test "the GitHub ranges fetch reports its own failure instead of letting set -e swallow it" {
+    # init-firewall.sh runs under `set -euo pipefail`, so a bare
+    # `var=$(curl ...)` that fails takes the whole script down ON THE
+    # ASSIGNMENT - before any of the diagnostics written for exactly that case
+    # can run. The container then exits having printed nothing after "Looking
+    # up GitHub's IP ranges...", and the only symptom anyone sees is that the
+    # sandbox did not start. It cost two CI rounds to not diagnose (#59).
+    #
+    # The fix is to capture curl's status rather than let set -e have it, so
+    # this checks the fetch is not a bare assignment again.
+    grep -q 'set -euo pipefail' "$SANDBOX_DIR/init-firewall.sh"
+    # Continuations are joined before matching: the fetch spans two lines, and
+    # the `||` that makes it safe is on the second one - so a line-at-a-time
+    # pass would report the correct form as the broken one.
+    local bare
+    bare=$(awk '
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            start = FNR
+            while (line ~ /\\$/ && (getline) > 0) {
+                sub(/\\$/, "", line)
+                line = line $0
+            }
+            if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(curl/ && line !~ /\|\|/)
+                print start": "line
+        }
+    ' "$SANDBOX_DIR/init-firewall.sh")
+    [ -z "$bare" ] || {
+        echo "this fetch is a bare assignment, so set -e will kill the script before it can report:" >&2
+        echo "$bare" >&2
+        false
+    }
+    # And that the failure path actually says something. The message is what
+    # separates "GitHub was unreachable" from "the sandbox is broken".
+    grep -q "could not fetch GitHub's IP ranges" "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "every startup script reports where it aborted instead of dying silently" {
+    # `set -e` alone aborts with no output whatsoever. For a script that runs
+    # during container startup that is the worst possible failure mode: the
+    # container just never appears, and every cause - a failed lookup, a full
+    # ipset, an unreachable API - presents identically, as "the sandbox is
+    # broken". Three CI failures were spent on two different instances of it.
+    #
+    # log-shipper.sh is deliberately absent: it does not use -e at all, on
+    # purpose, because one bad line should not kill the tailer.
+    local script
+    for script in init-firewall.sh dns-proxy.sh entrypoint.sh; do
+        # -E, not just -e: without errtrace the handler does not fire inside
+        # functions or subshells, which is where the fetch and the loops live.
+        grep -qE '^set -Eeuo pipefail$' "$SANDBOX_DIR/$script" \
+            || { echo "$script does not set -E, so its ERR trap would not fire in functions" >&2; false; }
+        grep -q "trap .*ERR" "$SANDBOX_DIR/$script" \
+            || { echo "$script has no ERR trap - a set -e abort in it would be silent" >&2; false; }
+        # Naming itself matters: three scripts run back to back into the same
+        # log, and "aborted at line 128" is useless without knowing whose.
+        grep -q "aborted at line" "$SANDBOX_DIR/$script"
+        grep -q "$script aborted" "$SANDBOX_DIR/$script" \
+            || { echo "$script's ERR trap does not name $script" >&2; false; }
+    done
+}
+
+@test "the ERR trap actually resolves the line and the command" {
+    # Extracted from the real file rather than retyped, so a trap that has been
+    # broken into single quotes - which would expand $LINENO and $BASH_COMMAND
+    # at definition time and report the trap's own line forever - fails here.
+    local trapline
+    trapline=$(grep -m1 "trap .*ERR" "$SANDBOX_DIR/init-firewall.sh")
+    cat > "$BATS_TEST_TMPDIR/probe.sh" <<EOF
+set -Eeuo pipefail
+$trapline
+echo "Looking up files.pythonhosted.org..."
+false
+echo "should not be reached"
+EOF
+    run bash "$BATS_TEST_TMPDIR/probe.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"should not be reached"* ]]
+    [[ "$output" == *"init-firewall.sh aborted at line 4"* ]] \
+        || { echo "trap did not report the failing line:" >&2; echo "$output" >&2; false; }
+    [[ "$output" == *"false"* ]] \
+        || { echo "trap did not report the failing command:" >&2; echo "$output" >&2; false; }
+}
+
+# The behaviour behind the two greps above, driven for real. init-firewall.sh
+# cannot be sourced - it flushes iptables at the top level - so the function is
+# extracted and run against a stubbed curl. No container, no network.
+#
+# `sleep` is shadowed by a no-op: the retry delays are deliberate in production
+# and pure cost here.
+run_fetch() {
+    local behaviour="$1"
+    STUB_DIR="$BATS_TEST_TMPDIR/stub"
+    mkdir -p "$STUB_DIR"
+    cp "$behaviour" "$STUB_DIR/curl"
+    chmod +x "$STUB_DIR/curl"
+    PATH="$STUB_DIR:$PATH"
+    sleep() { :; }
+    eval "$(sed -n '/^fetch_github_ranges()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
+    gh_auth=()
+    fetch_github_ranges
+}
+
+# A minimal but structurally valid /meta response - enough for the .web/.api/
+# .git check the function makes.
+meta_json() {
+    printf '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}'
+}
+
+@test "the ranges fetch returns the body when GitHub answers" {
+    cat > "$BATS_TEST_TMPDIR/ok" <<EOF
+#!/bin/bash
+printf '%s' '$(meta_json)'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/ok"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(meta_json)" ]
+}
+
+@test "the ranges fetch reports a failing curl rather than dying on the assignment" {
+    # 28 is curl's operation-timeout. Before the fix this case never reached a
+    # message at all: set -e took the script down on the assignment itself.
+    cat > "$BATS_TEST_TMPDIR/timeout" <<'EOF'
+#!/bin/bash
+echo "curl: (28) Operation timed out" >&2
+exit 28
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/timeout"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"attempt 1/3: curl exited 28"* ]]
+    [[ "$output" == *"attempt 3/3: curl exited 28"* ]]
+    # curl's own reason has to survive too - it is the difference between
+    # "GitHub was slow" and "DNS is broken in here".
+    [[ "$output" == *"Operation timed out"* ]]
+}
+
+@test "the ranges fetch retries an API error body and surfaces its message" {
+    # A rate limit answers 200-with-a-message or 403-with-a-message, not a
+    # transport error, so curl exits 0 and only the response check catches it.
+    # A burst of container starts is exactly what trips it, and it clears on
+    # its own - so it has to be retried, which curl's own --retry would not do.
+    cat > "$BATS_TEST_TMPDIR/ratelimited" <<'EOF'
+#!/bin/bash
+printf '%s' '{"message":"API rate limit exceeded"}'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/ratelimited"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"API rate limit exceeded"* ]]
+    [[ "$output" == *"attempt 3/3"* ]]
+}
+
+@test "the ranges fetch recovers when a later attempt succeeds" {
+    # The point of retrying at all: one blip must cost seconds, not the launch.
+    cat > "$BATS_TEST_TMPDIR/flaky" <<EOF
+#!/bin/bash
+n="\$BATS_TEST_TMPDIR/attempts"
+count=\$(cat "\$n" 2>/dev/null || echo 0)
+echo \$((count + 1)) > "\$n"
+if [ "\$count" -lt 1 ]; then exit 7; fi
+printf '%s' '$(meta_json)'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/flaky"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"attempt 1/3: curl exited 7"* ]]
+    [[ "$output" == *"$(meta_json)"* ]]
+}
+
+# Same harness, for the domain loop - the other place a silent `set -e` abort
+# stopped a container mid-startup, at a different domain each time.
+run_resolve() {
+    local behaviour="$1" domain="${2:-files.pythonhosted.org}"
+    STUB_DIR="$BATS_TEST_TMPDIR/stub"
+    mkdir -p "$STUB_DIR"
+    cp "$behaviour" "$STUB_DIR/dig"
+    chmod +x "$STUB_DIR/dig"
+    PATH="$STUB_DIR:$PATH"
+    sleep() { :; }
+    eval "$(sed -n '/^resolve_domain()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
+    resolve_domain "$domain"
+}
+
+@test "domain resolution returns the A records dig answered with" {
+    cat > "$BATS_TEST_TMPDIR/ok" <<'EOF'
+#!/bin/bash
+echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
+echo "files.pythonhosted.org.	60	IN	A	151.101.128.223"
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/ok"
+    [ "$status" -eq 0 ]
+    [ "$output" = "151.101.64.223
+151.101.128.223" ]
+}
+
+@test "a failing dig is reported rather than killing the script on the assignment" {
+    # This is the one that aborted CI: `ips=$(dig ... | awk ...)` under
+    # pipefail, with dig exiting non-zero. No message, no container.
+    cat > "$BATS_TEST_TMPDIR/servfail" <<'EOF'
+#!/bin/bash
+echo ";; connection timed out; no servers could be reached" >&2
+exit 9
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/servfail"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
+    [[ "$output" == *"attempt 3/3: dig exited 9"* ]]
+    [[ "$output" == *"no servers could be reached"* ]]
+}
+
+@test "an answer with no A records is distinguished from a failing lookup" {
+    # A CNAME-only answer, or one dnsmasq's stop-dns-rebind refused. Both look
+    # like an empty A list, and the raw answer is what tells them apart.
+    cat > "$BATS_TEST_TMPDIR/cname" <<'EOF'
+#!/bin/bash
+echo "release-assets.githubusercontent.com. 60 IN CNAME example.map.fastly.net."
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/cname" release-assets.githubusercontent.com
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no A records"* ]]
+    [[ "$output" == *"CNAME"* ]]
+    [[ "$output" != *"dig exited"* ]]
+}
+
+@test "domain resolution recovers when a later attempt answers" {
+    cat > "$BATS_TEST_TMPDIR/flaky" <<'EOF'
+#!/bin/bash
+n="$BATS_TEST_TMPDIR/digs"
+count=$(cat "$n" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$n"
+if [ "$count" -lt 1 ]; then exit 9; fi
+echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
+EOF
+    run run_resolve "$BATS_TEST_TMPDIR/flaky"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
+    [[ "$output" == *"151.101.64.223"* ]]
+}
+
+@test "each dig attempt is bounded, so one unanswered lookup cannot eat the budget" {
+    # dig's defaults are 5s x 3 tries. Three attempts of that is 45s spent on
+    # one domain, inside a startup the test suite gives 120s in total.
+    grep -qE 'dig .*\+time=[0-9]+ \+tries=[0-9]+' "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "the extra-domains loop resolves through the same path, so non-fatal is true" {
+    # Its comment says failures there are non-fatal. With a bare
+    # `ips=$(dig ... | awk ...)` that held for a domain that resolved to
+    # nothing and not for one whose lookup errored - pipefail took the whole
+    # script down instead of warning and skipping.
+    local bare
+    bare=$(awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ips=\$\(dig/ { print FNR": "$0 }
+    ' "$SANDBOX_DIR/init-firewall.sh")
+    [ -z "$bare" ] || {
+        echo "a dig is still assigned directly, so pipefail can kill the script:" >&2
+        echo "$bare" >&2
+        false
+    }
+    grep -q 'if ! ips=$(resolve_domain "$domain"); then' "$SANDBOX_DIR/init-firewall.sh"
+}
+
+@test "an empty response is reported as empty, not as a missing field" {
+    cat > "$BATS_TEST_TMPDIR/empty" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/empty"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"empty response"* ]]
+}
+
 @test "the zsh installer runs from a file, so a failed download fails the build" {
     # Upstream documents `sh -c "$(wget -O- ...)"`. In that form a failed
     # download substitutes to an empty string and `sh -c ""` exits 0, so the
@@ -452,7 +744,12 @@ setup() {
     # Unauthenticated /meta is capped at 60 requests/hour per source IP,
     # shared across every container start; exhausting it fails the launch.
     grep -q 'gh_auth=(-H "Authorization: Bearer \$GH_TOKEN")' "$SANDBOX_DIR/init-firewall.sh"
-    grep -q 'curl -s \${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
+    # The array reaching the request to /meta is the property; the flags around
+    # it are no longer pinned here, because they now have tests of their own
+    # ("every fetch in the container's startup path has a deadline" and the
+    # behavioural ones above). Pinning the whole invocation twice made adding a
+    # timeout to it fail a test about the token.
+    grep -q '\${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
 }
 
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
@@ -970,11 +1267,24 @@ this line is not json'
     # the container dies mid-startup - which used to surface as flaky,
     # sometimes vacuous tests rather than an obvious failure. See runtime.bats'
     # wait_ready comment.
+    # Detached and foreground starts both count - the transport test runs its
+    # container in the foreground, to read the container's own streams rather
+    # than the daemon's log driver (see its comment), and it needs a network
+    # every bit as much as the detached ones.
+    #
+    # Exempted: runs that replace the entrypoint with a plain shell. Those
+    # never reach dns-proxy.sh, so there is nothing for a resolver to be
+    # missing from - the image/checkout comparison in setup_file is one, and it
+    # only runs md5sum.
     local runs networks
-    runs=$(grep -cE '^\s*docker run -d' "$REPO_ROOT/test/runtime.bats")
+    runs=$(grep -E '^\s*(run timeout [0-9]+ )?docker run ' "$REPO_ROOT/test/runtime.bats" \
+        | grep -vc -- '--entrypoint sh')
     networks=$(grep -cE '^\s*--network ' "$REPO_ROOT/test/runtime.bats")
     [ "$runs" -gt 0 ]
-    [ "$runs" -eq "$networks" ]
+    [ "$runs" -eq "$networks" ] || {
+        echo "$runs container starts that run the real entrypoint, but $networks --network flags" >&2
+        false
+    }
 }
 
 @test "runtime.bats readiness waits for the final sleep infinity, not any startup sleep" {
@@ -1201,6 +1511,13 @@ EOF
 @test "install.sh links the per-project CLIs alongside the existing ones" {
     grep -qx 'link_bin dejima-dep' "$REPO_ROOT/install.sh"
     grep -qx 'link_bin dejima-project' "$REPO_ROOT/install.sh"
+}
+
+@test "install.sh puts the exit-time audit CLI on PATH" {
+    # bin/dejima's own startup warning tells the operator to run
+    # `dejima-audit ack ...` by name; that instruction is only true if the
+    # installer links it like every other user-facing CLI here.
+    grep -qx 'link_bin dejima-audit' "$REPO_ROOT/install.sh"
 }
 
 @test "README documents the declaration/approval split" {
@@ -1579,4 +1896,20 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
         fi
     done
     [ "$fail" -eq 0 ]
+}
+
+@test "no container mount covers the audit store" {
+    # The audit now keeps retained diffs of pre-session content under
+    # ~/.local/share/dejima. Everything about that is premised on the
+    # container not being able to read them - so a future mount that reaches
+    # it must break a test rather than silently opening the boundary.
+    # ~/.local/share/nvim is mounted (a named volume); its PARENT must not be.
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share/dejima' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.local:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
+    run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ]
 }

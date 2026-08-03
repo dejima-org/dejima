@@ -1,0 +1,15 @@
+{
+  "name": "dejima-ttyd-client",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Touch-friendly ttyd frontend for dejima, built into a single self-contained index.html",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0"
+  }
+}

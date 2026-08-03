@@ -648,10 +648,10 @@ write_config() {
             | sed 's/^=\[//; s/\] /./')"
     # Asserted explicitly so a grep that silently stops matching anything
     # (e.g. after the table is reformatted) fails loudly instead of passing
-    # vacuously over an empty list. 24, not 22: GITEA_TOKEN and GH_TOKEN each
+    # vacuously over an empty list. 25, not 23: GITEA_TOKEN and GH_TOKEN each
     # also point at [forge.gitea]/[github] token_file, alongside the
     # corresponding _FILE row.
-    [ "$(printf '%s\n' "$keys" | wc -l)" -eq 24 ]
+    [ "$(printf '%s\n' "$keys" | wc -l)" -eq 25 ]
     while IFS= read -r key; do
         run lib _config_spec "$key"
         [ "$status" -eq 0 ] || { echo "detector names unknown key: $key"; return 1; }

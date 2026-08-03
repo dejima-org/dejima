@@ -65,11 +65,13 @@ audit.dir	path	~/.local/share/dejima/audit
 audit.baselines_dir	path	~/.local/share/dejima/baselines
 audit.keep	int:1:1000	10
 audit.strict	bool	off
+audit.diffs	bool	on
 remote-access.enabled	bool	off
 remote-access.ntfy_url	?url
 remote-access.base_url	?url
 remote-access.ttyd_port	int:1:65535	7681
 remote-access.ttyd_font_size	?int:8:72
+remote-access.ttyd_tmux_prefix	?chord
 remote-access.debounce	int:0:86400	60
 EOF
 }
@@ -243,6 +245,13 @@ _config_valid_value() {
             ;;
         identifier)
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+            ;;
+        chord)
+            # A tmux control chord, as the remote terminal page's PREFIX,
+            # window and ZOOM buttons send. Narrower than tmux's own prefix
+            # syntax - C-\ and C-] are excluded - because the value is
+            # interpolated into the page's client options.
+            [[ "$value" =~ ^[Cc]-([A-Za-z@_?]|[Ss]pace)$ ]]
             ;;
         *)
             _config_extra_type_valid "$type" "$value"
