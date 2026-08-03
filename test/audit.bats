@@ -998,6 +998,21 @@ REPORT
     [[ "$output" == *".envrc"* ]]
 }
 
+@test "show finds the parent repo's report even after the worktree itself was snapshotted" {
+    # snapshot alone now creates the workspace's .staging/ dir, report or
+    # not - resolve_ws() must not mistake that for evidence of a report, or
+    # it stops at the worktree candidate before ever trying the parent.
+    git -C "$WS" commit -q --allow-empty -m init
+    git -C "$WS" worktree add -q "$WS/.worktrees/wt" -b wt
+    snap
+    printf 'x\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    "$AUDIT" snapshot "$WS/.worktrees/wt" "$(mktemp)"
+    run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".envrc"* ]]
+}
+
 @test "show names the path it resolved when that workspace has no reports" {
     # A wrong guess must be visible, not silent - the operator has to be able
     # to tell "nothing happened here" from "you are looking at the wrong repo".
@@ -1180,6 +1195,23 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     [ -f "$d/$(key_of '.claude/settings.json')" ]
 }
 
+@test "a nested dotenv file is never staged, matched on basename rather than exact path" {
+    # hash_paths() walks .claude/, .vscode/ and .git/hooks/ recursively, so a
+    # dotenv file can appear nested (e.g. .claude/.env) - the exact-path
+    # denylist arm only ever matches the un-nested form and would miss it.
+    mkdir -p "$WS/.claude"
+    printf 'SECRET=1\n' > "$WS/.claude/.env"
+    printf 'SECRET=2\n' > "$WS/.claude/.env.production"
+    printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ ! -e "$d/$(key_of '.claude/.env')" ]
+    [ ! -e "$d/$(key_of '.claude/.env.production')" ]
+    # ...but an ordinary sibling file still is
+    [ -f "$d/$(key_of '.claude/settings.json')" ]
+}
+
 @test "nothing is staged when the audit store is inside the workspace" {
     # The store is only out of the sandbox's reach while it is outside the
     # mounted workspace. Inside it, retained content is readable AND
@@ -1189,17 +1221,33 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
 }
 
+@test "nothing is staged when the audit store is a relative path resolving inside the workspace" {
+    # store_reachable must canonicalise both sides before comparing - a
+    # relative DEJIMA_AUDIT_DIR (resolved against cwd) can land inside $ws
+    # just as easily as an absolute one, and the raw-string comparison used
+    # to miss it entirely.
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    bash -c "cd '$WS' && DEJIMA_AUDIT_DIR=audit '$AUDIT' snapshot '$WS' '$STATE'"
+    [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
+}
+
 @test "nothing is staged when DEJIMA_AUDIT_DIFFS=0" {
     mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
     DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
     [ -z "$(staged_dirs)" ]
 }
 
-@test "a file over the staging cap is not staged" {
+@test "a file over the staging cap is not staged, while a smaller file in the same run still is" {
+    # The previous version of this test asserted only the negative, which
+    # passed vacuously (staged_dirs empty -> $d empty -> the -e check is
+    # trivially true) even before any staging existed at all.
     mkdir -p "$WS/.claude"
+    printf 'small\n' > "$WS/.claude/small.md"
     head -c 2000000 /dev/zero | tr '\0' 'a' > "$WS/.claude/big.md"
     snap
     d="$(staged_dirs | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.claude/small.md')" ]
     [ ! -e "$d/$(key_of '.claude/big.md')" ]
 }
 

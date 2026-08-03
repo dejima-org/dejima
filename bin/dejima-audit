@@ -102,7 +102,11 @@ resolve_ws() {
     fi
     for c in "$top" "$main" "$PWD"; do
         [ -n "$c" ] || continue
-        [ -d "$AUDIT_DIR/$(ws_slug "$c")" ] || continue
+        # A bare slug directory is no longer proof of a report - `snapshot`
+        # now creates one's .staging/ subdir for every workspace it runs
+        # against, report or not. Only an actual report is evidence of which
+        # path bin/dejima was invoked with.
+        select_report "$AUDIT_DIR/$(ws_slug "$c")" >/dev/null 2>&1 || continue
         printf '%s' "$c"
         return
     done
@@ -143,9 +147,16 @@ id_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 # This is the reliable half of the secret defence; looks_secret() (used at
 # promote time) is the best-effort half.
 diff_denied() {
-    case "${1#tcb:}" in
+    local id="${1#tcb:}"
+    case "$id" in
         .envrc|.mcp.json|.claude/settings.local.json) return 0 ;;
-        .env|.env.*)                                  return 0 ;;
+    esac
+    # Basename match, not exact-path: hash_paths() walks .claude/, .vscode/
+    # and .git/hooks/ recursively, so a dotenv file can appear nested (e.g.
+    # .claude/.env) - the exact-path arm above only ever matches the id in
+    # its ORIGINAL, un-nested form, and never would.
+    case "${id##*/}" in
+        .env|.env.*) return 0 ;;
     esac
     return 1
 }
@@ -158,9 +169,15 @@ diff_denied() {
 # because the whole premise of storing bytes here is that the container
 # cannot read them.
 store_reachable() {
-    local d
+    local d rws rd
+    # Canonicalised, not raw: a relative DEJIMA_AUDIT_DIR (e.g. "audit" with
+    # cwd inside $ws) would otherwise never match the "$rws"/* pattern below
+    # and stage straight into the container's read-write mount. A failed
+    # canonicalisation is treated as reachable so this fails closed.
+    rws="$(readlink -f "$ws" 2>/dev/null)" || return 0
     for d in "$AUDIT_DIR" "$BASELINE_DIR"; do
-        case "$d/" in "$ws"/*) return 0 ;; esac
+        rd="$(readlink -f "$d" 2>/dev/null)" || return 0
+        case "$rd/" in "$rws"/*) return 0 ;; esac
     done
     return 1
 }
@@ -215,8 +232,9 @@ reap_staging() {
 
 # Copy one surface's current bytes into the staging directory, to become the
 # BEFORE side of a diff after the session ends. No-op unless `snapshot` set
-# STAGE_DIR. Symlinks stage their target string, matching what hash_entry()
-# hashes for them.
+# STAGE_DIR. Symlinks stage "-> <target>", matching what
+# current_content_for_id() renders for them - the staged BEFORE bytes must
+# line up with the after-side content renderer, not the hasher.
 stage_entry() {
     [ -n "$STAGE_DIR" ] || return 0
     local id="$1" src="$2" key sz
