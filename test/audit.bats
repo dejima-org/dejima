@@ -1460,13 +1460,14 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     ! grep -rq 'xY12abcd9999' "$(sidecar)"
 }
 
-@test "a multi-valued exec key never retains an empty diff" {
+@test "an exec key the session made multi-valued never retains an empty diff" {
     # git executes the LAST value of a multi-valued key, but
-    # gitconfig_value_for_key returns the first match over a sorted snapshot,
-    # so both sides of this diff resolve to 'less' and it comes out empty. An
-    # empty .diff is worse than none once ack prefers the retained diff over
-    # live content: the operator would be shown a blank before/after for a
-    # CRITICAL exec-key change.
+    # gitconfig_value_for_key returns the first match over a SORTED snapshot,
+    # so a comparison here would have both sides resolve to 'less' and come
+    # out empty. An empty .diff is worse than none once ack prefers the
+    # retained diff over live content: the operator would be shown a blank
+    # before/after for a CRITICAL exec-key change. Either side being
+    # multi-valued is the signal that no honest comparison is available.
     git -C "$WS" config core.pager 'less'
     snap
     git -C "$WS" config --add core.pager 'zsh'
@@ -1474,7 +1475,75 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     [[ "$output" == *"core.pager"* ]]
     f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
     [ ! -e "$f.diff" ]
+    grep -qi 'multiple values' "$f.withheld"
+}
+
+@test "a multi-valued exec key never retains a fabricated diff" {
+    # Two pre-session values (git resolves to 'bbb'), one appended by the
+    # session ('zzz-evil', which git now runs). promote_gitconfig's before
+    # loop collects BOTH pre-session values, so comparing built a diff saying
+    # 'bbb' was removed - nothing was removed, and zzz-evil, the value git
+    # will execute, appeared nowhere in it. Approving that diff pinned
+    # sha256("aaa") and let the report shed its -CRITICAL protection.
+    git -C "$WS" config core.pager 'aaa'
+    git -C "$WS" config --add core.pager 'bbb'
+    snap
+    git -C "$WS" config --add core.pager 'zzz-evil'
+    run cmp_
+    [[ "$output" == *"core.pager=zzz-evil"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
+    grep -qi 'multiple values' "$f.withheld"
+    # Nothing claiming a pre-session value was removed reaches the prompt.
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"multiple values"* ]]
+    [[ "$output" != *"before (pre-session)"* ]]
+    [[ "$output" != *"-bbb"* ]]
+}
+
+@test "a re-quoted config value says the comparison came out empty" {
+    # The remaining route to an empty diff now that multi-valued keys never
+    # reach one: the config file's TEXT changed (git_config_snapshot compares
+    # raw lines, so this is a finding) while unquote_value flattens both
+    # sides back to the same string. A 0-byte .diff would show the operator a
+    # blank before/after for a CRITICAL exec-key change.
+    git -C "$WS" config core.pager 'less'
+    snap
+    sed -i 's/pager = less/pager = "less"/' "$WS/.git/config"
+    run cmp_
+    [[ "$output" == *"core.pager"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
     grep -qi 'compared equal' "$f.withheld"
+}
+
+@test "a huge current-side file is capped before it is copied into TMPDIR" {
+    # Every cap in this design used to apply AFTER the bytes were on disk, so
+    # `compare` - which runs from bin/dejima's EXIT trap, on a size the
+    # session chooses - copied the whole current file into $TMPDIR just to
+    # produce a marker. $TMPDIR is frequently a tmpfs, which makes that "a
+    # session filled the host's RAM at exit", and a SIGKILL mid-compare leaves
+    # the copy behind (cleanup_staging covers BEFORE_DIR only).
+    mkdir -p "$WS/.claude"; printf 'x\n' > "$WS/.claude/notes.md"
+    snap
+    # Sparse: making it costs nothing, copying it costs 200 MB.
+    truncate -s 200M "$WS/.claude/notes.md"
+    tmp="$(mktemp -d)"; peak="$(mktemp)"
+    : > "$tmp/.running"
+    ( while [ -e "$tmp/.running" ]; do
+          find "$tmp" -maxdepth 1 -type f ! -name '.running' -printf '%s\n' \
+              >> "$peak" 2>/dev/null
+          sleep 0.02
+      done ) & watcher=$!
+    TMPDIR="$tmp" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    rm -f "$tmp/.running"; wait "$watcher" 2>/dev/null || true
+    # The size gate fired instead of the copy. Without it this lands on
+    # 'binary content' (the file is all NULs) - having written 200 MB to
+    # find that out.
+    grep -qi 'too large' "$(sidecar)/$(key_of '.claude/notes.md').withheld"
+    max="$(sort -n "$peak" | tail -1)"; max="${max:-0}"
+    [ "$max" -le 1048576 ]
+    rm -rf "$tmp" "$peak"
 }
 
 @test "retained diffs are capped by a per-report budget, and exhausting it is reported" {

@@ -113,8 +113,18 @@ one can't happen.
   is caught too, not just one at the workspace root. A surface that
   existed before the session but was too large to have been staged (over
   1 MiB) withholds with "no pre-session copy", not a false claim that it
-  is new. A generated diff is withheld if it is binary, over 200 lines or
-  64 KiB, or matches a best-effort credential screen - vendor prefixes
+  is new. The *current* side is bounded by that same 1 MiB cap, and - like
+  the staged side - the size is checked *before* any copy is taken: a file
+  the session grew past it withholds with "change too large to retain"
+  rather than being copied through `$TMPDIR` first. That ordering is the
+  point, not the cap: `compare` runs from the exit trap on every session
+  exit and the size is the session's own choice, so copying first would
+  let a session turn "I filled my own workspace" into that many bytes
+  written to `$TMPDIR` - frequently a tmpfs, i.e. host RAM - at exit, and
+  into a whole copy of the file left sitting there if that exit was a
+  `SIGKILL`. A generated diff is withheld if it is binary, over 200 lines
+  or 64 KiB (and is bounded to that as it is generated, for the same
+  reason), or matches a best-effort credential screen - vendor prefixes
   including `sk-ant-`, `sk-proj-`, `ghp_`, `gho_`, `github_pat_`,
   `glpat-`, Slack's `xox[baprs]-`, `AIza`, `AKIA`, `_authToken`,
   `Authorization: Bearer`, and PEM private-key headers, matched
@@ -122,13 +132,25 @@ one can't happen.
   the only net for, `.claude/settings.json`'s `env` block, conventionally
   holds its keys upper-case). That screen is still explicitly best-effort
   and has real false negatives - the denylist above is the reliable half
-  of the defence, this is the second net. A generated diff can also come
-  out empty - before and after compare equal even though the finding was
-  reported as a change - for a multi-valued git config key, where the
-  value used for comparison is only the *first* one but git itself acts
-  on the *last*; that case withholds too, saying plainly that the
-  comparison came out empty rather than silently showing nothing, since
-  an empty diff for a reported change would otherwise read as a bug.
+  of the defence, this is the second net. A git config key holding more
+  than one value on either side of the session is not compared at all:
+  git resolves such a key to its *last* value in *file* order, and the
+  audit does not resolve it - it parses the config files and sorts, so
+  lexicographically-last is not the value git will run, and the
+  pre-session side is every value the key had rather than one. Comparing
+  anyway produced a diff over values git does not use: with two
+  pre-session values it read as a deletion that never happened, while the
+  value the session actually appended - the one git now executes -
+  appeared nowhere in it. That case withholds with "this key has multiple
+  values and git uses the last", and must be compared by hand;
+  `include.path` is legitimately multi-valued, so this is an ordinary
+  shape, not only a planted one. A generated diff can also still come out
+  empty - before and after compare equal even though the finding was
+  reported as a change - when the config file's *text* changed while the
+  parsed value did not, e.g. a value that was re-quoted; that case
+  withholds too, saying plainly that the comparison came out empty rather
+  than silently showing nothing, since an empty diff for a reported
+  change would otherwise read as a bug.
 
   A per-report **retention budget** (`RETAIN_BUDGET`, 1 MiB) also bounds
   the total diff bytes one report may keep. Once it is spent, remaining

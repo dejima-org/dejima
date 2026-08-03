@@ -353,15 +353,24 @@ existed_before() {
 write_diff() {
     local before="$1" cur="$2" sc="$3" key="$4" d sz
     d="$(mktemp)" || return 0
-    diff -U2 --label 'before (pre-session)' --label 'current' "$before" "$cur" > "$d" 2>/dev/null
+    # Bounded AT generation, not after it: everything over the cap is
+    # discarded anyway, and `compare` runs from bin/dejima's EXIT trap, so
+    # letting diff write the whole thing first would put an unbounded,
+    # session-chosen number of bytes into $TMPDIR (frequently a tmpfs, i.e.
+    # host RAM) on every session exit just to produce a marker. One byte past
+    # the cap, so the over-cap test below still trips.
+    diff -U2 --label 'before (pre-session)' --label 'current' "$before" "$cur" 2>/dev/null \
+        | head -c "$(( DIFF_BYTE_CAP + 1 ))" > "$d"
     sz="$(wc -c < "$d")" || sz=0
     if [ "$sz" -eq 0 ]; then
         # An empty diff is worse than none: Task 6 prefers the retained diff
         # over live content, so a 0-byte file would show the operator a blank
-        # before/after for a real finding. It happens for a multi-valued git
-        # config key, where both sides resolve to the same single value (see
-        # gitconfig_value_for_key). Say the comparison came out empty instead
-        # of silently showing nothing.
+        # before/after for a real finding. It happens for a git config key
+        # whose config-file TEXT changed while its parsed value did not - a
+        # re-quoted value, say - which the raw-line comparison in `compare`
+        # reports as a change and unquote_value() then flattens back to
+        # equal. Say the comparison came out empty instead of silently
+        # showing nothing.
         withhold "$sc/$key.withheld" "before and after compared equal - the change is not visible in a line diff; compare by hand"
     elif [ "$(wc -l < "$d")" -gt "$DIFF_LINE_CAP" ] || [ "$sz" -gt "$DIFF_BYTE_CAP" ]; then
         withhold "$sc/$key.withheld" "change too large to retain - compare by hand"
@@ -394,6 +403,20 @@ promote_gitconfig() {
         : > "$sc/$key.new" 2>/dev/null || true
         rm -f "$before"; return 0
     fi
+    # git resolves a multi-valued key to its LAST value in FILE order, and
+    # nothing here can say which that is: git_config_snapshot sorts, so last
+    # in this list is lexicographically last, not the value git will run.
+    # Neither side of such a comparison is therefore trustworthy, and the
+    # loop above collects EVERY pre-session value - so with two of them the
+    # diff read as "the second one was removed" when nothing was removed at
+    # all, while the value the session appended (the one git now executes)
+    # appeared nowhere in it. Refuse to compare rather than show the operator
+    # a diff over values git does not use.
+    if [ "$(wc -l < "$before")" -gt 1 ] \
+       || [ "$(gitconfig_count_for_key "$ws" "$ckey")" -gt 1 ]; then
+        withhold "$sc/$key.withheld" "this key has multiple values and git uses the last - compare by hand"
+        rm -f "$before"; return 0
+    fi
     cur="$(mktemp)" || { rm -f "$before"; return 0; }
     if current_content_for_id "$rid" > "$cur" 2>/dev/null; then
         write_diff "$before" "$cur" "$sc" "$key"
@@ -412,7 +435,7 @@ promote_gitconfig() {
 # to a marker rather than failing: this runs from bin/dejima's EXIT trap and
 # must never change the session's exit status.
 promote_finding() {
-    local rid="$1" sc="$2" key before cur
+    local rid="$1" sc="$2" key before cur src csz
     key="$(id_key "$rid")"
 
     if store_reachable; then
@@ -453,6 +476,26 @@ promote_finding() {
         # unavailable this run, or a copy that failed. Say so rather than
         # claiming it is new.
         withhold "$sc/$key.withheld" "no pre-session copy - compare by hand"
+        return 0
+    fi
+    # The after side gets the same cap the before side got at staging time,
+    # and - like there - it is checked BEFORE any copy is taken. `compare`
+    # runs from bin/dejima's EXIT trap and this size is the session's own
+    # choice, so copying first would let any session turn "I filled my own
+    # workspace" into that many bytes written to $TMPDIR (frequently a tmpfs,
+    # i.e. host RAM) at every exit, and into a whole copy of the file left
+    # sitting there if that exit was the SIGKILL case rm -f never survives.
+    # Mirrors current_content_for_id's dispatch; gitconfig ids never reach
+    # here (promote_gitconfig returned above), and stat does not follow a
+    # symlink, whose rendering is its target string rather than its content.
+    case "$rid" in
+        statusline:*) src="$STATUSLINE_PATH" ;;
+        tcb:*)        src="$ws/${rid#tcb:}" ;;
+        *)            src="$ws/$rid" ;;
+    esac
+    csz="$(stat -c %s "$src" 2>/dev/null)" || csz=0
+    if [ "$csz" -gt "$STAGE_FILE_CAP" ]; then
+        withhold "$sc/$key.withheld" "change too large to retain - compare by hand"
         return 0
     fi
     cur="$(mktemp)" || return 0
@@ -847,6 +890,18 @@ gitconfig_value_for_key() {
         return 0
     done < <(git_config_snapshot "$ws")
     return 1
+}
+
+# How many values a git config key currently holds. Only ever compared
+# against 1: more than one and neither gitconfig_value_for_key above nor the
+# state file's pre-session lines can say which value git will actually use
+# (see promote_gitconfig).
+gitconfig_count_for_key() {
+    local ws="$1" key="$2" line n=0
+    while IFS= read -r line; do
+        [ "${line%%=*}" = "$key" ] && n=$(( n + 1 ))
+    done < <(git_config_snapshot "$ws")
+    printf '%s' "$n"
 }
 
 # Print a file for the operator: sanitized per line (this is
