@@ -1409,7 +1409,12 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
     DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
     ! grep -rq 'curl evil' "$WS/audit"
-    [ -n "$(find "$WS/audit" -name '*.withheld')" ]
+    # The REASON, not just the absence: without the store_reachable arm this
+    # finding still lands on the "no pre-session copy" withhold (nothing was
+    # staged either), so an absence-only assertion passes with the gate gone.
+    w="$(find "$WS/audit" -name '*.withheld')"
+    [ -n "$w" ]
+    grep -q 'store is inside the mounted workspace' "$w"
 }
 
 @test "no diffs are retained when DEJIMA_AUDIT_DIFFS=0" {
@@ -1418,6 +1423,10 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
     DEJIMA_AUDIT_DIFFS=0 "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
     ! grep -rq 'curl evil' "$AUDITDIR"
+    # No sidecar AT ALL, not merely no content in it: with the DIFFS_ENABLED
+    # gate deleted the directory is still created and filled with withheld
+    # reasons, which the grep above would not notice.
+    [ -z "$(find "$AUDITDIR" -name '*.d' -type d)" ]
 }
 
 @test "rotation removes a report's retained diffs along with the report" {
@@ -1434,4 +1443,94 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     [ "$(find "$AUDITDIR" -name '*.txt' | wc -l)" -le 2 ]
     [ "$(find "$AUDITDIR" -maxdepth 2 -name '*.d' -type d | wc -l)" \
       -le "$(find "$AUDITDIR" -name '*.txt' | wc -l)" ]
+}
+
+@test "an uppercase-named credential is caught by the retention screen" {
+    # .claude/settings.json is deliberately outside diff_denied(), so
+    # looks_secret() is the ONLY net over its env block - and that block
+    # names its credentials in upper case. A case-sensitive keyword match put
+    # live tokens in the store in cleartext. The value here matches no
+    # vendor-prefix alternative, so only the case-insensitive keyword arm can
+    # catch it.
+    mkdir -p "$WS/.claude"; printf '{}\n' > "$WS/.claude/settings.json"
+    snap
+    printf '{"env":{"NPM_TOKEN":"xY12abcd9999"}}\n' > "$WS/.claude/settings.json"
+    cmp_ >/dev/null
+    [ -f "$(sidecar)/$(key_of '.claude/settings.json').withheld" ]
+    ! grep -rq 'xY12abcd9999' "$(sidecar)"
+}
+
+@test "a multi-valued exec key never retains an empty diff" {
+    # git executes the LAST value of a multi-valued key, but
+    # gitconfig_value_for_key returns the first match over a sorted snapshot,
+    # so both sides of this diff resolve to 'less' and it comes out empty. An
+    # empty .diff is worse than none once ack prefers the retained diff over
+    # live content: the operator would be shown a blank before/after for a
+    # CRITICAL exec-key change.
+    git -C "$WS" config core.pager 'less'
+    snap
+    git -C "$WS" config --add core.pager 'zsh'
+    run cmp_
+    [[ "$output" == *"core.pager"* ]]
+    f="$(sidecar)/$(key_of 'gitconfig:core.pager')"
+    [ ! -e "$f.diff" ]
+    grep -qi 'compared equal' "$f.withheld"
+}
+
+@test "retained diffs are capped by a per-report budget, and exhausting it is reported" {
+    mkdir -p "$WS/.claude"
+    # Lines of 'aaaa ' rather than solid 'a': a 40+ run of base64 characters
+    # trips looks_secret, which would withhold every diff and never reach the
+    # budget at all.
+    a="$(yes 'aaaa' | head -200 | tr '\n' ' ')"
+    b="$(yes 'bbbb' | head -200 | tr '\n' ' ')"
+    for i in $(seq 1 20); do
+        for j in $(seq 1 30); do printf '%s\n' "$a"; done > "$WS/.claude/f$i.md"
+    done
+    snap
+    for i in $(seq 1 20); do
+        for j in $(seq 1 30); do printf '%s\n' "$b"; done > "$WS/.claude/f$i.md"
+    done
+    run cmp_
+    # Said in the exit-time summary...
+    [[ "$output" == *"retention budget spent after"* ]]
+    [[ "$output" == *"ABNORMAL"* ]]
+    # ...and in the report itself.
+    grep -q 'retention budget spent after' "$(find "$AUDITDIR" -name '*.txt' | head -1)"
+    # Budget actually held: what was kept is under it, and the rest said why.
+    [ "$(cat "$(sidecar)"/*.diff | wc -c)" -le 1048576 ]
+    grep -lq 'budget' "$(sidecar)"/*.withheld
+}
+
+@test "retained markers and reasons are not world-readable" {
+    umask 022
+    printf 'export TOKEN=old\n' > "$WS/.envrc"
+    snap
+    printf 'export TOKEN=hunter2\n' > "$WS/.envrc"
+    cmp_ >/dev/null
+    [ "$(stat -c %a "$(sidecar)/$(key_of '.envrc').withheld")" = 600 ]
+}
+
+@test "a surface too large to have been staged says so instead of claiming to be new" {
+    # Over STAGE_FILE_CAP, so snapshot staged nothing for it - but it existed,
+    # and calling it new would promise there is no earlier version to compare
+    # against.
+    mkdir -p "$WS/.claude"
+    head -c 2000000 /dev/zero | tr '\0' 'a' > "$WS/.claude/big.md"
+    snap
+    head -c 2000000 /dev/zero | tr '\0' 'b' > "$WS/.claude/big.md"
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of '.claude/big.md')"
+    [ ! -e "$f.new" ]
+    grep -q 'no pre-session copy' "$f.withheld"
+}
+
+@test "a git config exec key set for the first time retains a marker, not a diff" {
+    snap
+    git -C "$WS" config core.hooksPath /tmp/evil
+    cmp_ >/dev/null
+    f="$(sidecar)/$(key_of 'gitconfig:core.hooksPath')"
+    [ -f "$f.new" ]
+    [ ! -s "$f.new" ]
+    [ ! -e "$f.diff" ]
 }

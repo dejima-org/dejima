@@ -279,6 +279,14 @@ open_staging() {
 DIFF_LINE_CAP=200
 DIFF_BYTE_CAP=65536
 
+# Total retained-diff bytes one report may hold. Fixed, not configurable, in
+# the same spirit as CRIT_CAP/WARN_CAP - and like CRIT_CAP's overflow,
+# spending it is a finding rather than a tuning problem: more changed
+# host-persistence surfaces in one session than there is room to keep the
+# evidence for is itself abnormal, so both the report and the exit-time
+# summary say so.
+RETAIN_BUDGET=1048576
+
 # Set only by `compare`, from the state file's ### staging line: where this
 # session's BEFORE content was staged. Distinct from STAGE_DIR (write side)
 # so that compare's own call to hash_paths() cannot overwrite the before
@@ -298,9 +306,16 @@ sidecar_dir() {
 # promoted. This is the SECOND net - diff_denied() is the reliable one - and
 # it has real false negatives. False positives only cost a withheld diff, so
 # it is deliberately broad.
+#
+# Case-INSENSITIVE, and that is load-bearing rather than cosmetic: the
+# canonical shape of a credential in the one high-value surface this is the
+# only net for is UPPERCASE. .claude/settings.json is deliberately outside
+# diff_denied() (it is the shared, committed file - see there), and its `env`
+# block is exactly where GITLAB_TOKEN/NPM_TOKEN/... live, so a case-sensitive
+# keyword match put live tokens in the store in cleartext.
 looks_secret() {
-    LC_ALL=C grep -qE \
-        'sk-ant-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|apikey|secret|token|passwd|password)[[:space:]"'"'"']*[:=][[:space:]"'"'"']*[^[:space:]"'"'"']{8,}|[A-Za-z0-9+/]{40,}={0,2}' \
+    LC_ALL=C grep -qiE \
+        'sk-ant-|sk-proj-|ghp_|gho_|github_pat_|glpat-|xox[baprs]-|AIza|AKIA[0-9A-Z]{16}|_authToken|Authorization:[[:space:]]*Bearer|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|apikey|secret|token|passwd|password)[[:space:]"'"'"']*[:=][[:space:]"'"'"']*[^[:space:]"'"'"']{8,}|[A-Za-z0-9+/]{40,}={0,2}' \
         "$1"
 }
 
@@ -336,15 +351,31 @@ existed_before() {
 # differ only in where the BEFORE side comes from, and a second copy of these
 # caps would be a second place for them to drift.
 write_diff() {
-    local before="$1" cur="$2" sc="$3" key="$4" d
+    local before="$1" cur="$2" sc="$3" key="$4" d sz
     d="$(mktemp)" || return 0
     diff -U2 --label 'before (pre-session)' --label 'current' "$before" "$cur" > "$d" 2>/dev/null
-    if [ "$(wc -l < "$d")" -gt "$DIFF_LINE_CAP" ] || [ "$(wc -c < "$d")" -gt "$DIFF_BYTE_CAP" ]; then
+    sz="$(wc -c < "$d")" || sz=0
+    if [ "$sz" -eq 0 ]; then
+        # An empty diff is worse than none: Task 6 prefers the retained diff
+        # over live content, so a 0-byte file would show the operator a blank
+        # before/after for a real finding. It happens for a multi-valued git
+        # config key, where both sides resolve to the same single value (see
+        # gitconfig_value_for_key). Say the comparison came out empty instead
+        # of silently showing nothing.
+        withhold "$sc/$key.withheld" "before and after compared equal - the change is not visible in a line diff; compare by hand"
+    elif [ "$(wc -l < "$d")" -gt "$DIFF_LINE_CAP" ] || [ "$sz" -gt "$DIFF_BYTE_CAP" ]; then
         withhold "$sc/$key.withheld" "change too large to retain - compare by hand"
     elif looks_secret "$d"; then
         withhold "$sc/$key.withheld" "change appears to contain a credential - diff not retained"
+    elif [ "$(( retain_spent + sz ))" -gt "$RETAIN_BUDGET" ]; then
+        withhold "$sc/$key.withheld" "retention budget for this report is spent - compare by hand"
+        retain_squeezed=$(( retain_squeezed + 1 ))
     else
-        cp -- "$d" "$sc/$key.diff" 2>/dev/null || rm -f "$sc/$key.diff"
+        if cp -- "$d" "$sc/$key.diff" 2>/dev/null; then
+            retain_spent=$(( retain_spent + sz ))
+        else
+            rm -f "$sc/$key.diff"
+        fi
     fi
     rm -f "$d"
     return 0
@@ -367,7 +398,10 @@ promote_gitconfig() {
     if current_content_for_id "$rid" > "$cur" 2>/dev/null; then
         write_diff "$before" "$cur" "$sc" "$key"
     else
-        # Unset between the compare scan and now: the key no longer runs.
+        # Defensive duplicate of promote_finding's existence check, which
+        # already ran for this id: only a key unset in the microseconds since
+        # reaches here. Without it the diff below would retain the whole
+        # former value, which is the one thing a removed surface must not do.
         : > "$sc/$key.removed" 2>/dev/null || true
     fi
     rm -f "$before" "$cur"
@@ -385,13 +419,9 @@ promote_finding() {
         withhold "$sc/$key.withheld" "audit store is inside the mounted workspace - retention disabled"
         return 0
     fi
-    case "$rid" in
-        gitconfig:*) promote_gitconfig "$rid" "$sc" "$key"; return 0 ;;
-    esac
-
-    # Existence and novelty are settled BEFORE the denylist, because both
-    # answers are markers with no content in them - a denied surface still
-    # gets an honest "this is new" or "this is gone".
+    # Existence is settled first, for EVERY namespace (current_sha_for_id
+    # dispatches, including to the git config keys promote_gitconfig handles
+    # below) - one tested branch rather than one per namespace.
     if [ -z "$(current_sha_for_id "$rid")" ]; then
         # Gone now. A deletion diff is the entire former file, which is the
         # whole-file dump this design avoids - and a surface that no longer
@@ -399,6 +429,13 @@ promote_finding() {
         : > "$sc/$key.removed" 2>/dev/null || true
         return 0
     fi
+    case "$rid" in
+        gitconfig:*) promote_gitconfig "$rid" "$sc" "$key"; return 0 ;;
+    esac
+
+    # Novelty is settled before the denylist, because its answer is a marker
+    # with no content in it - a denied surface still gets an honest "this is
+    # new".
     if ! existed_before "$rid"; then
         # New this session: there is no before, and the after is live on disk
         # for `ack` to read. Nothing to store.
@@ -913,9 +950,13 @@ case "$cmd" in
         [ -s "$state" ] || exit 0
 
         BEFORE_DIR="$(sed -n 's/^### staging //p' "$state" | head -1)"
-        # An rm -rf on a path read out of a file gets one sanity check: only
-        # a path our own open_staging() could have produced is removable.
+        # An rm -rf on a path read out of a file gets one sanity check: it
+        # must sit under our own store, in the shape open_staging() produces.
+        # `..` is rejected separately because `*` in a case pattern matches
+        # `/` too, so the shape alone would accept a path that climbs back
+        # out of the store again.
         case "$BEFORE_DIR" in
+            *..*) BEFORE_DIR="" ;;
             "$AUDIT_DIR/"*/.staging/*) ;;
             *) BEFORE_DIR="" ;;
         esac
@@ -935,6 +976,11 @@ case "$cmd" in
         # One raw namespaced id per finding whose surface has retainable
         # content, in report order - what promote_finding() works from below.
         crit=(); warn=(); info=(); finding_ids=()
+        # Retention budget accounting: bytes of diff already kept for this
+        # report, how many findings were refused for want of room, and how
+        # many had been dealt with when the budget ran out. budget_note is
+        # the two lines both the report and the summary print when it did.
+        retain_spent=0; retain_squeezed=0; retain_at=0; budget_note=()
         # config diffs: added/changed lines present in new but not old
         while IFS= read -r line; do
             key="${line%%=*}"
@@ -1072,10 +1118,30 @@ case "$cmd" in
             if [ "$DIFFS_ENABLED" = "1" ] && [ "${#finding_ids[@]}" -gt 0 ]; then
                 sc="$(sidecar_dir "$report")"
                 if ( umask 077; mkdir -p "$sc" ) 2>/dev/null; then
+                    # umask set and restored around the loop rather than a
+                    # ( umask 077; ... ) subshell, because the budget counters
+                    # promote_finding updates have to survive it. Every file
+                    # the loop writes is pre-session content or a statement
+                    # about it, so the 0700 directory must not be the only
+                    # thing keeping it off other local accounts.
+                    old_umask="$(umask)"; umask 077
+                    n=0
                     for rid in "${finding_ids[@]}"; do
+                        n=$(( n + 1 ))
                         promote_finding "$rid" "$sc"
+                        if [ "$retain_squeezed" -gt 0 ] && [ "$retain_at" -eq 0 ]; then
+                            retain_at=$(( n - 1 ))
+                        fi
                     done
+                    umask "$old_umask"
                     rmdir "$sc" 2>/dev/null || true
+                    if [ "$retain_squeezed" -gt 0 ]; then
+                        budget_note=(
+                            "  !! retention budget spent after $retain_at of ${#finding_ids[@]} findings."
+                            "  !! that many changed host-persistence surfaces in one session is ABNORMAL."
+                        )
+                        printf '%s\n' "${budget_note[@]}" >> "$report" 2>/dev/null || true
+                    fi
                 fi
             fi
 
@@ -1118,6 +1184,10 @@ case "$cmd" in
                     echo "  !! ${#crit[@]} critical findings in one session is ABNORMAL."
                 fi
             fi
+            # Last before the footer, where it is read first: running out of
+            # room to keep evidence is a finding about the session, not a
+            # note about the store.
+            [ "${#budget_note[@]}" -gt 0 ] && printf '%s\n' "${budget_note[@]}"
             echo "----------------------------------------------------------------"
             if [ "${#crit[@]}" -gt 0 ]; then
                 echo "         Review BEFORE the next 'git' or 'claude' in that repo."
