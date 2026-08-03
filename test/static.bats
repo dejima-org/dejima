@@ -458,7 +458,6 @@ setup() {
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
     grep -qE '^\s*ALLOW_GITHUB_PUSH:\s*\$\{ALLOW_GITHUB_PUSH:-0\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$SANDBOX_DIR/init-firewall.sh"
-    grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$REPO_ROOT/hooks/git-push-guard.sh"
 }
 
 @test "init-firewall.sh only opens port 22 to GitHub inside the ALLOW_GITHUB_PUSH conditional" {
@@ -473,9 +472,16 @@ setup() {
     [ "$port22_line" -gt "$if_line" ]
 }
 
-@test "git-push-guard.sh still blocks direct pushes to main/master when ALLOW_GITHUB_PUSH=1" {
-    # The host-allowlist widening must not touch the separate branch check.
-    grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
+@test "git-push-guard.sh blocks direct pushes to a branch named in DEJIMA_BLOCKED_BRANCHES" {
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@anywhere.example:x/y
+    git -C "$d" checkout -qb main
+    payload="$(printf '{"tool_input":{"command":"git push origin main"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="anywhere.example" DEJIMA_BLOCKED_BRANCHES="main master" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    rm -rf "$d"
 }
 
 @test "neither gitea CLI passes the token as a command-line argument" {
@@ -526,8 +532,8 @@ setup() {
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
-@test "gitea-merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
-    local hook="$REPO_ROOT/hooks/gitea-merge-guard.sh"
+@test "merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
+    local hook="$REPO_ROOT/hooks/merge-guard.sh"
     local payload
 
     # Blocked in the sandbox, including path-qualified - /usr/local/bin is
@@ -536,15 +542,15 @@ setup() {
     local cmd
     for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
-        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 2 ]
-        [[ "$output" == *"gitea-merge-guard.sh"* ]]
+        [[ "$output" == *"merge-guard.sh"* ]]
     done
 
     # The other verbs are the whole point of the tool and must pass through.
     for cmd in 'gitea-pr create --title x' 'gitea-pr comments 24' 'gitea-issue close 14'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
-        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 0 ]
     done
 
@@ -553,13 +559,99 @@ setup() {
     # env -u rather than DEJIMA= because the image sets DEJIMA=1 globally, so
     # a test running inside dejima would otherwise assert against itself.
     payload=$(jq -n '{tool_input: {command: "gitea-pr merge 24"}}')
-    run bash -c "printf '%s' \"\$1\" | env -u DEJIMA bash '$hook'" _ "$payload"
+    run bash -c "printf '%s' \"\$1\" | env -u DEJIMA DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
     [ "$status" -eq 0 ]
 }
 
-@test "install.sh links and registers the gitea merge guard" {
-    grep -qx 'link_hook gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
-    grep -q 'register_hook PreToolUse Bash gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
+@test "install.sh links and registers the merge guard" {
+    grep -qx 'link_hook merge-guard.sh' "$REPO_ROOT/install.sh"
+    grep -q 'register_hook PreToolUse Bash merge-guard.sh' "$REPO_ROOT/install.sh"
+}
+
+@test "install.sh cleans up the stale pre-rename gitea-merge-guard.sh hook symlink" {
+    grep -q 'gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
+    grep -q 'dangling' "$REPO_ROOT/install.sh"
+}
+
+@test "the push guard names no forge, and blocks everything when no host is allowed" {
+    run grep -ci gitea "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$output" = "0" ]
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@anywhere.example:x/y
+    git -C "$d" checkout -qb feature
+    payload="$(printf '{"tool_input":{"command":"git push origin feature"},"cwd":"%s"}' "$d")"
+    # No hosts allowed at all: every push is refused.
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    # Allowed host: permitted.
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="anywhere.example" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 0 ]
+    rm -rf "$d"
+}
+
+@test "the merge guard is inert without a configured block pattern" {
+    payload='{"tool_input":{"command":"gitea-pr merge 1"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr merge" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 2 ]
+}
+
+@test "a merge-block pattern cannot inject a regex" {
+    payload='{"tool_input":{"command":"echo hello"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK=".*" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "an empty DEJIMA_PUSH_HOSTS blocks every push, pinning the fail-closed direction" {
+    # DEJIMA_PUSH_HOSTS fails CLOSED: a workflow that never pushes, or an
+    # unconfigured forge, must not silently become a workflow that can push
+    # anywhere. This must hold even with other hosts and an unrelated
+    # (empty) branch policy present, so a later change can't narrow the
+    # test to pass while still widening what the guard actually permits.
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@forge.example:x/y
+    git -C "$d" checkout -qb feature
+    payload="$(printf '{"tool_input":{"command":"git push origin feature"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="main" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Blocked"* ]]
+    rm -rf "$d"
+}
+
+@test "an empty DEJIMA_BLOCKED_BRANCHES allows a push to main, pinning the fail-open direction" {
+    # DEJIMA_BLOCKED_BRANCHES fails OPEN: a workflow with genuinely no
+    # branch policy must not have one manufactured for it by a failure to
+    # read the value. The host is explicitly allowed here so only the
+    # branch check is under test.
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@forge.example:x/y
+    git -C "$d" checkout -qb main
+    payload="$(printf '{"tool_input":{"command":"git push origin main"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.example" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 0 ]
+    rm -rf "$d"
+}
+
+@test "an empty DEJIMA_MERGE_BLOCK allows the merge command through, pinning the fail-open direction" {
+    # DEJIMA_MERGE_BLOCK fails OPEN: a forge/workflow combination with no
+    # merge command to block must leave the hook inert rather than block
+    # everything (or nothing meaningful) by accident.
+    payload='{"tool_input":{"command":"gitea-pr merge 24 --admin"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {

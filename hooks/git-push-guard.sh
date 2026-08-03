@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# PreToolUse hook: inside dejima, only allow `git push` to the Gitea
-# host (GITEA_SSH_HOST / the GITEA_API host), and never directly to
-# main/master there - the sandbox workflow is feature branch + `gitea-pr
-# create`, never a direct push. GitHub push is also blocked here by default
-# (on top of the firewall's own port-22 block - see init-firewall.sh), unless
-# ALLOW_GITHUB_PUSH=1 is set, in which case github.com/ssh.github.com are
-# also accepted push hosts - the no-direct-to-main rule still applies there
-# too. This is a fast-fail guard against an overeager agent, not a hard
-# security boundary - a sandbox session has full shell access and could in
-# principle edit .git/config to route around it. No-op outside the sandbox
-# (DEJIMA unset), since this restriction doesn't apply to normal host
-# usage.
+# PreToolUse hook: inside dejima, only allow `git push` to a host listed in
+# DEJIMA_PUSH_HOSTS, and never directly to a branch listed in
+# DEJIMA_BLOCKED_BRANCHES - both resolved host-side by bin/dejima from the
+# configured forge and workflow (see dejima-provider-lib.sh), not hardcoded
+# to any one forge. This is a fast-fail guard against an overeager agent,
+# not a hard security boundary - a sandbox session has full shell access
+# and could in principle edit .git/config or re-export these variables to
+# route around it; that is true today and is not a regression, and the
+# firewall (see init-firewall.sh) is the actual boundary. No-op outside the
+# sandbox (DEJIMA unset), since this restriction doesn't apply to normal
+# host usage.
+#
+# DEJIMA_PUSH_HOSTS fails CLOSED: empty means no host is allowed, so every
+# push is refused. That is deliberate - it is how a no-forge or
+# non-pushing workflow becomes enforced rather than merely described.
+# DEJIMA_BLOCKED_BRANCHES fails OPEN: empty means no branch is protected,
+# which is correct for a workflow that genuinely has no branch policy.
 
 if [ -z "${DEJIMA:-}" ]; then
     exit 0
@@ -62,18 +67,16 @@ fi
 
 host=$(echo "$remote_url" | sed -E 's#^[a-zA-Z]+://([^/@]+@)?([^/:]+).*#\2#; s#^[^@/]+@([^:/]+)[:/].*#\1#')
 
-gitea_api_host=""
-if [ -n "${GITEA_API:-}" ]; then
-    gitea_api_host=$(echo "$GITEA_API" | sed -E 's#^[a-zA-Z]+://([^/]+).*#\1#')
-fi
+host_allowed=0
+for allowed_host in ${DEJIMA_PUSH_HOSTS:-}; do
+    if [ "$host" = "$allowed_host" ]; then
+        host_allowed=1
+        break
+    fi
+done
 
-github_allowed=0
-if [ "${ALLOW_GITHUB_PUSH:-0}" = "1" ] && { [ "$host" = "github.com" ] || [ "$host" = "ssh.github.com" ]; }; then
-    github_allowed=1
-fi
-
-if [ "$host" != "${GITEA_SSH_HOST:-}" ] && [ "$host" != "$gitea_api_host" ] && [ "$github_allowed" != 1 ]; then
-    echo "Blocked by git-push-guard.sh: this sandbox may only push to the Gitea host (${GITEA_SSH_HOST:-<GITEA_SSH_HOST not set>})$( [ "${ALLOW_GITHUB_PUSH:-0}" = "1" ] && echo " or github.com/ssh.github.com (ALLOW_GITHUB_PUSH=1)" ), not '$host'." >&2
+if [ "$host_allowed" != 1 ]; then
+    echo "Blocked by git-push-guard.sh: this sandbox may only push to ${DEJIMA_FORGE_NAME:-the configured forge}'s allowed host(s) (${DEJIMA_PUSH_HOSTS:-none allowed}), not '$host'." >&2
     exit 2
 fi
 
@@ -89,9 +92,11 @@ else
 fi
 branch="${branch#refs/heads/}"
 
-if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-    echo "Blocked by git-push-guard.sh: direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and run 'gitea-pr create' instead." >&2
-    exit 2
-fi
+for blocked_branch in ${DEJIMA_BLOCKED_BRANCHES:-}; do
+    if [ "$branch" = "$blocked_branch" ]; then
+        echo "Blocked by git-push-guard.sh: direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead." >&2
+        exit 2
+    fi
+done
 
 exit 0

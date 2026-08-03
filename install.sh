@@ -53,7 +53,17 @@ link_hook() {
 
 link_hook sandbox-context.sh
 link_hook git-push-guard.sh
-link_hook gitea-merge-guard.sh
+link_hook merge-guard.sh
+
+# Symlink from before the gitea-merge-guard.sh -> merge-guard.sh rename
+# points at a hooks/ path that no longer exists. Only remove it if it's
+# actually dangling - the same check the claude-sandbox-* cleanup below
+# uses for bin/, so an operator's own file at this name is left alone.
+old_merge_guard="$HOME/.claude/hooks/gitea-merge-guard.sh"
+if [ -L "$old_merge_guard" ] && [ ! -e "$old_merge_guard" ]; then
+    echo "Removing: dangling pre-rename symlink $old_merge_guard"
+    rm -f "$old_merge_guard"
+fi
 
 # Linked so it exists at a stable path for the read-only ~/.claude/hooks
 # mount, but deliberately NOT passed to register_hook below: bin/dejima
@@ -101,8 +111,8 @@ register_hook SessionStart "startup|resume|clear|compact" sandbox-context.sh \
     "injects sandbox context on session start"
 register_hook PreToolUse Bash git-push-guard.sh \
     "blocks pushes outside the allowed host(s)/branches"
-register_hook PreToolUse Bash gitea-merge-guard.sh \
-    "blocks 'gitea-pr merge' inside the sandbox"
+register_hook PreToolUse Bash merge-guard.sh \
+    "blocks the configured forge's merge command inside the sandbox"
 register_hook PreToolUse Bash deny-dangerous-bash.sh \
     "blocks obviously destructive Bash commands"
 echo
