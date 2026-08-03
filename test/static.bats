@@ -72,6 +72,157 @@ setup() {
     }
 }
 
+# The runtime counterpart of the test above. Build-time downloads have had a
+# retry guard for a while; the fetches that run on every container START had
+# nothing, which is the worse place for it - a dead build is obvious, and a
+# container that never comes up reads as the sandbox being broken.
+@test "every fetch in the container's startup path has a deadline" {
+    # curl has no default overall timeout. --connect-timeout alone is not one
+    # either: it bounds reaching the far end, not a transfer that connects and
+    # then stalls, which is the shape that hangs a startup indefinitely.
+    local unguarded
+    unguarded=$(awk '
+        /^[[:space:]]*#/ { next }
+        /curl/ && /https?:\/\// && !/--max-time [0-9]/ { print FILENAME": "FNR": "$0 }
+    ' "$SANDBOX_DIR"/*.sh)
+    [ -z "$unguarded" ] || {
+        echo "these runtime fetches have no --max-time, so they can hang a container start:" >&2
+        echo "$unguarded" >&2
+        false
+    }
+}
+
+@test "the GitHub ranges fetch reports its own failure instead of letting set -e swallow it" {
+    # init-firewall.sh runs under `set -euo pipefail`, so a bare
+    # `var=$(curl ...)` that fails takes the whole script down ON THE
+    # ASSIGNMENT - before any of the diagnostics written for exactly that case
+    # can run. The container then exits having printed nothing after "Looking
+    # up GitHub's IP ranges...", and the only symptom anyone sees is that the
+    # sandbox did not start. It cost two CI rounds to not diagnose (#59).
+    #
+    # The fix is to capture curl's status rather than let set -e have it, so
+    # this checks the fetch is not a bare assignment again.
+    grep -q 'set -euo pipefail' "$SANDBOX_DIR/init-firewall.sh"
+    # Continuations are joined before matching: the fetch spans two lines, and
+    # the `||` that makes it safe is on the second one - so a line-at-a-time
+    # pass would report the correct form as the broken one.
+    local bare
+    bare=$(awk '
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            start = FNR
+            while (line ~ /\\$/ && (getline) > 0) {
+                sub(/\\$/, "", line)
+                line = line $0
+            }
+            if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(curl/ && line !~ /\|\|/)
+                print start": "line
+        }
+    ' "$SANDBOX_DIR/init-firewall.sh")
+    [ -z "$bare" ] || {
+        echo "this fetch is a bare assignment, so set -e will kill the script before it can report:" >&2
+        echo "$bare" >&2
+        false
+    }
+    # And that the failure path actually says something. The message is what
+    # separates "GitHub was unreachable" from "the sandbox is broken".
+    grep -q "could not fetch GitHub's IP ranges" "$SANDBOX_DIR/init-firewall.sh"
+}
+
+# The behaviour behind the two greps above, driven for real. init-firewall.sh
+# cannot be sourced - it flushes iptables at the top level - so the function is
+# extracted and run against a stubbed curl. No container, no network.
+#
+# `sleep` is shadowed by a no-op: the retry delays are deliberate in production
+# and pure cost here.
+run_fetch() {
+    local behaviour="$1"
+    STUB_DIR="$BATS_TEST_TMPDIR/stub"
+    mkdir -p "$STUB_DIR"
+    cp "$behaviour" "$STUB_DIR/curl"
+    chmod +x "$STUB_DIR/curl"
+    PATH="$STUB_DIR:$PATH"
+    sleep() { :; }
+    eval "$(sed -n '/^fetch_github_ranges()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
+    gh_auth=()
+    fetch_github_ranges
+}
+
+# A minimal but structurally valid /meta response - enough for the .web/.api/
+# .git check the function makes.
+meta_json() {
+    printf '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}'
+}
+
+@test "the ranges fetch returns the body when GitHub answers" {
+    cat > "$BATS_TEST_TMPDIR/ok" <<EOF
+#!/bin/bash
+printf '%s' '$(meta_json)'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/ok"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(meta_json)" ]
+}
+
+@test "the ranges fetch reports a failing curl rather than dying on the assignment" {
+    # 28 is curl's operation-timeout. Before the fix this case never reached a
+    # message at all: set -e took the script down on the assignment itself.
+    cat > "$BATS_TEST_TMPDIR/timeout" <<'EOF'
+#!/bin/bash
+echo "curl: (28) Operation timed out" >&2
+exit 28
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/timeout"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"attempt 1/3: curl exited 28"* ]]
+    [[ "$output" == *"attempt 3/3: curl exited 28"* ]]
+    # curl's own reason has to survive too - it is the difference between
+    # "GitHub was slow" and "DNS is broken in here".
+    [[ "$output" == *"Operation timed out"* ]]
+}
+
+@test "the ranges fetch retries an API error body and surfaces its message" {
+    # A rate limit answers 200-with-a-message or 403-with-a-message, not a
+    # transport error, so curl exits 0 and only the response check catches it.
+    # A burst of container starts is exactly what trips it, and it clears on
+    # its own - so it has to be retried, which curl's own --retry would not do.
+    cat > "$BATS_TEST_TMPDIR/ratelimited" <<'EOF'
+#!/bin/bash
+printf '%s' '{"message":"API rate limit exceeded"}'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/ratelimited"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"API rate limit exceeded"* ]]
+    [[ "$output" == *"attempt 3/3"* ]]
+}
+
+@test "the ranges fetch recovers when a later attempt succeeds" {
+    # The point of retrying at all: one blip must cost seconds, not the launch.
+    cat > "$BATS_TEST_TMPDIR/flaky" <<EOF
+#!/bin/bash
+n="\$BATS_TEST_TMPDIR/attempts"
+count=\$(cat "\$n" 2>/dev/null || echo 0)
+echo \$((count + 1)) > "\$n"
+if [ "\$count" -lt 1 ]; then exit 7; fi
+printf '%s' '$(meta_json)'
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/flaky"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"attempt 1/3: curl exited 7"* ]]
+    [[ "$output" == *"$(meta_json)"* ]]
+}
+
+@test "an empty response is reported as empty, not as a missing field" {
+    cat > "$BATS_TEST_TMPDIR/empty" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/empty"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"empty response"* ]]
+}
+
 @test "the zsh installer runs from a file, so a failed download fails the build" {
     # Upstream documents `sh -c "$(wget -O- ...)"`. In that form a failed
     # download substitutes to an empty string and `sh -c ""` exits 0, so the
@@ -448,7 +599,12 @@ setup() {
     # Unauthenticated /meta is capped at 60 requests/hour per source IP,
     # shared across every container start; exhausting it fails the launch.
     grep -q 'gh_auth=(-H "Authorization: Bearer \$GH_TOKEN")' "$SANDBOX_DIR/init-firewall.sh"
-    grep -q 'curl -s \${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
+    # The array reaching the request to /meta is the property; the flags around
+    # it are no longer pinned here, because they now have tests of their own
+    # ("every fetch in the container's startup path has a deadline" and the
+    # behavioural ones above). Pinning the whole invocation twice made adding a
+    # timeout to it fail a test about the token.
+    grep -q '\${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
 }
 
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {

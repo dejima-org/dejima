@@ -45,9 +45,16 @@ network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 # assertions into vacuous passes, since everything is still reachable at
 # that point. Waiting for `sleep infinity` means the whole startup sequence
 # (DNS proxy, firewall, ipsets, logging, forwarder bind) has completed.
+#
+# 120 rather than 60: init-firewall.sh's GitHub ranges fetch now retries, and a
+# run that loses two attempts before succeeding spends ~26s of the budget on
+# that call alone (#59) - which on a runner that has just spent three minutes
+# unpacking an image is enough to turn a recovery into a spurious failure. A
+# longer budget only delays reporting a genuinely stuck startup; it cannot hide
+# one, since nothing here passes on a timeout.
 wait_ready() {
     local container="$1"
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 120); do
         if docker exec "$container" pgrep -x -f 'sleep infinity' >/dev/null 2>&1; then
             return 0
         fi
@@ -1068,8 +1075,18 @@ EOF
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
-    [ "$exit_code" = "1" ]
-    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]]
-    [[ "$logs" == *"'tls'"* ]]
-    [[ "$logs" == *"'loopback'"* ]]
+    # Both assertions print the log they were reading, because the container is
+    # gone by the time either can fail and bats prints the expression rather
+    # than the variable. Without this the whole failure is "the container did
+    # not say what we expected" - and the container exiting 1 somewhere EARLIER
+    # in the entrypoint, before the check under test ever runs, presents
+    # identically to the check being broken. That happened, cost two CI rounds,
+    # and was still unresolved at the end of them (#59).
+    dump() { echo "$1" >&2; echo "exit code: $exit_code" >&2; echo "container log:" >&2; echo "$logs" >&2; false; }
+
+    [ "$exit_code" = "1" ] || dump "expected the container to exit 1"
+    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]] \
+        || dump "the transport check never ran - something aborted the entrypoint before it"
+    [[ "$logs" == *"'tls'"* ]] || dump "the refusal did not name the valid values"
+    [[ "$logs" == *"'loopback'"* ]] || dump "the refusal did not name the valid values"
 }

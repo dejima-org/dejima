@@ -86,22 +86,61 @@ gh_auth=()
 if [ -n "${GH_TOKEN:-}" ]; then
     gh_auth=(-H "Authorization: Bearer $GH_TOKEN")
 fi
-gh_ranges=$(curl -s ${gh_auth[@]+"${gh_auth[@]}"} https://api.github.com/meta)
-if [ -z "$gh_ranges" ]; then
-    echo "ERROR: Empty response fetching GitHub's IP ranges"
-    exit 1
-fi
 
-if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
-    # An API error (rate limiting, a bad token) returns a JSON body with a
-    # `message` and no ranges - non-empty, so it reaches here rather than the
-    # emptiness check above. Surface it instead of reporting the response as
-    # malformed, which points at the wrong thing entirely.
-    if gh_error=$(echo "$gh_ranges" | jq -re '.message' 2>/dev/null); then
-        echo "ERROR: GitHub API request failed: $gh_error"
-    else
-        echo "ERROR: GitHub API response missing required fields"
-    fi
+# Bounded, retried, and reported. All three were missing, and the combination
+# was worse than any of them alone (#59).
+#
+# `curl -s` with no --max-time has no deadline at all - it waits as long as the
+# kernel keeps retrying the SYN. And under `set -euo pipefail` at the top of
+# this file, a curl that exits non-zero takes the whole script down ON THE
+# ASSIGNMENT, so every diagnostic below it is unreachable in exactly the case
+# that needs one: the container dies having printed nothing after the line
+# above, and the operator - or CI - sees only "the container never became
+# ready". The `|| status=$?` is what keeps the failure ours to report.
+#
+# Retried because both failure modes here are transient. A blip costs a few
+# seconds instead of the launch; and a burst of container starts can trip
+# GitHub's secondary rate limit, which answers 403 with a JSON body rather
+# than a transport error - so the retry has to wrap the response check too,
+# not just the transfer. curl's own --retry would not cover that case.
+fetch_github_ranges() {
+    local attempt status body
+    for attempt in 1 2 3; do
+        status=0
+        # -S so curl's own reason ("Operation timed out after ...") reaches
+        # stderr and therefore `docker logs`; -s alone would swallow it.
+        body=$(curl -sS --connect-timeout 5 --max-time 10 \
+            ${gh_auth[@]+"${gh_auth[@]}"} https://api.github.com/meta) || status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "  attempt $attempt/3: curl exited $status" >&2
+        elif [ -z "$body" ]; then
+            echo "  attempt $attempt/3: empty response" >&2
+        elif ! printf '%s' "$body" | jq -e '.web and .api and .git' >/dev/null 2>&1; then
+            # An API error - rate limiting, a bad token - comes back as a JSON
+            # body carrying a `message` and no ranges. Surface it rather than
+            # reporting the response as malformed, which points at the wrong
+            # thing entirely.
+            echo "  attempt $attempt/3: $(printf '%s' "$body" \
+                | jq -re '.message' 2>/dev/null || echo 'response carried no ranges')" >&2
+        else
+            printf '%s' "$body"
+            return 0
+        fi
+        # `if`, not `[ ... ] && sleep`: the AND-list's status on the last
+        # attempt is 1, which set -e would take as the script failing here
+        # rather than falling through to the message below.
+        if [ "$attempt" -lt 3 ]; then
+            sleep $((attempt * 2))
+        fi
+    done
+    return 1
+}
+
+if ! gh_ranges=$(fetch_github_ranges); then
+    echo "ERROR: could not fetch GitHub's IP ranges from api.github.com/meta." >&2
+    echo "Tried three times over ~36s; the reason for each attempt is above." >&2
+    echo "The sandbox cannot start without them - the firewall would deny every" >&2
+    echo "GitHub range, so git, gh and the API would all fail once inside." >&2
     exit 1
 fi
 
@@ -241,7 +280,12 @@ iptables -A OUTPUT -j NFLOG --nflog-group 2 --nflog-prefix "reject"
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 echo "Firewall rules applied. Self-checking..."
-if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
+# --max-time as well as --connect-timeout on both self-checks: a connect that
+# succeeds and then stalls is not covered by --connect-timeout, and while these
+# two sit inside `if` (so set -e cannot take the script down the way it could
+# above), a stalled transfer here still hangs the container's startup with no
+# deadline of its own.
+if curl --connect-timeout 5 --max-time 15 https://example.com >/dev/null 2>&1; then
     echo "ERROR: self-check failed - a non-allowlisted host (example.com) was reachable"
     exit 1
 else
@@ -249,7 +293,7 @@ else
 fi
 
 # Confirm the allowlist itself actually works, not just that the default-deny does.
-if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
+if ! curl --connect-timeout 5 --max-time 15 https://api.github.com/zen >/dev/null 2>&1; then
     echo "ERROR: self-check failed - api.github.com should be reachable but wasn't"
     exit 1
 else
