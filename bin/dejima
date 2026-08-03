@@ -575,6 +575,14 @@ cleanup() {
     # name here already keeps, not a live fix - see the static test.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
+        # Reaped, not just signalled. Without this the proxy stays a zombie
+        # child until dejima itself exits, at which point it reparents to
+        # PID 1 - and where PID 1 does not reap (a CI job container whose
+        # PID 1 is `sleep`, rather than the `init: true` dejima gives its
+        # own containers) it stays a zombie for the life of that container,
+        # holding a PID. One per launch is invisible interactively and
+        # accumulates in a test suite that launches hundreds of times.
+        wait "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
