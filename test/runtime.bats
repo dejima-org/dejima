@@ -45,17 +45,89 @@ network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 # assertions into vacuous passes, since everything is still reachable at
 # that point. Waiting for `sleep infinity` means the whole startup sequence
 # (DNS proxy, firewall, ipsets, logging, forwarder bind) has completed.
+#
+# 120 rather than 60: init-firewall.sh's GitHub ranges fetch now retries, and a
+# run that loses two attempts before succeeding spends ~26s of the budget on
+# that call alone (#59) - which on a runner that has just spent three minutes
+# unpacking an image is enough to turn a recovery into a spurious failure. A
+# longer budget only delays reporting a genuinely stuck startup; it cannot hide
+# one, since nothing here passes on a timeout.
+# `docker wait` returns the moment the container exits, but the json-file log
+# driver writes asynchronously - so reading the log right then can return one
+# that stops mid-stream, with everything after some flush boundary missing.
+#
+# That is not hypothetical. It presented as a container "aborting" partway
+# through init-firewall.sh's domain loop, at a slightly different domain each
+# run, and survived three separate fixes to that loop before the giveaway: the
+# log ended with no message from an ERR trap that cannot be bypassed and no
+# output from a retry that prints on every path. Nothing had aborted. The read
+# was short.
+#
+# Two identical consecutive reads means the driver has caught up. Deliberately
+# content-neutral - waiting for an expected string would make the wait pass or
+# fail on the very thing the caller is about to assert.
+settled_logs() {
+    local container="$1" current previous=""
+    for _ in $(seq 1 20); do
+        current=$(docker logs "$container" 2>&1)
+        if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+            break
+        fi
+        previous="$current"
+        sleep 0.25
+    done
+    printf '%s' "$current"
+}
+
 wait_ready() {
     local container="$1"
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 120); do
         if docker exec "$container" pgrep -x -f 'sleep infinity' >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
     done
     echo "container $container never reached the post-entrypoint sleep - startup log:" >&2
-    docker logs "$container" >&2
+    settled_logs "$container" >&2
     return 1
+}
+
+# $IMAGE is a single mutable tag on a shared daemon, and SKIP_BUILD=1 - which
+# CI sets, having built the image in an earlier step - means this file does not
+# build it either. Nothing in that arrangement ties the image to the checkout,
+# and when the two disagree every assertion in this file is being made against
+# code that is not under test.
+#
+# That is not a theoretical worry. It cost six CI rounds: a container kept
+# stopping partway through init-firewall.sh, and the fixes that were supposed
+# to make it explain itself - an ERR trap, a resolver that reports on every
+# path - produced no output at all, because the script running in the container
+# was not the script in the commit. A stale image looks exactly like a bug in
+# the code you are reading, which is the worst way for it to present.
+#
+# One container start, three files, compared by content rather than by any
+# claim about how the image was produced.
+assert_image_matches_checkout() {
+    local expected actual
+    expected=$(cd "$SANDBOX_DIR" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
+    actual=$(docker run --rm --entrypoint sh "$IMAGE" -c \
+        'cd /usr/local/bin && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh' 2>&1 | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+        echo "The image tagged $IMAGE was not built from this checkout." >&2
+        echo >&2
+        echo "checkout (docker/):        $(echo "$expected" | tr '\n' ' ')" >&2
+        echo "image (/usr/local/bin/):   $(echo "$actual" | tr '\n' ' ')" >&2
+        echo >&2
+        echo "Every test in this file would be asserting against different code than" >&2
+        echo "the one in the working tree, so they are not run. Rebuild it:" >&2
+        echo >&2
+        echo "  docker build -t $IMAGE -f docker/Dockerfile ." >&2
+        echo >&2
+        echo "In CI this means the build step and the test step disagreed - most" >&2
+        echo "likely another job retagged $IMAGE in between, since the tag is shared" >&2
+        echo "and carries no version." >&2
+        return 1
+    fi
 }
 
 setup_file() {
@@ -68,6 +140,7 @@ setup_file() {
     if [ "${SKIP_BUILD:-0}" != "1" ]; then
         docker build -q -t "$IMAGE" -f "$SANDBOX_DIR/Dockerfile" "$REPO_ROOT" >&2
     fi
+    assert_image_matches_checkout
 
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
@@ -1050,26 +1123,66 @@ EOF
     # this container took its loopback one, and every API call in the session
     # would fail with nothing naming the cause.
     container="dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")"
-    docker run -d --name "$container" \
+    docker rm -f "$container" >/dev/null 2>&1 || true
+
+    # Run in the FOREGROUND and read the container's own streams, rather than
+    # detaching and asking the daemon's log driver for them afterwards.
+    #
+    # The detached form spent six CI rounds insisting this container aborted
+    # partway through init-firewall.sh. It had not. Every line those logs ever
+    # contained came from an `echo` to stdout, and not one line written to
+    # stderr appeared in any of them - not init-firewall.sh's ERR trap, not
+    # resolve_domain's per-attempt reports, and not the FATAL message this test
+    # asserts on, which entrypoint.sh writes to stderr as well. The container
+    # was doing the right thing; the stderr half of what it said was not
+    # arriving.
+    #
+    # A foreground `docker run` attaches to the container's streams directly,
+    # so nothing is buffered, flushed or dropped by a log driver in between.
+    # It is also simply less machinery: one command yields both the output and
+    # the exit status, with no wait, no settling and no read-after-exit race.
+    #
+    # The timeout stays: without the transport check the entrypoint runs on
+    # into SANDBOX_TEST_MODE's `sleep infinity` and never exits, and that
+    # regression should fail here rather than hang the suite.
+    run timeout 120 docker run --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$IMAGE"
+    exit_code=$status
+    logs=$output
 
-    # Without the check the entrypoint runs on into SANDBOX_TEST_MODE's `sleep
-    # infinity` and never exits - the timeout turns that regression into a
-    # failure here rather than a hung suite.
-    run timeout 120 docker wait "$container"
-    exit_code=$output
-    logs=$(docker logs "$container" 2>&1)
+    # Still worth capturing: it answers what the output cannot - whether the
+    # script exited or the container was killed underneath it.
+    state=$(docker inspect \
+        --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{printf "%q" .State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' \
+        "$container" 2>&1 || true)
 
     docker rm -f "$container" >/dev/null 2>&1 || true
 
-    [ "$exit_code" = "1" ]
-    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]]
-    [[ "$logs" == *"'tls'"* ]]
-    [[ "$logs" == *"'loopback'"* ]]
+    # Every assertion prints what it was reading. bats prints the failing
+    # expression, not the variable, and the container is gone by then - so
+    # without this the whole failure is "the container did not say what we
+    # expected", which is equally true when the container aborted early, when
+    # it was killed, and when its output never reached us. Those took six CI
+    # rounds to tell apart (#59); the byte count and the state are what
+    # separate them.
+    dump() {
+        echo "$1" >&2
+        echo "exit code: $exit_code" >&2
+        echo "container state: $state" >&2
+        echo "container output (${#logs} bytes):" >&2
+        echo "$logs" >&2
+        false
+    }
+
+    [ "$exit_code" = "1" ] || dump "expected the container to exit 1"
+    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]] \
+        || dump "the transport check never ran - something aborted the entrypoint before it"
+    [[ "$logs" == *"'tls'"* ]] || dump "the refusal did not name the valid values"
+    [[ "$logs" == *"'loopback'"* ]] || dump "the refusal did not name the valid values"
 }
