@@ -290,3 +290,34 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     # Guards against a grep that silently matches nothing.
     [ "$found" = 1 ]
 }
+
+@test "the hook substitutes only the two runtime placeholders" {
+    b="$(mktemp)"
+    printf 'session=@@SESSION_ID@@ container=@@CONTAINER_ID@@\n' > "$b"
+    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+        'printf "{\"session_id\":\"abc123\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
+        "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -eq 0 ]
+    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
+    [[ "$ctx" == *"session=abc123"* ]]
+    [[ "$ctx" != *"@@SESSION_ID@@"* ]]
+    [[ "$ctx" != *"@@CONTAINER_ID@@"* ]]
+    rm -f "$b"
+}
+
+@test "a missing briefing file degrades rather than failing the session" {
+    run env DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
+        'printf "{\"session_id\":\"x\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
+        "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
+}
+
+@test "the hook no longer carries the briefing text itself" {
+    # The prose lives in the core fragment and the provider fragments now; a
+    # copy left behind here would drift silently.
+    run grep -c 'gitea-pr create' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$output" = "0" ]
+    run grep -ci 'gitea' "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$output" = "0" ]
+}

@@ -1054,19 +1054,20 @@ EOF
 }
 
 @test "the briefing names writable mounts so nothing survives being called disposable" {
-    run env DEJIMA=1 DEJIMA_RW_MOUNTS="/srv/one /srv/two" bash -c \
-        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
-        "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -eq 0 ]
-    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
-    [[ "$ctx" == *"/srv/one /srv/two"* ]]
-    [[ "$ctx" == *"outlive the container too"* ]]
+    # This sentence is composed host-side now (bin/dejima-provider-lib.sh's
+    # briefing_compose, via the {{writable_mounts}} placeholder) rather than
+    # by the hook, which only substitutes the two runtime placeholders in
+    # whatever briefing it is handed - see providers.bats for that half.
+    provider_lib="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    run env DEJIMA_RW_MOUNTS="/srv/one /srv/two" bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ "$provider_lib"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"/srv/one /srv/two"* ]]
+    [[ "$output" == *"outlive the container too"* ]]
     # And says nothing at all when there are none, rather than an empty list.
-    run env DEJIMA=1 bash -c \
-        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
-        "$REPO_ROOT/hooks/sandbox-context.sh"
-    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
-    [[ "$ctx" != *"outlive the container too"* ]]
+    run bash -c 'source "$1"; briefing_compose gitea worktree-pr claude-code' _ "$provider_lib"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"outlive the container too"* ]]
 }
 
 @test "a token file with an embedded newline makes bin/dejima exit non-zero, before docker is invoked" {

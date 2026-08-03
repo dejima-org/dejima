@@ -344,27 +344,31 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-@test "sandbox-context.sh never tells the agent to worktree outside the mounted project" {
+@test "the briefing never tells the agent to worktree outside the mounted project" {
     # ../<branch> (a sibling of the mounted project) or anything under $HOME
     # lands in container-local ephemeral storage, not real host storage -
     # the worktree, and whatever work went into it, silently vanishes when
-    # the session ends. Regression check for exactly this bug.
-    run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # the session ends. Regression check for exactly this bug. This
+    # paragraph is core briefing prose (bin/dejima-provider-lib.sh), not
+    # something the hook carries anymore - see providers.bats/config.bats
+    # for the hook's own (much narrower) job.
+    run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/bin/dejima-provider-lib.sh"
     [ "$status" -ne 0 ]
-    grep -q '.worktrees/' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q '.worktrees/' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
-@test "sandbox-context.sh tells the agent to close issues via the PR body" {
+@test "the worktree-pr workflow tells the agent to close issues via the PR body" {
     # The session ends at the PR and the merge happens later, without the
     # agent - so anything it defers to "after the merge" is something it
     # won't be there to do, and an issue a merged PR fixed just stays open.
     # A closing keyword in the body is the only part of that it can control.
-    grep -q 'Fixes #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # This lives in the workflow's own briefing fragment now, not the hook.
+    grep -q 'Fixes #N' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
     # And the counterpart, so partial work doesn't close anything.
-    grep -q 'Refs #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'Refs #N' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
     # The short form specifically: an issue's full URL renders as the same
     # link but does not trigger the close.
-    grep -q "not the issue's URL" "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q "not the issue's URL" "$REPO_ROOT/workflows/worktree-pr/briefing.md"
 }
 
 @test "entrypoint runs as root and drops to node via gosu, not a baked-in USER node" {
@@ -1047,9 +1051,12 @@ this line is not json'
     lab="$(printf 'a%.0s' $(seq 1 62))"
     for i in $(seq 1 700); do printf 'x%03d.%s.%s.%s\n' "$i" "$lab" "$lab" "$lab"; done \
         > "$ws/.dejima/allowed-domains"
+    local b; b="$(mktemp)"
+    printf 'dejima Docker container\n' > "$b"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
-    rm -rf "$ws"
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
+        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"; rm -f "$b"
     printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
     [[ "$out" == *"dejima Docker container"* ]]
     # 700 declared, 200 considered (the cap read_declared applies host-side),
