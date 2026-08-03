@@ -130,6 +130,53 @@ setup() {
     grep -q "could not fetch GitHub's IP ranges" "$SANDBOX_DIR/init-firewall.sh"
 }
 
+@test "every startup script reports where it aborted instead of dying silently" {
+    # `set -e` alone aborts with no output whatsoever. For a script that runs
+    # during container startup that is the worst possible failure mode: the
+    # container just never appears, and every cause - a failed lookup, a full
+    # ipset, an unreachable API - presents identically, as "the sandbox is
+    # broken". Three CI failures were spent on two different instances of it.
+    #
+    # log-shipper.sh is deliberately absent: it does not use -e at all, on
+    # purpose, because one bad line should not kill the tailer.
+    local script
+    for script in init-firewall.sh dns-proxy.sh entrypoint.sh; do
+        # -E, not just -e: without errtrace the handler does not fire inside
+        # functions or subshells, which is where the fetch and the loops live.
+        grep -qE '^set -Eeuo pipefail$' "$SANDBOX_DIR/$script" \
+            || { echo "$script does not set -E, so its ERR trap would not fire in functions" >&2; false; }
+        grep -q "trap .*ERR" "$SANDBOX_DIR/$script" \
+            || { echo "$script has no ERR trap - a set -e abort in it would be silent" >&2; false; }
+        # Naming itself matters: three scripts run back to back into the same
+        # log, and "aborted at line 128" is useless without knowing whose.
+        grep -q "aborted at line" "$SANDBOX_DIR/$script"
+        grep -q "$script aborted" "$SANDBOX_DIR/$script" \
+            || { echo "$script's ERR trap does not name $script" >&2; false; }
+    done
+}
+
+@test "the ERR trap actually resolves the line and the command" {
+    # Extracted from the real file rather than retyped, so a trap that has been
+    # broken into single quotes - which would expand $LINENO and $BASH_COMMAND
+    # at definition time and report the trap's own line forever - fails here.
+    local trapline
+    trapline=$(grep -m1 "trap .*ERR" "$SANDBOX_DIR/init-firewall.sh")
+    cat > "$BATS_TEST_TMPDIR/probe.sh" <<EOF
+set -Eeuo pipefail
+$trapline
+echo "Looking up files.pythonhosted.org..."
+false
+echo "should not be reached"
+EOF
+    run bash "$BATS_TEST_TMPDIR/probe.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"should not be reached"* ]]
+    [[ "$output" == *"init-firewall.sh aborted at line 4"* ]] \
+        || { echo "trap did not report the failing line:" >&2; echo "$output" >&2; false; }
+    [[ "$output" == *"false"* ]] \
+        || { echo "trap did not report the failing command:" >&2; echo "$output" >&2; false; }
+}
+
 # The behaviour behind the two greps above, driven for real. init-firewall.sh
 # cannot be sourced - it flushes iptables at the top level - so the function is
 # extracted and run against a stubbed curl. No container, no network.

@@ -8,8 +8,27 @@
 # everything here - IPv6 blocking, ulogd2 verdict logging, the GitHub
 # push/pull split, GH_TOKEN auth, and the extra-domains allowlist - is this
 # project's own.
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
+
+# Nothing in here may die quietly. Under `set -e` a failing command aborts the
+# script with no output at all, and this script's failures are invisible in the
+# worst possible way: the container simply never appears, which reads as the
+# sandbox being broken rather than as one command in one loop having failed.
+# Three CI failures were spent on two different instances of exactly that (#59)
+# - one at the GitHub ranges fetch, one in the domain loop below - and neither
+# left a single line to go on.
+#
+# The explicit `exit 1` paths below say more than this can and are worth
+# keeping; this is the floor under everything else. -E on the line above is
+# what extends it into functions and subshells, where it would otherwise not
+# fire at all.
+#
+# A failure inside a command substitution reports twice - once from the
+# subshell, naming the command that actually failed, and once from the
+# statement containing it. That is worth the noise: for `x=$(a | b)` the first
+# line is the only thing that says whether it was `a` or `b`.
+trap 'status=$?; echo "ERROR: init-firewall.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fixed-domains.sh
