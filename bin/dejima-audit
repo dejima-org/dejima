@@ -172,11 +172,18 @@ store_reachable() {
     local d rws rd
     # Canonicalised, not raw: a relative DEJIMA_AUDIT_DIR (e.g. "audit" with
     # cwd inside $ws) would otherwise never match the "$rws"/* pattern below
-    # and stage straight into the container's read-write mount. A failed
-    # canonicalisation is treated as reachable so this fails closed.
-    rws="$(readlink -f "$ws" 2>/dev/null)" || return 0
+    # and stage straight into the container's read-write mount. `-m`, not
+    # `-f`: `$AUDIT_DIR` routinely doesn't exist yet on a fresh install (its
+    # parent tree is only ever mkdir -p'd on a real finding or by `ack`), and
+    # `-f` requires every component but the last to exist - it would fail
+    # there on every clean-history host, permanently disabling staging via
+    # the fail-closed branch below. `-m` resolves what exists and treats the
+    # rest literally, which is exactly this comparison's semantics. A failed
+    # canonicalisation (now essentially just a malformed/empty path) is
+    # treated as reachable so this still fails closed.
+    rws="$(readlink -m "$ws" 2>/dev/null)" || return 0
     for d in "$AUDIT_DIR" "$BASELINE_DIR"; do
-        rd="$(readlink -f "$d" 2>/dev/null)" || return 0
+        rd="$(readlink -m "$d" 2>/dev/null)" || return 0
         case "$rd/" in "$rws"/*) return 0 ;; esac
     done
     return 1

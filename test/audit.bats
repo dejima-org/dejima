@@ -1231,6 +1231,21 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
 }
 
+@test "staging still happens when the audit store's parent tree does not exist yet (fresh install)" {
+    # readlink -f requires every path component but the last to already
+    # exist, and nothing creates $AUDIT_DIR's tree ahead of snapshot on a
+    # clean-history host (compare only mkdir -p's it on a real finding; ack
+    # creates $BASELINE_DIR). setup()'s mktemp -d for AUDITDIR masks this -
+    # point at a genuinely missing parent instead.
+    fresh="$AUDITDIR/nonexistent-parent/audit"
+    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
+    DEJIMA_AUDIT_DIR="$fresh" "$AUDIT" snapshot "$WS" "$STATE"
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    d="$(find "$fresh/$slug/.staging" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    [ -n "$d" ]
+    [ -f "$d/$(key_of '.git/hooks/pre-commit')" ]
+}
+
 @test "nothing is staged when DEJIMA_AUDIT_DIFFS=0" {
     mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
     DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
