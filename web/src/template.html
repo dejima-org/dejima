@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Without this a phone lays the page out at a virtual desktop width and
+     scales the result down, which no font size can rescue. user-scalable=no
+     is not tidiness: a two-finger drag is this page's scroll gesture, and
+     pinch-zoom would eat it. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<title>dejima</title>
+<!--BUILD_STAMP-->
+<style>
+/*XTERM_CSS*/
+</style>
+<style>
+/*PAGE_CSS*/
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="terminal"></div>
+  <div id="toolbar" hidden>
+    <div class="row">
+      <button type="button" data-action="esc">ESC</button>
+      <button type="button" data-action="ctrl">CTRL</button>
+      <button type="button" data-action="tab">TAB</button>
+      <button type="button" data-action="left" aria-label="Left">&#8592;</button>
+      <button type="button" data-action="down" aria-label="Down">&#8595;</button>
+      <button type="button" data-action="up" aria-label="Up">&#8593;</button>
+      <button type="button" data-action="right" aria-label="Right">&#8594;</button>
+    </div>
+    <div class="row">
+      <button type="button" data-action="prefix">PREFIX</button>
+      <button type="button" data-action="prev-window" aria-label="Previous window">&#9664;W</button>
+      <button type="button" data-action="next-window" aria-label="Next window">W&#9654;</button>
+      <button type="button" data-action="zoom">ZOOM</button>
+      <button type="button" data-action="drag">DRAG</button>
+      <button type="button" data-action="paste">PASTE</button>
+      <button type="button" data-action="kbd" aria-label="Show keyboard">KBD</button>
+    </div>
+  </div>
+</div>
+<div id="toast" hidden></div>
+<script>
+/*XTERM_JS*/
+</script>
+<script>
+/*ADDON_FIT_JS*/
+</script>
+<script>
+/*CLIENT_JS*/
+</script>
+</body>
+</html>

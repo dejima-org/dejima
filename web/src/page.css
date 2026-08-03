@@ -1,0 +1,105 @@
+/* The page around xterm's own stylesheet. */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+  /* Stops iOS growing text in landscape, which would desynchronise the cell
+     size from what the fit addon measured. */
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Fixed rather than 100vh: vh units are the LAYOUT viewport, which does not
+   shrink when the soft keyboard appears. viewport.js sizes this to the visual
+   viewport instead. */
+#app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#terminal {
+  flex: 1 1 auto;
+  /* Without this a flex child refuses to shrink below its content height, and
+     the terminal pushes the toolbar off the bottom of the screen. */
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Only on touch: the gesture layer needs every touchmove, and the browser will
+   not deliver them if it has already decided the gesture is a page scroll. */
+body.touch #terminal {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+#toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+  background: #14161a;
+  border-top: 1px solid #2a2f37;
+  touch-action: manipulation;
+}
+
+#toolbar .row {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+#toolbar button {
+  min-height: 40px;
+  padding: 0 2px;
+  font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #d7dce3;
+  background: #232830;
+  border: 1px solid #343b45;
+  border-radius: 6px;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#toolbar button:active {
+  background: #39414d;
+}
+
+/* Armed for one key, versus latched on. Two states on one button, so the
+   distinction has to be visible without a legend. */
+#toolbar button.is-armed {
+  color: #0b0d10;
+  background: #7fb3ff;
+  border-color: #7fb3ff;
+}
+
+#toolbar button.is-locked {
+  color: #0b0d10;
+  background: #ffcc66;
+  border-color: #ffcc66;
+}
+
+#toast {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  z-index: 10;
+  padding: 10px 12px;
+  font: 13px/1.4 system-ui, sans-serif;
+  color: #0b0d10;
+  background: #ffcc66;
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
