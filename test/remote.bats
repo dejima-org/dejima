@@ -1765,6 +1765,23 @@ EOF
 }
 ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 
+# Reports no listener, whatever the host is actually running. Opt-in, and
+# deliberately not part of stub_ttyd: the port-in-use refusal has its own test
+# below, which binds a real socket and needs the real ss to see it.
+#
+# For every OTHER ttyd test the port being free is a precondition, not the
+# subject - and one that was being inherited from the machine rather than
+# stated. The default-port case asserts against 7681, which is exactly the
+# port a real dejima-ttyd front door holds, so it failed on any host running
+# the feature: the machine a developer is most likely to run this suite on.
+# Same shape as #56 - a test reading its environment instead of setting it.
+stub_ss_no_listeners() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_DIR/ss"
+    chmod +x "$STUB_DIR/ss"
+    PATH="$STUB_DIR:$PATH"
+}
+
 # The EXACT argument vector, one argument per line - a whitelist, for the same
 # reason expect_argv above is one. The bind address is the security property
 # of this whole task, and an absence grep cannot see a SECOND --interface, a
@@ -1808,6 +1825,7 @@ unit_exec_start() {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345

@@ -408,7 +408,25 @@ make_cert() {
     # `run env ...`, not a `VAR=x run ...` prefix: an assignment prefixed to a
     # shell *function* persists in the calling shell rather than scoping to
     # the call, so it would leak into every later test in this file.
-    run env SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
+    #
+    # The -u pair is what makes this test about the code rather than about
+    # where it runs (#56). "No cert configured" was expressed by not setting
+    # the variables, which only holds where nothing else set them -
+    # entrypoint.sh:211 exports both into every tls-transport session, so a
+    # suite run from inside a dejima container inherited real cert paths, the
+    # guard below never fired, and execution fell through to the listen. What
+    # failed then was an EADDRINUSE against the session's own forwarder on
+    # :443, reported as this assertion failing - the code was fine and the
+    # test was reading its own environment. Unsetting them states the
+    # precondition instead of assuming it.
+    #
+    # The port override is belt-and-braces: the cert check runs before the
+    # listen today, so a passing test never binds anything, but if that order
+    # ever changes the fall-through lands on an unused port rather than on
+    # whatever holds :443.
+    run env -u SANDBOX_ANTHROPIC_TLS_CERT -u SANDBOX_ANTHROPIC_TLS_KEY \
+        SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
+        SANDBOX_ANTHROPIC_PROXY_PORT=18398 \
         node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js"
     [ "$status" -ne 0 ]
     [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
