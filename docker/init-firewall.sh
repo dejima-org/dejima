@@ -353,7 +353,28 @@ else
 fi
 
 # Confirm the allowlist itself actually works, not just that the default-deny does.
-if ! curl --connect-timeout 5 --max-time 15 https://api.github.com/zen >/dev/null 2>&1; then
+#
+# Retried, unlike the negative control above, because the two ask opposite
+# questions. This one asserts something CAN be reached, and a transient DNS
+# answer or a CDN edge rotating mid-boot answers it wrongly in the direction
+# that kills the container - which is how it presented, one container failing
+# here while a dozen others in the same CI run came up fine. The example.com
+# check must NOT be retried: there a single success is the real answer, and
+# retrying would only be asking until it says what we want.
+github_reachable=0
+for attempt in 1 2 3; do
+    if curl --connect-timeout 5 --max-time 15 https://api.github.com/zen >/dev/null 2>&1; then
+        github_reachable=1
+        break
+    fi
+    echo "  attempt $attempt/3: api.github.com not reachable yet" >&2
+    # `if`, not `[ ... ] && sleep` - see fetch_github_ranges above for what
+    # that costs on the last attempt under set -e.
+    if [ "$attempt" -lt 3 ]; then
+        sleep $((attempt * 2))
+    fi
+done
+if [ "$github_reachable" -ne 1 ]; then
     echo "ERROR: self-check failed - api.github.com should be reachable but wasn't"
     exit 1
 else

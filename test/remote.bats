@@ -880,10 +880,18 @@ EOF
 # Waits for the grouped session an attach should have created, then prints
 # "<name> <group>" for it - empty group means UNGROUPED, i.e. a fresh session
 # tmux conjured out of a name rather than a clone of the sandbox's own.
+#
+# Waits for the CLIENT rather than the session, like the earlier attach test
+# does. dejima-attach creates the session detached, checks it holds the pane,
+# selects the window and only then attaches - so has-session goes true while
+# the session is still on whatever window the group started on. A caller that
+# goes on to assert the window index reads it inside that gap. That is how
+# this failed in CI, with the group assertion on the line before it passing:
+# the group is set at creation, the window is not.
 await_group() {
     local i
-    for i in $(seq 50); do
-        if tmux has-session -t "=dejima-$1" 2>/dev/null; then break; fi
+    for i in $(seq 100); do
+        [ "$(tmux list-clients -F '#{client_session}' 2>/dev/null)" = "dejima-$1" ] && break
         sleep 0.1
     done
     tmux list-sessions -F '#{session_name} #{session_group}' | grep "^dejima-$1 " || true
