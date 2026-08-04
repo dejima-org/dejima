@@ -531,3 +531,26 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
         [[ " $hosts " == *" $h "* ]] || { echo "missing $h in: $hosts"; return 1; }
     done
 }
+
+@test "an unset push_token_file yields no GH_TOKEN pair at all, not an empty one" {
+    # docker-compose.yml declares GH_TOKEN itself, carrying the independent
+    # read-only [github] token_file value. `-e GH_TOKEN=` (the pair
+    # forge_env_exports used to emit for an unresolved value) overrides that
+    # entry to empty on `docker compose run` - wholly unconfigured must stay
+    # silent here, exactly like it already does for provider_validate_selection's
+    # own partial-config warning, or selecting this forge with no push token
+    # yet silently voids the baseline read-only access every session gets.
+    printf '[core]\nforge = github\n' > "$CONFIG_DIR/config"
+    run lib forge_env_exports github
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ]
+}
+
+@test "a configured push_token_file still yields a real GH_TOKEN pair" {
+    tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    printf '[forge.github]\npush_token_file = %s\n' "$tok" > "$CONFIG_DIR/config"
+    run lib forge_env_exports github
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "GH_TOKEN=ghp_example" ]
+}

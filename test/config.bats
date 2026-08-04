@@ -755,6 +755,52 @@ EOF
     [[ "$output" != *"is not used"* ]]
 }
 
+@test "the github token_file warning is silent when push_token_file is not also set" {
+    # The warning claims GH_TOKEN comes from push_token_file - false unless
+    # that is actually configured too. Wholly unconfigured (push_token_file
+    # unset) is the same silent case provider_validate_selection's own
+    # partial-config warning defers to, not something to say out loud here.
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' "[github]" "token_file = $ro"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"is not used"* ]]
+}
+
+@test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
+    # Finding 1 regression: forge_env_exports used to emit `GH_TOKEN=` (empty)
+    # whenever push_token_file was unset, and `-e GH_TOKEN=` on `docker
+    # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
+    # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
+    # [github] token_file value every session is supposed to get regardless
+    # of forge. Asserted on the actual argument list handed to `docker`, not
+    # on a warning, so this catches the container-facing symptom directly.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' 'workflow = local-only' \
+        '[github]' "token_file = $ro"
+    workspace="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! grep -qxF 'GH_TOKEN=' "$docker_log" \
+        || { echo "GH_TOKEN= reached docker, clobbering the read-only token"; cat "$docker_log"; return 1; }
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
 @test "logging.loki_url reaches the launch environment" {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"

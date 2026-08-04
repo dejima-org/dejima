@@ -558,6 +558,18 @@ forge_env_exports() {
         else
             value="$(config_get "forge.$forge" "$ref")" || return 1
         fi
+        # An unresolved (empty) value is skipped rather than emitted as
+        # `NAME=`. Harmless for a forge whose variables docker-compose.yml
+        # never declares in its own `environment:` section - an absent -e
+        # flag and an empty one are the same "not set" to a container either
+        # way, and every such variable's consumer already treats unset and
+        # empty identically. Not harmless for GH_TOKEN specifically: compose
+        # DOES declare it there, carrying an independent read-only value
+        # every session gets regardless of which forge is selected. `-e
+        # GH_TOKEN=` on `docker compose run` overrides that entry - emitting
+        # it here whenever a forge's own env_export resolves it empty would
+        # silently replace a configured read-only token with nothing.
+        [ -n "$value" ] || continue
         printf '%s=%s\n' "$name" "$value"
     done
 }
