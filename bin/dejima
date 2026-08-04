@@ -627,7 +627,7 @@ cleanup() {
     # STATE is dropped from the rm -f above and freed only after compare has
     # read it, so this function's own cleanup can't race the audit that
     # needs it - and its removal is guarded too, so it stays truly last.
-    "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    DEJIMA_RW_MOUNTS="$DEJIMA_RW_MOUNTS" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
@@ -830,7 +830,10 @@ fi
 # DEJIMA_RW_MOUNTS is deliberately not forwarded into the container as an
 # environment variable: hooks/sandbox-context.sh no longer reads it (the
 # writable-mounts sentence reaches the session through the composed briefing
-# instead), so passing it would just be a value nothing inside consumes.
+# instead), so passing it would just be a value nothing inside consumes. It
+# IS forwarded the other direction, host-side, to the exit-time dejima-audit
+# invocation in cleanup() below - that report's header names these paths so
+# an operator reading any finding knows what else the session could reach.
 for path in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
     extra_mounts+=(-v "$path:$path")
 done
