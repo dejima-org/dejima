@@ -157,6 +157,24 @@ if ! config_exists; then
     exit 1
 fi
 
+# gh reads exactly one token variable, so when github is the selected FORGE
+# its write-capable push_token_file becomes GH_TOKEN and the read-only
+# [github] token_file is unused for this launch. Said out loud rather than
+# left as two configured tokens with one silently ignored - an operator who
+# set both is entitled to know which one is in effect. A warning, not a
+# refusal: the write-capable one winning is exactly what selecting this forge
+# asked for, so there is nothing here to stop for. Checked here, ahead of
+# --print-config's own exit below (like _warn_legacy_env above it), rather
+# than down by the GH_TOKEN block further down that --print-config never
+# reaches, so --print-config reports it too.
+if [ "$(config_get core forge)" = "github" ]; then
+    _github_ro_token_file="$(config_get github token_file)"
+    if [ -f "$_github_ro_token_file" ] && [ -s "$_github_ro_token_file" ]; then
+        echo "Note: [github] token_file is not used while [core] forge = github." >&2
+        echo "GH_TOKEN comes from [forge.github] push_token_file for this launch." >&2
+    fi
+fi
+
 # --print-config resolves the whole precedence chain and exits, before any
 # workspace argument is required and before anything is built or mounted.
 # It exists for two reasons: it answers "one config file now - what is

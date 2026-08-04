@@ -500,3 +500,34 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ -z "$output" ]
 }
+
+@test "the github forge pushes with its own token, not the read-only one" {
+    run lib manifest_validate forge github
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(lib manifest_get forge github capabilities)" = "pr issues" ]
+    [ "$(lib manifest_get forge github pr_command)" = "gh pr" ]
+    [ "$(lib manifest_get forge github merge_block)" = "gh pr merge" ]
+    # The write-capable token is its own key. Reusing [github] token_file
+    # would promote a deliberately read-only PAT to a pushing credential.
+    [ "$(lib manifest_get forge github requires)" = "push_token_file" ]
+    [[ "$(lib manifest_get forge github env_export)" == *"GH_TOKEN=@push_token_file"* ]]
+    # Ships no CLI: gh is already in the image.
+    [ -z "$(lib manifest_get forge github install)" ]
+}
+
+@test "the briefing does not call GitHub read-only when the forge can push to it" {
+    # The other half of Task 2's network_allowlist resolver, tested here
+    # because this is where the github forge starts existing.
+    printf '[forge.github]\npush_token_file = /dev/null\n' > "$CONFIG_DIR/config"
+    run lib briefing_compose github branch-push claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"GitHub read-only"* ]]
+    [[ "$output" == *"GitHub, which this session can also push to"* ]]
+}
+
+@test "the github forge contributes its hosts without any config" {
+    hosts="$(lib forge_hosts github)"
+    for h in github.com ssh.github.com api.github.com; do
+        [[ " $hosts " == *" $h "* ]] || { echo "missing $h in: $hosts"; return 1; }
+    done
+}

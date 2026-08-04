@@ -734,6 +734,27 @@ EOF
     [[ "$output" == *"set the path, not the token"* ]]
 }
 
+@test "selecting the github forge warns that [github] token_file is unused" {
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' 'workflow = branch-push' \
+        '[github]' "token_file = $ro" \
+        '[forge.github]' "push_token_file = $tok"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"[github] token_file is not used"* ]]
+    [[ "$output" == *"push_token_file"* ]]
+}
+
+@test "the github token_file warning is silent for any other forge" {
+    write_config '[core]' 'forge = gitea' '[github]' "token_file = $CONFIG_DIR/ro"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"is not used"* ]]
+}
+
 @test "logging.loki_url reaches the launch environment" {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"
