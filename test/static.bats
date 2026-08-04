@@ -1976,3 +1976,21 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     run grep -nE 'dejima-dep (add|remove) [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
 }
+
+@test "README does not claim --global/--project patch a running session" {
+    # A scope-flag-only call sets session_wanted=0 and never touches docker -
+    # see bin/dejima-allow. Claiming otherwise sends an operator to expect a
+    # live update they will not get.
+    run grep -nE 'which also (updates|patches) the running session' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+    grep -q 'deliberately do not touch a running container' "$REPO_ROOT/README.md"
+}
+
+@test "README does not claim dejima-project approve reports live-session failures" {
+    # approve only ever calls dejima-allow without --container (see
+    # bin/dejima-project's approve case), so a failure there is a persistence
+    # failure, never a live-session one.
+    run grep -n 'could not apply to a running session' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+    grep -q 'never attempts to patch a running session' "$REPO_ROOT/README.md"
+}
