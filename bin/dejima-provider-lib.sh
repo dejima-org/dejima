@@ -523,11 +523,10 @@ provider_validate_selection() {
     # this key", not "does it have a value" - a key can have a schema
     # default, so it always has a value, and testing the value would make a
     # wholly unconfigured forge (nothing in [forge.<name>] at all) look
-    # partly configured. A key whose schema default is non-empty (e.g.
-    # gitea's token_file, defaulting to ~/.config/gitea/token, exactly what
-    # the README's documented setup relies on) is skipped outright - its
-    # resolved value is already correct even when the operator never wrote
-    # it, so it can never count as genuinely missing.
+    # partly configured. A key whose schema default is non-empty (e.g. a
+    # token_file key that defaults to a path under ~/.config) is skipped
+    # outright - it already has a working value even when the operator
+    # never wrote it, so it can never count as genuinely missing.
     set_n=0 unset_n=0 missing=""
     for key in $(manifest_get forge "$forge" requires); do
         [ -z "$(config_default "forge.$forge.$key")" ] || continue
@@ -544,9 +543,9 @@ provider_validate_selection() {
     # have broken a supported state. Still scoped to PARTIAL configuration -
     # nothing set at all is rule 3's case above, and carries its own message -
     # and, like rule 3, only when the workflow actually pushes: a non-pushing
-    # workflow never invokes the forge, so e.g. gitea's ssh_host alone (set
-    # only so the firewall allows fetches) is a legitimate configuration, not
-    # a typo.
+    # workflow never invokes the forge at all, so a partially filled-in forge
+    # section (e.g. only a host key, set so the firewall allows fetches) is
+    # untidy rather than broken - not a typo worth refusing.
     if [ "$push" = "on" ] && [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
         echo "forge '$forge' is partly configured - [forge.$forge] is missing:" >&2
         echo "$missing. Set them, or set [core] forge = none if this sandbox" >&2

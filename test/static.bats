@@ -1630,9 +1630,17 @@ EOF
     chmod +x "$DEJIMA_T/docker"
     : > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
+    # forge = none, workflow = local-only: provider_validate_selection runs
+    # ahead of the audit-startup path these tests are actually about, and the
+    # default gitea/worktree-pr pair is refused unconfigured (see
+    # providers.bats) - this fixture sidesteps that with the honest
+    # "no forge, no push" pair rather than configuring a forge just to get
+    # past validation.
     cat > "$DEJIMA_T/config/config" <<EOF
 [core]
 ssh_key = $DEJIMA_T/sandbox-key
+forge = none
+workflow = local-only
 [audit]
 dir = $DEJIMA_T/audit
 EOF
