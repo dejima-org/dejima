@@ -725,8 +725,16 @@ start_tmux() {
     # dejima-attach a bare pty too.
     script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
     attach_pid=$!
-    for _ in $(seq 50); do
-        if tmux has-session -t '=dejima-0123456789abcdef' 2>/dev/null; then break; fi
+    # Waits for the CLIENT, not just the session. dejima-attach creates the
+    # session and then attaches to it, so has-session goes true first and
+    # list-clients stays empty for a moment after - and the assertion below
+    # used to run inside that window. On an unloaded machine it lost the race
+    # rarely enough to look like noise; under load it failed 5 times in 12.
+    # Polling for the state being asserted on closes the window instead of
+    # widening it, and the assertions themselves are unchanged, so a genuine
+    # regression still fails here rather than timing out into a pass.
+    for _ in $(seq 100); do
+        [ "$(tmux list-clients -F '#{client_session}' 2>/dev/null)" = "dejima-0123456789abcdef" ] && break
         sleep 0.1
     done
     tmux has-session -t '=dejima-0123456789abcdef'

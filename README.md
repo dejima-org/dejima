@@ -898,8 +898,8 @@ instead of finding out the hard way:
 
 ```sh
 bats test/               # everything
-bats test/static.bats test/project.bats test/remote.bats test/audit.bats  # fast, no Docker/build needed
-SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
+bats test/audit.bats     # one area - the suites are independent, see .dejima.md
+SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the current image
 ```
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every

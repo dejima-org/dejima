@@ -419,7 +419,3 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
         "$REPO_ROOT/docs" "$REPO_ROOT/install.sh"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
 }
-
-@test "the fast CI suite includes providers.bats" {
-    grep -q 'test/providers.bats' "$REPO_ROOT/.gitea/workflows/tests.yml"
-}

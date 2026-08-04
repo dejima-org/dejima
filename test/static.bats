@@ -1913,3 +1913,26 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
 }
+
+@test "every sandbox suite is in the CI matrix, and runtime.bats is not" {
+    # Derived from the directory rather than a list kept here, so adding a
+    # test file fails this until the workflow is told about it. A suite nobody
+    # wired into CI runs nowhere, and nothing else would say so.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    local f base missing=""
+    for f in "$REPO_ROOT"/test/*.bats; do
+        base="$(basename "$f" .bats)"
+        [ "$base" = "runtime" ] && continue
+        grep -qE "^ *- *$base\$" "$wf" || missing="$missing $base"
+    done
+    [ -z "$missing" ] || {
+        echo "these suites are not in the sandbox matrix, so CI never runs them:$missing" >&2
+        false
+    }
+
+    # runtime.bats belongs to the other job, and must not be a matrix entry:
+    # that job runs on a generic runner with no Docker daemon, so it would
+    # fail every time rather than testing anything.
+    ! grep -qE '^ *- *runtime$' "$wf"
+    grep -q 'test/runtime.bats' "$wf"
+}

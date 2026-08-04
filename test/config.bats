@@ -801,10 +801,6 @@ run_install() {
     [ -f "$CONFIG_DIR/remote.conf" ]
 }
 
-@test "the fast CI suite includes config.bats" {
-    grep -q 'test/config.bats' "$REPO_ROOT/.gitea/workflows/tests.yml"
-}
-
 @test "the README documents the config file, not the retired variables" {
     # The retired variables must be gone from the setup instructions...
     run grep -nE '^\| `(SANDBOX_CMD|SANDBOX_EXTRA_MOUNTS|SANDBOX_NVIM_CONFIG|SANDBOX_SHARE_DIR|SANDBOX_CREDENTIAL_PROXY|LOKI_URL|ENABLE_FIREWALL|GITEA_SSH_HOST|GITEA_API|GITEA_TOKEN)`' \
