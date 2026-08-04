@@ -468,3 +468,26 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [[ "$output" == *"GitHub read-only, plus anything"* ]]
     [[ "$output" != *"configured none host"* ]]
 }
+
+@test "branch-push pushes and blocks main, but attempts no PR" {
+    run lib manifest_validate workflow branch-push
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(lib manifest_get workflow branch-push push)" = "on" ]
+    [ "$(lib manifest_get workflow branch-push blocked_branches)" = "main master" ]
+    [ "$(lib manifest_get workflow branch-push block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow branch-push requires_worktree)" = "on" ]
+    [ "$(lib manifest_get workflow branch-push autonomy)" = "push-branch" ]
+    # Requires no capability, so it is usable against a forge that offers none.
+    [ -z "$(lib manifest_get workflow branch-push requires)" ]
+    run lib provider_validate_selection none branch-push claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the branch-push briefing tells the agent to stop at the push" {
+    run lib briefing_compose gitea branch-push claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Push that branch"* ]]
+    # It must not instruct opening a PR - that is worktree-pr's job, and this
+    # workflow's whole point is that it stops earlier.
+    [[ "$output" != *"create"*"PR"* ]] || { echo "branch-push briefing mentions opening a PR"; return 1; }
+}
