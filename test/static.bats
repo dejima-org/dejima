@@ -1538,7 +1538,7 @@ EOF
 }
 
 @test "README documents dejima-dep --global" {
-    grep -q 'dejima-dep add cargo:cargo-nextest --global' "$REPO_ROOT/README.md"
+    grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
 }
 
 @test "README documents that the exit-time audit's findings are not attributed to the session" {
@@ -1941,4 +1941,38 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # fail every time rather than testing anything.
     ! grep -qE '^ *- *runtime$' "$wf"
     grep -q 'test/runtime.bats' "$wf"
+}
+
+@test "the agent briefing teaches the project scope, not just global" {
+    # The observed failure: an agent asked for a project-specific domain to be
+    # added container-wide and globally, because --project was never named.
+    grep -q -- 'dejima-allow --project' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+}
+
+@test "the agent briefing and the context hook use the new argument order" {
+    # A briefing that hands the operator a command the CLI now rejects is worse
+    # than one that says nothing.
+    run grep -nE 'dejima-allow [a-z<][^ ]* +--' \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -ne 0 ]
+}
+
+@test "the briefing's container placeholder is the template form, not a shell variable" {
+    # _briefing_core_preamble is a quoted heredoc rendered by placeholder
+    # substitution; a literal $container_id would reach the agent unexpanded.
+    run grep -n 'dejima-allow --container \$container_id' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ]
+    grep -q 'dejima-allow --container {{container_id}}' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+}
+
+@test "README documents dejima-allow with flags before the domain" {
+    grep -q 'dejima-allow --global crates.io' "$REPO_ROOT/README.md"
+    run grep -nE 'dejima-allow [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "README documents dejima-dep with flags before the spec" {
+    grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
+    run grep -nE 'dejima-dep (add|remove) [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
 }

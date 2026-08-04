@@ -237,14 +237,22 @@ something:
 ```sh
 dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # approve the declared set
-dejima-allow crates.io --project ~/myproject
-dejima-dep add cargo:cargo-nextest --global
+dejima-allow --project ~/myproject crates.io
+dejima-dep add --global cargo:cargo-nextest
 ```
 
-Domains apply at the next launch, and `dejima-allow` also patches a running
-session. Dependencies need an image rebuild, so they always land on the next
-one. →
-[Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
+`dejima-allow` with no scope flag patches a running session; `--project` or
+`--global` instead records an approval for future sessions, and domains
+apply at their next launch. Dependencies need an image rebuild, so they
+always land on the next one.
+
+`--project` records two things: the approval in `~/.config/dejima` (which is
+what actually grants) and a declaration in the project's own
+`.dejima/allowed-domains` (which is committed, so the rest of the project gets
+it too). `--global` writes only the approval — there is no project to declare
+in.
+
+→ [Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
 [Adding a domain to a running session](#adding-a-domain-to-a-running-session)
 
 ### Log shipping
@@ -617,7 +625,7 @@ default:
 - whatever `[forge.gitea] ssh_host`/`api` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
-Everything else is rejected. Run `dejima-allow <domain> --global`
+Everything else is rejected. Run `dejima-allow --global <domain>`
 (or `--project <path>` for one project) to allow more permanently (e.g.
 `crates.io` for a Rust project), or `dejima --no-firewall` to disable the
 firewall entirely for one launch (debugging only).
@@ -650,7 +658,7 @@ sandbox — it has no privilege to do this itself):
 
 ```sh
 dejima-allow crates.io                # this session only
-dejima-allow crates.io --global       # + persist for every project
+dejima-allow --global crates.io       # + persist for every project
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -727,10 +735,10 @@ you run on the host:
 ```sh
 dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # review and approve the declared set
-dejima-allow crates.io --project ~/myproject
-dejima-allow crates.io --global       # applies to every project
-dejima-dep add cargo:cargo-nextest --project ~/myproject
-dejima-dep add cargo:cargo-nextest --global
+dejima-allow --project ~/myproject crates.io
+dejima-allow --global crates.io       # applies to every project
+dejima-dep add --project ~/myproject cargo:cargo-nextest
+dejima-dep add --global cargo:cargo-nextest
 ```
 
 `dejima-project status`/`approve` classify a declared entry against
