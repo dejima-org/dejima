@@ -865,9 +865,58 @@ EOF
     grep -q 'register_hook PreToolUse Bash merge-guard.sh' "$REPO_ROOT/install.sh"
 }
 
-@test "install.sh cleans up the stale pre-rename gitea-merge-guard.sh hook symlink" {
-    grep -q 'gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
-    grep -q 'dangling' "$REPO_ROOT/install.sh"
+# Runs install.sh against a throwaway HOME, with a stub `docker` on PATH so
+# its tool check passes somewhere without one (this suite is the no-Docker
+# half). Everything the script writes - hook symlinks, ~/.local/bin,
+# settings.json, the starter config - lands under that HOME.
+run_install() {
+    local home="$1"
+    mkdir -p "$home/stub"
+    printf '#!/bin/sh\nexit 0\n' > "$home/stub/docker"
+    chmod +x "$home/stub/docker"
+    env HOME="$home" PATH="$home/stub:$PATH" DEJIMA_CONFIG_DIR="$home/config" \
+        bash "$REPO_ROOT/install.sh"
+}
+
+# Every registered hook command, one per line.
+registered_commands() {
+    jq -r '[.hooks[]?[]?.hooks[]?.command // empty] | .[]' "$1/.claude/settings.json"
+}
+
+@test "install.sh replaces the pre-rename gitea-merge-guard.sh registration rather than reading it as one" {
+    # Asserted by running it, not by grepping it: the bug this covers was a
+    # register_hook call that was present in the source and did nothing. Its
+    # dedupe matched the pre-rename command string as a substring, so the
+    # merge guard was registered nowhere while install.sh reported success,
+    # and every session start reported the missing hook the stale entry
+    # still named.
+    local home="$BATS_TEST_TMPDIR/h"
+    mkdir -p "$home/.claude/hooks"
+    ln -s "$REPO_ROOT/hooks/gone.sh" "$home/.claude/hooks/gitea-merge-guard.sh"
+    jq -n '{hooks: {PreToolUse: [{matcher: "Bash", hooks: [{type: "command",
+        command: "$HOME/.claude/hooks/gitea-merge-guard.sh"}]}]}}' \
+        > "$home/.claude/settings.json"
+
+    run_install "$home"
+
+    run registered_commands "$home"
+    [[ "$output" != *"gitea-merge-guard.sh"* ]]
+    [ "$(registered_commands "$home" | grep -c '/merge-guard\.sh$')" -eq 1 ]
+    [ ! -e "$home/.claude/hooks/gitea-merge-guard.sh" ]
+}
+
+@test "install.sh registers each hook exactly once across repeated runs" {
+    # The other direction of the same dedupe: an exact match must still
+    # match. A re-run after a git pull is the common case, and duplicate
+    # registrations would run every guard twice.
+    local home="$BATS_TEST_TMPDIR/h2" cmd
+    run_install "$home"
+    run_install "$home"
+
+    while read -r cmd; do
+        [ "$(registered_commands "$home" | grep -cxF "$cmd")" -eq 1 ]
+    done < <(registered_commands "$home")
+    [ "$(registered_commands "$home" | wc -l)" -eq 4 ]
 }
 
 @test "the push guard names no forge, and blocks everything when no host is allowed" {
