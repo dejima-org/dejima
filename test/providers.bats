@@ -442,3 +442,29 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
         "$REPO_ROOT/docs" "$REPO_ROOT/install.sh"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
 }
+
+@test "the briefing names a real forge host, and says nothing about one for none" {
+    printf '[forge.gitea]\nssh_host = git.example\n' > "$CONFIG_DIR/config"
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"GitHub read-only, the configured gitea host (git.example), plus anything"* ]]
+
+    # workflows/local-only (Task 4) is what `forge = none` is meant to pair
+    # with - none's capabilities are empty, so no shipped workflow today
+    # accepts it (worktree-pr requires the 'pr' capability). Rather than wait
+    # on a later task, this composes against a throwaway workflow that
+    # requires nothing, using the real none/forge.conf so the resolver is
+    # exercised against Task 1's actual manifest, not a re-typed copy of it.
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/none" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
+    cp "$REPO_ROOT/forges/none/forge.conf" "$FAKE_ROOT/forges/none/forge.conf"
+    printf 'requires =\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
+    printf 'Nothing forge-specific here.\n' > "$FAKE_ROOT/workflows/w/briefing.md"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; briefing_compose none w h' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # No dangling article, no "none" read as a forge name.
+    [[ "$output" == *"GitHub read-only, plus anything"* ]]
+    [[ "$output" != *"configured none host"* ]]
+}

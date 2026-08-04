@@ -588,7 +588,7 @@ BRIEFING_FRAGMENT_MAX=16384
 # is a hard refusal (_briefing_substitute below), not a literal passthrough -
 # an unrecognized {{key}} reaching an agent's context verbatim is exactly the
 # kind of silent drift this whole function exists to prevent.
-_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts"
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist"
 
 _briefing_whitelisted() {
     _set_contains "$_BRIEFING_WHITELIST" "$1"
@@ -616,7 +616,7 @@ What this means:
   packages, anything outside the mounted paths, and the container itself go
   away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
-  registry, GitHub read-only, the configured {{forge_name}} host{{forge_ssh_host}}, plus anything
+  registry, {{network_allowlist}}, plus anything
   approved via dejima-allow). Requests to anything else will simply
   fail to connect. That restriction is not only a limit on your reach: it
   is also what bounds where a prompt injection or a compromised dependency
@@ -783,6 +783,28 @@ _briefing_resolve_key() {
                 host="$(config_get "forge.$forge" ssh_host 2>/dev/null)" || host=""
             fi
             [ -z "$host" ] || printf ' (%s)' "$host"
+            ;;
+        # What the session may actually reach, phrased for the selected forge
+        # rather than assembled from two placeholders. Three cases, because
+        # all three are materially different postures and the agent acts on
+        # this sentence: GitHub is read-only by default; a forge with hosts
+        # adds them; `github` as the FORGE means this session can push there,
+        # so calling it read-only would be false in the direction that matters.
+        network_allowlist)
+            local hosts=""
+            if [ "$forge" = "github" ]; then
+                printf '%s' "GitHub, which this session can also push to"
+            else
+                if [ -n "$(manifest_get forge "$forge" host_keys)$(manifest_get forge "$forge" url_keys)$(manifest_get forge "$forge" fixed_hosts)" ]; then
+                    hosts=", the configured $forge host"
+                    if config_exists 2>/dev/null; then
+                        local h
+                        h="$(config_get "forge.$forge" ssh_host 2>/dev/null)" || h=""
+                        [ -z "$h" ] || hosts="$hosts ($h)"
+                    fi
+                fi
+                printf '%s' "GitHub read-only$hosts"
+            fi
             ;;
         blocked_branches) manifest_get workflow "$workflow" blocked_branches ;;
         project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;
