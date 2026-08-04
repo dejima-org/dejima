@@ -68,14 +68,15 @@ if [ "$global" -eq 1 ]; then
     echo "Added $domain to the global approved domains (applies to every future session)."
 fi
 
-# The live-session update below needs a running container to exec into.
-# Skipped only by the test suite (test/project.bats), which exercises
-# --project persistence on its own, without a container.
-#
 # A scope flag means "record this approval", not "patch what is running now" -
 # so a --project/--global invocation never goes near Docker, and stops
 # reporting on containers the caller did not ask about. --container is the
 # explicit opt-in to doing both.
+#
+# The env var checked below is a second, independent escape hatch: it skips
+# the live-session update even for a bare (no-scope) call, which
+# session_wanted above does not - test-suite use only, never a documented
+# interface.
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0

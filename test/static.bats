@@ -699,7 +699,7 @@ EOF
     # reach a real running dejima session (and mutate its live
     # firewall) even if the machine running this test happens to have one -
     # it must fail at "container not found", not at validation.
-    run "$REPO_ROOT/bin/dejima-allow" 'crates.io' --container dejima-test-suite-nonexistent-target
+    run "$REPO_ROOT/bin/dejima-allow" --container dejima-test-suite-nonexistent-target 'crates.io'
     [ "$status" -ne 0 ]
     [[ "$output" != *"Not a valid domain"* ]]
 }
@@ -1298,9 +1298,10 @@ this line is not json'
 }
 
 @test "dejima-allow's session-skip escape hatch is test-only, never a silent no-op path" {
-    # DEJIMA_ALLOW_SKIP_SESSION exists so test/project.bats can
-    # exercise --project persistence without a live container. It must never
-    # be reachable from the documented interface.
+    # DEJIMA_ALLOW_SKIP_SESSION exists so test/project.bats can exercise a
+    # bare (no-scope) call without a live container - --project/--global
+    # already never need it, since session_wanted keeps them off Docker on
+    # their own. It must never be reachable from the documented interface.
     run grep -c 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
     [ "$output" -eq 1 ]
     run grep 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/README.md"

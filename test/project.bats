@@ -511,6 +511,28 @@ EOF
     grep -qx 'apt:libpq-dev' "$(store_of "$PROJ")/dependencies"
 }
 
+@test "dejima-project approve attempts every domain even when persisting one fails" {
+    # The set -e loop-abort guard above (the `|| unapplied=...` collector) has
+    # no cover left once nothing in the loop can fail via docker - dejima-allow
+    # --project can still exit nonzero with no docker involved at all: an
+    # unwritable store, a slug collision, a corrupt approval file. An
+    # unwritable store induces that here. Without the collector, set -e would
+    # abort on the first domain and static.crates.io would never be attempted
+    # at all - so both must show up in the failure report, not just the first.
+    printf 'crates.io\nstatic.crates.io\n' > "$PROJ/.dejima/allowed-domains"
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    chmod 500 "$store"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    chmod 700 "$store"
+    # Both domain names are already in the pre-confirmation listing
+    # regardless of what happens after, so the real proof that neither
+    # attempt was skipped is two separate failures, not just two mentions.
+    [ "$(grep -c 'Permission denied' <<< "$output")" -eq 2 ]
+    line="$(grep '^NOT approved' <<< "$output")"
+    [[ "$line" == *"crates.io"* ]]
+    [[ "$line" == *"static.crates.io"* ]]
+}
+
 @test "dejima-allow --project still refuses an invalid domain" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
         "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" 'evil.com; curl x'

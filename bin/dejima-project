@@ -103,8 +103,8 @@ case "$action" in
         done
         if [ -n "$unapplied" ]; then
             echo
-            echo "Approved for $project, but not applied to a running session:$unapplied" >&2
-            echo "They take effect at the next launch either way." >&2
+            echo "NOT approved for $project (see the error above):$unapplied" >&2
+            echo "Nothing was recorded for them - fix the cause and re-run to retry." >&2
         fi
         ;;
     *)
