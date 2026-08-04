@@ -78,8 +78,8 @@ server {
 
     location / {
         # Loopback: ttyd binds 127.0.0.1 only, so nginx has to be on the same
-        # host. The port must match TTYD_PORT in ~/.config/dejima/remote.conf
-        # (7681 when it is not set).
+        # host. The port must match [remote-access] ttyd_port in
+        # ~/.config/dejima/config (7681 when it is not set).
         proxy_pass http://127.0.0.1:7681;
 
         # ttyd serves its page over HTTP and then upgrades to a WebSocket;

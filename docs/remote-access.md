@@ -2,14 +2,14 @@
 
 [← dejima README](../README.md)
 
-**Opt-in, and entirely off until you create one file.** Nothing here runs and
-no front door exists unless `~/.config/dejima/remote.conf` is present. With
-it absent, `dejima` builds exactly the `docker compose` invocation it
-built before this feature existed, no session state is written, no
-notification hook is registered, and `dejima-attach`, `dejima-ttyd` and
-`dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
-three onto `PATH` and stops there - it runs no `systemctl`, copies no unit,
-and starts nothing.
+**Opt-in, and entirely off until you flip one switch.** Nothing here runs and
+no front door exists unless `[remote-access] enabled = on` is set in
+`~/.config/dejima/config`. With it `off` (the default), `dejima` builds
+exactly the `docker compose` invocation it built before this feature
+existed, no session state is written, no notification hook is registered,
+and `dejima-attach`, `dejima-ttyd` and `dejima-notify-watch` each refuse to
+run at all. `install.sh` symlinks those three onto `PATH` and stops there -
+it runs no `systemctl`, copies no unit, and starts nothing.
 
 What this is: a way to get back to a session that is *already running* on
 your machine, from a phone on the same network, when it stops to ask you
@@ -23,62 +23,65 @@ follows from that single fact - it is why the listener is on loopback, why
 the proxy needs authentication, and why the bind address is the one step to
 get right.
 
-## `remote.conf`
+## `[remote-access]`
 
-Flat `KEY=value` lines, `#` comments and blank lines ignored, at
-`~/.config/dejima/remote.conf` (`$DEJIMA_CONFIG_DIR` relocates the whole
-config tree, same as it does for approvals):
+A section of the single config file, at `~/.config/dejima/config`
+(`$DEJIMA_CONFIG_DIR` relocates the whole config tree, same as it does for
+approvals):
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `NTFY_URL` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
-| `BASE_URL` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
-| `TTYD_PORT` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
-| `TTYD_FONT_SIZE` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
-| `TTYD_TMUX_PREFIX` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
+| `enabled` | `off` | the switch - nothing below runs until this is `on` |
+| `ntfy_url` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
+| `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
+| `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
+| `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
-`NTFY_URL` and `BASE_URL` must carry an explicit `http://` or `https://`
+`ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
 scheme; a value without one is refused rather than guessed at, because
 `curl` reads a leading `-K/path` as an *option* that takes the request's URL
 from that file instead. Values are restricted to
 `A-Za-z0-9:/._~?=%@+-` — no whitespace and nothing shell-active, since these
 end up in an HTTP header and in a URL handed to a phone.
 
-**A malformed file is a hard failure, not a warning.** The whole file is
+**A malformed config is a hard failure, not a warning.** The whole file is
 validated on every read, not just the key being asked for: an unknown key, a
-value outside that character set, or a line without an `=` makes
+value outside that character set, or a line that doesn't parse makes
 `dejima-ttyd` and `dejima-notify-watch` refuse to start and say which line
-was wrong. A `TTYD_PORT` that isn't a number in 1-65535 is refused the same
-way, as is a `TTYD_FONT_SIZE` outside 8-72 - a size big enough to make one
+was wrong. A `ttyd_port` that isn't a number in 1-65535 is refused the same
+way, as is a `ttyd_font_size` outside 8-72 - a size big enough to make one
 glyph wider than the viewport renders a terminal that shows nothing, which
-reads as a broken front door rather than as a typo three files away. A
-`TTYD_TMUX_PREFIX` that is not a control chord is refused here too, rather
+reads as a broken front door rather than as a typo three sections away. A
+`ttyd_tmux_prefix` that is not a control chord is refused here too, rather
 than on the phone, hours later, by whoever presses `PREFIX` and gets nothing.
 
-Those are the two scripts that read a *value* out of the file.
-`dejima-attach` and `dejima` do not - to them the file is a switch, and
-all they ask is whether it exists - so neither one parses it and neither
-refuses on a bad line. That is deliberate rather than an oversight: a
-malformed line cannot change what they do, and making the front door refuse
-to open over a typo would take away the terminal you would fix it from.
+`dejima-ttyd` and `dejima-notify-watch` are the two scripts that read a
+*value* out of the config, so a typo anywhere in the file refuses their
+start. `dejima` reads values too (`audit dir` among them) and refuses the
+same way. `dejima-attach` alone only asks `remote_enabled` - deliberately
+bypassing the whole-file validation, so a typo elsewhere in the config can't
+lock you out of the terminal you'd fix it from.
 
 ```
-# ~/.config/dejima/remote.conf - substitute your own topic and hostname
-NTFY_URL=https://ntfy.example.invalid/your-topic-here
-BASE_URL=https://dejima.example.invalid
-TTYD_PORT=7681
-# TTYD_FONT_SIZE=20      # optional, and applies to the desktop too
-# TTYD_TMUX_PREFIX=C-a   # optional; the page assumes stock C-b without it
+# ~/.config/dejima/config - substitute your own topic and hostname
+[remote-access]
+enabled = on
+ntfy_url = https://ntfy.example.invalid/your-topic-here
+base_url = https://dejima.example.invalid
+ttyd_port = 7681
+# ttyd_font_size = 20      # optional, and applies to the desktop too
+# ttyd_tmux_prefix = C-a   # optional; the page assumes stock C-b without it
 ```
 
-**Editing this file changes nothing until the services restart.** Every value
-is read once, at process start - `dejima-ttyd` reads `TTYD_PORT`,
-`TTYD_FONT_SIZE` and `TTYD_TMUX_PREFIX` and then `exec`s `ttyd` with them
+**Editing this changes nothing until the services restart.** Every value
+is read once, at process start - `dejima-ttyd` reads `ttyd_port`,
+`ttyd_font_size` and `ttyd_tmux_prefix` and then `exec`s `ttyd` with them
 baked into its argv. So:
 
 ```sh
 systemctl --user restart dejima-ttyd.service
-systemctl --user restart dejima-notify-watch.service   # if NTFY_URL changed
+systemctl --user restart dejima-notify-watch.service   # if ntfy_url changed
 pgrep -a ttyd    # confirm the argv is what you just configured
 ```
 
@@ -105,7 +108,7 @@ So:
   nothing but a process on this host can open that socket.
 - **The reverse proxy has to run on that same host** - the dejima box, the
   one your sandboxes start on. That is not a preference, it is what the
-  loopback bind implies: `proxy_pass http://127.0.0.1:<TTYD_PORT>` only
+  loopback bind implies: `proxy_pass http://127.0.0.1:<ttyd_port>` only
   resolves to `ttyd` from the same machine. If you already run a proxy on a
   *different* box, do not point it here - reaching `ttyd` from there would
   mean binding `ttyd` to a routable address, which is precisely the escape
@@ -146,14 +149,14 @@ Cross-check from the other side, too: the address a running sandbox has a
 route to is the one to avoid, and the container will tell you which it is -
 `docker exec <container> ip route | grep default` names it.
 
-Afterwards, `ss -ltnp | grep <TTYD_PORT>` should show `ttyd` on `127.0.0.1`
+Afterwards, `ss -ltnp | grep <ttyd_port>` should show `ttyd` on `127.0.0.1`
 only, and `ss -ltnp` on your proxy's port should show the single LAN address
 you chose - not `*` and not `0.0.0.0`.
 
 ## Verifying it
 
 Verify rather than assume. With a sandbox running, from inside it (adjust
-`7681` if you changed `TTYD_PORT`, and `443` to whatever port your proxy
+`7681` if you changed `ttyd_port`, and `443` to whatever port your proxy
 listens on):
 
 ```sh
@@ -260,7 +263,7 @@ one-line bind error in a unit nobody is watching. That is a diagnostic, not a
 fix: the listener is there from the moment the package lands, whether or not
 you ever run `dejima-ttyd`.
 
-`dejima-ttyd` reads `TTYD_PORT` and launches
+`dejima-ttyd` reads `ttyd_port` and launches
 `ttyd --interface 127.0.0.1 --port <port> --check-origin --url-arg --writable dejima-attach`.
 Two of those are load-bearing:
 
@@ -287,7 +290,7 @@ systemctl --user enable --now dejima-ttyd.service
 
 It is a **user** unit, not a system one, and it repeats no configuration:
 `ExecStart` is `%h/.local/bin/dejima-ttyd`, and the bind address and port
-live in the script and `remote.conf` so the two cannot drift.
+live in the script and the config so the two cannot drift.
 
 Then put a reverse proxy in front of it. Adapt
 `docs/nginx-dejima.conf.example` - it will not load as written, deliberately,
@@ -369,7 +372,7 @@ PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
 - `CTRL` is sticky: one tap arms it for the next key, a second tap locks it on,
   a third releases it. Armed and locked are different colours, because they are
   the same button.
-- `PREFIX` sends the tmux prefix - `C-b` unless `TTYD_TMUX_PREFIX` says
+- `PREFIX` sends the tmux prefix - `C-b` unless `ttyd_tmux_prefix` says
   otherwise - so tmux's own bindings stay reachable: `PREFIX` then `w` opens
   the window list, `PREFIX` then `[` enters copy mode.
 - `◀W` and `W▶` are prefix + `p` / prefix + `n`. They are the answer to the
@@ -409,14 +412,15 @@ what anyone reaches for, and this is the trade. Removing `--index` from
 
 ### Font size
 
-If the text is still smaller than you want, set `TTYD_FONT_SIZE` in
-`remote.conf` (8-72). Be aware of what it costs: **it applies to every
-client.** `ttyd` 1.7.7 accepts client options only at launch - the URL-query
-override that would let a deep link carry its own size landed upstream after
-1.7.7 was cut - so there is no way from here to give a phone one size and the
-desktop another. A larger size also means fewer columns, and because attaching
-shares the window with your desktop session, tmux resizes that window to
-whichever client used it last.
+If the text is still smaller than you want once the layout is honest, set
+`ttyd_font_size` in `[remote-access]` (8-72). Be aware of what it costs:
+**it applies to every client.** `ttyd` 1.7.7 accepts client options only at
+launch - the URL-query override that would let a deep link carry its own size
+landed upstream after 1.7.7 was cut - so there is no way from here to give a
+phone one size and the desktop another. A larger size also means fewer
+columns, and because attaching shares the window with your desktop session,
+tmux resizes that window to whichever client used it last. Start by fixing the
+viewport and only reach for this if you still need it.
 
 ### Rebuilding the page
 
@@ -589,7 +593,7 @@ systemctl --user enable --now dejima-notify-watch.service
 `inotify-tools` is optional - without `inotifywait` the watcher degrades to
 a roughly six-second poll rather than failing (a one-second floor under the
 loop plus a five-second sleep). Repeat markers for the same session and
-event inside 60 seconds are debounced (`DEJIMA_DEBOUNCE_SECONDS` overrides
+event inside 60 seconds are debounced (`[remote-access] debounce` overrides
 that).
 
 One environment gotcha, because it fails silently: the watcher and
@@ -628,7 +632,7 @@ logging out, which discards the tmpfs) is the recovery.
 
 **What a notification contains.** A title of `dejima: <project> needs input`
 (or `dejima: <project> finished`), a fixed one-line body, and - when
-`BASE_URL` is set - a click link of `<BASE_URL>/?arg=<run-id>` that opens the
+`base_url` is set - a click link of `<base_url>/?arg=<run-id>` that opens the
 web front door already attached to that session. `<project>` is the
 workspace directory's name, taken from the host-side registry and reduced to
 `A-Za-z0-9._-`.
@@ -660,8 +664,8 @@ the next one is worth checking.
 
 1. **Is the session registered?** Inside the sandbox, `echo $DEJIMA_RUN_ID`
    and `echo $DEJIMA_NOTIFY_DIR`. Both empty means `dejima` started this
-   container with remote access off - `remote.conf` did not exist at launch,
-   and no later change affects a session already running.
+   container with remote access off - `[remote-access] enabled` was off at
+   launch, and no later change affects a session already running.
 2. **Is the hook registered?** The `Notification` and `Stop` entries live in
    the throwaway override layer, not in your real `settings.json`:
    `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 2.
@@ -681,18 +685,18 @@ the next one is worth checking.
    session.
 4. **Did the push succeed?** `curl`'s stderr goes to the watcher's journal:
    `journalctl --user -u dejima-notify-watch -n 50`. A `push failed` line
-   with a 404 usually means `NTFY_URL` names the server but no topic; a 401
+   with a 404 usually means `ntfy_url` names the server but no topic; a 401
    or 403 means the instance wants credentials, which the URL can carry as
    `https://<user>:<token>@<host>/<topic>` - nothing here sends an auth
    header of its own.
 5. **Is the phone subscribed to the topic the config names?** Last in the
    list and first to check in practice, since it is the only link with no
-   log anywhere. The topic in `NTFY_URL` and the one in the app have to be
+   log anywhere. The topic in `ntfy_url` and the one in the app have to be
    the same string.
 
 Note also that step 3 sends a real notification when the chain is healthy,
 which makes it a test of the whole path rather than only of the watcher.
-Repeat runs within `DEJIMA_DEBOUNCE_SECONDS` (60 by default) are consumed
+Repeat runs within `[remote-access] debounce` (60 by default) are consumed
 without pushing, so leave a minute between attempts or you will diagnose the
 debounce instead.
 

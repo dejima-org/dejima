@@ -6,12 +6,12 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now dejima-ttyd.service
 #
-# It does nothing useful until ~/.config/dejima/remote.conf exists; without
-# it dejima-ttyd exits 1 and the restart limit below stops the unit instead
-# of retrying forever.
+# It does nothing useful until [remote-access] enabled = on is set in
+# ~/.config/dejima/config; without it dejima-ttyd exits 1 and the restart
+# limit below stops the unit instead of retrying forever.
 [Unit]
 Description=dejima remote session terminal (ttyd)
-# A missing or malformed remote.conf fails every start identically, so give
+# A missing or malformed config fails every start identically, so give
 # up visibly (systemctl --user status says why) rather than restarting for
 # the life of the login session.
 StartLimitIntervalSec=60
@@ -19,7 +19,8 @@ StartLimitBurst=5
 
 [Service]
 # The bind address and the port both come from bin/dejima-ttyd, which reads
-# remote.conf - do not repeat either of them here, or the two will drift.
+# ~/.config/dejima/config - do not repeat either of them here, or the two
+# will drift.
 # %h, not an absolute path: this file is the same for every operator.
 ExecStart=%h/.local/bin/dejima-ttyd
 Restart=on-failure

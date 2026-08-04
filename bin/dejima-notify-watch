@@ -38,52 +38,44 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 
 if ! remote_enabled; then
-    echo "Remote access is not configured ($(remote_conf_path) does not exist)." >&2
+    echo "Remote access is not configured (no [remote-access] enabled = on in $(config_path))." >&2
     echo "See README \"Remote access\"." >&2
     exit 1
 fi
 
-NTFY_URL="$(remote_conf_get NTFY_URL)"
-BASE_URL="$(remote_conf_get BASE_URL)"
+NTFY_URL="$(config_get remote-access ntfy_url)"
+BASE_URL="$(config_get remote-access base_url)"
 if [ -z "$NTFY_URL" ]; then
-    echo "NTFY_URL is not set in $(remote_conf_path) - nothing to push to." >&2
+    echo "ntfy_url is not set in $(config_path) - nothing to push to." >&2
     exit 1
 fi
 
-# valid_remote_value permits a leading '-', which is harmless in a config file
-# and not harmless in curl's argument list: curl reads "-K/path" as an OPTION,
-# and -K takes the request's URL - and its output file - from that path
-# instead, so a value that isn't a URL sends the push somewhere the operator
-# never named. Requiring an explicit scheme is what makes these URLs rather
-# than arguments; the `--` at the call site is the other half. Widening
-# valid_remote_value instead would be the wrong place: it also guards nginx
-# and the TTYD_PORT, neither of which wants a URL.
+# The url config type already requires an http(s) scheme, but this is a
+# second check in the one place a bad value is dangerous rather than just
+# wrong: curl reads "-K/path" as an OPTION, and -K takes the request's URL -
+# and its output file - from that path instead, so a value that somehow
+# isn't a URL sends the push somewhere the operator never named. The `--` at
+# the call site is the other half.
 #
-# Refusing rather than sanitizing, because remote.conf is operator-written:
+# Refusing rather than sanitizing, because the config is operator-written:
 # a value that can't be used as intended means they got something wrong, and
 # this is the one place they say where their phone notifications go.
 require_url() {
     case "$2" in
         http://*|https://*) ;;
         *)
-            echo "$1 in $(remote_conf_path) must be an http:// or https:// URL: $2" >&2
+            echo "$1 in $(config_path) must be an http:// or https:// URL: $2" >&2
             exit 1
             ;;
     esac
 }
-require_url NTFY_URL "$NTFY_URL"
-[ -z "$BASE_URL" ] || require_url BASE_URL "$BASE_URL"
+require_url ntfy_url "$NTFY_URL"
+[ -z "$BASE_URL" ] || require_url base_url "$BASE_URL"
 
 STATE_DIR="$(remote_state_dir)"
 NOTIFY_DIR="$STATE_DIR/notify"
 DEBOUNCE_DIR="$STATE_DIR/debounce"
-DEBOUNCE_SECONDS="${DEJIMA_DEBOUNCE_SECONDS:-60}"
-case "$DEBOUNCE_SECONDS" in
-    ''|*[!0-9]*)
-        echo "DEJIMA_DEBOUNCE_SECONDS must be a whole number of seconds: $DEBOUNCE_SECONDS" >&2
-        exit 1
-        ;;
-esac
+DEBOUNCE_SECONDS="$(config_get remote-access debounce)"
 
 # Same check bin/dejima makes before creating this, and for the same reason:
 # /tmp is the fallback parent when XDG_RUNTIME_DIR is unset, and

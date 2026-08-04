@@ -83,13 +83,20 @@ EOF
     chmod 600 "$LAUNCH_DIR/sandbox-key"
 }
 
+# ssh_key is written into whatever config file config_root() currently
+# resolves to (DEJIMA_CONFIG_DIR, which a few tests point elsewhere) rather
+# than always $CONFIG_DIR/config, and appended rather than written, so it
+# layers over anything a test already put there (e.g. approved dependencies)
+# instead of clobbering it.
 launch() {
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_DOCKERFILE_LOG="$LAUNCH_DIR/dockerfile-log" \
-        SANDBOX_CREDENTIAL_PROXY=0 \
-        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
         "$REPO_ROOT/bin/dejima" "$@"
 }
@@ -685,10 +692,9 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # no domains at all, or by the env prefix below never reaching the child.
     printf 'good.example.com\n' > "$CONFIG_DIR/allowed-domains"
     launch_setup
+    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
-        SANDBOX_CREDENTIAL_PROXY=0 \
-        SANDBOX_SSH_KEY="$LAUNCH_DIR/sandbox-key" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \
         run "$REPO_ROOT/bin/dejima" "$PROJ"
     [ "$status" -eq 0 ]
@@ -820,7 +826,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     [[ "$output" != *"writable from inside the sandbox"* ]]
 
-    export DEJIMA_AUDIT_DIR="$PROJ/.audit"
+    printf '[audit]\ndir = %s\n' "$PROJ/.audit" >> "$CONFIG_DIR/config"
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"the audit report store"* ]]
@@ -829,9 +835,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # approval store's text verbatim, so the audit store described a hazard
     # that was not the one it has.
     [[ "$output" != *"the approval store"* ]]
-    unset DEJIMA_AUDIT_DIR
 
-    export DEJIMA_AUDIT_BASELINE_DIR="$PROJ/.baselines"
+    printf '[audit]\nbaselines_dir = %s\n' "$PROJ/.baselines" >> "$CONFIG_DIR/config"
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"the audit baseline store"* ]]

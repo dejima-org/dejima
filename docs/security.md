@@ -63,7 +63,7 @@ one can't happen.
   or hook file is something to read and clean up *before* the next `git`
   or `claude` in that repo, not something that was blocked. It's silent when nothing
   changed, and never affects the session's own exit code even if it can't
-  complete. It doesn't cover `$SANDBOX_SHARE_DIR` (see "Shared scratch
+  complete. It doesn't cover `[core] share_dir` (see "Shared scratch
   space") - that hand-off path stays unaudited - and its coverage is a
   fixed list of known Claude Code config surfaces, not a general integrity
   check, so a future config surface this list hasn't been taught about yet
@@ -159,8 +159,8 @@ one can't happen.
   that many changed host-persistence surfaces in one session is treated
   as a signal in its own right, not merely a limit worth raising - an
   ordinary session changes few enough of these surfaces that the budget
-  is never in practice a constraint. `DEJIMA_AUDIT_DIFFS=0` disables
-  retention (and staging) entirely.
+  is never in practice a constraint. `diffs = off` in the config's
+  `[audit]` section disables retention (and staging) entirely.
 
   Two residual limits worth knowing on top of the credential screen's
   false negatives above. The prompt shows at most 40 lines of a diff or
@@ -274,9 +274,10 @@ one can't happen.
   can make Claude Code clear the fake credential file, showing a logged-out
   session - harmless, since it's a host temp file, and rare, since the proxy
   absorbs 401s with its own refresh-and-retry.
-  `SANDBOX_CREDENTIAL_PROXY=0` is the kill switch, restoring the previous
-  behavior - the credential mounted into the container explicitly, readable
-  by a compromised session. Setups without a `claudeAiOauth` block (API-key
+  `[credentials] proxy = off` (in `~/.config/dejima/config`) is the kill
+  switch, restoring the previous behavior - the credential mounted into the
+  container explicitly, readable by a compromised session. Setups without a
+  `claudeAiOauth` block (API-key
   auth) skip the proxy automatically; there's no stored subscription
   credential to protect.
 - **If TLS interception stops working.** The container reaches the API by
@@ -289,14 +290,15 @@ one can't happen.
   `curl --cacert /etc/dejima-anthropic-tls/cert.pem https://api.anthropic.com/v1/messages`
   still succeeds from inside the container while Claude Code does not: the
   certificate is fine, the client is refusing it. **This is not a reason to
-  set `SANDBOX_CREDENTIAL_PROXY=0`.** That kill switch mounts the real,
+  set `[credentials] proxy = off`.** That kill switch mounts the real,
   durable OAuth credential into a container a compromised session can read,
   which is the single thing this whole mechanism exists to prevent.
   Certificate pinning breaks how Claude Code is *addressed*; it has no
   bearing on whether the credential can be kept on the host. Work down this
   ladder instead - the first two rungs keep the credential out of the
   container, and only the "looks like an ordinary session" property degrades.
-  First, `SANDBOX_ANTHROPIC_TRANSPORT=loopback`: a plaintext loopback
+  First, `[credentials] transport = loopback` (in `~/.config/dejima/config`,
+  then relaunch): a plaintext loopback
   forwarder and an explicit `ANTHROPIC_BASE_URL=http://127.0.0.1:18300`, the
   topology this sandbox used before the TLS terminator existed, so pinning
   cannot apply at all. It costs the base-URL fingerprint, two attribution
@@ -310,7 +312,7 @@ one can't happen.
   Claude Code's own support for `ANTHROPIC_UNIX_SOCKET`. It also costs more in
   appearance than rung one: it classifies the session as host-orchestrated
   and emits its own analytics event. Only if both fail, and knowing what it
-  gives up, `SANDBOX_CREDENTIAL_PROXY=0` - the one rung that surrenders the
+  gives up, `[credentials] proxy = off` - the one rung that surrenders the
   real credential into the container. Rung one is a supported, tested mode,
   not an improvised workaround; if you reach the third, treat it as a
   temporary state rather than a new baseline.
@@ -446,16 +448,16 @@ one can't happen.
   the mounted project, and the firewall's Gitea allowlist is host-based
   rather than repo-scoped, so a compromised session can still reach (and
   push to) other repos on that host you have access to. This doesn't extend
-  to GitHub by default: port 22 there is blocked unless `ALLOW_GITHUB_PUSH=1`
-  is set, so the forwarded agent has no transport to use for it at all
+  to GitHub by default: port 22 there is blocked unless `--allow-github-push`
+  is given, so the forwarded agent has no transport to use for it at all
   otherwise (see "GitHub push: blocked by default, optional opt-in" above).
-- `SANDBOX_SSH_KEY` (see "Headless git push without agent forwarding") is a
+- `[core] ssh_key` (see "Headless git push without agent forwarding") is a
   second, independent credential-loading path with the same "signs for any
   Gitea repo it has access to" shape as the forwarded agent above - the
   mitigation is that it's meant to be a dedicated deploy key scoped to only
   the repos that actually need push access, not your personal identity.
   That scoping is a convention, not something enforced here: nothing checks
-  what `SANDBOX_SSH_KEY` actually points at, so pointing it at your real
+  what `[core] ssh_key` actually points at, so pointing it at your real
   `~/.ssh/id_ed25519`/`id_rsa` instead of a dedicated key would load your
   full personal identity into the container for the whole session (`bin/
   dejima` warns if this looks like it might be happening - see
@@ -475,7 +477,8 @@ one can't happen.
 - The sandbox's own user (matching your host user — see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
-  that user via `gosu` before execing `$SANDBOX_CMD`. A compromised session can't
+  that user via `gosu` before execing the configured command (`[core] command`,
+  `claude` by default). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that

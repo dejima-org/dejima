@@ -7,8 +7,8 @@
 # printed as it happens.
 #
 # It never enables anything: the remote-access scripts do nothing without
-# ~/.config/dejima/remote.conf, and the user units in systemd/ are left for
-# the operator to install by hand.
+# [remote-access] enabled = on in ~/.config/dejima/config, and the user units
+# in systemd/ are left for the operator to install by hand.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -150,15 +150,84 @@ link_bin dejima-project
 link_bin dejima-audit
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
-# without ~/.config/dejima/remote.conf - they refuse to run at all - so linking
-# unconditionally adds no front door and costs nothing. The user units in
-# systemd/ are deliberately NOT copied or enabled here: standing up a front
-# door is an explicit operator decision, and this script never touches
-# systemd.
+# without [remote-access] enabled = on - they refuse to run at all - so
+# linking unconditionally adds no front door and costs nothing. The user
+# units in systemd/ are deliberately NOT copied or enabled here: standing up
+# a front door is an explicit operator decision, and this script never
+# touches systemd.
 link_bin dejima-attach
 link_bin dejima-ttyd
 link_bin dejima-notify-watch
 echo
+
+# From the library rather than duplicated here: remote_enabled and the
+# config accessors have one definition each (which honour DEJIMA_CONFIG_DIR
+# through config_root), and a second copy of any of them would drift without
+# anything noticing.
+# shellcheck source=bin/dejima-project-lib.sh
+source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
+
+CONFIG_FILE="$(config_path)"
+if config_exists; then
+    echo "Config: $CONFIG_FILE already exists - leaving it alone."
+else
+    mkdir -p "$(config_root)"
+    echo "Writing a starter config to $CONFIG_FILE"
+    # Seeded from any legacy variables still exported, so the one-time
+    # migration is a review rather than a retyping. Everything else is
+    # written commented-out at its schema default, so the file doubles as
+    # the reference for what can be set.
+    {
+        printf '# dejima configuration. See README.md.\n'
+        printf '# Every key below is shown at its default; uncomment to change one.\n\n'
+        _section=""
+        while IFS=$'\t' read -r _key _type _default; do
+            [ -n "$_key" ] || continue
+            _leaf="${_key##*.}"
+            _sec="${_key%.*}"
+            if [ "$_sec" != "$_section" ]; then
+                printf '\n[%s]\n' "$_sec"
+                _section="$_sec"
+            fi
+            _seed=""
+            case "$_key" in
+                forge.gitea.ssh_host)      _seed="${GITEA_SSH_HOST:-}" ;;
+                forge.gitea.api)           _seed="${GITEA_API:-}" ;;
+                core.command)              _seed="${SANDBOX_CMD:-}" ;;
+                core.ssh_key)              _seed="${SANDBOX_SSH_KEY:-}" ;;
+                mounts.readonly)           _seed="${SANDBOX_EXTRA_MOUNTS:-}" ;;
+                mounts.nvim_config)        _seed="${SANDBOX_NVIM_CONFIG:-}" ;;
+                logging.loki_url)          _seed="${LOKI_URL:-}" ;;
+                credentials.transport)     _seed="${SANDBOX_ANTHROPIC_TRANSPORT:-}" ;;
+                # The schema default dropped the old ${XDG_DATA_HOME:-...}
+                # fallback in favour of a literal ~/.local/share/... path - an
+                # operator with XDG_DATA_HOME set would otherwise silently get
+                # a fresh, empty audit store and lose sight of prior
+                # unacknowledged CRITICAL findings. Seed from the old formula
+                # so that migration is something to review, not something
+                # invisible.
+                audit.dir)
+                    [ -n "${XDG_DATA_HOME:-}" ] && _seed="$XDG_DATA_HOME/dejima/audit"
+                    ;;
+                audit.baselines_dir)
+                    [ -n "${XDG_DATA_HOME:-}" ] && _seed="$XDG_DATA_HOME/dejima/baselines"
+                    ;;
+            esac
+            if [ -n "$_seed" ]; then
+                printf '%s = %s\n' "$_leaf" "$_seed"
+            else
+                printf '# %s = %s\n' "$_leaf" "$_default"
+            fi
+        done < <(_config_table)
+    } > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+fi
+
+if [ -f "$(config_root)/remote.conf" ]; then
+    echo
+    echo "Note: $(config_root)/remote.conf is no longer read - its keys moved to the"
+    echo "[remote-access] section of $CONFIG_FILE. Left in place for you to remove."
+fi
 
 echo "Done. Try: $BIN_DIR/dejima ~/some/project"
 echo "(or just 'dejima ~/some/project' once $BIN_DIR is on PATH)"
@@ -166,14 +235,8 @@ echo
 # Conditional, because the unconditional version is a false statement to the
 # operator most likely to see it: someone with a front door already up,
 # re-running this after a git pull.
-# From the library rather than spelled out again here: the config root has
-# one definition (config_root, which honours DEJIMA_CONFIG_DIR) and a second
-# copy of it would drift without anything noticing.
-# shellcheck source=bin/dejima-project-lib.sh
-source "$SCRIPT_DIR/bin/dejima-project-lib.sh"
-remote_conf="$(remote_conf_path)"
-if [ -f "$remote_conf" ]; then
-    echo "Remote access is configured ($remote_conf); this script did not start or stop anything."
+if remote_enabled; then
+    echo "Remote access is configured ($CONFIG_FILE); this script did not start or stop anything."
     echo "See docs/remote-access.md."
 else
     echo "Remote access is available but not configured - nothing is listening."

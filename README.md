@@ -104,36 +104,58 @@ road with no barrier.
     container only ever sees a forwarded agent socket, never your private
     key — but it dies with your client connection, so it's fine for
     interactive use, not for unattended/headless sessions.
-  - `SANDBOX_SSH_KEY` — a dedicated deploy key for headless/unattended use,
+  - `[core] ssh_key` — a dedicated deploy key for headless/unattended use,
     independent of any forwarded agent. See "Headless git push without
     agent forwarding" below.
 
-Everything else is optional, depending on which workflow(s) you want:
+Everything else is optional, depending on which workflow(s) you want. All of
+it lives in one file, `~/.config/dejima/config` — `./install.sh` writes a
+starter copy with every key present, commented out at its default; uncomment
+and edit whichever ones you need. Run `dejima --print-config` at any time to
+see the whole resolved schema, real values included.
 
-| Variable | Default | Purpose |
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `GITEA_SSH_HOST`, `GITEA_API` | unset | Gitea/Forgejo PR workflow (`gitea-pr`) — skip both if you only push to GitHub |
-| `GITEA_TOKEN` | env, else `~/.config/gitea/token` | Gitea/Forgejo API token |
-| `GH_TOKEN` | env, else `~/.config/gh/sandbox-token` | read-only PAT for private GitHub repos / `gh` |
-| `ALLOW_GITHUB_PUSH` | `0` | opt-in: allow `git push` to GitHub (blocked by default — see below) |
-| `SANDBOX_CMD` | `claude` | container's main process (e.g. `nvim`) |
-| `SANDBOX_NVIM_CONFIG` | unset | nvim config dir, used when `SANDBOX_CMD=nvim` |
-| `SANDBOX_EXTRA_MOUNTS` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `SANDBOX_SHARE_DIR` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir |
-| `LOKI_URL` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `SANDBOX_LOG_CONVERSATION` | `0` | opt-in: also ship session transcripts to Loki (needs `LOKI_URL`) — see "Conversation logging (opt-in)" below |
-| `ENABLE_FIREWALL` | `1` | set to `0` to disable the egress firewall (debugging only) |
-| `SANDBOX_CREDENTIAL_PROXY` | `1` | set to `0` to disable the host-side credential proxy and mount the real OAuth credential into the container directly, as before this feature |
-| `SANDBOX_ANTHROPIC_TRANSPORT` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
+| `[core] harness` | `claude-code` | agent harness the container runs |
+| `[core] forge` | `gitea` | forge integration (`gitea-pr`/`gitea-issue`) |
+| `[core] workflow` | `worktree-pr` | workflow `sandbox-context.sh` tells the agent to follow |
+| `[core] command` | `claude` | container's main process (e.g. `nvim`) — also settable per launch with `--cmd` |
+| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only) — also settable per launch with `--no-firewall` |
+| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
+| `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
+| `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
+| `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
+| `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname — skip if you only push to GitHub |
+| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1` — skip if you only push to GitHub |
+| `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
+| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
+| `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
+| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
+| `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
+| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
+| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
+| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`) — see "Conversation logging (opt-in)" below |
+| `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
+| `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
+| `[audit] keep` | `10` | how many past findings/baselines to retain |
+| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
+| `[remote-access] enabled` | `off` | the switch — nothing in "Remote access" below runs until this is `on` |
+| `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
+| `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
+| `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
+| `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
+| `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
 **Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
 target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
-skip `GITEA_*` entirely and set `ALLOW_GITHUB_PUSH=1` instead to push
-straight to GitHub (see "GitHub push: blocked by default, optional opt-in"
-below) — the two aren't both required, pick whichever matches your remote.
-[Forgejo](https://forgejo.org/) works unmodified: it's a Gitea fork exposing
-a compatible `/api/v1` surface, so pointing `GITEA_API` at a Forgejo instance
-just works.
+skip `[forge.gitea]` entirely and use `dejima --allow-github-push` instead to
+push straight to GitHub (see "GitHub push: blocked by default, optional
+opt-in" below) — the two aren't both required, pick whichever matches your
+remote. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea fork
+exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api` at a
+Forgejo instance just works.
 
 ## Setup
 
@@ -148,10 +170,13 @@ sandbox escape if you get it wrong.
 ### Core (required)
 
 1. `./install.sh` — symlinks the CLIs into `~/.local/bin` and the hooks into
-   `~/.claude/hooks`. It is idempotent, so re-run it after pulling.
+   `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
+   exists yet. It is idempotent, so re-run it after pulling; it never
+   overwrites an existing config.
 2. Put `~/.local/bin` on your `PATH` if it isn't already.
 3. Give it a git push credential — `ssh-add` your key for interactive use,
-   or set `SANDBOX_SSH_KEY` to a dedicated deploy key for unattended runs.
+   or set `[core] ssh_key` in the config to a dedicated deploy key for
+   unattended runs.
    → [Prerequisites](#prerequisites),
    [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
 
@@ -161,8 +186,8 @@ That is enough to run `dejima`.
 
 Skip this if you only push to GitHub.
 
-1. Export `GITEA_SSH_HOST` (the SSH hostname) and `GITEA_API`
-   (`https://<gitea host>/api/v1`) from your shell profile.
+1. Set `[forge.gitea] ssh_host` (the SSH hostname) and `[forge.gitea] api`
+   (`https://<gitea host>/api/v1`) in `~/.config/dejima/config`.
 2. Generate a token — Settings → Applications, scopes `write:repository` and
    `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
    → [Prerequisites](#prerequisites)
@@ -187,8 +212,8 @@ one. →
 
 ### Log shipping
 
-1. Export `LOKI_URL` pointing at your Loki push endpoint.
-2. Optionally set `SANDBOX_LOG_CONVERSATION=1` to ship transcripts as well —
+1. Set `[logging] loki_url` to your Loki push endpoint.
+2. Optionally set `[logging] conversation = on` to ship transcripts as well —
    read
    [Conversation logging (opt-in)](#conversation-logging-opt-in) first, since
    that ships what you and the model actually say.
@@ -200,25 +225,26 @@ one. →
 Per launch, not a persistent setting:
 
 ```sh
-ALLOW_GITHUB_PUSH=1 dejima ~/myproject
+dejima --allow-github-push ~/myproject
 ```
 
-Pair it with a repo-scoped deploy key in `SANDBOX_SSH_KEY`. Read
+Pair it with a repo-scoped deploy key in `[core] ssh_key`. Read
 [GitHub push: blocked by default, optional opt-in](#github-push-blocked-by-default-optional-opt-in)
 before turning it on — with a forwarded personal agent this is much broader
 than it looks.
 
 ### Remote access (opt-in)
 
-Entirely off until step 1 exists. **Read
+Entirely off until step 1 is done. **Read
 [docs/remote-access.md](docs/remote-access.md) end to end before doing any of
 this.** Step 2 is the one that carries the security of the whole feature, and
 getting it wrong still looks like it works.
 
-1. **Create `~/.config/dejima/remote.conf`.** This file is the switch —
-   nothing here runs without it. Set `NTFY_URL`, `BASE_URL`, and `TTYD_PORT`
-   if you want something other than 7681. →
-   [`remote.conf`](docs/remote-access.md#remoteconf)
+1. **Set `[remote-access] enabled = on`** in `~/.config/dejima/config`. This
+   is the switch — nothing here runs without it. Set `ntfy_url`, `base_url`,
+   and `ttyd_port` in the same section if you want something other than
+   7681. →
+   [`[remote-access]`](docs/remote-access.md#remote-access)
 2. **Choose the reverse proxy's bind address, on the dejima box itself.** One
    specific address on its LAN interface. Never the wildcard, never
    `0.0.0.0`, never a Docker bridge. →
@@ -242,8 +268,8 @@ getting it wrong still looks like it works.
 5. **If you will read it on a phone**, there is nothing to turn on: the front
    door serves a touch frontend by default, with gestures for scrolling,
    selection and pane resizing, and a toolbar carrying Esc, a sticky Ctrl, the
-   arrows and tmux's window switching. Set `TTYD_TMUX_PREFIX` if your tmux
-   prefix is not `C-b`. →
+   arrows and tmux's window switching. Set `ttyd_tmux_prefix` in
+   `[remote-access]` if your tmux prefix is not `C-b`. →
    [Reading it on a phone](docs/remote-access.md#reading-it-on-a-phone). Typing from one has its
    own gotcha, which nothing here can fix. →
    [Typing on a phone](docs/remote-access.md#typing-on-a-phone)
@@ -306,28 +332,62 @@ hook reads, so it solves the quoting problem but not this one.
 ### Using a different editor/application
 
 ```sh
-SANDBOX_CMD=nvim dejima ~/repos/some-project
+dejima --cmd nvim ~/repos/some-project
 ```
 
-Runs unconfigured unless you also set `SANDBOX_NVIM_CONFIG` to a real config
-directory on the host (bind-mounted read-only at `~/.config/nvim` — lazy.nvim's
-lockfile is the one exception, layered read-write on top so plugin syncs
-don't fail on a read-only filesystem; nothing else in the config is
-writable):
+Runs unconfigured unless you also set `[mounts] nvim_config` in the config to
+a real config directory on the host (bind-mounted read-only at
+`~/.config/nvim` — lazy.nvim's lockfile is the one exception, layered
+read-write on top so plugin syncs don't fail on a read-only filesystem;
+nothing else in the config is writable):
 
-```sh
-SANDBOX_CMD=nvim SANDBOX_NVIM_CONFIG=~/.config/nvim dejima ~/repos/some-project
+```
+[core]
+command = nvim
+
+[mounts]
+nvim_config = ~/.config/nvim
 ```
 
-Set both in your shell profile if you use this mode regularly.
+Set both in `~/.config/dejima/config` if you use this mode regularly, or pass
+`--cmd nvim` per launch once `nvim_config` is set.
 
 If your config references something outside that directory by absolute host
 path (a helper script in a dotfiles `bin/`, say), bring it in with
-`SANDBOX_EXTRA_MOUNTS` (colon-separated, mounted read-only at the same path):
+`[mounts] readonly` (colon-separated, mounted read-only at the same path):
 
-```sh
-SANDBOX_EXTRA_MOUNTS=~/dotfiles/bin dejima ~/repos/some-project
 ```
+[mounts]
+readonly = ~/dotfiles/bin
+```
+
+### Writable host directories
+
+`[mounts] read_write` is the same thing without `:ro` — for a directory a
+session is meant to write to and whose contents should outlive the container:
+
+```
+[mounts]
+read_write = ~/specs
+```
+
+Both lists mount at the host path they name, which is the point: a convention
+that says "specs live in `~/specs`" keeps working inside the container without
+being rewritten. That is the difference from `[core] share_dir`, which is
+mounted at `~/shared` regardless of where it lives on the host because its job
+is to be a well-known handoff point.
+
+An entry is **refused, not warned about**, if it overlaps anything dejima
+relies on being out of a session's reach: the approval store, either audit
+store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
+(already read-write, so listing it again is a mistake worth surfacing). A
+writable mount over any of those would let a session approve its own domains,
+delete the audit findings naming it, or plant code that runs unsandboxed on the
+host next time you start an agent. Overlap is checked in both directions after
+resolving symlinks, so `read_write = ~` is caught too.
+
+Sessions are told which directories these are, so "everything else is
+disposable" stays true in the briefing rather than becoming a trap.
 
 ## Config parity with your host Claude Code setup
 
@@ -385,32 +445,38 @@ ssh-keygen -t ed25519 -N '' -f ~/.ssh/dejima_ed25519
 Passphrase-less is deliberate — this is meant to be a low-privilege
 credential living only inside the container, not your personal identity. Add
 the public half as a Gitea deploy key scoped to just the repos that need
-push access, then:
+push access, then set it in the config:
 
-```sh
-SANDBOX_SSH_KEY=~/.ssh/dejima_ed25519 dejima ~/repos/some-project
+```
+[core]
+ssh_key = ~/.ssh/dejima_ed25519
 ```
 
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
 deletes the plaintext copy immediately after — the sandbox user itself never
 has a path to the raw key, only the agent socket (see
 [security notes](docs/security.md) for the full mount rationale). Setting
-`SANDBOX_SSH_KEY` means a live forwarded agent is no longer required at all.
+`[core] ssh_key` means a live forwarded agent is no longer required at all.
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `$SANDBOX_SHARE_DIR` (default
+`~/shared` is a read-write bind mount of `[core] share_dir` (default
 `~/.local/share/dejima/shared`, created automatically) — separate
 from the project mount, for passing files (screenshots, temp scripts) in and
 out of a session without touching the actual checkout. Persists across
 sessions since it's a real directory, not a container volume.
 
-It's also the answer if your own `CLAUDE.md` tells agents to put something at
-a fixed host path — design docs, scratch notes, anything meant to outlive the
-session but stay out of the project checkout. Point that convention at
-`~/shared` (or set `SANDBOX_SHARE_DIR` to wherever you keep it) rather than
-expecting some other host directory to be present in the container: this is
-the only writable host path mounted besides the project itself.
+Treat it as a handoff point, not as general-purpose storage. If your own
+project instructions tell agents to write somewhere at a fixed host path —
+design docs, scratch notes, anything meant to outlive the session but stay out
+of the project checkout — mount that directory instead, with
+`[mounts] read_write`. It arrives at its own absolute path, so a convention
+that says "put specs in `~/specs`" keeps working inside the container without
+being rewritten to point at `~/shared`.
+
+`~/shared`, the project mount, and anything in `[mounts] read_write` are the
+only writable host paths in the container. Everything else a session writes
+goes away with it.
 
 ## Testing frontend changes
 
@@ -437,6 +503,30 @@ full shell access as the container's own user regardless.
 
 ## Sandbox self-awareness
 
+### Project instructions: `.dejima.md`
+
+`.dejima.md` at a project's root is that project's agent-instruction file —
+the same role `CLAUDE.md` plays for Claude Code — under a name that doesn't
+name a harness. dejima loads it into the session's opening context the way the
+harness would load its own, so a project's instructions apply whichever agent
+is running.
+
+The reason for a second name: Claude Code finds a `CLAUDE.md` by itself, and
+nothing else does. As dejima grows the ability to run agents that aren't Claude
+Code, a project that wants to say "here is how to work on me" needs one file
+that reaches all of them — so dejima delivers it rather than leaving each
+harness to go looking for its own.
+
+Loaded verbatim, capped at 16 KB with any truncation noted in the text. It
+carries no authority over the sandbox itself: the file sits on the read-write
+workspace mount, so nothing in it widens the firewall, relaxes a guard, or
+authorises a push, and the text delivered around it says so.
+
+This repo ships one, describing which half of its own test suite a sandboxed
+session can run.
+
+### The session briefing
+
 A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
 reminder when `DEJIMA` is set: the session is running in a
 disposable, firewalled container and should stay within the task at hand —
@@ -452,7 +542,7 @@ any `git push` whose resolved remote isn't the Gitea host, and any push to
 against an overeager agent, not a hard security boundary — a session has full
 shell access and could in principle edit `.git/config` to route around it.
 GitHub push is blocked by default too (see "GitHub push" below) unless
-`ALLOW_GITHUB_PUSH=1` is set. For a real guarantee against pushes to
+`--allow-github-push` is given. For a real guarantee against pushes to
 main/master, use branch protection on the remote itself.
 
 `gitea-merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
@@ -487,13 +577,13 @@ default:
   (GitHub release assets, a separate CDN from github.com's own IPs),
   `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums);
   `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
-- whatever `GITEA_SSH_HOST`/`GITEA_API` resolve to — not port-restricted, so
+- whatever `[forge.gitea] ssh_host`/`api` resolve to — not port-restricted, so
   git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
 
 Everything else is rejected. Run `dejima-allow <domain> --global`
 (or `--project <path>` for one project) to allow more permanently (e.g.
-`crates.io` for a Rust project), or `ENABLE_FIREWALL=0` to disable the
-firewall entirely (debugging only).
+`crates.io` for a Rust project), or `dejima --no-firewall` to disable the
+firewall entirely for one launch (debugging only).
 
 IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
 strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
@@ -560,9 +650,9 @@ One gap remains: allowing an *internal* hostname (one that resolves to an
 RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
 rejects private answers for any domain not exempted at startup, and that
 exemption list can only be extended by restarting dnsmasq. Internal hosts
-named before the container starts (`GITEA_SSH_HOST`, `GITEA_API`,
-`LOKI_URL`, and any globally or per-project approved domain) are already
-exempted and unaffected by this.
+named before the container starts (`[forge.gitea] ssh_host`, `api`,
+`[logging] loki_url`, and any globally or per-project approved domain) are
+already exempted and unaffected by this.
 
 The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
@@ -636,7 +726,7 @@ parent's; global approvals apply everywhere regardless.
 
 ## Network request logging
 
-If `LOKI_URL` is set (see Prerequisites), every DNS query and every new
+If `[logging] loki_url` is set (see Prerequisites), every DNS query and every new
 outbound connection attempt - allowed or rejected - is shipped to that Loki
 endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
 
@@ -656,7 +746,7 @@ resolve or connect.
 
 ### Conversation logging (opt-in)
 
-Set `SANDBOX_LOG_CONVERSATION=1` (with `LOKI_URL` configured) to also ship
+Set `[logging] conversation = on` (with `loki_url` configured) to also ship
 session content to Loki as the `dejima-conversation` job: your
 prompts, the agent's text responses, and tool invocations (tool name +
 input - never tool outputs). Lines are JSON with the session ID inside
@@ -671,7 +761,7 @@ the sandbox runs.
 ### Viewing logs in Grafana
 
 Nothing sandbox-specific needed on the Grafana side beyond a Loki data
-source pointed at wherever `LOKI_URL` resolves to (Connections → Data
+source pointed at wherever `[logging] loki_url` resolves to (Connections → Data
 sources → Loki, if one isn't already configured against that instance) -
 `log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
 scrape target or exporter involved.
@@ -710,12 +800,12 @@ just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
 443. Port 22 is unreachable, so SSH-based push has no transport at all,
 regardless of what any hook does or doesn't catch.
 
-**Opt-in, not hardcoded** — set `ALLOW_GITHUB_PUSH=1` to open port 22 to
+**Opt-in, not hardcoded** — pass `--allow-github-push` to open port 22 to
 GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
 push destination (the no-direct-to-main rule still applies):
 
 ```sh
-ALLOW_GITHUB_PUSH=1 dejima ~/repos/some-project
+dejima --allow-github-push ~/repos/some-project
 ```
 
 **Read this before turning it on.** Whether a push actually succeeds depends
@@ -723,33 +813,33 @@ entirely on what SSH key is loaded into the agent. A forwarded personal
 agent with your normal GitHub key would let a compromised session push to
 **any** repo that key can write to, not just the one you intended — agent
 forwarding doesn't distinguish push from pull. Use a dedicated,
-**repo-scoped GitHub deploy key** via `SANDBOX_SSH_KEY` instead whenever
-`ALLOW_GITHUB_PUSH=1` is set — that's what actually limits the blast radius.
-`ALLOW_GITHUB_PUSH` only changes the firewall/hook's *host* check; it adds no
-credential-loading path of its own.
+**repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
+`--allow-github-push` is set — that's what actually limits the blast radius.
+`--allow-github-push` only changes the firewall/hook's *host* check; it adds
+no credential-loading path of its own. There is deliberately no config-file
+equivalent for this flag — an exported or saved value must not silently
+grant a push path, so it's a per-launch decision only.
 
-`GH_TOKEN` must stay a **read-only** fine-grained PAT regardless of this
-setting. `gh auth setup-git` (run at container start if `GH_TOKEN` is set)
-points git's github.com HTTPS credential helper at `gh`, which only ever
-holds whatever token `GH_TOKEN` provides — a write-scoped token there would
-make HTTPS push possible independent of `ALLOW_GITHUB_PUSH`, so don't use
-one.
-
-`ALLOW_GITHUB_PUSH` is a per-launch variable, not a persistent toggle — it
-only affects the one `dejima` invocation it's set for.
+`[github] token_file` must point at a **read-only** fine-grained PAT
+regardless of this setting. `gh auth setup-git` (run at container start if
+that file exists) points git's github.com HTTPS credential helper at `gh`,
+which only ever holds whatever token that file provides — a write-scoped
+token there would make HTTPS push possible independent of
+`--allow-github-push`, so don't use one.
 
 ## Remote access
 
-**Opt-in, and off entirely unless you create `~/.config/dejima/remote.conf`.**
-Reach a running sandbox from another machine or a phone - over SSH or a
-browser - and get a push when a session wants you. Two front doors and a
-notification path, none of which exist until you configure them.
+**Opt-in, and off entirely unless `[remote-access] enabled = on` is set in
+`~/.config/dejima/config`.** Reach a running sandbox from another machine or
+a phone - over SSH or a browser - and get a push when a session wants you.
+Two front doors and a notification path, none of which exist until you
+configure them.
 
 It is documented separately because getting the bind address wrong is the one
 mistake here that exposes a `--dangerously-skip-permissions` shell to your
 network, and that deserves more room than a section.
 
-**→ [docs/remote-access.md](docs/remote-access.md)** - `remote.conf`, picking a
+**→ [docs/remote-access.md](docs/remote-access.md)** - `[remote-access]`, picking a
 bind address and verifying it, the SSH and web front doors, reading and typing
 on a phone, running behind another reverse proxy, notifications, and attaching.
 
@@ -798,7 +888,7 @@ The other three need no Docker either. `project.bats` covers the
 declaration/approval split - what `.dejima/` may ask for, what only the host
 can grant, and that the approval store is never mounted. `remote.bats`
 covers everything in [docs/remote-access.md](docs/remote-access.md):
-`remote.conf` parsing, the session registry, and the properties the
+the `[remote-access]` config section, the session registry, and the properties the
 feature's security rests on - that the
 notification path carries no sandbox-controlled byte, and that no marker
 name outside `waiting`/`done` is ever acted on. `audit.bats` covers
@@ -831,7 +921,8 @@ likely to collide with a real container you have running.
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
-| `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders |
+| `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
+| `.dejima.md` | Project-level agent instructions, harness-agnostic — `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
 | `hooks/gitea-merge-guard.sh` | `PreToolUse` hook: blocks `gitea-pr merge` in the sandbox — merging is a human decision |
@@ -849,8 +940,8 @@ likely to collide with a real container you have running.
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,
-checks for a live `ssh-agent`, loads `GITEA_TOKEN`/`GH_TOKEN` if not already
-set, discovers which host directories need mounting for symlinks under
+checks for a live `ssh-agent`, reads `GITEA_TOKEN`/`GH_TOKEN` from the token
+files named in the config, discovers which host directories need mounting for symlinks under
 `~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
 top-level entries like `statusline.sh`) to resolve, and runs
 `docker compose run`. `bin/dejima-allow`

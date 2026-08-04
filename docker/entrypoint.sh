@@ -139,7 +139,7 @@ fi
 # empty file the old mask used to provide rather than betting that an absent
 # credentials file behaves the same as an empty one. Either way this is
 # skipped when something is already there - which also covers
-# SANDBOX_CREDENTIAL_PROXY=0 mounting the real credential in deliberately.
+# [credentials] proxy = off mounting the real credential in deliberately.
 if [ ! -e "$SANDBOX_HOME/.claude/.credentials.json" ]; then
     install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 /dev/null "$SANDBOX_HOME/.claude/.credentials.json"
 fi
@@ -154,7 +154,7 @@ fi
 # ANTHROPIC_BASE_URL and no placeholder token - it is indistinguishable from a
 # stock install, which is the whole point (see docs/security.md). The hosts
 # entry deliberately lives inside this guard rather than in compose's
-# extra_hosts: under SANDBOX_CREDENTIAL_PROXY=0 nothing listens on :443, and
+# extra_hosts: under [credentials] proxy = off nothing listens on :443, and
 # an unconditional entry would black-hole the real API on exactly the path
 # that has to keep working.
 SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
@@ -200,9 +200,10 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
             echo "FATAL: openssl failed to generate the TLS terminator cert for api.anthropic.com." >&2
             echo "$openssl_err" >&2
             echo "Not starting the session - API traffic would have no valid cert to trust." >&2
-            echo "Re-run with SANDBOX_ANTHROPIC_TRANSPORT=loopback, or with" >&2
-            echo "SANDBOX_CREDENTIAL_PROXY=0 to launch without the proxy (the real OAuth" >&2
-            echo "credential is then mounted into the container)." >&2
+            echo "On the HOST, set [credentials] transport = loopback in" >&2
+            echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
+            echo "the proxy (the real OAuth credential is then mounted into the" >&2
+            echo "container) - then relaunch dejima." >&2
             exit 1
         fi
         chown "$SANDBOX_USER" "$tls_dir/key.pem" "$tls_dir/cert.pem"
@@ -239,9 +240,10 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     if [ "$forwarder_bound" != "1" ]; then
         echo "FATAL: the credential-proxy forwarder never bound 127.0.0.1:$forwarder_port." >&2
         echo "Not starting the session - API traffic would have no working path to the" >&2
-        echo "host-side proxy. Re-run with SANDBOX_ANTHROPIC_TRANSPORT=loopback, or with" >&2
-        echo "SANDBOX_CREDENTIAL_PROXY=0 to launch without the proxy (the real OAuth" >&2
-        echo "credential is then mounted into the container)." >&2
+        echo "host-side proxy. On the HOST, set [credentials] transport = loopback in" >&2
+        echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
+        echo "the proxy (the real OAuth credential is then mounted into the" >&2
+        echo "container) - then relaunch dejima." >&2
         exit 1
     fi
 fi

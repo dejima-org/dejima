@@ -8,9 +8,13 @@
 # `claude` in that repo again. See docs/security.md.
 set -uo pipefail
 
+# shellcheck source=dejima-config-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-config-lib.sh"
+config_validate || exit 1
+
 cmd="${1:-}"; ws_arg="${2:-}"; state="${3:-}"
 
-PROJECTS_DIR="${DEJIMA_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
+PROJECTS_DIR="$(config_get harness.claude-code projects_dir)"
 
 # The one top-level ~/.claude entry docker-compose.yml's read-only overlays
 # don't cover (settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/
@@ -20,7 +24,7 @@ PROJECTS_DIR="${DEJIMA_AUDIT_PROJECTS_DIR:-$HOME/.claude/projects}"
 # resolves the mount destination through the symlink; confirmed against a
 # live container, see test/runtime.bats). Detection here is the compensating
 # control for that gap. Overridable for tests.
-STATUSLINE_PATH="${DEJIMA_AUDIT_STATUSLINE:-$HOME/.claude/statusline.sh}"
+STATUSLINE_PATH="$(config_get harness.claude-code statusline_path)"
 
 # This script's own repo root - the sandbox's trusted computing base (see
 # tcb_snapshot below) is only monitored when the workspace being audited IS
@@ -37,12 +41,12 @@ CRIT_CAP=10
 # moderately - overflow here is ordinary, not an alarm.
 WARN_CAP=5
 
-AUDIT_DIR="${DEJIMA_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/audit}"
+AUDIT_DIR="$(config_get audit dir)"
 # Retention is a security property, not housekeeping. With one overwritten
 # report, a session that plants something needs only to talk the operator
 # into a restart for the next clean exit to erase the evidence - and
 # suggesting a restart is an entirely ordinary thing to suggest.
-AUDIT_KEEP="${DEJIMA_AUDIT_KEEP:-10}"
+AUDIT_KEEP="$(config_get audit keep)"
 
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
@@ -68,7 +72,7 @@ select_report() {
     printf '%s\n' "$r"
 }
 
-BASELINE_DIR="${DEJIMA_AUDIT_BASELINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dejima/baselines}"
+BASELINE_DIR="$(config_get audit baselines_dir)"
 
 # The workspace argument is optional: `dejima-audit show` inside a repo
 # should mean that repo. bin/dejima always passes an explicit path, so this
@@ -115,9 +119,9 @@ resolve_ws() {
 ws="$(resolve_ws "$ws_arg")"
 
 # Retention of pre-session CONTENT (as bounded diffs) is separable from the
-# audit itself: an operator who wants zero content at rest sets this to 0 and
+# audit itself: an operator who wants zero content at rest sets this off and
 # still gets every finding, just without before/after.
-DIFFS_ENABLED="${DEJIMA_AUDIT_DIFFS:-1}"
+DIFFS_ENABLED="$(config_get_bool audit diffs)"
 
 # Per-file cap on what is staged. Bounded because staging is the one place
 # WHOLE files (rather than diffs) exist on disk, so its size is the size of
@@ -170,9 +174,11 @@ diff_denied() {
 # cannot read them.
 store_reachable() {
     local d rws rd
-    # Canonicalised, not raw: a relative DEJIMA_AUDIT_DIR (e.g. "audit" with
-    # cwd inside $ws) would otherwise never match the "$rws"/* pattern below
-    # and stage straight into the container's read-write mount. `-m`, not
+    # Canonicalised, not raw: symlinks and `..` in either side would otherwise
+    # never match the "$rws"/* pattern below and would stage straight into the
+    # container's read-write mount. (A *relative* store used to be the sharper
+    # case here; the config's "path" type now refuses one outright, so it
+    # cannot reach this function at all.) `-m`, not
     # `-f`: `$AUDIT_DIR` routinely doesn't exist yet on a fresh install (its
     # parent tree is only ever mkdir -p'd on a real finding or by `ack`), and
     # `-f` requires every component but the last to exist - it would fail
@@ -997,6 +1003,11 @@ statusline_snapshot() {
 }
 
 case "$cmd" in
+    --print-paths)
+        printf 'projects_dir=%s\nstatusline_path=%s\naudit_dir=%s\nbaselines_dir=%s\nkeep=%s\n' \
+            "$PROJECTS_DIR" "$STATUSLINE_PATH" "$AUDIT_DIR" "$BASELINE_DIR" "$AUDIT_KEEP"
+        exit 0
+        ;;
     snapshot)
         STAGE_DIR="$(open_staging)"
         # First section, so the existing ranges (anchored at ### gitconfig

@@ -10,14 +10,36 @@ setup() {
     git -C "$WS" config user.email t@t; git -C "$WS" config user.name t
     STATE="$(mktemp)"
     PROJDIR="$(mktemp -d)"
-    export DEJIMA_AUDIT_PROJECTS_DIR="$PROJDIR"
     CURRENT_SLUG="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     STATUSLINE_DIR="$(mktemp -d)"
-    export DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
-    AUDITDIR="$(mktemp -d)"; export DEJIMA_AUDIT_DIR="$AUDITDIR"
-    BASEDIR="$(mktemp -d)"; export DEJIMA_AUDIT_BASELINE_DIR="$BASEDIR"
+    DEJIMA_AUDIT_STATUSLINE="$STATUSLINE_DIR/statusline.sh"
+    AUDITDIR="$(mktemp -d)"
+    BASEDIR="$(mktemp -d)"
+    # These directories now come from the config file, not the environment
+    # (dejima-audit sources dejima-config-lib.sh and reads them via
+    # config_get) - so a dedicated config dir/file replaces the old env-var
+    # overrides as the mechanism, while every test below still refers to the
+    # same PROJDIR/STATUSLINE_DIR/AUDITDIR/BASEDIR paths it always did.
+    CONFIG_DIR="$(mktemp -d)"
+    export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
+    cat > "$CONFIG_DIR/config" <<EOF
+[harness.claude-code]
+projects_dir = $PROJDIR
+statusline_path = $DEJIMA_AUDIT_STATUSLINE
+[audit]
+dir = $AUDITDIR
+baselines_dir = $BASEDIR
+EOF
 }
-teardown() { rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"; rm -rf "$AUDITDIR"; rm -rf "$BASEDIR"; }
+teardown() {
+    rm -rf "$WS"; rm -f "$STATE"; rm -rf "$PROJDIR"; rm -rf "$STATUSLINE_DIR"
+    rm -rf "$AUDITDIR"; rm -rf "$BASEDIR"; rm -rf "$CONFIG_DIR"
+}
+
+# Appends key = value lines to the [audit] section setup() leaves at the end
+# of the config, which is where these settings live now that the DEJIMA_AUDIT_*
+# variables are gone. A repeated key is last-wins, so this overrides setup().
+audit_set() { printf '%s\n' "$@" >> "$CONFIG_DIR/config"; }
 
 snap() { "$AUDIT" snapshot "$WS" "$STATE"; }
 cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
@@ -526,14 +548,15 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *"-CRITICAL.txt"* ]]
 }
 
-@test "rotation keeps DEJIMA_AUDIT_KEEP clean reports" {
+@test "rotation keeps audit.keep clean reports" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$AUDITDIR/$slug"
     for i in $(seq 1 12); do
         touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"
     done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
-    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
+    cmp_ >/dev/null 2>&1
     run bash -c "ls '$AUDITDIR/$slug' | wc -l"
     [ "$output" -le 10 ]
 }
@@ -543,9 +566,10 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     mkdir -p "$AUDITDIR/$slug"
     touch "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt"
     for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
-    DEJIMA_AUDIT_KEEP=10 cmp_ >/dev/null 2>&1
-    # rotation actually ran: 12 planted clean reports + this run's own, trimmed to KEEP
+    cmp_ >/dev/null 2>&1
+    # rotation actually ran: 12 planted clean reports + this run's own, trimmed to keep
     clean_n="$(find "$AUDITDIR/$slug" -maxdepth 1 -name '*.txt' ! -name '*-CRITICAL.txt' | wc -l)"
     [ "$clean_n" -le 10 ]
     # ...and the unacknowledged CRITICAL report survived it
@@ -556,9 +580,10 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$AUDITDIR/$slug"
     for i in $(seq 1 12); do touch "$AUDITDIR/$slug/2026-01-01-0000$i.txt"; done
+    printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
     chmod 500 "$AUDITDIR/$slug"
-    run timeout 5 env DEJIMA_AUDIT_KEEP=10 "$AUDIT" compare "$WS" "$STATE"
+    run timeout 5 "$AUDIT" compare "$WS" "$STATE"
     result="$status"
     chmod 700 "$AUDITDIR/$slug"
     [ "$result" -ne 124 ]
@@ -1217,18 +1242,22 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     # mounted workspace. Inside it, retained content is readable AND
     # deletable from within the container, so none is produced.
     mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    audit_set "dir = $WS/audit"
+    "$AUDIT" snapshot "$WS" "$STATE"
     [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
 }
 
-@test "nothing is staged when the audit store is a relative path resolving inside the workspace" {
-    # store_reachable must canonicalise both sides before comparing - a
-    # relative DEJIMA_AUDIT_DIR (resolved against cwd) can land inside $ws
-    # just as easily as an absolute one, and the raw-string comparison used
-    # to miss it entirely.
-    mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
-    bash -c "cd '$WS' && DEJIMA_AUDIT_DIR=audit '$AUDIT' snapshot '$WS' '$STATE'"
-    [ -z "$(find "$WS/audit" -type f 2>/dev/null)" ]
+@test "a relative audit store is refused by the config rather than resolved against cwd" {
+    # This used to be a store_reachable concern: a relative DEJIMA_AUDIT_DIR
+    # resolved against cwd could land inside $ws just as easily as an absolute
+    # one, and the raw-string comparison missed it. The config's "path" type
+    # now requires an absolute or ~-rooted value, so the case is refused at
+    # parse time and never reaches store_reachable at all - which is the
+    # stronger guarantee, and the reason the old relative-path case is gone.
+    audit_set 'dir = audit'
+    run "$AUDIT" snapshot "$WS" "$STATE"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"dir"* ]]
 }
 
 @test "staging still happens when the audit store's parent tree does not exist yet (fresh install)" {
@@ -1239,16 +1268,18 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     # point at a genuinely missing parent instead.
     fresh="$AUDITDIR/nonexistent-parent/audit"
     mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIR="$fresh" "$AUDIT" snapshot "$WS" "$STATE"
+    audit_set "dir = $fresh"
+    "$AUDIT" snapshot "$WS" "$STATE"
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     d="$(find "$fresh/$slug/.staging" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
     [ -n "$d" ]
     [ -f "$d/$(key_of '.git/hooks/pre-commit')" ]
 }
 
-@test "nothing is staged when DEJIMA_AUDIT_DIFFS=0" {
+@test "nothing is staged when [audit] diffs is off" {
+    audit_set 'diffs = off'
     mkdir -p "$WS/.git/hooks"; printf 'original\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    "$AUDIT" snapshot "$WS" "$STATE"
     [ -z "$(staged_dirs)" ]
 }
 
@@ -1405,9 +1436,10 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
 
 @test "no diffs are retained when the store is inside the workspace" {
     mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" snapshot "$WS" "$STATE"
+    audit_set "dir = $WS/audit"
+    "$AUDIT" snapshot "$WS" "$STATE"
     printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIR="$WS/audit" "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
     ! grep -rq 'curl evil' "$WS/audit"
     # The REASON, not just the absence: without the store_reachable arm this
     # finding still lands on the "no pre-session copy" withhold (nothing was
@@ -1417,11 +1449,12 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     grep -q 'store is inside the mounted workspace' "$w"
 }
 
-@test "no diffs are retained when DEJIMA_AUDIT_DIFFS=0" {
+@test "no diffs are retained when [audit] diffs is off" {
+    audit_set 'diffs = off'
     mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" snapshot "$WS" "$STATE"
+    "$AUDIT" snapshot "$WS" "$STATE"
     printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
-    DEJIMA_AUDIT_DIFFS=0 "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
+    "$AUDIT" compare "$WS" "$STATE" >/dev/null 2>&1
     ! grep -rq 'curl evil' "$AUDITDIR"
     # No sidecar AT ALL, not merely no content in it: with the DIFFS_ENABLED
     # gate deleted the directory is still created and filled with withheld
@@ -1430,7 +1463,7 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
 }
 
 @test "rotation removes a report's retained diffs along with the report" {
-    export DEJIMA_AUDIT_KEEP=1
+    audit_set 'keep = 1'
     mkdir -p "$WS/.claude"
     for i in 1 2 3; do
         printf 'v%s\n' "$i" > "$WS/.claude/notes.md"

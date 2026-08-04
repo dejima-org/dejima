@@ -44,7 +44,7 @@ jobs:
       # install. Set on the command rather than in env: so it survives su.
       - run: |
           chown -R node:node .
-          su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats'
+          su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats test/config.bats'
 
   runtime:
     # Not ubuntu-latest, unlike the job above. This one only works on a runner
