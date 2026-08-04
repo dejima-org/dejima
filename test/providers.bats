@@ -404,6 +404,29 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ "$output" = "0" ]
 }
 
+@test "the none forge declares no capabilities, keys or hosts" {
+    run lib manifest_validate forge none
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$(lib manifest_get forge none capabilities)" ]
+    [ -z "$(lib manifest_get forge none keys)" ]
+    [ -z "$(lib manifest_get forge none requires)" ]
+    # No host sources at all - this is what makes it the honest "I have no
+    # forge" answer rather than a forge that merely isn't configured yet.
+    [ -z "$(lib forge_hosts none)" ]
+    [ -z "$(lib forge_env_exports none)" ]
+}
+
+@test "the none forge ships no CLIs into the image" {
+    [ -z "$(lib manifest_get forge none install)" ]
+    [ ! -d "$REPO_ROOT/forges/none/bin" ]
+}
+
+@test "a workflow needing a capability is refused against the none forge" {
+    run lib provider_validate_selection none worktree-pr claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"requires the 'pr' capability"* ]]
+}
+
 @test "docs/providers.md documents every manifest key" {
     for axis in forge workflow harness; do
         while IFS=$'\t' read -r key _rest; do
