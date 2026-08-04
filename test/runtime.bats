@@ -146,8 +146,8 @@ setup_file() {
     docker network rm "$network" >/dev/null 2>&1 || true
     docker network create "$network" >/dev/null
 
-    # No GITEA_*/LOKI_URL: this suite only asserts the default allowlist and
-    # enforcement, which shouldn't depend on either.
+    # No DEJIMA_FORGE_HOSTS/LOKI_URL: this suite only asserts the default
+    # allowlist and enforcement, which shouldn't depend on either.
     #
     # GH_TOKEN is forwarded rather than dropped, and every container start in
     # this file does the same. It doesn't change the allowlist - it only
@@ -402,14 +402,19 @@ dexec_node() {
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
-@test "GITEA_SSH_HOST is exempted from stop-dns-rebind, other allowed domains are not" {
+@test "a configured forge host is exempted from stop-dns-rebind, other allowed domains are not" {
+    # Passed as DEJIMA_FORGE_HOSTS, not GITEA_SSH_HOST: the container no longer
+    # derives hostnames from any one forge's variables - bin/dejima resolves
+    # them host-side from whichever forge is configured and hands the result
+    # over under this one name. Feeding the old variable here made the test
+    # assert against a hostname the entrypoint never saw.
     local test_container="dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e GITEA_SSH_HOST=gitea.internal.example \
+        -e DEJIMA_FORGE_HOSTS=forge.internal.example \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
@@ -419,7 +424,7 @@ dexec_node() {
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 
-    run docker exec "$test_container" grep 'rebind-domain-ok=/gitea.internal.example/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_container" grep 'rebind-domain-ok=/forge.internal.example/' /etc/dnsmasq-sandbox.conf
     [ "$status" -eq 0 ]
 
     run docker exec "$test_container" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf

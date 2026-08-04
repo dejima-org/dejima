@@ -30,25 +30,29 @@
 # meaningfully absent (ssh_key, loki_url) and one that must always have a
 # value (firewall, share_dir).
 #
-# The three axis keys accept exactly one value each in this phase. They exist
-# now so a config written today stays valid when Phase 2 widens them to a
-# directory lookup.
+# The three axis keys are `provider:<axis>` - validated by looking the name
+# up under the provider root (see _config_extra_type_valid below and
+# dejima-provider-lib.sh) rather than a fixed enum, so adding a provider is
+# adding a directory, not editing this schema.
+#
+# [forge.<name>] and [harness.<name>] keys are absent from this table for the
+# same reason: enumerating a forge's own keys here would mean a new forge
+# needs a core edit, which is exactly what the provider axes are for.
+# Those two sections are resolved instead through the _config_extra_*
+# functions below, stubbed here and overridden by dejima-provider-lib.sh once
+# it is sourced, against the type+default each provider's own `keys` manifest
+# entry declares (see _provider_keyspec_parse there).
 # ---------------------------------------------------------------------------
 _config_table() {
     cat <<'EOF'
-core.harness	enum:claude-code	claude-code
-core.forge	enum:gitea	gitea
-core.workflow	enum:worktree-pr	worktree-pr
+core.harness	provider:harness	claude-code
+core.forge	provider:forge	gitea
+core.workflow	provider:workflow	worktree-pr
 core.command	identifier	claude
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
 core.known_hosts	path	~/.ssh/known_hosts
-harness.claude-code.projects_dir	path	~/.claude/projects
-harness.claude-code.statusline_path	path	~/.claude/statusline.sh
-forge.gitea.ssh_host	?hostname
-forge.gitea.api	?url
-forge.gitea.token_file	path	~/.config/gitea/token
 github.token_file	path	~/.config/gh/sandbox-token
 mounts.readonly	?list:path
 mounts.read_write	?list:path
@@ -71,6 +75,14 @@ remote-access.ttyd_tmux_prefix	?chord
 remote-access.debounce	int:0:86400	60
 EOF
 }
+
+# Extension point for [forge.<name>]/[harness.<name>] keys, which this layer
+# cannot enumerate on its own - see the _config_table comment above. Stub
+# returns 1 (not found); overridden by dejima-provider-lib.sh, which prints
+# the same "TYPE<TAB>DEFAULT" shape _config_spec itself does so a
+# manifest-sourced entry is indistinguishable from a hardcoded one to every
+# caller.
+_config_extra_spec() { return 1; }
 
 # Prints "TYPE<TAB>DEFAULT" for a known key; returns 1 for anything else,
 # which is what makes an unknown key in the config file fatal.
@@ -129,12 +141,18 @@ config_default() {
     printf '%s' "${spec#*$'\t'}"
 }
 
+# Extension point mirroring _config_extra_spec: the forge/harness keys this
+# layer cannot enumerate on its own. Stub prints nothing; overridden by
+# dejima-provider-lib.sh.
+_config_extra_keys() { :; }
+
 _config_keys() {
     local key rest
     while IFS=$'\t' read -r key rest; do
         [ -n "$key" ] || continue
         printf '%s\n' "$key"
     done < <(_config_table)
+    _config_extra_keys
 }
 
 # Moved here from dejima-project-lib.sh so this file has no dependencies and
@@ -163,6 +181,14 @@ config_path() {
 valid_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
 }
+
+# Extension point for types this layer cannot judge on its own. A stub here,
+# overridden by dejima-provider-lib.sh when that is sourced - which is what
+# lets the schema name a provider: type without this file having to know what
+# a provider is. Returns 0 valid, 1 invalid, 2 "not a type I handle", so an
+# unknown type stays fatal rather than being waved through by a hook that
+# simply did not recognise it.
+_config_extra_type_valid() { return 2; }
 
 _config_valid_value() {
     local type="$1" value="$2" optional=0
@@ -261,8 +287,12 @@ _config_valid_value() {
             [[ "$value" =~ ^[Cc]-([A-Za-z@_?]|[Ss]pace)$ ]]
             ;;
         *)
-            echo "config: unknown schema type: $type" >&2
-            return 1
+            _config_extra_type_valid "$type" "$value"
+            case $? in
+                0) return 0 ;;
+                1) return 1 ;;
+                *) echo "config: unknown schema type: $type" >&2; return 1 ;;
+            esac
             ;;
     esac
 }
@@ -275,15 +305,16 @@ config_exists() {
     [ -f "$(config_path)" ]
 }
 
-# Phase 1 knows one harness and one forge. Phase 2 replaces the two
-# provider-section branches with a directory lookup under harnesses/ and
-# forges/; the shape of the check does not change, only where the list of
-# legal names comes from.
+# Extension point for [forge.<name>]/[harness.<name>] sections - a section is
+# known only when a provider directory for <name> actually exists, which
+# needs dejima-provider-lib.sh (provider_dir). Stub refuses everything;
+# overridden once that file is sourced.
+_config_extra_section_known() { return 1; }
+
 _config_section_known() {
     case "$1" in
         core|github|mounts|credentials|logging|audit|remote-access) return 0 ;;
-        harness.claude-code|forge.gitea) return 0 ;;
-        *) return 1 ;;
+        *) _config_extra_section_known "$1" ;;
     esac
 }
 

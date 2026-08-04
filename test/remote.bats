@@ -725,8 +725,16 @@ start_tmux() {
     # dejima-attach a bare pty too.
     script -qec "$REPO_ROOT/bin/dejima-attach 0123456789abcdef" /dev/null >/dev/null 2>&1 &
     attach_pid=$!
-    for _ in $(seq 50); do
-        if tmux has-session -t '=dejima-0123456789abcdef' 2>/dev/null; then break; fi
+    # Waits for the CLIENT, not just the session. dejima-attach creates the
+    # session and then attaches to it, so has-session goes true first and
+    # list-clients stays empty for a moment after - and the assertion below
+    # used to run inside that window. On an unloaded machine it lost the race
+    # rarely enough to look like noise; under load it failed 5 times in 12.
+    # Polling for the state being asserted on closes the window instead of
+    # widening it, and the assertions themselves are unchanged, so a genuine
+    # regression still fails here rather than timing out into a pass.
+    for _ in $(seq 100); do
+        [ "$(tmux list-clients -F '#{client_session}' 2>/dev/null)" = "dejima-0123456789abcdef" ] && break
         sleep 0.1
     done
     tmux has-session -t '=dejima-0123456789abcdef'
@@ -1765,6 +1773,23 @@ EOF
 }
 ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 
+# Reports no listener, whatever the host is actually running. Opt-in, and
+# deliberately not part of stub_ttyd: the port-in-use refusal has its own test
+# below, which binds a real socket and needs the real ss to see it.
+#
+# For every OTHER ttyd test the port being free is a precondition, not the
+# subject - and one that was being inherited from the machine rather than
+# stated. The default-port case asserts against 7681, which is exactly the
+# port a real dejima-ttyd front door holds, so it failed on any host running
+# the feature: the machine a developer is most likely to run this suite on.
+# Same shape as #56 - a test reading its environment instead of setting it.
+stub_ss_no_listeners() {
+    STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_DIR/ss"
+    chmod +x "$STUB_DIR/ss"
+    PATH="$STUB_DIR:$PATH"
+}
+
 # The EXACT argument vector, one argument per line - a whitelist, for the same
 # reason expect_argv above is one. The bind address is the security property
 # of this whole task, and an absence grep cannot see a SECOND --interface, a
@@ -1808,6 +1833,7 @@ unit_exec_start() {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
@@ -1928,6 +1954,38 @@ PY
     [[ "$output" == *"invalid value"* ]]
     [[ "$output" == *"ttyd_port"* ]]
     [[ "$output" != *"ttyd is not installed"* ]]
+}
+
+@test "dejima-ttyd starts against a config containing a [forge.<name>] section" {
+    # Regression test: dejima-project-lib.sh used to source only
+    # dejima-config-lib.sh, leaving _config_extra_section_known's refuse-
+    # everything stub in place, so any config with a [forge.*]/[harness.*]
+    # section - including the one install.sh itself generates - died with
+    # "unknown section [forge.gitea]" in every remote-access CLI. Confirmed
+    # directly against the unpatched source before this fix.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    write_remote_config '[forge.gitea]' 'ssh_host = git.example' \
+        'api = https://api.example/v1'
+    STUB_DIR="$(mktemp -d)"
+    for tool in readlink dirname cat; do
+        ln -s "$(command -v "$tool")" "$STUB_DIR/$tool"
+    done
+    run env PATH="$STUB_DIR" "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown section"* ]]
+    # Got past config validation to the next check, same as the missing-ttyd
+    # test above - proof the section itself was accepted, not that this
+    # particular failure mode is silent about it.
+    [[ "$output" == *"ttyd is not installed"* ]]
+}
+
+@test "dejima-notify-watch starts against a config containing a [forge.<name>] section" {
+    conf_with_ntfy
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\n' \
+        >> "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unknown section"* ]]
 }
 
 @test "a malformed config takes down the scripts that read a value, not dejima-attach" {
@@ -2071,9 +2129,12 @@ PY
     # resolves the page relative to its own resolved location.
     local fake="$BATS_TEST_TMPDIR/incomplete"
     mkdir -p "$fake/bin"
+    # Every library the launcher sources, so the copy fails on the missing
+    # page rather than on a missing lib - which would pass the status check
+    # below while proving nothing.
     cp "$REPO_ROOT/bin/dejima-ttyd" "$REPO_ROOT/bin/dejima-project-lib.sh" \
-       "$REPO_ROOT/bin/dejima-attach" "$fake/bin/"
-    cp "$REPO_ROOT/bin/dejima-config-lib.sh" "$fake/bin/"
+       "$REPO_ROOT/bin/dejima-attach" "$REPO_ROOT/bin/dejima-config-lib.sh" \
+       "$REPO_ROOT/bin/dejima-provider-lib.sh" "$fake/bin/"
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
     run "$fake/bin/dejima-ttyd"

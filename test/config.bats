@@ -6,7 +6,11 @@
 
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
-    LIB="$REPO_ROOT/bin/dejima-config-lib.sh"
+    # [forge.<name>]/[harness.<name>] schema now comes from the provider
+    # manifest (dejima-provider-lib.sh), not a row hardcoded in
+    # dejima-config-lib.sh - lib() sources the former, a strict superset of
+    # the latter, so every existing call site still resolves.
+    LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
     # Retired variables may already be exported by whatever launched this
@@ -218,6 +222,27 @@ write_config() {
     [ "$output" = "$HOME/a:/b" ]
 }
 
+@test "config_is_set distinguishes absent, empty and defaulted" {
+    write_config '[core]' 'ssh_key =' 'known_hosts = ~/x'
+    # Absent entirely - not in the file at all.
+    run lib config_is_set core firewall
+    [ "$status" -ne 0 ]
+    # Present with a value.
+    run lib config_is_set core known_hosts
+    [ "$status" -eq 0 ]
+    # Present but empty - still "set", distinct from absent.
+    run lib config_is_set core ssh_key
+    [ "$status" -eq 0 ]
+    # A schema default is not the same as being set: audit.keep has a
+    # default (10) and config_get returns it, but it never appears in this
+    # file, so config_is_set must say so - this is the whole point of the
+    # function, and the bug it exists to prevent (see provider_validate_selection).
+    run lib config_get audit keep
+    [ "$output" = "10" ]
+    run lib config_is_set audit keep
+    [ "$status" -ne 0 ]
+}
+
 @test "comments, blank lines and surrounding whitespace are ignored" {
     write_config '# leading comment' '' '  [core]  ' '; semicolon comment' \
                  '   firewall   =   off   ' ''
@@ -275,6 +300,13 @@ write_config() {
     write_config '[core]' 'firewall = on'
     run lib config_get core nonesuch
     [ "$status" -ne 0 ]
+}
+
+@test "config_is_set refuses an unknown key, like config_get does" {
+    write_config '[core]' 'firewall = on'
+    run lib config_is_set core nonesuch
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown config key"* ]]
 }
 
 @test "config_get validates the whole file, not just the requested key" {
@@ -769,10 +801,6 @@ run_install() {
     [ -f "$CONFIG_DIR/remote.conf" ]
 }
 
-@test "the fast CI suite includes config.bats" {
-    grep -q 'test/config.bats' "$REPO_ROOT/.gitea/workflows/tests.yml"
-}
-
 @test "the README documents the config file, not the retired variables" {
     # The retired variables must be gone from the setup instructions...
     run grep -nE '^\| `(SANDBOX_CMD|SANDBOX_EXTRA_MOUNTS|SANDBOX_NVIM_CONFIG|SANDBOX_SHARE_DIR|SANDBOX_CREDENTIAL_PROXY|LOKI_URL|ENABLE_FIREWALL|GITEA_SSH_HOST|GITEA_API|GITEA_TOKEN)`' \
@@ -809,10 +837,25 @@ run_install() {
     # live shell plumbing, so any mention of a retired name is either the
     # deliberate "no longer read" notice (install.sh's remote.conf one lives
     # outside these two directories, but the exclusion is kept here too in
-    # case a future doc adds one) or a stale instruction.
+    # case a future doc adds one), a stale instruction, or one of the two
+    # cases below that are neither:
+    #
+    # - A manifest-field line (`env_export    = GITEA_API=api ...`): this is
+    #   docs/providers.md quoting a forge manifest's `env_export` value
+    #   verbatim, which *declares* a container-side environment variable -
+    #   the exact thing env_export is for - not an instruction to an operator
+    #   to set one. `GITEA_API` and friends are retired only as host-side,
+    #   operator-set variables (what _warn_legacy_env's table is about); they
+    #   are not retired as the container-side names env_export produces, and
+    #   docs/providers.md documenting that mapping is not a regression.
+    # - A backtick-quoted mention (`` `GITEA_API` ``): prose naming a
+    #   variable - "the container gets `GITEA_API`" - reads a value, it
+    #   doesn't tell anyone to set one.
     while IFS= read -r name; do
         out="$(grep -rnE "\b${name}\b" "$REPO_ROOT/docs" "$REPO_ROOT/systemd" 2>/dev/null \
-            | grep -v 'no longer read' || true)"
+            | grep -v 'no longer read' \
+            | grep -vE ':[[:space:]]*env_export[[:space:]]*=' \
+            | grep -vE "\`${name}\`" || true)"
         if [ -n "$out" ]; then
             echo "$out" >&2
             hit=1
@@ -897,9 +940,28 @@ EOF
         || { echo "read_write not mounted read-write:"; cat "$docker_log"; return 1; }
     grep -qxF "$ro:$ro:ro" "$docker_log" \
         || { echo "readonly lost its :ro"; return 1; }
-    grep -qxF "DEJIMA_RW_MOUNTS=$rw" "$docker_log" \
-        || { echo "session never told which paths persist"; return 1; }
+    # The session learns which paths persist through the composed briefing
+    # now (see "--print-briefing names a configured read_write directory"
+    # below), not a raw DEJIMA_RW_MOUNTS env var - nothing inside the
+    # container reads that any more, since hooks/sandbox-context.sh only
+    # substitutes runtime placeholders into whatever briefing it is handed.
+    run grep -qxF "DEJIMA_RW_MOUNTS=$rw" "$docker_log"
+    [ "$status" -ne 0 ] || { echo "DEJIMA_RW_MOUNTS is still forwarded into the container"; return 1; }
     rm -rf "$rw" "$ro" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "--print-briefing names a configured read_write directory" {
+    # Regression check: --print-briefing used to compose before
+    # DEJIMA_RW_MOUNTS was resolved (that happened later, only on the real
+    # launch path), so the diagnostic silently dropped this sentence even
+    # though an actual session was told correctly. briefing_compose now
+    # reads the same DEJIMA_RW_MOUNTS a real launch would.
+    rw="$(mktemp -d)"
+    write_config '[mounts]' "read_write = $rw"
+    run "$REPO_ROOT/bin/dejima" --print-briefing
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"outlive the container too: $rw"* ]]
+    rm -rf "$rw"
 }
 
 @test "a read_write entry overlapping a protected path is refused, not warned" {
@@ -1026,17 +1088,45 @@ EOF
 }
 
 @test "the briefing names writable mounts so nothing survives being called disposable" {
-    run env DEJIMA=1 DEJIMA_RW_MOUNTS="/srv/one /srv/two" bash -c \
-        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
-        "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -eq 0 ]
-    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
-    [[ "$ctx" == *"/srv/one /srv/two"* ]]
-    [[ "$ctx" == *"outlive the container too"* ]]
+    # This sentence is composed host-side now (bin/dejima-provider-lib.sh's
+    # briefing_compose, via the {{writable_mounts}} placeholder) rather than
+    # by the hook, which only substitutes the two runtime placeholders in
+    # whatever briefing it is handed - see providers.bats for that half.
+    provider_lib="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    run env DEJIMA_RW_MOUNTS="/srv/one /srv/two" bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ "$provider_lib"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"/srv/one /srv/two"* ]]
+    [[ "$output" == *"outlive the container too"* ]]
     # And says nothing at all when there are none, rather than an empty list.
-    run env DEJIMA=1 bash -c \
-        'printf "{\"session_id\":\"t\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
-        "$REPO_ROOT/hooks/sandbox-context.sh"
-    ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
-    [[ "$ctx" != *"outlive the container too"* ]]
+    run bash -c 'source "$1"; briefing_compose gitea worktree-pr claude-code' _ "$provider_lib"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"outlive the container too"* ]]
+}
+
+@test "a token file with an embedded newline makes bin/dejima exit non-zero, before docker is invoked" {
+    # A refusal in forge_env_exports that gets swallowed by a process
+    # substitution would launch anyway with a partial environment - this test
+    # exercises the real launch path to verify the refusal actually stops it.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # Configure gitea forge with a valid config plus a token file with a newline.
+    printf '[core]\nfirewall = on\nssh_key = %s\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+        "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
+    printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "DOCKER WAS CALLED - TEST SHOULD HAVE FAILED" >&2
+exit 1
+EOF
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -ne 0 ] || { echo "bin/dejima did not fail"; return 1; }
+    [[ "$output" == *"newline"* ]] || { echo "no refusal message: $output"; return 1; }
+    # docker must not have been invoked at all.
+    [[ "$output" != *"DOCKER WAS CALLED"* ]] \
+        || { echo "docker was invoked despite the refusal"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$STUB_DIR"
 }

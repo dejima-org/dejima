@@ -22,6 +22,8 @@
 
 # shellcheck source=dejima-config-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/dejima-config-lib.sh"
+# shellcheck source=dejima-provider-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/dejima-provider-lib.sh"
 
 DEJIMA_MAX_DECLARED=200
 

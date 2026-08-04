@@ -703,6 +703,33 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [[ " $(launched_env ALLOWED_DOMAINS) " != *"evil.example"* ]]
 }
 
+@test "--allow-github-push adds github.com/ssh.github.com to DEJIMA_PUSH_HOSTS" {
+    # At bafad17, ALLOW_GITHUB_PUSH itself was what git-push-guard.sh checked.
+    # Now the guard only reads DEJIMA_PUSH_HOSTS, so the flag's actual effect
+    # has to be widening that list - exporting ALLOW_GITHUB_PUSH alone (which
+    # nothing reads anymore) would make the flag a no-op that still opens
+    # port 22 in the firewall for nothing. DEJIMA_PUSH_HOSTS reaches the
+    # container as a `docker ... -e` argument, not an exported env var of
+    # this process, so it's read off the logged argv rather than
+    # launched_env (which only sees what's actually exported).
+    launch_setup
+    run launch --allow-github-push "$PROJ"
+    [ "$status" -eq 0 ]
+    run_line="$(grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1)"
+    [ -n "$run_line" ]
+    [[ "$run_line" == *"-e DEJIMA_PUSH_HOSTS="*"github.com"* ]]
+    [[ "$run_line" == *"ssh.github.com"* ]]
+}
+
+@test "without --allow-github-push, DEJIMA_PUSH_HOSTS carries no github hosts" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    run_line="$(grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1)"
+    [ -n "$run_line" ]
+    [[ "$run_line" != *"github.com"* ]]
+}
+
 @test "the launcher refuses to start when either store's approved domains are corrupt" {
     # A store entry that no longer validates means a bug or tampering, not
     # user error - launching anyway would either drop it silently or write it

@@ -157,6 +157,43 @@ remote. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea fork
 exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api` at a
 Forgejo instance just works.
 
+## Provider axes: forge, workflow, harness
+
+The forge integration, the push/PR workflow, and the agent harness aren't
+hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
+`harnesses/`, selected by `[core] forge`, `[core] workflow` and
+`[core] harness` respectively. Ships today: `forges/gitea`,
+`workflows/worktree-pr`, `harnesses/claude-code` — which is why the rest of
+this document reads as if Gitea/Forgejo and a worktree-and-PR workflow are
+the only option; right now, they are the only one that ships.
+
+A provider is **data**, never sourced or executed: its manifest (`forge.conf`,
+`workflow.conf`, `harness.conf`) is parsed with the same discipline as the
+main config file — an unknown key or a bad value is a hard error, not a
+silent pass-through — and a provider's optional briefing prose is
+substituted into and handed to the agent, never interpreted as code. The one
+thing a provider ships that *does* run is a forge's `bin/`, copied into the
+image at build time as an ordinary program on `PATH`. A forge or harness also
+declares its own `[forge.<name>]`/`[harness.<name>] `config keys, with their
+own types and defaults, right in its manifest — core holds no forge-specific
+or harness-specific schema at all, which is what makes adding a provider a
+matter of adding a directory rather than editing this repo's own code.
+
+`bin/dejima` resolves the selection on the host and passes only resolved
+values into the container — the hostnames a forge needs reachable, which of
+them pushes are allowed to, which branches are protected, and the literal
+merge command to block — plus the forge's own environment variables (a
+Gitea/Forgejo API token, in the shipped forge's case). The session briefing
+itself (the text `hooks/sandbox-context.sh` injects at `SessionStart`) is
+composed host-side too, from a fixed core fragment no provider can override
+plus the selected workflow's and harness's own prose, then mounted
+**read-only** — so a session can never rewrite what the next session is
+told. `dejima --print-briefing` prints exactly what a session would see,
+without launching anything.
+
+See [docs/providers.md](docs/providers.md) for the full manifest contract,
+key by key, with the shipped manifests as worked examples.
+
 ## Setup
 
 Every feature's configuration, in one place and in order. Each step links to
@@ -305,7 +342,7 @@ editor setup at all.
 Typical loop: point it at a project, ask Claude to implement something and
 open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
 to pull review feedback, feed it back in, repeat. Merging is yours — see
-`gitea-merge-guard.sh` below. `gitea-issue` is on `PATH` too, for the work
+`merge-guard.sh` below. `gitea-issue` is on `PATH` too, for the work
 that gets deferred rather than done: `list`, `view`, `create`, `comment`,
 `close` and `reopen`, so a problem found mid-session becomes a ticket instead
 of a footnote on an unrelated PR.
@@ -545,7 +582,7 @@ GitHub push is blocked by default too (see "GitHub push" below) unless
 `--allow-github-push` is given. For a real guarantee against pushes to
 main/master, use branch protection on the remote itself.
 
-`gitea-merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
+`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
 `gitea-pr merge` inside the sandbox. It's the API-side counterpart to the rule
 above: a merge puts a branch on `main` without ever performing a push, so
 `git-push-guard.sh` never sees it. A hook is handed a command rather than a
@@ -861,8 +898,8 @@ instead of finding out the hard way:
 
 ```sh
 bats test/               # everything
-bats test/static.bats test/project.bats test/remote.bats test/audit.bats  # fast, no Docker/build needed
-SKIP_BUILD=1 bats test/runtime.bats   # reuse the current image
+bats test/audit.bats     # one area - the suites are independent, see .dejima.md
+SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the current image
 ```
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every
@@ -925,18 +962,20 @@ likely to collide with a real container you have running.
 | `.dejima.md` | Project-level agent instructions, harness-agnostic — `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/gitea-merge-guard.sh` | `PreToolUse` hook: blocks `gitea-pr merge` in the sandbox — merging is a human decision |
+| `hooks/merge-guard.sh` | `PreToolUse` hook: blocks the configured forge's merge command (`DEJIMA_MERGE_BLOCK`) in the sandbox — merging is a human decision |
 | `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see [docs/remote-access.md](docs/remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
-| `bin/gitea-pr` | Create a PR, read its comments, merge it; baked into the image so the sandbox can open PRs |
-| `bin/gitea-issue` | List, view, create, comment on, close and reopen Gitea issues; also baked into the image |
+| `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH — see [docs/providers.md](docs/providers.md) |
+| `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` — data, never sourced or executed; see [docs/providers.md](docs/providers.md) |
+| `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it) and `gitea-issue` (list, view, create, comment on, close and reopen issues) |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
+| `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,

@@ -90,12 +90,12 @@ user=dnsmasq
 pid-file=/var/run/dnsmasq-sandbox.pid
 EOF
 
-    # EXTRA_ALLOWED_DOMAINS (GITEA_SSH_HOST/GITEA_API/LOKI_URL's hosts, plus
+    # EXTRA_ALLOWED_DOMAINS (the configured forge's hosts and LOKI_URL's, plus
     # the approved domains the launcher passes in ALLOWED_DOMAINS) are
     # expected to potentially be internal/self-hosted addresses, unlike
     # FIXED_DOMAINS/GITHUB_DNS_SUFFIXES above, which are always public SaaS
     # domains - exempt just these from stop-dns-rebind so a legitimately
-    # internal Gitea/Loki host still resolves.
+    # internal forge or Loki host still resolves.
     for domain in ${EXTRA_ALLOWED_DOMAINS:-}; do
         if [[ "$domain" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             continue

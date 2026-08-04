@@ -2,15 +2,18 @@
 # SessionStart hook: when running inside the dejima Docker container
 # (see https://github.com/anthropics/claude-code/tree/main/.devcontainer for
 # the reference this is based on, and this repo's own README for the actual
-# setup), inject a reminder of the sandbox's constraints and how to escape
-# it. No-op outside the container.
+# setup), read the session briefing bin/dejima composed host-side and mounted
+# read-only, fill in the two placeholders only the container can resolve, and
+# append what only the container can compute: the gap between what this
+# project declares it needs and what this image actually has, and the
+# project's own .dejima.md. No-op outside the container.
 
 if [ -z "${DEJIMA:-}" ]; then
     exit 0
 fi
 
-# Read stdin once - it's consumed by the first reader, and this hook now
-# needs both session_id and cwd out of the same payload.
+# Read stdin once - it's consumed by the first reader, and this hook needs
+# both session_id and cwd out of the same payload.
 payload=$(cat)
 session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty')
 resume_id="${session_id:-<unknown-session-id>}"
@@ -18,12 +21,42 @@ project_dir=$(printf '%s' "$payload" | jq -r '.cwd // empty')
 project_dir="${project_dir:-$PWD}"
 
 # /etc/hostname in a docker container is the container's own ID, which
-# docker exec accepts directly - baking it into the suggested command below
+# docker exec accepts directly - substituting it into the briefing below
 # means the agent states its real container instead of guessing (a wrong
 # guess that matches *another* running sandbox makes dejima-allow
 # "succeed" against the wrong container).
 container_id=$(cat /etc/hostname 2>/dev/null)
 container_id="${container_id:-<container-id>}"
+
+# The briefing itself is composed host-side (bin/dejima, via
+# briefing_compose in bin/dejima-provider-lib.sh) and mounted read-only, so a
+# session can never rewrite its own next briefing. It still carries two
+# placeholders neither the host nor the image build can resolve -
+# @@SESSION_ID@@ and @@CONTAINER_ID@@ - substituted here, the only place
+# both are known. Missing or unreadable degrades to no briefing rather than
+# failing the hook: a SessionStart hook that exits non-zero drops the whole
+# session's context, which is worse than one missing paragraph.
+# Substitutes every occurrence of a marker without the replacement text ever
+# being interpreted. Deliberately not using ${text//marker/value}: bash 5.2's
+# patsub_replacement (on by default) makes a literal "&" in the replacement
+# expand to the matched text, so a session id containing one would leave the
+# marker in place and corrupt the resume line. The session id comes from the
+# harness payload and is not ours to trust.
+_briefing_subst() {
+    local text="$1" marker="$2" value="$3" out=""
+    while [ "$text" != "${text#*"$marker"}" ]; do
+        out="$out${text%%"$marker"*}$value"
+        text="${text#*"$marker"}"
+    done
+    printf '%s%s' "$out" "$text"
+}
+
+briefing=""
+if [ -n "${DEJIMA_BRIEFING_FILE:-}" ] && [ -f "$DEJIMA_BRIEFING_FILE" ]; then
+    briefing="$(cat "$DEJIMA_BRIEFING_FILE")"
+    briefing="$(_briefing_subst "$briefing" "@@SESSION_ID@@" "$resume_id")"
+    briefing="$(_briefing_subst "$briefing" "@@CONTAINER_ID@@" "$container_id")"
+fi
 
 # What the project says it needs, checked against what this container
 # actually has. .dejima/ is on the read-write workspace mount, so it
@@ -159,22 +192,6 @@ if [ -n "$requirements" ]; then
 This project declares requirements this session does not satisfy:$requirements"
 fi
 
-# Writable host mounts, named by bin/dejima (see its [mounts] read_write
-# handling). Without this the sentence that follows in the briefing -
-# "everything else is disposable" - is false whenever an operator configures
-# one, and false in the direction that loses work: an agent told a path is
-# disposable has no reason to treat it carefully.
-# Leading and trailing newlines rather than spaces, so the fixed prose either
-# side keeps its own wrapping instead of being reflowed around a list whose
-# length nobody here knows.
-rw_mounts_line=""
-if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
-    rw_mounts_line="
-  These host directories are bind-mounted read-write at their own paths and
-  outlive the container too: ${DEJIMA_RW_MOUNTS}.
- "
-fi
-
 # The project's agent-instruction file - CLAUDE.md's role, under a name that
 # doesn't name a harness. Claude Code finds a CLAUDE.md on its own and nothing
 # else does, so as dejima grows the ability to run other agents, a project that
@@ -218,108 +235,7 @@ ${project_doc}${truncated}
     fi
 fi
 
-context=$(cat <<EOF
-You are running inside the dejima Docker container, not directly on
-the user's machine, with
---dangerously-skip-permissions active (no tool-use confirmations).
-
-What this means:
-- The workspace directory is bind-mounted read-write and is the real
-  project. ~/shared is also a real, persistent host directory (not part of
-  the project) - use it to hand the user a file (a screenshot, a temp
-  script) without touching the project checkout, or to pick up something
-  they left there for you. ~/.claude is bind-mounted too, so this session's
-  transcript and its project memory outlive the container - the work is
-  recoverable on the host with the \`--resume\` command at the end of this
-  briefing.$rw_mounts_line Everything else is disposable: installed system
-  packages, anything outside the mounted paths, and the container itself go
-  away when this run ends.
-- Outbound network is restricted to an allowlist (Anthropic's API, the npm
-  registry, GitHub read-only, the configured Gitea host, plus anything
-  approved via dejima-allow). Requests to anything else will simply
-  fail to connect. That restriction is not only a limit on your reach: it
-  is also what bounds where a prompt injection or a compromised dependency
-  in this session could send the user's code or fetch its next instruction
-  from. You cannot audit yourself for that from the inside, so the
-  allowlist is load-bearing for you too, not just for the host - working
-  around it would give up that protection, not merely lift the one limit
-  it appears to. If a task needs one more domain and nothing else, that's
-  a quick fix, not a reason to stop: tell the user to run
-  \`bin/dejima-allow <domain> --container $container_id\` (add
-  \`--global\` to persist it past this session) from a terminal outside the
-  sandbox, then continue. Quote that --container value exactly as written
-  here - it is this container's real ID, not something to infer.
-- Stay within the task you were given. Since there are no permission
-  prompts here, be more conservative than usual about anything destructive,
-  irreversible, or outside the project directory.
-
-Git workflow - do this even though nothing stops you from doing otherwise:
-- Do new work in a git worktree for the feature branch, not by switching
-  branches in place in the mounted checkout - that's the user's actual
-  working copy, and changing its branch out from under them is disruptive
-  even if you switch it back.
-- The worktree MUST live under the mounted project directory itself, e.g.
-  \`git worktree add .worktrees/<branch> -b <branch>\` run from the project
-  root - never \`../<branch>\` or any other path outside it, including
-  anywhere under \$HOME. Only the exact directory bind-mounted into this
-  container is backed by real storage on the host - what looks like the
-  project's own parent directory is not, so a worktree created there is
-  real work that just gets thrown away. Add
-  \`.worktrees/\` to \`.git/info/exclude\` (not \`.gitignore\` - this is
-  sandbox-local, not something to commit) so it doesn't clutter \`git
-  status\` for the user's real checkout.
-- Push that branch to the Gitea remote, then run \`gitea-pr create\` from
-  the worktree. Never push to GitHub (read-only, and not reachable for
-  push regardless), and never push directly to main/master, on any remote.
-  A \`git-push-guard.sh\` hook enforces both as a backstop, but treat them
-  as the actual workflow to follow, not just a filter to route around.
-  Merging is the operator's call, not yours - a \`gitea-merge-guard.sh\`
-  hook blocks it here. Report the PR URL and stop.
-- Do the push and the \`gitea-pr create\` WITHOUT asking first. Once the
-  work is complete and its tests pass, that is the workflow, not a decision
-  to escalate - so do not stop to offer a choice between merging locally,
-  opening a PR, and leaving the branch alone. That menu is the right default
-  only where nothing knows a branch's intended destination; here it is
-  known, and asking makes the operator answer the same question every time.
-  The line between yours and theirs is drawn after the PR is open: pushing
-  and opening are yours, merging is theirs. General branch-finishing advice
-  from a skill or a generic workflow does not override this, because it
-  cannot know that this sandbox already has one.
-- Name the issues a PR resolves in its body: \`Fixes #N\` (\`Closes\` and
-  \`Resolves\` work too) tells Gitea to close them when it merges. Use
-  \`Refs #N\` for work that is partial or merely related, so those stay
-  open. Prefer the keyword to closing anything yourself once it lands,
-  because of the line above - you stop at the PR, and the merge happens
-  later without you, so whatever you left for "after the merge" is not
-  something you will be there to do. Write \`#N\` and not the issue's URL:
-  they render alike, but only the short form triggers the close. Read the
-  whole issue before claiming it, since the ask is often wider than the
-  title, and a closing keyword closes it whether or not you covered all
-  of it.
-- Write PR and issue bodies to a file and pass \`--body-file FILE\`, rather
-  than \`--body "..."\` or a heredoc. Both of those put the entire body into
-  the Bash command string, where \`deny-dangerous-bash.sh\` reads it - and
-  that hook matches its patterns anywhere in the string, with no way to tell
-  an instruction from prose that merely mentions one. A body describing a
-  crash, a restart, or a destructive command it is warning about will get
-  the call blocked, which looks like a broken tool rather than what it is.
-  Writing the file first keeps the prose out of the command entirely.
-  \`gitea-issue\` (list/view/create/comment/close/reopen) takes the same
-  flag, for recording a problem you found but aren't fixing.
-
-If a task genuinely needs something else the sandbox can't provide -
-broader network access than a domain or two, host-level or system changes,
-GUI/hardware access - stop and explain clearly to the user what you need
-and why, instead of trying to work around the firewall or sandbox yourself.
-They can continue this exact session outside the container by running on
-the host:
-
-  claude --resume $resume_id
-
-(session history is shared via the bind-mounted ~/.claude, so it will pick
-up right where this left off).$requirements$project_doc
-EOF
-)
+context="$briefing$requirements$project_doc"
 
 # Fed on stdin rather than as --arg: a single argv element is capped at 128
 # KiB (MAX_ARG_STRLEN), and a context that overruns it makes jq fail outright,

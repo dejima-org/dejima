@@ -10,10 +10,38 @@ at repositories you already trust. Everything below is about how bad a
 compromised session *inside* that trust boundary can get, not a claim that
 one can't happen.
 
+## Provider trust
+
+Forges, workflows and harnesses (`forges/`, `workflows/`, `harnesses/`) are
+**data**, never sourced or executed. A provider's manifest is parsed with
+the same discipline as the main config file - an unknown key or a bad value
+is a hard error, not a silent pass-through - and its optional briefing
+prose is substituted into and handed to the agent, never interpreted as
+code. `bin/dejima` resolves the selected forge/workflow/harness **on the
+host** and passes only the resolved results into the container - which
+hosts pushes are allowed to, which branches are protected, the literal merge
+command to block, plus the forge's own environment variables (a Gitea API
+token, in the shipped forge's case) - never a manifest or a provider
+directory itself. The one thing a provider ships that does run is a forge's
+`bin/`, copied into the image at build time as an ordinary program on
+`PATH`, no different from any other CLI baked into it.
+
+The session briefing text (what `hooks/sandbox-context.sh` injects at
+`SessionStart`) is composed the same way: **host-side**, from a fixed core
+fragment no provider can override plus the selected workflow's and
+harness's own prose, then mounted **read-only** into the container - so a
+compromised session cannot rewrite what it is *currently* being told. That
+guarantee does not reach into the *next* session: a workflow's or harness's
+briefing fragment (e.g. `workflows/worktree-pr/briefing.md`) lives in the
+checkout itself and needs no symlink to edit, so a session with write access
+to this repo's own checkout can change what the next launch composes and
+hands to whichever session starts against it. See
+[docs/providers.md](providers.md) for the full manifest contract.
+
 - `--dangerously-skip-permissions` removes your chance to review tool calls
   before they run. Only point this at trusted repositories.
 - The mounted project itself has **no write protection**. `deny-dangerous-
-  bash.sh`, `git-push-guard.sh` and `gitea-merge-guard.sh` are regex
+  bash.sh`, `git-push-guard.sh` and `merge-guard.sh` are regex
   pattern-matching on the literal Bash command string - a fast-fail guard
   against an overeager agent doing something obviously destructive, not a
   boundary against one that's actively trying to get around them (a

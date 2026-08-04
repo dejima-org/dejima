@@ -19,6 +19,8 @@ REPO_ROOT="$SCRIPT_DIR/.."
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
+# shellcheck source=dejima-provider-lib.sh
+source "$SCRIPT_DIR/dejima-provider-lib.sh"
 
 # Flags come first, then the optional workspace path, then "--" and
 # everything after that reaches the container command untouched - including a
@@ -53,11 +55,13 @@ _need_value() {
 }
 
 PRINT_CONFIG=0
+PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
         --print-config)      PRINT_CONFIG=1; shift ;;
+        --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
@@ -130,6 +134,20 @@ _warn_legacy_env() {
         echo "Set them in $(config_path) instead, then unset them in your shell profile." >&2
         echo "" >&2
     fi
+
+    # GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) -
+    # forge_env_exports computes their replacements fresh from the manifest
+    # further down and passes them as -e flags, but a value already exported
+    # by the operator's shell is otherwise inherited by the docker subprocess
+    # unchanged since nothing else reassigns these three names. Cleared, not
+    # just unread, for the same reason the old hardcoded GITEA_TOKEN
+    # computation started from "" rather than the inherited value. These
+    # three names, specifically, are the only environment variables dejima
+    # ever read directly for forge configuration before the manifest schema
+    # replaced them - they name no CURRENT forge selection, only that one
+    # retired path, so unlike the rest of this file they stay fixed regardless
+    # of which forge is configured or added later.
+    unset GITEA_TOKEN GITEA_SSH_HOST GITEA_API
 }
 _warn_legacy_env
 
@@ -154,6 +172,29 @@ if [ "$PRINT_CONFIG" = 1 ]; then
     exit 0
 fi
 
+# The selected forge/workflow/harness combination, resolved and validated
+# before anything is built or mounted. provider_validate_selection enforces
+# rules 1, 2 and 6 as refusals and rule 5 (a partly-configured forge) as a
+# warning - see its definition. Rule 3 ("a pushing workflow needs a forge
+# that resolves to a host") is deliberately NOT enforced here: it is
+# deferred to Phase 3, which adds `forge = none` as the honest way to say
+# "no forge" - enforcing it now would refuse the supported "I don't use a
+# forge" configuration that git-push-guard.sh already handles at runtime
+# (see README "Skip this if you only push to GitHub").
+DEJIMA_FORGE_NAME="$(config_get core forge)"
+DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
+DEJIMA_HARNESS_NAME="$(config_get core harness)"
+provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+# Resolved here, ahead of --print-briefing below, because briefing_compose
+# needs DEJIMA_RW_MOUNTS (the {{writable_mounts}} placeholder) to render the
+# same sentence a real launch renders - see the read_write mounts block this
+# was hoisted from, further down, which now only turns this already-
+# validated list into -v flags rather than re-deriving it. WORKSPACE_DIR,
+# AUDIT_DIR, BASELINE_DIR and SANDBOX_EXTRA_MOUNTS are pure config reads (or,
+# for WORKSPACE_DIR, a default-to-pwd with an existence check) - no side
+# effects a print-and-exit needs to avoid, and a workspace argument stays
+# optional here exactly as it was before this moved.
 WORKSPACE_DIR="${1:-$(pwd)}"
 if [ ! -d "$WORKSPACE_DIR" ]; then
     echo "Not a directory: $WORKSPACE_DIR" >&2
@@ -167,6 +208,124 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
+AUDIT_DIR="$(config_get audit dir)"
+BASELINE_DIR="$(config_get audit baselines_dir)"
+SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+
+# Read-write host mounts. Distinct from [core] share_dir, which is mounted at
+# ~/shared - a well-known handoff point the agent is told about by name -
+# while these are mounted at their own absolute path, so a path that works on
+# the host works unchanged inside.
+#
+# A writable mount is a host-persistence surface, so it may not overlap the
+# surfaces the rest of this repo exists to protect. Refused, not warned:
+# warn_if_inside_workspace below only warns because it reports an
+# ENVIRONMENTAL condition an operator may have reached indirectly (an
+# XDG_DATA_HOME pointing somewhere surprising). This is a deliberate line in a
+# hand-edited config with an obvious alternative, so refusing costs nothing
+# and removes the "saw the warning, continued anyway" path.
+_paths_overlap() {
+    local a="$1" b="$2"
+    [ "$a" = "$b" ] && return 0
+    case "$a/" in "$b"/*) return 0 ;; esac
+    case "$b/" in "$a"/*) return 0 ;; esac
+    return 1
+}
+SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
+RW_MOUNT_PATHS=()
+DEJIMA_RW_MOUNTS=""
+if [ -n "$SANDBOX_RW_MOUNTS" ]; then
+    IFS=':' read -ra rw_paths <<< "$SANDBOX_RW_MOUNTS"
+    for path in "${rw_paths[@]}"; do
+        [ -n "$path" ] || continue
+        if [ ! -d "$path" ]; then
+            echo "[mounts] read_write entry is not an existing directory: $path" >&2
+            exit 1
+        fi
+        # readlink -m, not -f: -f yields nothing unless at most the final
+        # component is missing, and a guarded path that does not exist YET is
+        # exactly the one worth refusing. An empty result would otherwise be
+        # skipped, so an operator whose [audit] dir sits two levels below a
+        # directory nothing has created could mount a writable ancestor of the
+        # store dejima-audit is about to write findings into. -m also folds
+        # away trailing slashes and "."/".." components, so the comparisons
+        # below are between canonical paths rather than whatever spelling the
+        # config happened to use.
+        rw_real="$(readlink -m "$path")"
+        for guarded in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
+            "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
+            guarded_real="$(readlink -m "$guarded")"
+            _paths_overlap "$rw_real" "$guarded_real" || continue
+            echo "Refusing [mounts] read_write entry: $path" >&2
+            echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
+            echo "A writable mount there would let a session approve its own domains and" >&2
+            echo "dependencies, delete the audit findings it is named in, or plant code" >&2
+            echo "that runs unsandboxed on the host the next time you start an agent." >&2
+            exit 1
+        done
+        # A path in both lists would be resolved by whichever mount Docker
+        # applies last, which is not something to decide by ordering. Compared
+        # canonically rather than as config text: "$d" and "$d/" are the same
+        # directory, and a raw string match would pass them both through and
+        # emit two -v flags for it, leaving the read-only one to win or lose
+        # by accident.
+        if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
+            IFS=':' read -ra ro_paths <<< "$SANDBOX_EXTRA_MOUNTS"
+            for ro_path in "${ro_paths[@]}"; do
+                [ -n "$ro_path" ] || continue
+                [ "$(readlink -m "$ro_path")" = "$rw_real" ] || continue
+                echo "[mounts] read_write and [mounts] readonly both name the same" >&2
+                echo "directory: $path and $ro_path both resolve to $rw_real." >&2
+                exit 1
+            done
+        fi
+        RW_MOUNT_PATHS+=("$path")
+        DEJIMA_RW_MOUNTS="${DEJIMA_RW_MOUNTS:+$DEJIMA_RW_MOUNTS }$path"
+    done
+fi
+
+# --print-briefing composes and exits, the same way --print-config does -
+# before anything is built or mounted, and before a workspace argument is
+# required. It exists so the composed briefing can be inspected (and, per
+# test/providers.bats's parity check, diffed against the pre-composition
+# text) without booting a container. Composing after DEJIMA_RW_MOUNTS above,
+# rather than before it, is what makes that inspection trustworthy:
+# briefing_compose reads DEJIMA_RW_MOUNTS to resolve {{writable_mounts}}, so
+# composing any earlier would silently print a briefing missing that
+# sentence whenever an operator has a read_write mount configured - exactly
+# the gap this ordering exists to close.
+if [ "$PRINT_BRIEFING" = 1 ]; then
+    briefing_compose "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+    exit 0
+fi
+
+if ! DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"; then
+    exit 1
+fi
+DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
+if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
+    DEJIMA_PUSH_HOSTS="$DEJIMA_FORGE_HOSTS"
+else
+    DEJIMA_PUSH_HOSTS=""
+fi
+# --allow-github-push's actual effect: git-push-guard.sh only ever checks
+# DEJIMA_PUSH_HOSTS, so granting it a github.com push means adding these
+# hosts to that list, not just exporting ALLOW_GITHUB_PUSH (which nothing
+# reads anymore now that the guard is forge/workflow-driven).
+if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+    DEJIMA_PUSH_HOSTS="${DEJIMA_PUSH_HOSTS:+$DEJIMA_PUSH_HOSTS }github.com ssh.github.com"
+fi
+DEJIMA_BLOCKED_BRANCHES="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" blocked_branches)"
+if [ "$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" block_merge)" = "on" ]; then
+    DEJIMA_MERGE_BLOCK="$(manifest_get forge "$DEJIMA_FORGE_NAME" merge_block)"
+else
+    DEJIMA_MERGE_BLOCK=""
+fi
+
+# WORKSPACE_DIR is resolved above, ahead of --print-briefing, since
+# briefing_compose needs DEJIMA_RW_MOUNTS (which needs WORKSPACE_DIR for its
+# own overlap guard) before that point.
+#
 # Allowed domains come only from the host-side approval store (see
 # bin/dejima-project-lib.sh), global then per-project. The first
 # assignment below is plain, not ${ALLOWED_DOMAINS:-}-preserving: the store
@@ -189,9 +348,8 @@ fi
 # The approval store, and the exit-audit's own report/baseline stores, are
 # only out of the container's reach while none of them are inside the
 # mounted workspace - same class of warning as the self-mounted repo TCB
-# warning below.
-AUDIT_DIR="$(config_get audit dir)"
-BASELINE_DIR="$(config_get audit baselines_dir)"
+# warning below. AUDIT_DIR/BASELINE_DIR are resolved above, ahead of
+# --print-briefing, since the read_write mounts guard needs them too.
 # The three stores fail in three different ways once they are reachable, and
 # an operator who sees this needs to know which one they are looking at - so
 # each states its own consequence rather than sharing one text. Consequence
@@ -251,7 +409,10 @@ if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK}" ]; then
     have_forwarded_agent=0
 fi
 
-if [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
+# Rule 4: a workflow that never pushes has no use for either - skip the
+# requirement entirely rather than force an operator doing local-only work
+# to set up an agent or a deploy key for nothing.
+if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
     echo "SSH_AUTH_SOCK is not set or not a valid socket, and [core] ssh_key is not set." >&2
     echo "Either start ssh-agent and run ssh-add, or set [core] ssh_key in $(config_path) to a" >&2
     echo "dedicated key for headless use - see README 'Headless git push' section." >&2
@@ -265,25 +426,18 @@ fi
 # SANDBOX_SSH_KEY (if set) provides its own identity independently of this.
 if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
     echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
-    echo "git-over-ssh (e.g. pushing to Gitea) will fail until you ssh-add a key," >&2
+    echo "git-over-ssh (e.g. pushing to the configured forge) will fail until you ssh-add a key," >&2
     echo "unless [core] ssh_key is also set." >&2
-fi
-
-# Plain assignment, not left unset: a stale GITEA_TOKEN already exported by
-# the operator's shell must not survive a missing/renamed token file and
-# flow straight through to the export below - the configured file is the
-# only source.
-GITEA_TOKEN=""
-GITEA_TOKEN_FILE="$(config_get forge.gitea token_file)"
-if [ -f "$GITEA_TOKEN_FILE" ]; then
-    GITEA_TOKEN="$(<"$GITEA_TOKEN_FILE")"
 fi
 
 # Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
 # auth login` session is write-capable, which would defeat the point.
 # This should be a dedicated read-only fine-grained PAT (Contents +
 # Metadata: read-only), generated separately for this sandbox.
-# Plain assignment, same reason as GITEA_TOKEN above.
+# Plain assignment: stays empty (never inherited from the shell) when
+# GH_TOKEN_FILE doesn't exist, the same "start from empty, not from
+# whatever's already exported" reasoning forge_env_exports applies to a
+# forge's own token further down.
 GH_TOKEN=""
 GH_TOKEN_FILE="$(config_get github token_file)"
 if [ -f "$GH_TOKEN_FILE" ]; then
@@ -421,8 +575,16 @@ cleanup() {
     # name here already keeps, not a live fix - see the static test.
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
+        # Reaped, not just signalled. Without this the proxy stays a zombie
+        # child until dejima itself exits, at which point it reparents to
+        # PID 1 - and where PID 1 does not reap (a CI job container whose
+        # PID 1 is `sleep`, rather than the `init: true` dejima gives its
+        # own containers) it stays a zombie for the life of that container,
+        # holding a PID. One per launch is invisible interactively and
+        # accumulates in a test suite that launches hundreds of times.
+        wait "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
@@ -481,12 +643,13 @@ export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
 export SANDBOX_GITCONFIG_DIR
+# Rule 4's other half: a workflow that never pushes gets no agent socket
+# forwarded either - left empty here, docker-compose.yml's
+# ${SSH_AUTH_SOCK:-/dev/null} mounts nothing.
+[ "$DEJIMA_WORKFLOW_PUSH" = "on" ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
-export GITEA_TOKEN="${GITEA_TOKEN:-}"
-export GITEA_SSH_HOST="$(config_get forge.gitea ssh_host)"
-export GITEA_API="$(config_get forge.gitea api)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # --allow-github-push is the only way to grant this - same principle as
@@ -541,6 +704,34 @@ export LOKI_URL="$(config_get logging loki_url)"
 # "." here too would mount a whole config checkout read-only into the
 # container for nothing.
 extra_mounts=()
+
+# The forge's own env vars, generated from its manifest's env_export list
+# rather than hardcoded - see forge_env_exports. -e here: passed straight
+# through to `docker compose run`, which takes -e alongside -v.
+_forge_env_lines=""
+if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
+    # forge_env_exports has already explained why on stderr. It can fail
+    # partway, having printed some records, so nothing it produced can be
+    # trusted - refuse rather than launch with a partial forge environment.
+    exit 1
+fi
+while IFS= read -r _forge_env; do
+    [ -n "$_forge_env" ] || continue
+    extra_mounts+=(-e "$_forge_env")
+done <<< "$_forge_env_lines"
+
+# The resolved combination, for the briefing and the hooks that read it
+# (git-push-guard.sh's host allowlist and no-direct-push branches,
+# merge-guard.sh's block) - computed here, unconditionally passed through
+# the same way, regardless of which forge and workflow are configured.
+extra_mounts+=(-e "DEJIMA_FORGE_NAME=$DEJIMA_FORGE_NAME")
+extra_mounts+=(-e "DEJIMA_WORKFLOW_NAME=$DEJIMA_WORKFLOW_NAME")
+extra_mounts+=(-e "DEJIMA_HARNESS_NAME=$DEJIMA_HARNESS_NAME")
+extra_mounts+=(-e "DEJIMA_FORGE_HOSTS=$DEJIMA_FORGE_HOSTS")
+extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
+extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
+extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
+
 mounted_dirs=""
 for mounted_dir in hooks skills commands agents output-styles; do
     dir="$HOME/.claude/$mounted_dir"
@@ -596,8 +787,9 @@ fi
 # outside anywhere already mounted above - e.g. a dotfiles bin/ directory
 # an editor config shells out to. Colon-separated, like $PATH. Mounted
 # read-only at their own path, same as everything else here - this repo
-# still has no opinion on what's inside any of them.
-SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+# still has no opinion on what's inside any of them. SANDBOX_EXTRA_MOUNTS
+# itself is resolved above, ahead of --print-briefing (the read_write guard
+# below needs it too) - only applying it as -v flags happens here.
 if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
     IFS=':' read -ra extra_paths <<< "$SANDBOX_EXTRA_MOUNTS"
     for path in "${extra_paths[@]}"; do
@@ -610,81 +802,30 @@ if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
     done
 fi
 
-# Read-write host mounts. Distinct from [core] share_dir, which is mounted at
-# ~/shared - a well-known handoff point the agent is told about by name -
-# while these are mounted at their own absolute path, so a path that works on
-# the host works unchanged inside.
-#
-# A writable mount is a host-persistence surface, so it may not overlap the
-# surfaces the rest of this repo exists to protect. Refused, not warned:
-# warn_if_inside_workspace above only warns because it reports an
-# ENVIRONMENTAL condition an operator may have reached indirectly (an
-# XDG_DATA_HOME pointing somewhere surprising). This is a deliberate line in a
-# hand-edited config with an obvious alternative, so refusing costs nothing
-# and removes the "saw the warning, continued anyway" path.
-_paths_overlap() {
-    local a="$1" b="$2"
-    [ "$a" = "$b" ] && return 0
-    case "$a/" in "$b"/*) return 0 ;; esac
-    case "$b/" in "$a"/*) return 0 ;; esac
-    return 1
-}
-SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
-rw_mount_list=""
-if [ -n "$SANDBOX_RW_MOUNTS" ]; then
-    IFS=':' read -ra rw_paths <<< "$SANDBOX_RW_MOUNTS"
-    for path in "${rw_paths[@]}"; do
-        [ -n "$path" ] || continue
-        if [ ! -d "$path" ]; then
-            echo "[mounts] read_write entry is not an existing directory: $path" >&2
-            exit 1
-        fi
-        # readlink -m, not -f: -f yields nothing unless at most the final
-        # component is missing, and a guarded path that does not exist YET is
-        # exactly the one worth refusing. An empty result would otherwise be
-        # skipped, so an operator whose [audit] dir sits two levels below a
-        # directory nothing has created could mount a writable ancestor of the
-        # store dejima-audit is about to write findings into. -m also folds
-        # away trailing slashes and "."/".." components, so the comparisons
-        # below are between canonical paths rather than whatever spelling the
-        # config happened to use.
-        rw_real="$(readlink -m "$path")"
-        for guarded in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
-            "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
-            guarded_real="$(readlink -m "$guarded")"
-            _paths_overlap "$rw_real" "$guarded_real" || continue
-            echo "Refusing [mounts] read_write entry: $path" >&2
-            echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
-            echo "A writable mount there would let a session approve its own domains and" >&2
-            echo "dependencies, delete the audit findings it is named in, or plant code" >&2
-            echo "that runs unsandboxed on the host the next time you start an agent." >&2
-            exit 1
-        done
-        # A path in both lists would be resolved by whichever mount Docker
-        # applies last, which is not something to decide by ordering. Compared
-        # canonically rather than as config text: "$d" and "$d/" are the same
-        # directory, and a raw string match would pass them both through and
-        # emit two -v flags for it, leaving the read-only one to win or lose
-        # by accident.
-        if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
-            IFS=':' read -ra ro_paths <<< "$SANDBOX_EXTRA_MOUNTS"
-            for ro_path in "${ro_paths[@]}"; do
-                [ -n "$ro_path" ] || continue
-                [ "$(readlink -m "$ro_path")" = "$rw_real" ] || continue
-                echo "[mounts] read_write and [mounts] readonly both name the same" >&2
-                echo "directory: $path and $ro_path both resolve to $rw_real." >&2
-                exit 1
-            done
-        fi
-        extra_mounts+=(-v "$path:$path")
-        rw_mount_list="${rw_mount_list:+$rw_mount_list }$path"
-    done
+# Read-write host mounts: validated and resolved into RW_MOUNT_PATHS and
+# DEJIMA_RW_MOUNTS above, ahead of --print-briefing, so the briefing composed
+# there and the briefing composed for a real launch read the same value.
+# Nothing left to do here but turn the already-validated list into -v flags -
+# re-validating would be a second place this could drift from the first.
+# DEJIMA_RW_MOUNTS is deliberately not forwarded into the container as an
+# environment variable: hooks/sandbox-context.sh no longer reads it (the
+# writable-mounts sentence reaches the session through the composed briefing
+# instead), so passing it would just be a value nothing inside consumes.
+for path in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
+    extra_mounts+=(-v "$path:$path")
+done
+
+# The session briefing, composed host-side from the core text and the
+# selected workflow/harness fragments (see briefing_compose) and mounted
+# read-only, so a session can never rewrite its own next briefing. The two
+# runtime placeholders it still carries (@@SESSION_ID@@, @@CONTAINER_ID@@)
+# are hooks/sandbox-context.sh's job to fill in at SessionStart.
+SANDBOX_BRIEFING_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-briefing.XXXXXX")"
+if ! briefing_compose "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" > "$SANDBOX_BRIEFING_FILE"; then
+    exit 1
 fi
-# Handed to the session so its briefing can say which host paths survive the
-# container - see hooks/sandbox-context.sh. Without this the briefing's
-# "everything else is disposable" would be false, and false in the direction
-# that gets work thrown away.
-extra_mounts+=(-e "DEJIMA_RW_MOUNTS=$rw_mount_list")
+extra_mounts+=(-v "$SANDBOX_BRIEFING_FILE:/etc/dejima/briefing:ro")
+extra_mounts+=(-e "DEJIMA_BRIEFING_FILE=/etc/dejima/briefing")
 
 # Block the workspace's own git hooks from being rewritten to run on the
 # host at the next `git` invocation. Only when .git is a real directory - a

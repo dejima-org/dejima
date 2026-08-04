@@ -2,10 +2,19 @@
 # `pull_request` fires on opened/reopened/synchronize, and synchronize is the
 # push-to-an-open-PR event, so both are covered without listing types.
 #
-# Split in two because the halves cost wildly different amounts: everything
-# except runtime.bats is seconds and needs nothing but a shell, while
-# runtime.bats builds the image and boots real containers. Splitting means a
-# typo in a doc test doesn't wait on a full image build to tell you.
+# Split by what each half NEEDS, not by what it costs. Everything except
+# runtime.bats runs anywhere a shell does, including inside a dejima sandbox -
+# which is where this repo is normally worked on. runtime.bats builds the image
+# and boots real containers, so it needs a Docker daemon the sandbox
+# deliberately does not have. That constraint is what a contributor has to
+# reason about when deciding what they can run before pushing, so the jobs are
+# named for it.
+#
+# The sandbox half is a matrix over its files rather than one invocation. The
+# files are independent, so running them together only serialised them: wall
+# clock was their sum rather than the slowest one. It also means a failure
+# names the suite that failed in the job list, instead of one red check
+# covering every unrelated area at once.
 name: tests
 
 on:
@@ -19,8 +28,24 @@ on:
 # supersede, and cancel the stale run by hand if it is in the way.
 
 jobs:
-  fast:
+  sandbox:
     runs-on: ubuntu-latest
+    strategy:
+      # One suite per job. fail-fast off because these cover unrelated areas -
+      # cancelling the other six on the first failure would hide whether a
+      # change broke one thing or all of them, which is the question a review
+      # actually needs answered.
+      fail-fast: false
+      matrix:
+        suite:
+          - static
+          - project
+          - remote
+          - audit
+          - proxy
+          - config
+          - providers
+    name: sandbox (${{ matrix.suite }})
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
       # needs to run at all, and apt-get is what everything below needs.
@@ -44,9 +69,9 @@ jobs:
       # install. Set on the command rather than in env: so it survives su.
       - run: |
           chown -R node:node .
-          su node -c 'TERM=xterm-256color bats test/static.bats test/project.bats test/remote.bats test/audit.bats test/proxy.bats test/config.bats'
+          su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
 
-  runtime:
+  host-docker:
     # Not ubuntu-latest, unlike the job above. This one only works on a runner
     # configured for it - host network namespace, the Docker socket, and the
     # shared volume below - and none of that is anything the workflow can ask
@@ -57,7 +82,7 @@ jobs:
     # runner failed on a repo that had not changed. A label only the configured
     # runner has makes that unrepresentable rather than merely diagnosable: no
     # runner matching it means this job queues instead of running somewhere it
-    # cannot work. The fast job stays on ubuntu-latest, because it genuinely
+    # cannot work. The sandbox job stays on ubuntu-latest, because it genuinely
     # does run anywhere.
     runs-on: dejima-runtime
     container:

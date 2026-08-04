@@ -1,0 +1,323 @@
+# Provider axes: forges, workflows, harnesses
+
+[← dejima README](../README.md)
+
+dejima's forge (Gitea/Forgejo/...), workflow (worktree-and-PR, or something
+else) and harness (Claude Code, or another agent CLI) behaviour are not
+hardcoded into core. Each is a directory under `forges/`, `workflows/` or
+`harnesses/`, selected by `[core] forge`, `[core] workflow` and
+`[core] harness` in `~/.config/dejima/config`. Shipped today:
+
+| Axis | Directory | Selector | Ships |
+| --- | --- | --- | --- |
+| forge | `forges/` | `[core] forge` | `forges/gitea` |
+| workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr` |
+| harness | `harnesses/` | `[core] harness` | `harnesses/claude-code` |
+
+**A provider is data.** Nothing in dejima sources, `eval`s or executes a
+manifest or a briefing fragment - a manifest is parsed with exactly the
+discipline the config file itself gets (unknown key is fatal, every value is
+type-checked, a line count cap), and a briefing fragment is prose that gets
+substituted into and handed to the agent, never interpreted as code. The one
+thing a provider ships that *does* run is a forge's `bin/` - copied into the
+Docker image at build time (`docker/Dockerfile`: `COPY forges/`, then every
+file under a `*/bin/` is installed) as an ordinary program the agent invokes
+on `PATH`, the same as `git` or `curl`. That program never feeds back into a
+decision dejima itself makes; it's just a CLI the image happens to carry.
+
+This matters because a provider directory is ordinary repo content, and the
+repo itself can be the mounted workspace (dejima sandboxing its own
+checkout). Parsing rather than sourcing a manifest is what keeps "a session
+edited a manifest" from meaning "a session ran code on the host at the next
+launch."
+
+**The point of the whole arrangement: adding a provider never means editing
+core.** A forge or harness declares its own `[forge.<name>]`/
+`[harness.<name>]` config schema *in its own manifest* (the `keys` field,
+below) - core holds no forge-specific or harness-specific schema at all.
+Adding a forge is adding a directory whose manifest describes it; nothing
+elsewhere needs to change.
+
+## The manifest file
+
+Each provider directory has exactly one manifest file, named for its axis:
+`forge.conf`, `workflow.conf`, `harness.conf`. Format is the same
+`key = value` shape as the main config file:
+
+- One `key = value` pair per line; surrounding whitespace is trimmed.
+- Blank lines and lines starting with `#` or `;` are comments.
+- Any other line without an `=` is a malformed-line error.
+- A key not in that axis's schema (below) is an **unknown key** error, not a
+  silent pass-through.
+- A value that fails its key's type check is a **hard** error, not a warning.
+- Capped at 200 lines; a longer file is refused outright.
+
+A missing key is not an error - it resolves to that key's schema default
+(empty string for a key with none), the same way an absent key in the main
+config file does.
+
+## Types
+
+Every key's type is one of the main config file's own types (`bool`,
+`enum:a|b|...`, `path`, `hostname`, `url`, `identifier`, `int:min:max`), plus
+a handful that only a manifest uses, because they land somewhere a config
+value never does:
+
+| Type | Meaning |
+| --- | --- |
+| `command` | Space-separated words (a bare name or a multi-word one like `gh pr`) - lands in prose an agent runs, so nothing shell-active is legal. |
+| `relpath` | A path relative to the provider's own directory, no leading `/` and no `..` - a manifest may only name a file it ships. |
+| `export` | `NAME=key` or `NAME=@key` for the `env_export` forge key - see [Forge](#forge) below. |
+| `template` | Prose that may contain `{{placeholder}}` markers; the placeholder names are checked against the briefing whitelist at composition time, not here. |
+| `keyspec` | One element of a `keys` list - see [The `keys` field](#the-keys-field-a-providers-own-config-schema) below. |
+| `list:TYPE` | Space-separated (not colon-separated, unlike a config-file list) elements, each checked against `TYPE`. |
+
+A leading `?` on any type (`?hostname`, `?list:identifier`, ...) makes the
+key optional: empty/absent is legal. Without it, a non-empty value is
+required whenever the key itself has no schema default.
+
+## The `keys` field: a provider's own config schema
+
+A forge or harness manifest can declare `keys = ...`: a space-separated list
+of `name:type` or `name:type=default` elements, each parsed by the same
+`keyspec` grammar the config file's own three-column schema table uses
+(name, type, default) - just packed into one manifest line instead of a
+row hardcoded in core. This is what a `[forge.<name>]`/`[harness.<name>]`
+config section's own keys, types and defaults come from - **core never
+hardcodes them.**
+
+Worked example, gitea's `keys` line:
+
+```
+keys = ssh_host:?hostname api:?url token_file:path=~/.config/gitea/token
+```
+
+Three elements:
+
+- `ssh_host:?hostname` - optional (`?`), type `hostname`, no default (so
+  unset resolves to empty).
+- `api:?url` - optional, type `url`, no default.
+- `token_file:path=~/.config/gitea/token` - **not** optional (no `?`), type
+  `path`, default `~/.config/gitea/token`. A non-optional element must carry
+  a default - the same invariant every hardcoded core schema row already
+  holds: "always has a value" only means something if there is one.
+
+Once gitea is the selected forge, `[forge.gitea] ssh_host`,
+`[forge.gitea] api` and `[forge.gitea] token_file` become real config keys an
+operator can set, resolved the same way as any other config key
+(`config_get`, `--print-config`), purely from this one manifest line.
+
+## Forge
+
+`forges/<name>/forge.conf`. Every key:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `capabilities` | `?list:identifier` | (empty) | What this forge can do - `pr`, `issues`, etc. A workflow's own `requires` is checked against this set at launch; a workflow asking for a capability this forge lacks is refused. |
+| `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
+| `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
+| `merge_block` | `?command` | (empty) | The literal command prefix `hooks/merge-guard.sh` refuses inside the sandbox (e.g. `gitea-pr merge`) - only when the workflow's `block_merge = on`. |
+| `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
+| `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work (used only for the partial-configuration warning below, not a launch-time gate today). |
+| `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
+| `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
+| `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (none of the shipped forges use this). |
+| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into the image - the only manifest key naming something that actually gets copied and executed. |
+| `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
+
+Worked example, `forges/gitea/forge.conf`:
+
+```
+capabilities  = pr issues
+pr_command    = gitea-pr
+issue_command = gitea-issue
+merge_block   = gitea-pr merge
+keys          = ssh_host:?hostname api:?url token_file:path=~/.config/gitea/token
+requires      = ssh_host api token_file
+host_keys     = ssh_host
+url_keys      = api
+install       = <its two CLIs, listed relative to its own bin/ directory>
+env_export    = GITEA_API=api GITEA_SSH_HOST=ssh_host GITEA_TOKEN=@token_file
+```
+
+Reading it: gitea offers the `pr` and `issues` capabilities; its briefing
+prose refers to `gitea-pr`/`gitea-issue`; `hooks/merge-guard.sh` blocks
+`gitea-pr merge` when the workflow asks for that; `[forge.gitea]` gets three
+config keys (`ssh_host`, `api`, `token_file`) from `keys`; an operator is
+expected to set all three (`requires`); `ssh_host` is a literal hostname and
+`api` is a URL, both of which end up in the firewall allowlist and the push
+guard's host list; `install` names the two executables under its own `bin/`
+subdirectory (`gitea-pr` and `gitea-issue`), which is what the Dockerfile
+copies into the image; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
+and `GITEA_TOKEN` (the *contents* of the file at `token_file`, not its path)
+as environment variables.
+
+## Workflow
+
+`workflows/<name>/workflow.conf`. Every key:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `requires` | `?list:identifier` | (empty) | Forge capabilities this workflow needs (checked against the selected forge's `capabilities` at launch). |
+| `push` | `bool` | `on` | Whether this workflow pushes at all. When `off`, `DEJIMA_PUSH_HOSTS` is empty regardless of the forge, so `git-push-guard.sh` refuses every push. |
+| `blocked_branches` | `?list:identifier` | (empty) | Branch names `git-push-guard.sh` refuses a direct push to, even on an allowed host. |
+| `block_merge` | `bool` | `off` | When `on`, resolves the selected forge's `merge_block` command into `DEJIMA_MERGE_BLOCK` for `hooks/merge-guard.sh`. |
+| `requires_worktree` | `bool` | `off` | When `on`, this workflow's briefing fragment must contain a `<!-- core: worktree -->` marker, which the core worktree-containment paragraph is spliced into - see below. |
+| `autonomy` | `enum:commit\|push-branch\|open-pr` | `commit` | Gates `<!-- requires: autonomy=VALUE -->` spans in this workflow's own briefing fragment (see below); also read by the forge/harness resolvers where autonomy-conditioned prose applies. |
+| `briefing` | `?relpath` | (empty) | This workflow's briefing fragment file, relative to its own directory. |
+
+Worked example, `workflows/worktree-pr/workflow.conf`:
+
+```
+requires          = pr
+push              = on
+blocked_branches  = main master
+block_merge       = on
+requires_worktree = on
+autonomy          = open-pr
+briefing          = briefing.md
+```
+
+Reading it: needs a forge with the `pr` capability; pushes are allowed;
+direct pushes to `main` or `master` are blocked; merging is blocked in the
+sandbox (using whichever `merge_block` command the selected forge names);
+its briefing fragment must (and does) carry the worktree marker; its
+autonomy is `open-pr` (push the branch and open the PR without stopping to
+ask, per its briefing prose); and its prose lives in `briefing.md` next to
+the manifest.
+
+### Briefing fragment markers
+
+A workflow's `briefing.md` is plain Markdown plus two marker forms that
+`briefing_compose` resolves before the agent ever sees the text:
+
+- `<!-- core: worktree -->` - replaced with the core worktree-containment
+  paragraph (only when `requires_worktree = on`; present but unused
+  otherwise). This text is core's, not the provider's, because getting it
+  wrong silently discards real work - a workflow can only opt in or out via
+  `requires_worktree`, never edit or omit the paragraph itself.
+- `<!-- requires: CONDITION --> ... <!-- end -->` - the enclosed prose
+  survives only when `CONDITION` holds; both marker lines are always
+  dropped. `CONDITION` is either a bare forge capability (checked against
+  the selected forge's `capabilities`, e.g. `<!-- requires: issues -->`) or
+  `autonomy=VALUE` (checked against this workflow's own `autonomy`).
+
+## Harness
+
+`harnesses/<name>/harness.conf`. Every key:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `command` | `identifier` | `claude` | The container's main process for this harness. |
+| `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
+| `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. |
+| `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
+
+Worked example, `harnesses/claude-code/harness.conf`:
+
+```
+command        = claude
+keys           = projects_dir:path=~/.claude/projects statusline_path:path=~/.claude/statusline.sh
+resume_command = claude --resume {{session_id}}
+briefing       = briefing.md
+```
+
+Reading it: the container's main process is `claude`; `[harness.claude-code]`
+gets `projects_dir` and `statusline_path`, both `path`-typed with defaults;
+resuming the session on the host is `claude --resume <session id>`, with
+`{{session_id}}` filled in at composition time; and its briefing fragment is
+`briefing.md`.
+
+## Session briefing composition
+
+The text a `SessionStart` hook injects into the agent is assembled
+**host-side**, by `briefing_compose` in `bin/dejima-provider-lib.sh`, never
+inside the container - giving `hooks/sandbox-context.sh` the provider
+directories to compose from would mean mounting them into the sandbox, the
+opposite of "providers are data, never sourced." In reading order:
+
+1. The core preamble (what the sandbox is, why the firewall is load-bearing
+   for the agent too) - fixed prose, not overridable by any provider.
+2. The selected workflow's fragment, with its worktree/capability/autonomy
+   markers resolved.
+3. The core closing text (how to hand a task back to the operator when the
+   sandbox genuinely can't do it).
+4. The selected harness's fragment (today, just the resume command).
+
+Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
+(`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
+`blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
+`session_id`, `resume_command`, `writable_mounts`) - an unrecognized one is a
+hard refusal, not a literal pass-through. `{{session_id}}` and
+`{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
+`@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
+known until the container is actually running; `hooks/sandbox-context.sh`
+fills those two in at `SessionStart`.
+
+The result is mounted **read-only** into the container - so a session can
+never rewrite what the *next* session is told, even a session running
+against dejima's own checkout. `dejima --print-briefing` composes and prints
+it without launching anything, for inspecting exactly what a session would
+see.
+
+## What bin/dejima passes into the container
+
+Only resolved values, never an unresolved manifest or a provider directory
+itself:
+
+- `DEJIMA_FORGE_HOSTS` - every hostname the selected forge needs reachable
+  (`host_keys`, the host part of `url_keys`, plus `fixed_hosts`), unioned by
+  `forge_hosts`.
+- `DEJIMA_PUSH_HOSTS` - `DEJIMA_FORGE_HOSTS` when the workflow's `push = on`,
+  otherwise empty.
+- `DEJIMA_BLOCKED_BRANCHES` - the workflow's `blocked_branches`.
+- `DEJIMA_MERGE_BLOCK` - the forge's `merge_block`, but only when the
+  workflow's `block_merge = on`; otherwise empty.
+- Whatever the forge's own `env_export` names (e.g. `GITEA_API`,
+  `GITEA_SSH_HOST`, `GITEA_TOKEN`).
+
+`hooks/git-push-guard.sh` reads `DEJIMA_PUSH_HOSTS` and
+`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` (renamed from
+`gitea-merge-guard.sh` in this phase) reads `DEJIMA_MERGE_BLOCK` as a
+regex-escaped literal command prefix. Two different failure directions,
+both deliberate:
+
+- `DEJIMA_PUSH_HOSTS` fails **closed** - empty means no host is allowed, so
+  every push is refused. A no-forge or non-pushing workflow becomes
+  *enforced*, not merely described.
+- `DEJIMA_BLOCKED_BRANCHES` fails **open** - empty means no branch is
+  protected, which is correct for a workflow with genuinely no branch
+  policy.
+- `DEJIMA_MERGE_BLOCK` fails **open** the same way - empty makes
+  `merge-guard.sh` inert rather than conditionally installed.
+
+## Validation, and what's deliberately deferred to Phase 3
+
+`provider_validate_selection` checks the selected forge/workflow/harness at
+every launch: each manifest must validate, and a workflow's `requires` must
+be a subset of the forge's `capabilities` - a workflow asking for a
+capability the forge doesn't have is refused outright.
+
+Two more rules are **planned but not enforced yet**, and a fresh install
+relies on that:
+
+- A pushing workflow whose forge resolves to no host at all is not refused.
+  Gitea's `ssh_host`/`api` have no schema default, and `install.sh` writes
+  them commented out, so a fresh install would be refused by this rule if it
+  existed today - while it launches fine as-is, with `git-push-guard.sh`
+  blocking every push at runtime (fail-closed, see above). An unconfigured
+  forge is a supported state ("skip this if you only push to GitHub" in the
+  README), not a bug, until Phase 3 adds `forge = none` as the honest way to
+  say so.
+- A forge's `requires` keys being unset produces a **warning**, not a
+  refusal, and only when the forge is *partially* configured (some of
+  `requires` set, some not) - a wholly unconfigured forge stays silent, the
+  same supported case as above. A partial configuration is almost certainly
+  a typo, so flagging it costs nothing even before Phase 3 turns this into a
+  refusal alongside the rule above.
+
+## Providers not yet built
+
+`forges/github`, `forges/none`, `workflows/branch-push` and
+`workflows/local-only` are Phase 3 candidates. They do not exist in this
+repo today - nothing selects them, and no manifest for them ships.

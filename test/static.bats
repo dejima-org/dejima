@@ -636,27 +636,31 @@ EOF
     [ "$status" -ne 0 ]
 }
 
-@test "sandbox-context.sh never tells the agent to worktree outside the mounted project" {
+@test "the briefing never tells the agent to worktree outside the mounted project" {
     # ../<branch> (a sibling of the mounted project) or anything under $HOME
     # lands in container-local ephemeral storage, not real host storage -
     # the worktree, and whatever work went into it, silently vanishes when
-    # the session ends. Regression check for exactly this bug.
-    run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # the session ends. Regression check for exactly this bug. This
+    # paragraph is core briefing prose (bin/dejima-provider-lib.sh), not
+    # something the hook carries anymore - see providers.bats/config.bats
+    # for the hook's own (much narrower) job.
+    run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/bin/dejima-provider-lib.sh"
     [ "$status" -ne 0 ]
-    grep -q '.worktrees/' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q '.worktrees/' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
-@test "sandbox-context.sh tells the agent to close issues via the PR body" {
+@test "the worktree-pr workflow tells the agent to close issues via the PR body" {
     # The session ends at the PR and the merge happens later, without the
     # agent - so anything it defers to "after the merge" is something it
     # won't be there to do, and an issue a merged PR fixed just stays open.
     # A closing keyword in the body is the only part of that it can control.
-    grep -q 'Fixes #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    # This lives in the workflow's own briefing fragment now, not the hook.
+    grep -q 'Fixes #N' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
     # And the counterpart, so partial work doesn't close anything.
-    grep -q 'Refs #N' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'Refs #N' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
     # The short form specifically: an issue's full URL renders as the same
     # link but does not trigger the close.
-    grep -q "not the issue's URL" "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q "not the issue's URL" "$REPO_ROOT/workflows/worktree-pr/briefing.md"
 }
 
 @test "entrypoint runs as root and drops to node via gosu, not a baked-in USER node" {
@@ -751,7 +755,6 @@ EOF
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
     grep -qE '^\s*ALLOW_GITHUB_PUSH:\s*\$\{ALLOW_GITHUB_PUSH:-0\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$SANDBOX_DIR/init-firewall.sh"
-    grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$REPO_ROOT/hooks/git-push-guard.sh"
 }
 
 @test "init-firewall.sh only opens port 22 to GitHub inside the ALLOW_GITHUB_PUSH conditional" {
@@ -766,9 +769,16 @@ EOF
     [ "$port22_line" -gt "$if_line" ]
 }
 
-@test "git-push-guard.sh still blocks direct pushes to main/master when ALLOW_GITHUB_PUSH=1" {
-    # The host-allowlist widening must not touch the separate branch check.
-    grep -q 'branch" = "main"\|branch" = "master"' "$REPO_ROOT/hooks/git-push-guard.sh"
+@test "git-push-guard.sh blocks direct pushes to a branch named in DEJIMA_BLOCKED_BRANCHES" {
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@anywhere.example:x/y
+    git -C "$d" checkout -qb main
+    payload="$(printf '{"tool_input":{"command":"git push origin main"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="anywhere.example" DEJIMA_BLOCKED_BRANCHES="main master" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    rm -rf "$d"
 }
 
 @test "neither gitea CLI passes the token as a command-line argument" {
@@ -777,10 +787,11 @@ EOF
     # runs alongside agents that read process listings.
     #
     # Both files, because they are deliberate copies of each other rather
-    # than a shared library (see bin/gitea-issue's header for why), and a
-    # duplicated security property is exactly the kind that drifts.
+    # than a shared library (see forges/gitea/bin/gitea-issue's header for
+    # why), and a duplicated security property is exactly the kind that
+    # drifts.
     local f
-    for f in bin/gitea-pr bin/gitea-issue; do
+    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue; do
         run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
         [ "$status" -ne 0 ]
         grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
@@ -792,7 +803,7 @@ EOF
     # apostrophe or a backtick is the common case, not the edge one. A body
     # that arrives via a file never enters argv at all.
     local f
-    for f in bin/gitea-pr bin/gitea-issue; do
+    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue; do
         grep -q -- '--body-file' "$REPO_ROOT/$f"
         # '-' means stdin, so a heredoc works without a temp file.
         grep -q 'file" = "-"' "$REPO_ROOT/$f"
@@ -806,18 +817,20 @@ EOF
     # Gitea's issues endpoint returns PRs too - a PR is an issue with a
     # branch attached - so without type=issues every open PR shows up as an
     # issue and the work list reads as twice as long as it is.
-    grep -q 'type=issues' "$REPO_ROOT/bin/gitea-issue"
+    grep -q 'type=issues' "$REPO_ROOT/forges/gitea/bin/gitea-issue"
 }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
-    grep -qx 'COPY bin/gitea-issue /usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
-    # Copied without the executable bit surviving is the failure that only
-    # shows up at runtime, so the chmod list is checked too.
-    grep -q 'chmod +x .*/usr/local/bin/gitea-issue' "$SANDBOX_DIR/Dockerfile"
+    grep -q 'COPY forges/' "$SANDBOX_DIR/Dockerfile"
+    # install -m 755, not a plain cp, so the executable bit surviving isn't
+    # a separate chmod line that can fall out of sync.
+    grep -q -- '-exec install -m 755' "$SANDBOX_DIR/Dockerfile"
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
+    [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
-@test "gitea-merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
-    local hook="$REPO_ROOT/hooks/gitea-merge-guard.sh"
+@test "merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
+    local hook="$REPO_ROOT/hooks/merge-guard.sh"
     local payload
 
     # Blocked in the sandbox, including path-qualified - /usr/local/bin is
@@ -826,15 +839,15 @@ EOF
     local cmd
     for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
-        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 2 ]
-        [[ "$output" == *"gitea-merge-guard.sh"* ]]
+        [[ "$output" == *"merge-guard.sh"* ]]
     done
 
     # The other verbs are the whole point of the tool and must pass through.
     for cmd in 'gitea-pr create --title x' 'gitea-pr comments 24' 'gitea-issue close 14'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
-        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 bash '$hook'" _ "$payload"
+        run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 0 ]
     done
 
@@ -843,13 +856,99 @@ EOF
     # env -u rather than DEJIMA= because the image sets DEJIMA=1 globally, so
     # a test running inside dejima would otherwise assert against itself.
     payload=$(jq -n '{tool_input: {command: "gitea-pr merge 24"}}')
-    run bash -c "printf '%s' \"\$1\" | env -u DEJIMA bash '$hook'" _ "$payload"
+    run bash -c "printf '%s' \"\$1\" | env -u DEJIMA DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
     [ "$status" -eq 0 ]
 }
 
-@test "install.sh links and registers the gitea merge guard" {
-    grep -qx 'link_hook gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
-    grep -q 'register_hook PreToolUse Bash gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
+@test "install.sh links and registers the merge guard" {
+    grep -qx 'link_hook merge-guard.sh' "$REPO_ROOT/install.sh"
+    grep -q 'register_hook PreToolUse Bash merge-guard.sh' "$REPO_ROOT/install.sh"
+}
+
+@test "install.sh cleans up the stale pre-rename gitea-merge-guard.sh hook symlink" {
+    grep -q 'gitea-merge-guard.sh' "$REPO_ROOT/install.sh"
+    grep -q 'dangling' "$REPO_ROOT/install.sh"
+}
+
+@test "the push guard names no forge, and blocks everything when no host is allowed" {
+    run grep -ci gitea "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$output" = "0" ]
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@anywhere.example:x/y
+    git -C "$d" checkout -qb feature
+    payload="$(printf '{"tool_input":{"command":"git push origin feature"},"cwd":"%s"}' "$d")"
+    # No hosts allowed at all: every push is refused.
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    # Allowed host: permitted.
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="anywhere.example" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 0 ]
+    rm -rf "$d"
+}
+
+@test "the merge guard is inert without a configured block pattern" {
+    payload='{"tool_input":{"command":"gitea-pr merge 1"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr merge" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 2 ]
+}
+
+@test "a merge-block pattern cannot inject a regex" {
+    payload='{"tool_input":{"command":"echo hello"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK=".*" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "an empty DEJIMA_PUSH_HOSTS blocks every push, pinning the fail-closed direction" {
+    # DEJIMA_PUSH_HOSTS fails CLOSED: a workflow that never pushes, or an
+    # unconfigured forge, must not silently become a workflow that can push
+    # anywhere. This must hold even with other hosts and an unrelated
+    # (empty) branch policy present, so a later change can't narrow the
+    # test to pass while still widening what the guard actually permits.
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@forge.example:x/y
+    git -C "$d" checkout -qb feature
+    payload="$(printf '{"tool_input":{"command":"git push origin feature"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="main" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Blocked"* ]]
+    rm -rf "$d"
+}
+
+@test "an empty DEJIMA_BLOCKED_BRANCHES allows a push to main, pinning the fail-open direction" {
+    # DEJIMA_BLOCKED_BRANCHES fails OPEN: a workflow with genuinely no
+    # branch policy must not have one manufactured for it by a failure to
+    # read the value. The host is explicitly allowed here so only the
+    # branch check is under test.
+    d="$(mktemp -d)"
+    git -C "$d" init -q
+    git -C "$d" remote add origin git@forge.example:x/y
+    git -C "$d" checkout -qb main
+    payload="$(printf '{"tool_input":{"command":"git push origin main"},"cwd":"%s"}' "$d")"
+    run env DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.example" DEJIMA_BLOCKED_BRANCHES="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/git-push-guard.sh"
+    [ "$status" -eq 0 ]
+    rm -rf "$d"
+}
+
+@test "an empty DEJIMA_MERGE_BLOCK allows the merge command through, pinning the fail-open direction" {
+    # DEJIMA_MERGE_BLOCK fails OPEN: a forge/workflow combination with no
+    # merge command to block must leave the hook inert rather than block
+    # everything (or nothing meaningful) by accident.
+    payload='{"tool_input":{"command":"gitea-pr merge 24 --admin"},"cwd":"/tmp"}'
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="" \
+        bash -c 'printf "%s" "$1" | bash "$2"' _ "$payload" "$REPO_ROOT/hooks/merge-guard.sh"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {
@@ -1354,9 +1453,12 @@ this line is not json'
     lab="$(printf 'a%.0s' $(seq 1 62))"
     for i in $(seq 1 700); do printf 'x%03d.%s.%s.%s\n' "$i" "$lab" "$lab" "$lab"; done \
         > "$ws/.dejima/allowed-domains"
+    local b; b="$(mktemp)"
+    printf 'dejima Docker container\n' > "$b"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
-    rm -rf "$ws"
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
+        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"; rm -f "$b"
     printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
     [[ "$out" == *"dejima Docker container"* ]]
     # 700 declared, 200 considered (the cap read_declared applies host-side),
@@ -1467,7 +1569,7 @@ EOF
 # This catches address- and hostname-shaped leaks only. A personal domain
 # that looks like any other public one is not mechanically distinguishable
 # and still rests on review.
-SCANNED_PATHS=(README.md docs docker bin hooks install.sh systemd .gitea)
+SCANNED_PATHS=(README.md docs docker bin forges workflows harnesses hooks install.sh systemd .gitea)
 
 @test "no private or link-local address is used as a documentation example" {
     run grep -rnIE '\b(10|127\.0\.0\.[2-9]|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' \
@@ -1727,6 +1829,75 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$check" -lt "$guard" ]
 }
 
+@test "core names no forge" {
+    # The single assertion that keeps this separation from decaying: without
+    # it, the first convenient edit puts a forge name back into core. A
+    # whole-file skip or a substring loose enough to stop catching a real
+    # prose leak would both defeat the point, so each file gets its own
+    # narrow, justified exclusion for the specific lines that are not a
+    # forge coupling - everything else in scope must still match nothing.
+    local f matches fail=0
+    for f in "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-config-lib.sh" \
+             "$REPO_ROOT/bin/dejima-provider-lib.sh" "$REPO_ROOT/docker/entrypoint.sh" \
+             "$REPO_ROOT/docker/docker-compose.yml" "$REPO_ROOT/hooks/git-push-guard.sh" \
+             "$REPO_ROOT/hooks/merge-guard.sh" "$REPO_ROOT/hooks/sandbox-context.sh"; do
+        matches="$(grep -inE 'gitea|github\.com' "$f" || true)"
+        case "$f" in
+            */bin/dejima)
+                # _warn_legacy_env's table names the OLD environment
+                # variables (GITEA_SSH_HOST, GITEA_API, ...) dejima read
+                # directly before the manifest schema replaced them - a
+                # one-time migration aid for an operator's existing shell
+                # profile. Those names only ever meant gitea (nothing else
+                # was ever wired that way) and do not change when a forge is
+                # added or removed, so excluding the function body - the same
+                # range test/config.bats isolates by name for its own
+                # "every retired variable" test - is exempting history, not a
+                # live coupling.
+                matches="$(sed '/^_warn_legacy_env()/,/^}/d' "$f" | grep -inE 'gitea|github\.com' || true)"
+                # A citation of an external issue URL, the same category as
+                # hooks/sandbox-context.sh:3 below.
+                matches="$(grep -vE 'claude-code/issues/29162' <<< "$matches" || true)"
+                # --allow-github-push widening DEJIMA_PUSH_HOSTS with
+                # github.com/ssh.github.com - the identical "GitHub read-only
+                # [here, push], independent of forge selection" exception
+                # docker/entrypoint.sh and docker-compose.yml already get
+                # below, not a forge coupling.
+                matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                ;;
+            */bin/dejima-config-lib.sh)
+                # core.forge's schema DEFAULT - real data (today there is
+                # exactly one shipped forge to default to), not a row a new
+                # forge needs to edit. Its TYPE, provider:forge, is what is
+                # structural, and that names no forge; github.token_file
+                # (GitHub as a read-only source, independent of forge
+                # selection - see the identical exception in the briefing
+                # prose below) and the bare "github" section name it lives in
+                # don't contain "github.com" and so never match this pattern
+                # at all.
+                matches="$(grep -vE ':core\.forge	provider:forge	gitea$' <<< "$matches" || true)"
+                ;;
+            */docker/entrypoint.sh|*/docker/docker-compose.yml)
+                # Implements GitHub read-only (git's github.com credential
+                # helper, and the comment on it) - a core feature independent
+                # of which forge is configured, not a coupling to one. Same
+                # feature the "GitHub read-only" prose exception below names.
+                matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                ;;
+            */hooks/sandbox-context.sh)
+                # A citation of Anthropic's own devcontainer, not a forge.
+                matches="$(grep -vE 'anthropics/claude-code/tree' <<< "$matches" || true)"
+                ;;
+        esac
+        if [ -n "$matches" ]; then
+            echo "$f still names a forge:"
+            echo "$matches"
+            fail=1
+        fi
+    done
+    [ "$fail" -eq 0 ]
+}
+
 @test "no container mount covers the audit store" {
     # The audit now keeps retained diffs of pre-session content under
     # ~/.local/share/dejima. Everything about that is premised on the
@@ -1741,4 +1912,27 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -ne 0 ]
     run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
+}
+
+@test "every sandbox suite is in the CI matrix, and runtime.bats is not" {
+    # Derived from the directory rather than a list kept here, so adding a
+    # test file fails this until the workflow is told about it. A suite nobody
+    # wired into CI runs nowhere, and nothing else would say so.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    local f base missing=""
+    for f in "$REPO_ROOT"/test/*.bats; do
+        base="$(basename "$f" .bats)"
+        [ "$base" = "runtime" ] && continue
+        grep -qE "^ *- *$base\$" "$wf" || missing="$missing $base"
+    done
+    [ -z "$missing" ] || {
+        echo "these suites are not in the sandbox matrix, so CI never runs them:$missing" >&2
+        false
+    }
+
+    # runtime.bats belongs to the other job, and must not be a matrix entry:
+    # that job runs on a generic runner with no Docker daemon, so it would
+    # fail every time rather than testing anything.
+    ! grep -qE '^ *- *runtime$' "$wf"
+    grep -q 'test/runtime.bats' "$wf"
 }
