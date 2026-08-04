@@ -90,7 +90,7 @@ case "$action" in
             *) echo "Nothing approved."; exit 0 ;;
         esac
         for spec in $pending_deps; do
-            "$SCRIPT_DIR/dejima-dep" add "$spec" --project "$project"
+            "$SCRIPT_DIR/dejima-dep" add --project "$project" "$spec"
         done
         # dejima-allow --project alone never touches a running session
         # (issue #61 - a scope flag records an approval, it doesn't patch a

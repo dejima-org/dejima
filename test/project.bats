@@ -199,7 +199,7 @@ EOF
     # fails on the first --global anyone ever runs.
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR/fresh/dejima"
     [ ! -d "$DEJIMA_CONFIG_DIR" ]
-    run "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global
+    run "$REPO_ROOT/bin/dejima-dep" add --global cargo:cargo-nextest
     [ "$status" -eq 0 ]
     [ -d "$DEJIMA_CONFIG_DIR" ]
     grep -qx 'cargo:cargo-nextest' "$DEJIMA_CONFIG_DIR/dependencies"
@@ -256,10 +256,10 @@ EOF
     local parent wt
     parent="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     wt="$PROJ/.worktrees/feat"
-    "$REPO_ROOT/bin/dejima-dep" add apt:parentpkg --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:parentpkg >/dev/null
     mkdir -p "$wt"
 
-    run "$REPO_ROOT/bin/dejima-dep" add apt:branchpkg --project "$wt"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$wt" apt:branchpkg
     [ "$status" -eq 0 ]
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
         "$REPO_ROOT/bin/dejima-allow" --project "$wt" branch.example
@@ -332,7 +332,7 @@ EOF
 }
 
 @test "dejima-dep add approves a spec and list shows it" {
-    run "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [ "$status" -eq 0 ]
@@ -340,35 +340,35 @@ EOF
 }
 
 @test "dejima-dep add says the change needs a relaunch" {
-    run "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev
     [ "$status" -eq 0 ]
     [[ "$output" == *"next launch"* ]]
 }
 
 @test "dejima-dep rejects a malformed spec without writing anything" {
-    run "$REPO_ROOT/bin/dejima-dep" add 'apt:a;b' --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" 'apt:a;b'
     [ "$status" -ne 0 ]
     run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"a;b"* ]]
 }
 
 @test "dejima-dep remove takes a spec back out" {
-    "$REPO_ROOT/bin/dejima-dep" add npm:typescript --project "$PROJ" >/dev/null
-    run "$REPO_ROOT/bin/dejima-dep" remove npm:typescript --project "$PROJ"
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" npm:typescript >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove --project "$PROJ" npm:typescript
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
     [[ "$output" != *"npm:typescript"* ]]
 }
 
 @test "dejima-dep add --global writes the global store, not a project entry" {
-    run "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global
+    run "$REPO_ROOT/bin/dejima-dep" add --global cargo:cargo-nextest
     [ "$status" -eq 0 ]
     grep -qx 'cargo:cargo-nextest' "$CONFIG_DIR/dependencies"
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
 @test "dejima-dep list --global shows global deps, plain list in an unrelated project does not" {
-    "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global cargo:cargo-nextest >/dev/null
     run "$REPO_ROOT/bin/dejima-dep" list --global
     [[ "$output" == *"cargo:cargo-nextest"* ]]
     run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
@@ -376,8 +376,8 @@ EOF
 }
 
 @test "dejima-dep remove --global removes a globally approved spec" {
-    "$REPO_ROOT/bin/dejima-dep" add cargo:cargo-nextest --global >/dev/null
-    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --global
+    "$REPO_ROOT/bin/dejima-dep" add --global cargo:cargo-nextest >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove --global cargo:cargo-nextest
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-dep" list --global
     [[ "$output" != *"cargo:cargo-nextest"* ]]
@@ -385,16 +385,16 @@ EOF
 
 @test "dejima-dep remove fails the same way in both scopes when no store exists" {
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR/fresh/dejima"
-    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --global
+    run "$REPO_ROOT/bin/dejima-dep" remove --global cargo:cargo-nextest
     [ "$status" -eq 1 ]
     [[ "$output" != *"Removed"* ]]
-    run "$REPO_ROOT/bin/dejima-dep" remove cargo:cargo-nextest --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-dep" remove --project "$PROJ" cargo:cargo-nextest
     [ "$status" -eq 1 ]
     [[ "$output" != *"Removed"* ]]
 }
 
 @test "dejima-dep rejects --global combined with --project and writes nothing" {
-    run "$REPO_ROOT/bin/dejima-dep" add apt:foo --global --project /tmp/x
+    run "$REPO_ROOT/bin/dejima-dep" add --global --project /tmp/x apt:foo
     [ "$status" -ne 0 ]
     [[ "$output" == *"mutually exclusive"* ]]
     [ ! -f "$CONFIG_DIR/dependencies" ]
@@ -402,7 +402,7 @@ EOF
 }
 
 @test "dejima-dep add --global rejects an invalid spec before writing anything" {
-    run "$REPO_ROOT/bin/dejima-dep" add 'apt:a;b' --global
+    run "$REPO_ROOT/bin/dejima-dep" add --global 'apt:a;b'
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/dependencies" ]
 }
@@ -542,7 +542,7 @@ EOF
 @test "dejima-project status shows declared, approved and rejected" {
     printf 'apt:libpq-dev\ngem:rails\n' > "$PROJ/.dejima/dependencies"
     printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
@@ -552,7 +552,7 @@ EOF
 
 @test "dejima-project status shows a dep approved only globally as approved" {
     printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"approved"*"apt:libpq-dev"* ]]
@@ -588,7 +588,7 @@ EOF
 @test "dejima-project approve reports nothing pending when declared entries are approved globally" {
     printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
     printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
         "$REPO_ROOT/bin/dejima-allow" --global static.crates.io
     [ "$status" -eq 0 ]
@@ -688,7 +688,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 
 @test "the launcher passes approved project domains to the container, and declared ones never" {
     printf 'declared.example.com\n' > "$PROJ/.dejima/allowed-domains"
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     printf 'approved.example.com\n' > "$(store_of "$PROJ")/allowed-domains"
     launch_setup
     run launch "$PROJ"
@@ -809,7 +809,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)" ]
 
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
@@ -817,7 +817,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 }
 
 @test "the launcher builds and runs the global layer when only global deps are approved" {
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
@@ -826,8 +826,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 }
 
 @test "the launcher builds the global layer then the project layer on top of it" {
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
@@ -846,8 +846,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # one as its base, versus both independently FROM-ing the base image
     # (which would silently drop the global packages from every project that
     # also has its own deps).
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
@@ -873,7 +873,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 
     # Same project, but with the store somewhere the session can rewrite it.
     export DEJIMA_CONFIG_DIR="$PROJ/.config/dejima"
-    "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --project "$PROJ" >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"the approval store"* ]]
@@ -1060,5 +1060,31 @@ EOF
 @test "dejima-allow rejects the old argument order" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
         "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+    [ "$status" -ne 0 ]
+}
+
+@test "dejima-dep add takes the spec last" {
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+}
+
+@test "dejima-dep add --project with no path uses the current directory" {
+    run bash -c "cd '$PROJ' && '$REPO_ROOT/bin/dejima-dep' add --project apt:ripgrep"
+    [ "$status" -eq 0 ]
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+}
+
+@test "dejima-dep list --project still takes its path" {
+    # The row the required-count-aware rule exists for: list has no trailing
+    # positional, so the path is the last token and must still be consumed.
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"apt:ripgrep"* ]]
+}
+
+@test "dejima-dep rejects the old argument order" {
+    run "$REPO_ROOT/bin/dejima-dep" add apt:ripgrep --project "$PROJ"
     [ "$status" -ne 0 ]
 }

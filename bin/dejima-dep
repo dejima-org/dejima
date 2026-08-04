@@ -5,9 +5,10 @@
 # grant itself one - the same split bin/dejima-allow uses for
 # domains.
 #
-# Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]
-#   dejima-dep add cargo:cargo-nextest --project ~/myproject
-#   dejima-dep add cargo:cargo-nextest --global
+# Usage: dejima-dep <add|remove|list> [--global | --project [path]] [<spec>]
+#   dejima-dep add --project ~/myproject cargo:cargo-nextest
+#   dejima-dep add --project cargo:cargo-nextest   # the project in $PWD
+#   dejima-dep add --global cargo:cargo-nextest
 #   dejima-dep list
 #
 # A spec is <apt|npm|pip|cargo>:<name>. The dependencies actually installed
@@ -23,31 +24,33 @@ spec=""
 project=""
 global=0
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --global) global=1; shift ;;
-        --project) project="$2"; shift 2 ;;
-        -*) echo "Unknown option: $1" >&2; exit 1 ;;
-        *)
-            if [ -z "$action" ]; then action="$1"
-            elif [ -z "$spec" ]; then spec="$1"
-            else echo "Unexpected argument: $1" >&2; exit 1
-            fi
-            shift
-            ;;
-    esac
-done
-
 usage() {
-    echo "Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]" >&2
+    echo "Usage: dejima-dep <add|remove|list> [--global | --project [path]] [<spec>]" >&2
     exit 1
 }
 
-[ -n "$action" ] || usage
+# The action is read first so the required trailing count is known before
+# parsing the rest: add/remove need a spec after any --project path, list does
+# not - and that count is exactly what decides whether a token after --project
+# is the path or the spec.
+case "${1:-}" in
+    add|remove) action="$1"; shift; required=1 ;;
+    list)       action="$1"; shift; required=0 ;;
+    *)          usage ;;
+esac
+
+parse_scope_args "$required" "$@" || usage
+case "${#dj_positional[@]}" in
+    0) spec="" ;;
+    1) spec="${dj_positional[0]}" ;;
+    *) usage ;;
+esac
+global="$dj_global"
+[ "$dj_project_set" -eq 0 ] || project="${dj_project:-$PWD}"
 
 # An entry belongs to exactly one scope; silently picking one would misplace
 # an approval.
-if [ "$global" -eq 1 ] && [ -n "$project" ]; then
+if [ "$global" -eq 1 ] && [ "$dj_project_set" -eq 1 ]; then
     echo "--global and --project are mutually exclusive." >&2
     exit 1
 fi
