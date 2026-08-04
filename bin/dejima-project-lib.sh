@@ -296,10 +296,16 @@ declare_entry() {
     # S_ISREG check cover the non-symlink shapes: a FIFO planted here would
     # otherwise block a host CLI the user was told to run for as long as the
     # session declines to open the other end.
-    python3 - "$project/.dejima" "$kind" "$entry" <<'PY'
+    python3 - "$project/.dejima" "$kind" "$entry" "$DEJIMA_MAX_DECLARED" <<'PY'
 import errno, os, stat, sys
 
 directory, name, entry = sys.argv[1], sys.argv[2], sys.argv[3]
+MAX_DECLARED = int(sys.argv[4])
+# A ceiling on the read-back below, not on what a project may declare. The
+# largest legitimate file is MAX_DECLARED entries of a domain's 253 bytes plus
+# comments - tens of KiB - so this is orders of magnitude clear of anything
+# real, and exists only to stop a session-owned file from being unbounded.
+LIMIT = 1 << 20
 path = os.path.join(directory, name)
 why = (
     "A project's .dejima is writable by the sandboxed session, so a link or",
@@ -350,7 +356,21 @@ if not stat.S_ISREG(os.fstat(fd).st_mode):
     refuse("Refusing to write to %s: it is not a regular file." % path, *why)
 
 with os.fdopen(fd, "r+b") as fh:
-    body = fh.read()
+    # Bounded, because the duplicate check has to read back a file the session
+    # owns, and `truncate -s 8G` makes an arbitrarily large one at zero disk
+    # cost. Reading LIMIT + 1 rather than trusting fstat's size: the file can
+    # grow between the two, and this way the ceiling holds whatever it does.
+    body = fh.read(LIMIT + 1)
+    if len(body) > LIMIT:
+        refuse(
+            "Refusing to read %s back: it is larger than %d bytes." % (path, LIMIT),
+            "A project's .dejima is writable by the sandboxed session, and this",
+            "command has to read the file back to skip an entry already declared -",
+            "so an oversized one exhausts this machine's memory instead of",
+            "misdirecting the write. A real declaration is a few hundred short",
+            "lines; read_declared stops reading entries at %d." % MAX_DECLARED,
+            "Inspect and truncate it, then re-run.",
+        )
     line = entry.encode()
     if line not in body.split(b"\n"):
         # O_APPEND, so this lands at the end whatever else has written since.

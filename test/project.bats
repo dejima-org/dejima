@@ -1386,6 +1386,39 @@ EOF
     grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
 }
 
+@test "declaring into an oversized declaration file is refused, not read into memory" {
+    # The third shape, and the one the atomic rewrite introduced: the duplicate
+    # check has to read back a file the session owns, and `truncate -s 8G` makes
+    # that file arbitrarily large at zero cost - it is sparse, du reports 0. A
+    # slurping read turns the command the briefing told the user to run into a
+    # host OOM, aimed at whatever else that host is running.
+    #
+    # The address-space limit is so that a regression fails THIS test rather
+    # than the machine it runs on. With the bound the read stops at 1 MiB and
+    # nothing comes near the limit; without it, this is a MemoryError here
+    # instead of dockerd or an editor being killed.
+    truncate -s 8G "$PROJ/.dejima/dependencies"
+    run timeout 30 bash -c 'ulimit -v 2097152; exec "$@"' _ \
+        "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"Refusing"* ]]
+    [[ "$output" == *"larger than"* ]]
+    [[ "$output" != *"Traceback"* ]]
+    # and the approval, which is the part that grants, still landed
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+}
+
+@test "declaring into a declaration file just under the cap still works" {
+    # The discriminating neighbour: the cap must be a ceiling on a hostile file,
+    # not a new way for a large-but-real declaration to be refused.
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(b"# " + b"x" * ((1 << 20) - 4) + b"\n")' \
+        "$PROJ/.dejima/dependencies"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Refusing"* ]]
+    [ "$(tail -n 1 "$PROJ/.dejima/dependencies")" = "apt:ripgrep" ]
+}
+
 # The two above plant the link and wait. A session does not have to wait: the
 # briefing tells it to ask the user to run `dejima-allow --project` from a
 # terminal outside the sandbox, so the session is normally still running when

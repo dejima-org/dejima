@@ -762,9 +762,14 @@ follows it, which would aim a host-side append at your approval store or at
 any other file you can write. The refusal is the `open` itself rather than a
 test before it — `O_NOFOLLOW` on both, with the file opened relative to the
 already-opened directory — so a session that is still running while you type
-the command cannot swap either path out from under the write. Expect that:
-the agent briefing tells the agent to ask you to run `dejima-allow --project`
-from a terminal outside the sandbox, so the session usually *is* live.
+the command cannot swap `.dejima` or the declaration file out from under the
+write. (Those two leaves are what the session controls. A symlink further up
+a `--project` path you supply yourself is still resolved through.) Expect the
+session to be live: the agent briefing tells the agent to ask you to run
+`dejima-allow --project` from a terminal outside the sandbox. The same write
+reads the file back to skip an already-declared entry, and that read is
+capped — a session can make its own `.dejima/<kind>` arbitrarily large for
+free, and an oversized one is refused rather than loaded into your memory.
 
 Neither writer has an inverse for the declaration. `dejima-dep remove
 --project` withdraws the approval and deliberately leaves the declaration
