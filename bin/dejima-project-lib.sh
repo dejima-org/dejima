@@ -9,7 +9,10 @@
 #   compromised session can write these. They grant nothing; they are read
 #   only to compare against reality and suggest a command for the user to
 #   run. Parsed, never sourced - executing a file on a session-writable
-#   mount is a host-shell persistence path.
+#   mount is a host-shell persistence path. declare_entry also WRITES one,
+#   which is why it refuses to follow a symlink: a host-side write onto a
+#   session-writable path is the one direction this split does not otherwise
+#   cover.
 #
 #   ~/.config/dejima/{allowed-domains,dependencies} - a GLOBAL
 #   APPROVAL, applying to every project.
@@ -266,8 +269,40 @@ declare_entry() {
     validator="$(_approved_validator "$kind")" || return 1
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
     dir="$project/.dejima"
+    # This is the one write in this file that lands on the session-writable
+    # bind mount, so it is the one that must not follow a symlink. A
+    # compromised session can plant one and then ask the user - through the
+    # startup briefing, which tells it to hand over exactly this command - to
+    # run the CLI that trips it. Following it would aim a host-privileged
+    # append anywhere the user can write: at ~/.config/dejima/allowed-domains,
+    # silently turning a project approval into a global one; at
+    # ~/.config/dejima/dependencies, where a domain is a corrupt entry and
+    # approved_entries' refuse-rather-than-proceed contract then blocks every
+    # project's image build until the file is hand-edited; or at any host file
+    # at all. The directory is checked as well as the file, because mkdir -p
+    # follows a directory symlink just as happily.
+    #
+    # A check is not a lock: a session running right now can still swap the
+    # path between this test and the write below. That race is the honest
+    # bound of this guard, and the reason the documented moment to run these
+    # CLIs is with nothing running - which is also the moment the workflow
+    # already calls for, since approving a dependency needs a relaunch anyway.
+    if [ -L "$dir" ]; then
+        echo "Refusing to write through $dir: it is a symlink." >&2
+        echo "A project's .dejima is writable by the sandboxed session, so a symlink" >&2
+        echo "here can point this append at the approval store or any other host file." >&2
+        echo "Inspect and remove it, then re-run." >&2
+        return 1
+    fi
     mkdir -p "$dir" || { echo "Could not create $dir" >&2; return 1; }
     file="$dir/$kind"
+    if [ -L "$file" ]; then
+        echo "Refusing to write through $file: it is a symlink." >&2
+        echo "A project's .dejima is writable by the sandboxed session, so a symlink" >&2
+        echo "here can point this append at the approval store or any other host file." >&2
+        echo "Inspect and remove it, then re-run." >&2
+        return 1
+    fi
     touch "$file" || { echo "Could not write $file" >&2; return 1; }
     grep -qxF "$entry" "$file" || printf '%s\n' "$entry" >> "$file"
 }

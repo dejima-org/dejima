@@ -1297,14 +1297,19 @@ this line is not json'
     [ "$status" -ne 0 ]
 }
 
-@test "dejima-allow's session-skip escape hatch is test-only, never a silent no-op path" {
-    # DEJIMA_ALLOW_SKIP_SESSION exists so test/project.bats can exercise a
-    # bare (no-scope) call without a live container - --project/--global
-    # already never need it, since session_wanted keeps them off Docker on
-    # their own. It must never be reachable from the documented interface.
-    run grep -c 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
-    [ "$output" -eq 1 ]
-    run grep 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/README.md"
+@test "dejima-allow has no env-triggered path that skips the live session" {
+    # DEJIMA_ALLOW_SKIP_SESSION used to exist as a test-only escape hatch, and
+    # by the end was consulted by nothing: every caller passed --project or
+    # --global, which set session_wanted=0 on their own. An environment
+    # variable that turns a firewall CLI into a silent no-op is worth keeping
+    # out on purpose, not just deleting once - which is what this pins.
+    # Matched on the read and the write, not the bare name: both files below
+    # still name it in a comment explaining why it is gone, and a grep that
+    # tripped on its own rationale would have to be deleted to pass.
+    run grep -n '\${\?DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
+    [ "$status" -ne 0 ]
+    run grep -rn --exclude=static.bats 'DEJIMA_ALLOW_SKIP_SESSION=' \
+        "$REPO_ROOT/test" "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
 }
 

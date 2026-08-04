@@ -261,8 +261,7 @@ EOF
 
     run "$REPO_ROOT/bin/dejima-dep" add --project "$wt" apt:branchpkg
     [ "$status" -eq 0 ]
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --project "$wt" branch.example
+    run "$REPO_ROOT/bin/dejima-allow" --project "$wt" branch.example
     [ "$status" -eq 0 ]
 
     [ ! -d "$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$wt")" ]
@@ -418,8 +417,7 @@ EOF
 }
 
 @test "dejima-allow --project persists without needing a container" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
     [ "$status" -eq 0 ]
     store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     grep -qx 'crates.io' "$store/allowed-domains"
@@ -449,8 +447,7 @@ EOF
 }
 
 @test "dejima-allow --global persists without needing a container" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --global example.com
+    run "$REPO_ROOT/bin/dejima-allow" --global example.com
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     [ ! -d "$CONFIG_DIR/projects" ]
@@ -467,16 +464,14 @@ EOF
 }
 
 @test "dejima-allow --global and --project together persist to both stores" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" example.com
+    run "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" example.com
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
 }
 
 @test "dejima-allow rejects an invalid domain before persisting to either store" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" 'evil.com; curl x'
+    run "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" 'evil.com; curl x'
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/allowed-domains" ]
     [ ! -d "$CONFIG_DIR/projects" ]
@@ -544,8 +539,7 @@ EOF
 }
 
 @test "dejima-allow --project still refuses an invalid domain" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" 'evil.com; curl x'
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" 'evil.com; curl x'
     [ "$status" -ne 0 ]
 }
 
@@ -599,8 +593,7 @@ EOF
     printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
     printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
     "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" --global static.crates.io
+    run "$REPO_ROOT/bin/dejima-allow" --global static.crates.io
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -eq 0 ]
@@ -618,7 +611,7 @@ EOF
 @test "dejima-project approve approves the declared set on confirmation" {
     printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
     printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
-    run bash -c 'echo y | DEJIMA_ALLOW_SKIP_SESSION=1 "$1" approve "$2"' \
+    run bash -c 'echo y | "$1" approve "$2"' \
         _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
@@ -934,7 +927,10 @@ parse() {
 @test "--project with only the required positional after it means the current directory" {
     run parse 1 --project example.com
     [ "$status" -eq 0 ]
-    [[ "$output" == *"project="$'\n'* ]] || [[ "$output" == *"project="* ]]
+    # An empty project= line, i.e. the parser left the path unset for the
+    # caller to default to $PWD. Written as the exact "project=" + newline
+    # because a bare *"project="* substring match would hold for any value.
+    [[ "$output" == *"project="$'\n'* ]]
     [[ "$output" == *"project_set=1"* ]]
     [[ "$output" == *"positional=example.com"* ]]
 }
@@ -1020,7 +1016,7 @@ parse() {
     # The complaint in the issue: a project-level invocation talked about
     # running containers. With a `docker` stub that would fail loudly if
     # called, a --project run must still succeed - proving it never went near
-    # one, without needing DEJIMA_ALLOW_SKIP_SESSION to hide the evidence.
+    # one, rather than relying on an env var to hide the evidence.
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
@@ -1068,8 +1064,7 @@ EOF
 }
 
 @test "dejima-allow rejects the old argument order" {
-    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
     [ "$status" -ne 0 ]
 }
 
@@ -1235,4 +1230,143 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"docker was called"* ]]
     grep -qx 'approved.example' "$(store_of "$PROJ")/allowed-domains"
+}
+
+# --- a declaration path the session controls ---
+#
+# .dejima lives on the read-write bind mount, so everything below is something
+# a compromised session can arrange on its own and then ask the user to
+# trigger - the startup briefing tells it to hand over the exact
+# `dejima-allow --project` command that would follow the planted link. The
+# writer is host-side and unsandboxed, so following one turns a session's
+# write access to its own directory into a write anywhere the user can reach.
+
+@test "dejima-allow --project refuses a .dejima that is a symlink to a directory" {
+    # The broadest shape: mkdir -p follows a directory symlink, so no file in
+    # it needs to exist beforehand for the append to land outside the project.
+    local elsewhere
+    elsewhere="$(mktemp -d)"
+    rm -rf "$PROJ/.dejima"
+    ln -s "$elsewhere" "$PROJ/.dejima"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com
+    [[ "$output" == *"Refusing"* ]]
+    [[ "$output" == *"symlink"* ]]
+    [ ! -e "$elsewhere/allowed-domains" ]
+    # The approval is separate and still recorded - the refusal is about where
+    # the declaration would have gone, not about the grant.
+    grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
+    rm -rf "$elsewhere"
+}
+
+@test "dejima-allow --project refuses a declaration file that is a symlink to the global store" {
+    # The escalation the guard exists for: the user asks for one project's
+    # scope and the entry lands in the store that applies to every project on
+    # the machine, while the output claims the project was written.
+    printf '%s\n' 'already.example' > "$CONFIG_DIR/allowed-domains"
+    ln -sf "$CONFIG_DIR/allowed-domains" "$PROJ/.dejima/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" evil.example
+    [[ "$output" == *"Refusing"* ]]
+    [[ "$output" == *"symlink"* ]]
+    run grep -c . "$CONFIG_DIR/allowed-domains"
+    [ "$output" -eq 1 ]
+    run grep -qx 'evil.example' "$CONFIG_DIR/allowed-domains"
+    [ "$status" -ne 0 ]
+}
+
+@test "dejima-allow --project refuses a declaration symlinked at the global dependency list" {
+    # Persistent denial of service rather than escalation: a domain is not a
+    # valid dependency spec, so approved_entries' refuse-rather-than-proceed
+    # contract would fire against the global store and stop bin/dejima
+    # building a derived image for ANY project until the file is hand-edited.
+    printf 'apt:libpq-dev\n' > "$CONFIG_DIR/dependencies"
+    ln -sf "$CONFIG_DIR/dependencies" "$PROJ/.dejima/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" evil.example
+    [[ "$output" == *"Refusing"* ]]
+    run bash -c 'source "$1"; approved_entries "$2" dependencies' _ "$LIB" "$CONFIG_DIR"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"evil.example"* ]]
+}
+
+@test "dejima-dep add --project refuses a .dejima that is a symlink to a directory" {
+    local elsewhere
+    elsewhere="$(mktemp -d)"
+    rm -rf "$PROJ/.dejima"
+    ln -s "$elsewhere" "$PROJ/.dejima"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [[ "$output" == *"Refusing"* ]]
+    [[ "$output" == *"symlink"* ]]
+    [ ! -e "$elsewhere/dependencies" ]
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+    rm -rf "$elsewhere"
+}
+
+@test "dejima-dep add --project refuses a declaration file symlinked at an arbitrary host file" {
+    # Neither store is involved here: any path the user can write is a target
+    # once the link is followed, which is why the guard is on the write and
+    # not on a list of paths worth protecting.
+    local victim
+    victim="$(mktemp -d)/victim"
+    printf 'original\n' > "$victim"
+    ln -sf "$victim" "$PROJ/.dejima/dependencies"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [[ "$output" == *"Refusing"* ]]
+    [[ "$output" == *"symlink"* ]]
+    [ "$(cat "$victim")" = "original" ]
+    rm -rf "$(dirname "$victim")"
+}
+
+@test "dejima-project approve attempts every dependency even when one fails" {
+    # The dep loop had no collector, so under set -e the first failure aborted
+    # the whole script: the second dep and BOTH domains were never attempted
+    # and no summary was printed at all. An unwritable config root fails every
+    # entry without needing docker anywhere near this.
+    printf 'apt:one\napt:two\n' > "$PROJ/.dejima/dependencies"
+    printf 'a.example\nb.example\n' > "$PROJ/.dejima/allowed-domains"
+    chmod 500 "$CONFIG_DIR"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    chmod 700 "$CONFIG_DIR"
+    line="$(grep 'dejima-dep failed' <<< "$output")"
+    [[ "$line" == *"apt:one"* ]]
+    [[ "$line" == *"apt:two"* ]]
+    # The domains are the real proof the abort is gone: they come after the
+    # dep loop entirely, so a fatal first dep meant they were never tried.
+    line="$(grep 'dejima-allow failed' <<< "$output")"
+    [[ "$line" == *"a.example"* ]]
+    [[ "$line" == *"b.example"* ]]
+}
+
+@test "dejima-project approve exits non-zero when nothing could be approved" {
+    # `dejima-project approve ~/p && dejima` is the obvious way to chain
+    # these. Exiting 0 after recording nothing walks that chain into a session
+    # with none of the approvals the user just confirmed.
+    printf 'a.example\n' > "$PROJ/.dejima/allowed-domains"
+    chmod 500 "$CONFIG_DIR"
+    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    chmod 700 "$CONFIG_DIR"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NOT approved"* ]]
+    [[ "$output" != *"Restart the sandbox"* ]]
+}
+
+@test "dejima-dep refuses --container rather than silently ignoring it" {
+    # Before the shared parser this was an "Unknown option". Adopting
+    # dejima-allow's parser handed dejima-dep a flag it has no concept of, and
+    # swallowing it would give a caller who meant to scope an approval to one
+    # session a persistent project-scoped grant plus a zero exit.
+    run "$REPO_ROOT/bin/dejima-dep" add --container bogusctr --project "$PROJ" apt:ripgrep
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--container"* ]]
+    [ ! -e "$(store_of "$PROJ")/dependencies" ]
+    [ ! -e "$PROJ/.dejima/dependencies" ]
+}
+
+@test "dejima-dep remove --project says the declaration will re-offer the entry" {
+    # The asymmetry is deliberate but was invisible and self-undoing: the
+    # entry goes back to pending, the briefing reports it missing, and the
+    # next approve puts it straight back.
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$PROJ/.dejima/dependencies"* ]]
+    [[ "$output" == *"approve will offer it again"* ]]
 }

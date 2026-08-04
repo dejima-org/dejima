@@ -84,15 +84,15 @@ fi
 # reporting on containers the caller did not ask about. --container is the
 # explicit opt-in to doing both.
 #
-# The env var checked below is a second, independent escape hatch: it skips
-# the live-session update even for a bare (no-scope) call, which
-# session_wanted above does not - test-suite use only, never a documented
-# interface.
+# This is the only thing that decides. A DEJIMA_ALLOW_SKIP_SESSION env var
+# used to sit alongside it as a test-only escape hatch; session_wanted made it
+# redundant, and a firewall CLI with an environment-triggered no-op path is
+# not something to keep for no reason.
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0
 fi
-if [ "$session_wanted" -eq 1 ] && [ "${DEJIMA_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
+if [ "$session_wanted" -eq 1 ]; then
     if [ -z "$container" ]; then
         containers=$(docker ps --filter "label=com.docker.compose.project=dejima" --filter "status=running" --format '{{.Names}}')
         count=$(echo "$containers" | grep -c . || true)

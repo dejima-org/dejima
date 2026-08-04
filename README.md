@@ -729,8 +729,8 @@ A project can declare what it needs in two committed files:
 ```
 
 **Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a compromised session could write these files - they are only
-ever read to compare against reality and suggest a command. Approvals live
+read-write, so a compromised session could write these files - they are read
+only to compare against reality and suggest a command. Approvals live
 outside the container, under `~/.config/dejima/` by default
 (`$DEJIMA_CONFIG_DIR` relocates the whole tree) - global at its
 root, per project under `projects/<slug>/` - and are written only by tools
@@ -745,11 +745,38 @@ dejima-dep add --project ~/myproject cargo:cargo-nextest
 dejima-dep add --global cargo:cargo-nextest
 ```
 
+Two of those tools also write the declaration, so an approval you make by
+hand does not stay invisible to everyone else on the project:
+`dejima-allow --project` appends to `.dejima/allowed-domains`, and
+`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
+approval first — that is the part that grants — and report separately on the
+declaration, so a project you can't write to still gets you the approval.
+`--global` writes no declaration at all: there is no project to declare in.
+
+The declaration those two write still grants nothing; it is the same
+untrusted file the section above describes, and writing to it does not
+promote it. That it is session-writable is exactly why both tools refuse to
+write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**:
+a compromised session can plant one and then ask you to run the command that
+follows it, which would aim a host-side append at your approval store or at
+any other file you can write. The check can't beat a session editing the path
+underneath it, which is one more reason the documented moment to run these is
+with nothing running.
+
+Neither writer has an inverse for the declaration. `dejima-dep remove
+--project` withdraws the approval and deliberately leaves the declaration
+alone (it says so, since `dejima-project approve` will otherwise offer the
+entry again); `dejima-allow --project` has no `remove` at all. Taking
+something back from the project itself means editing `.dejima/` and
+committing that.
+
 `dejima-project status`/`approve` classify a declared entry against
 the union of global and project approvals, so something already approved
 globally shows as approved, not pending. Unlike `dejima-allow`,
 `dejima-dep`'s `--global` and `--project` are mutually exclusive -
-an entry belongs to exactly one scope.
+an entry belongs to exactly one scope. `dejima-dep` has no `--container`
+scope either, and refuses the flag rather than ignoring it: a dependency
+needs an image rebuild, so there is nothing to patch in a live session.
 
 Approved domains join the allowlist at the next launch. `dejima-allow` can
 also patch a running session immediately, but only when it is run bare or
@@ -771,7 +798,10 @@ ever calls `dejima-allow` without `--container`, so recording the approval
 is the only thing it does. If an individual approval can't be recorded — an
 unwritable store, a slug collision, a corrupt approval list — it reports
 that entry as not approved and keeps going, rather than stopping at the
-first failure.
+first failure; that holds for dependencies and domains alike, so one bad
+entry can't cost you the rest of the set. It then exits non-zero if anything
+failed, so `dejima-project approve ~/myproject && dejima` won't launch a
+session missing the approvals you just confirmed.
 
 A session whose project declares something it doesn't have is told so in its
 startup context, with the exact command to hand you. Project approvals are

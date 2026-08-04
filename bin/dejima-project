@@ -157,19 +157,27 @@ case "$action" in
             y|Y) ;;
             *) echo "Nothing approved."; exit 0 ;;
         esac
+        # Both loops collect instead of letting set -e abort. Neither CLI is
+        # called with --container, so neither touches a running container and
+        # there is no live patch to succeed or fail here - but each can still
+        # fail on its own (an unwritable store, a slug collision, a corrupt
+        # approval list, a declaration path a session has symlinked), and a
+        # bare call would abort the whole script on the first failure,
+        # silently skipping every remaining entry - the deps after it AND all
+        # the domains - with no summary at all. What a failure MEANS is the
+        # other half: the approval itself did not happen, so neither report
+        # below may repeat the old "approved, but not applied to a running
+        # session" line, which would call an entry approved when nothing was
+        # recorded.
+        dep_failed=""
+        dep_approved=0
         for spec in $pending_deps; do
-            "$SCRIPT_DIR/dejima-dep" add --project "$project" "$spec"
+            if "$SCRIPT_DIR/dejima-dep" add --project "$project" "$spec"; then
+                dep_approved=1
+            else
+                dep_failed="$dep_failed $spec"
+            fi
         done
-        # Approvals only: dejima-allow's --project scope deliberately does not
-        # touch a running container, so there is no live patch to succeed or
-        # fail here. The collector stays, with a narrower meaning: --project
-        # can still fail on its own (an unwritable store, a slug collision, a
-        # corrupt approval list), and under set -e a bare call would abort this
-        # loop and silently skip every remaining domain - the bug the original
-        # collector exists to prevent. What changed is what a failure MEANS:
-        # the approval itself did not happen, so this must not repeat the old
-        # "approved, but not applied to a running session" line, which would
-        # tell the user a domain is approved when nothing was recorded.
         failed=""
         dom_approved=0
         for dom in $pending_doms; do
@@ -180,16 +188,25 @@ case "$action" in
             fi
         done
         echo
+        if [ -n "$dep_failed" ]; then
+            echo "NOT approved for $project (dejima-dep failed):$dep_failed" >&2
+            echo "Fix the cause and re-run; nothing was recorded for those." >&2
+        fi
         if [ -n "$failed" ]; then
             echo "NOT approved for $project (dejima-allow failed):$failed" >&2
             echo "Fix the cause and re-run; nothing was recorded for those." >&2
         fi
-        # Only when something actually landed - the dep loop above has no
-        # failure path to check, so its mere presence counts, but a domain
-        # loop that failed every domain must not follow "NOT approved" with a
-        # line that reads as success.
-        if [ -n "$pending_deps" ] || [ "$dom_approved" -eq 1 ]; then
+        # Only when something actually landed: a run that failed every entry
+        # must not follow "NOT approved" with a line that reads as success.
+        if [ "$dep_approved" -eq 1 ] || [ "$dom_approved" -eq 1 ]; then
             echo "Restart the sandbox for the approved entries to take effect."
+        fi
+        # `dejima-project approve ~/p && dejima` is the obvious way to chain
+        # these, and exiting 0 after recording nothing would walk that chain
+        # straight into a session with none of the approvals the user just
+        # confirmed.
+        if [ -n "$dep_failed" ] || [ -n "$failed" ]; then
+            exit 1
         fi
         ;;
     *)
