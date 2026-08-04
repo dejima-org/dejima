@@ -401,6 +401,16 @@ EOF
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
+@test "dejima-dep rejects --global combined with --project and no path" {
+    # The form that discriminates: with an explicit path, dj_project is
+    # non-empty and a check keyed on emptiness would still refuse it. With no
+    # path, only dj_project_set can tell "--project meaning cwd" from
+    # "--project absent" - so this is the case that catches the regression.
+    run "$REPO_ROOT/bin/dejima-dep" add --global --project apt:foo
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mutually exclusive"* ]]
+}
+
 @test "dejima-dep add --global rejects an invalid spec before writing anything" {
     run "$REPO_ROOT/bin/dejima-dep" add --global 'apt:a;b'
     [ "$status" -ne 0 ]
