@@ -117,8 +117,8 @@ see the whole resolved schema, real values included.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `[core] harness` | `claude-code` | agent harness the container runs |
-| `[core] forge` | `gitea` | forge integration (`gitea-pr`/`gitea-issue`) |
-| `[core] workflow` | `worktree-pr` | workflow `sandbox-context.sh` tells the agent to follow |
+| `[core] forge` | `gitea` | forge integration — `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `[core] workflow` | `worktree-pr` | workflow `sandbox-context.sh` tells the agent to follow — `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`) — also settable per launch with `--cmd` |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only) — also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
@@ -129,6 +129,7 @@ see the whole resolved schema, real values included.
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname — skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1` — skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github` — deliberately separate from `[github] token_file` below; see "GitHub push" |
 | `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
@@ -148,24 +149,33 @@ see the whole resolved schema, real values included.
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
-**Gitea/Forgejo is the default PR workflow** — `gitea-pr`, and the only push
-target `git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo,
-skip `[forge.gitea]` entirely and use `dejima --allow-github-push` instead to
-push straight to GitHub (see "GitHub push: blocked by default, optional
-opt-in" below) — the two aren't both required, pick whichever matches your
-remote. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea fork
-exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api` at a
-Forgejo instance just works.
+**Gitea/Forgejo is the default forge** — `gitea-pr`, and the only push target
+`git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo, either
+set `[core] forge = github` to push and open PRs through `gh` instead (see
+"GitHub push" below for the posture change that opens, and why its
+`push_token_file` is a separate credential from the read-only `[github]
+token_file`), or use `dejima --allow-github-push` per launch to push straight
+to whatever remote is configured without changing the forge at all. If this
+sandbox pushes nowhere — read-only work, or a workflow that only commits
+locally — set `[core] forge = none` and `[core] workflow = local-only`; that
+pair is the honest way to say so, rather than leaving `[forge.gitea]`
+half-filled. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea
+fork exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api`
+at a Forgejo instance just works. See
+[docs/providers.md](docs/providers.md#shipped-providers) for every shipped
+forge/workflow and what each is for.
 
 ## Provider axes: forge, workflow, harness
 
 The forge integration, the push/PR workflow, and the agent harness aren't
 hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected by `[core] forge`, `[core] workflow` and
-`[core] harness` respectively. Ships today: `forges/gitea`,
-`workflows/worktree-pr`, `harnesses/claude-code` — which is why the rest of
-this document reads as if Gitea/Forgejo and a worktree-and-PR workflow are
-the only option; right now, they are the only one that ships.
+`[core] harness` respectively. Ships today: `forges/gitea`, `forges/github`,
+`forges/none`, `workflows/worktree-pr`, `workflows/branch-push`,
+`workflows/local-only`, `harnesses/claude-code` — Gitea/Forgejo and
+worktree-and-PR are only the *defaults*, not the only option; the rest of
+this document defaults to describing them because that's what a fresh
+install runs with.
 
 A provider is **data**, never sourced or executed: its manifest (`forge.conf`,
 `workflow.conf`, `harness.conf`) is parsed with the same discipline as the
@@ -183,7 +193,8 @@ matter of adding a directory rather than editing this repo's own code.
 values into the container — the hostnames a forge needs reachable, which of
 them pushes are allowed to, which branches are protected, and the literal
 merge command to block — plus the forge's own environment variables (a
-Gitea/Forgejo API token, in the shipped forge's case). The session briefing
+Gitea/Forgejo API token for `gitea`, a write-capable PAT for `github`,
+nothing for `none`). The session briefing
 itself (the text `hooks/sandbox-context.sh` injects at `SessionStart`) is
 composed host-side too, from a fixed core fragment no provider can override
 plus the selected workflow's and harness's own prose, then mounted
@@ -221,13 +232,39 @@ That is enough to run `dejima`.
 
 ### Gitea/Forgejo PR workflow
 
-Skip this if you only push to GitHub.
+Skip this if you use `forge = github` or `forge = none` instead (below).
 
 1. Set `[forge.gitea] ssh_host` (the SSH hostname) and `[forge.gitea] api`
    (`https://<gitea host>/api/v1`) in `~/.config/dejima/config`.
 2. Generate a token — Settings → Applications, scopes `write:repository` and
    `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
    → [Prerequisites](#prerequisites)
+
+### GitHub forge (opt-in alternative)
+
+Set `[core] forge = github` instead of the above to push and open PRs
+against GitHub directly through `gh`, rather than a Gitea/Forgejo instance.
+This is a persistent, per-config choice — different from the per-launch
+`--allow-github-push` flag (see "GitHub push" below), and it opens
+`ssh.github.com:22` for push every time this forge is selected, not just for
+one launch.
+
+1. Generate a **write-capable** PAT, separate from the read-only
+   `[github] token_file` used for read access — promoting the read-only
+   token here would defeat the point of scoping it read-only.
+2. Save it to a file and set `[forge.github] push_token_file` to that path.
+
+dejima warns at startup if both `[github] token_file` and
+`[forge.github] push_token_file` are set and non-empty: `gh` only reads one
+token variable, and the write-capable one wins for that launch.
+
+### Pushing nowhere
+
+If this sandbox should never push or open a PR — read-only work, exploring a
+codebase, anything where you'll take the diff out by hand — set
+`[core] forge = none` and `[core] workflow = local-only`. Nothing to
+configure for either; the agent commits locally and stops there, and
+`git-push-guard.sh` refuses every push regardless of what else is set.
 
 ### Per-project domains and dependencies
 
@@ -614,8 +651,13 @@ default:
   (GitHub release assets, a separate CDN from github.com's own IPs),
   `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums);
   `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
-- whatever `[forge.gitea] ssh_host`/`api` resolve to — not port-restricted, so
-  git-over-ssh to Gitea works without a blanket "port 22 to anywhere" rule
+- whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
+  by default) — not port-restricted, so git-over-ssh to the forge works
+  without a blanket "port 22 to anywhere" rule. Selecting `[core] forge =
+  github` adds `ssh.github.com`/`api.github.com`/`github.com` to this same
+  unrestricted allowlist — opening port 22 to GitHub persistently, unlike the
+  default GitHub entry above, which stays 443-only unless `--allow-github-push`
+  is given per launch
 
 Everything else is rejected. Run `dejima-allow <domain> --global`
 (or `--project <path>` for one project) to allow more permanently (e.g.
@@ -830,6 +872,13 @@ connection attempt (`| json` in a query unpacks fields like `dest_ip`,
 pretty-printed by default, no extra parsing setup needed.
 
 ## GitHub push: blocked by default, optional opt-in
+
+This section is about `--allow-github-push`, a per-launch flag that pushes
+to whatever remote is already configured without changing the forge. If you
+want GitHub push and PRs as a standing choice instead, set
+`[core] forge = github` — see "GitHub forge (opt-in alternative)" above; it
+also opens `ssh.github.com:22`, but persistently rather than per launch, and
+uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
 
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
 **default** it can never push there — enforced at the network layer, not

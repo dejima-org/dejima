@@ -10,9 +10,11 @@ hardcoded into core. Each is a directory under `forges/`, `workflows/` or
 
 | Axis | Directory | Selector | Ships |
 | --- | --- | --- | --- |
-| forge | `forges/` | `[core] forge` | `forges/gitea` |
-| workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr` |
+| forge | `forges/` | `[core] forge` | `forges/gitea`, `forges/github`, `forges/none` |
+| workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only` |
 | harness | `harnesses/` | `[core] harness` | `harnesses/claude-code` |
+
+See [Shipped providers](#shipped-providers) below for what each one is for.
 
 **A provider is data.** Nothing in dejima sources, `eval`s or executes a
 manifest or a briefing fragment - a manifest is parsed with exactly the
@@ -121,7 +123,7 @@ operator can set, resolved the same way as any other config key
 | `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work (used only for the partial-configuration warning below, not a launch-time gate today). |
 | `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
-| `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (none of the shipped forges use this). |
+| `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
 | `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into the image - the only manifest key naming something that actually gets copied and executed. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
@@ -291,33 +293,67 @@ both deliberate:
 - `DEJIMA_MERGE_BLOCK` fails **open** the same way - empty makes
   `merge-guard.sh` inert rather than conditionally installed.
 
-## Validation, and what's deliberately deferred to Phase 3
+## Validation
 
 `provider_validate_selection` checks the selected forge/workflow/harness at
-every launch: each manifest must validate, and a workflow's `requires` must
-be a subset of the forge's `capabilities` - a workflow asking for a
-capability the forge doesn't have is refused outright.
+every launch:
 
-Two more rules are **planned but not enforced yet**, and a fresh install
-relies on that:
+- Each manifest must validate.
+- A workflow's `requires` must be a subset of the forge's `capabilities` - a
+  workflow asking for a capability the forge doesn't have is refused
+  outright.
+- The workflow's `autonomy` must be something the forge can actually back up:
+  `autonomy = open-pr` needs a forge offering the `pr` capability; `autonomy
+  = push-branch` needs `push = on` (it can't stop at a push it never makes).
+  A mismatch is refused at launch rather than discovered by the agent
+  mid-task.
+- A pushing workflow (`push = on`) needs a forge that resolves to somewhere
+  to push to. A wholly unconfigured forge with nothing to configure at all
+  (`forge = none`) is refused with "select a workflow that does not push
+  instead"; a forge that has config keys but none of them resolve to a host
+  is refused with "configure it, or select `forge = none`".
+- A forge whose `requires` keys are **partly** set - some configured, some
+  not - is refused as a likely typo, but only when the workflow actually
+  pushes: a non-pushing workflow never invokes the forge, so e.g. gitea's
+  `ssh_host` alone (set only so the firewall allows fetches) is a legitimate
+  configuration, not a typo. A wholly unconfigured forge is never flagged by
+  this rule - that's the case above.
+- A pushing workflow whose forge has **none** of its required settings
+  configured is refused too, even when `fixed_hosts` means the "resolves to
+  no host" rule above never fires. This is what catches `github`: its single
+  `requires` key (`push_token_file`) means "partly configured" (the rule
+  above) can never trigger for it either - there's nothing to be partial
+  between - so without this rule a pushing workflow could select `github`
+  with no `push_token_file` set and launch anyway, `fixed_hosts` masking the
+  fact that nothing was actually configured.
 
-- A pushing workflow whose forge resolves to no host at all is not refused.
-  Gitea's `ssh_host`/`api` have no schema default, and `install.sh` writes
-  them commented out, so a fresh install would be refused by this rule if it
-  existed today - while it launches fine as-is, with `git-push-guard.sh`
-  blocking every push at runtime (fail-closed, see above). An unconfigured
-  forge is a supported state ("skip this if you only push to GitHub" in the
-  README), not a bug, until Phase 3 adds `forge = none` as the honest way to
-  say so.
-- A forge's `requires` keys being unset produces a **warning**, not a
-  refusal, and only when the forge is *partially* configured (some of
-  `requires` set, some not) - a wholly unconfigured forge stays silent, the
-  same supported case as above. A partial configuration is almost certainly
-  a typo, so flagging it costs nothing even before Phase 3 turns this into a
-  refusal alongside the rule above.
+Two qualifications worth stating explicitly for the "partly configured" rule:
+it only applies when the workflow's `push = on` (a non-pushing workflow never
+touches the forge, so an incomplete `[forge.<name>]` section is harmless),
+and a required key with a non-empty schema default - gitea's `token_file`,
+defaulting to `~/.config/gitea/token` - never counts as missing, since its
+resolved value is already correct even when the operator never wrote it.
 
-## Providers not yet built
+## Shipped providers
 
-`forges/github`, `forges/none`, `workflows/branch-push` and
-`workflows/local-only` are Phase 3 candidates. They do not exist in this
-repo today - nothing selects them, and no manifest for them ships.
+| axis | provider | notes |
+| --- | --- | --- |
+| forge | `gitea` | PRs and issues via `gitea-pr`/`gitea-issue`, shipped into the image |
+| forge | `github` | PRs and issues via `gh`; needs its own write-capable `push_token_file`; opens `ssh.github.com:22` |
+| forge | `none` | no capabilities; pair with `local-only` |
+| workflow | `worktree-pr` | worktree → push → PR, stops at the PR |
+| workflow | `branch-push` | worktree → push, stops at the branch |
+| workflow | `local-only` | commits locally, pushes nothing |
+| harness | `claude-code` | the only harness today |
+
+**Selecting `forge = github` is a real posture change, not just a config
+choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
+every session gets regardless (clone, fetch, `gh` API calls over port 443)
+never needs port 22 at all. And `[forge.github] push_token_file` is
+deliberately a *separate*, write-capable token from `[github] token_file`
+(a read-only fine-grained PAT used for read access independent of which
+forge is selected): promoting the read-only token to push duty would defeat
+the point of scoping it read-only in the first place. Because `gh` only ever
+reads one token variable, dejima warns at startup when both files are
+present and non-empty - the write-capable `push_token_file` wins for that
+launch, and the read-only `token_file` is not used while `forge = github`.

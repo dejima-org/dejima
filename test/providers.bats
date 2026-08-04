@@ -487,6 +487,25 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     done
 }
 
+@test "docs/providers.md documents every shipped provider" {
+    local doc="$REPO_ROOT/docs/providers.md" axis name
+    for axis in forge workflow harness; do
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            grep -q "$name" "$doc" || { echo "docs/providers.md never mentions $axis '$name'"; return 1; }
+        done < <(lib provider_list "$axis")
+    done
+}
+
+@test "no doc still says the new providers are unbuilt" {
+    ! grep -qi 'not yet built\|Phase 3 candidates\|deferred to Phase 3' "$REPO_ROOT/docs/providers.md"
+}
+
+@test "the github forge's firewall posture change is documented" {
+    grep -q 'ssh.github.com' "$REPO_ROOT/docs/providers.md"
+    grep -qi 'push' "$REPO_ROOT/docs/providers.md"
+}
+
 @test "no doc still points at the old gitea CLI paths" {
     run grep -rn 'bin/gitea-pr\|bin/gitea-issue' "$REPO_ROOT/README.md" \
         "$REPO_ROOT/docs" "$REPO_ROOT/install.sh"
