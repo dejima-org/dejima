@@ -1158,3 +1158,18 @@ EOF
     grep -qx 'branch.example' "$(store_of "$PROJ")/allowed-domains"
     [[ "$output" == *"$wt/.dejima"* ]]
 }
+
+@test "an unwritable project still records the approval and says so" {
+    # approve_entry runs first and ungated, so by the time declare_entry
+    # fails the domain is already granted for every future session. A run
+    # that aborts here without saying so would read as "nothing happened,"
+    # when in fact access was just extended.
+    rm -rf "$PROJ/.dejima"
+    chmod 555 "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com
+    chmod 755 "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"IS recorded"* ]]
+    grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
+    [ ! -d "$PROJ/.dejima" ]
+}

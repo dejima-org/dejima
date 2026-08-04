@@ -60,9 +60,18 @@ fi
 if [ -n "$project" ]; then
     store="$(ensure_project_store "$project")"
     approve_entry "$store" allowed-domains "$domain"
-    declare_entry "$project" allowed-domains "$domain"
     echo "Added $domain to the approved domains for $project (applies to every future session in it)."
-    echo "Declared it in $project/.dejima/allowed-domains - commit that to share it."
+    # Printed only after the approval above, and guarded rather than left to
+    # set -e: the approval is what grants, and it is already written by this
+    # point. Letting a declare_entry failure abort here would exit before this
+    # echo ever ran, leaving the operator thinking nothing happened when a
+    # domain had, in fact, just been approved for every future session.
+    if declare_entry "$project" allowed-domains "$domain"; then
+        echo "Declared it in $project/.dejima/allowed-domains - commit that to share it."
+    else
+        echo "The approval above IS recorded and applies to every future session in it;" >&2
+        echo "only the project's own .dejima declaration could not be written." >&2
+    fi
 fi
 if [ "$global" -eq 1 ]; then
     store="$(ensure_global_store)"

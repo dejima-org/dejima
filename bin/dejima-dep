@@ -81,9 +81,19 @@ case "$action" in
         else
             store="$(ensure_project_store "$project")"
             approve_entry "$store" dependencies "$spec"
-            declare_entry "$project" dependencies "$spec"
             echo "Approved $spec for $project."
-            echo "Declared it in $project/.dejima/dependencies - commit that to share it."
+            # Printed only after the approval above, and guarded rather than
+            # left to set -e: the approval is what grants, and it is already
+            # written by this point. Letting a declare_entry failure abort
+            # here would exit before this echo ever ran, leaving the operator
+            # thinking nothing happened when a spec had, in fact, just been
+            # approved.
+            if declare_entry "$project" dependencies "$spec"; then
+                echo "Declared it in $project/.dejima/dependencies - commit that to share it."
+            else
+                echo "The approval above IS recorded; only the project's own .dejima" >&2
+                echo "declaration could not be written." >&2
+            fi
         fi
         # Unlike dejima-allow, this cannot touch a running session:
         # it needs an image rebuild. Say so, or an agent will keep insisting
