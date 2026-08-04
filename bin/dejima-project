@@ -20,17 +20,39 @@ project="$(cd "$project" && pwd)"
 decl_dir="$project/.dejima"
 store="$(resolve_project_store "$project")"
 
-approved_of() {
-    local kind="$1"
-    approved_entries "$(config_root)" "$kind" || return 1
+# Approved entries for one kind, tagged with the store they came from, so
+# status can say where a grant actually lives rather than merging both into an
+# anonymous list.
+#
+# approved_entries's exit status is captured from a plain command
+# substitution, not from a `while read < <(...)` piped straight into the tag
+# loop - a corrupt store that makes approved_entries fail before printing
+# anything leaves that pattern's while loop with zero iterations, and a while
+# loop that never ran its body reports success regardless of what the command
+# feeding it did, which would turn a corrupt-store failure into a silent
+# "nothing approved" here.
+approved_tagged() {
+    local kind="$1" entries e
+    entries="$(approved_entries "$(config_root)" "$kind")" || return 1
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        printf 'global %s\n' "$e"
+    done <<< "$entries"
     [ -n "$store" ] || return 0
-    approved_entries "$store" "$kind"
+    entries="$(approved_entries "$store" "$kind")" || return 1
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        printf 'project %s\n' "$e"
+    done <<< "$entries"
+    return 0
 }
 
 # Prints "<state> <entry>" per declared entry: approved / pending / rejected.
+# Used by `approve`, which acts on pending entries only and has no use for the
+# approved-but-undeclared ones `report` (below) exists to surface.
 classify() {
     local kind="$1" validator="$2" approved state entry
-    approved="$(approved_of "$kind")" || return 1
+    approved="$(approved_tagged "$kind" | cut -d' ' -f2-)" || return 1
     while read -r state entry; do
         case "$state" in
             rejected)  printf 'rejected %s\n' "$entry" ;;
@@ -47,16 +69,59 @@ classify() {
     return 0
 }
 
+# The status view: the union of what the project declares and what is
+# actually approved. Declarations alone were the bug (issue #61) - an
+# approval recorded with `dejima-allow --project` has no declaration behind
+# it and was therefore invisible here, which reads as "the command did
+# nothing".
+#
+# Entries are already validated (read_declared/approved_entries refuse
+# anything else), so the plain string comparisons below are enough - no
+# entry can contain a character that would make one domain/spec look like
+# another.
+report() {
+    local kind="$1" validator="$2" approved state entry src tag e seen=""
+    approved="$(approved_tagged "$kind")" || return 1
+    while read -r state entry; do
+        case "$state" in
+            rejected)  printf '  rejected  %s\n' "$entry" ;;
+            truncated) printf '  truncated %s entries declared; only the first %s considered\n' \
+                              "$entry" "$DEJIMA_MAX_DECLARED" ;;
+            ok)
+                src=""
+                while read -r tag e; do
+                    [ "$e" = "$entry" ] || continue
+                    src="$tag"
+                    break
+                done <<< "$approved"
+                if [ -n "$src" ]; then
+                    printf '  approved  %s (%s)\n' "$entry" "$src"
+                    seen="$seen$entry"$'\n'
+                else
+                    printf '  pending   %s (declared, not approved)\n' "$entry"
+                fi
+                ;;
+        esac
+    done < <(read_declared "$decl_dir/$kind" "$validator")
+    # Approvals with no declaration behind them - the previously invisible case.
+    while read -r tag e; do
+        [ -n "$e" ] || continue
+        grep -qxF "$e" <<< "$seen" && continue
+        printf '  approved  %s (%s, not declared)\n' "$e" "$tag"
+    done <<< "$approved"
+    return 0
+}
+
 case "$action" in
     status)
         echo "Project: $project"
-        echo "Approvals: ${store:-<none yet>}"
+        echo "Project approvals: ${store:-<none yet>}"
         echo "Global approvals: $(config_root)"
         echo
         echo "dependencies:"
-        classify dependencies valid_dep_spec | sed 's/^/  /'
+        report dependencies valid_dep_spec
         echo "allowed-domains:"
-        classify allowed-domains valid_domain | sed 's/^/  /'
+        report allowed-domains valid_domain
         ;;
     approve)
         pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
@@ -92,20 +157,26 @@ case "$action" in
         for spec in $pending_deps; do
             "$SCRIPT_DIR/dejima-dep" add --project "$project" "$spec"
         done
-        # dejima-allow --project alone never touches a running session
-        # (issue #61 - a scope flag records an approval, it doesn't patch a
-        # container), so a nonzero exit here means the approval itself was
-        # refused. Under set -e that used to abort the loop and silently skip
-        # every remaining domain, so collect and report instead.
-        unapplied=""
+        # Approvals only: dejima-allow's --project scope deliberately does not
+        # touch a running container, so there is no live patch to succeed or
+        # fail here. The collector stays, with a narrower meaning: --project
+        # can still fail on its own (an unwritable store, a slug collision, a
+        # corrupt approval list), and under set -e a bare call would abort this
+        # loop and silently skip every remaining domain - the bug the original
+        # collector exists to prevent. What changed is what a failure MEANS:
+        # the approval itself did not happen, so this must not repeat the old
+        # "approved, but not applied to a running session" line, which would
+        # tell the user a domain is approved when nothing was recorded.
+        failed=""
         for dom in $pending_doms; do
-            "$SCRIPT_DIR/dejima-allow" --project "$project" "$dom" || unapplied="$unapplied $dom"
+            "$SCRIPT_DIR/dejima-allow" --project "$project" "$dom" || failed="$failed $dom"
         done
-        if [ -n "$unapplied" ]; then
-            echo
-            echo "NOT approved for $project (see the error above):$unapplied" >&2
-            echo "Nothing was recorded for them - fix the cause and re-run to retry." >&2
+        echo
+        if [ -n "$failed" ]; then
+            echo "NOT approved for $project (dejima-allow failed):$failed" >&2
+            echo "Fix the cause and re-run; nothing was recorded for those." >&2
         fi
+        echo "Restart the sandbox for the approved entries to take effect."
         ;;
     *)
         echo "Usage: dejima-project <status|approve> [<path>]" >&2

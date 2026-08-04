@@ -1173,3 +1173,84 @@ EOF
     grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
     [ ! -d "$PROJ/.dejima" ]
 }
+
+@test "status shows an approval that was never declared" {
+    # The reported bug: a domain approved with --project was invisible,
+    # because status only ever iterated the declaration file.
+    printf 'example.com\n' > "$(mktemp -d)/unused"
+    mkdir -p "$(store_of "$PROJ")"
+    printf '%s\n' "$PROJ" > "$(store_of "$PROJ")/path"
+    printf 'orphan.example\n' > "$(store_of "$PROJ")/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orphan.example"* ]]
+    [[ "$output" == *"not declared"* ]]
+}
+
+@test "status marks where an approval came from" {
+    mkdir -p "$(store_of "$PROJ")"
+    printf '%s\n' "$PROJ" > "$(store_of "$PROJ")/path"
+    printf 'proj.example\n' > "$(store_of "$PROJ")/allowed-domains"
+    printf 'glob.example\n' > "$CONFIG_DIR/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj.example"*"(project"* ]]
+    [[ "$output" == *"glob.example"*"(global"* ]]
+}
+
+@test "status still marks a declared-but-unapproved entry pending" {
+    printf 'pending.example\n' > "$PROJ/.dejima/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pending"*"pending.example"* ]]
+}
+
+@test "status still marks a malformed declaration rejected" {
+    printf 'not a domain\n' > "$PROJ/.dejima/allowed-domains"
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rejected"* ]]
+}
+
+@test "status labels each store rather than printing a bare path" {
+    run "$REPO_ROOT/bin/dejima-project" status "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Project approvals:"* ]]
+    [[ "$output" == *"Global approvals:"* ]]
+}
+
+@test "approve records without chasing a running session" {
+    # approve shells out to dejima-allow --project, which no longer touches
+    # containers - so a docker that would fail loudly must never be reached.
+    printf 'approved.example\n' > "$PROJ/.dejima/allowed-domains"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "docker was called: $*" >&2
+exit 97
+EOF
+    chmod +x "$STUB_DIR/docker"
+    run env PATH="$STUB_DIR:$PATH" \
+        bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"docker was called"* ]]
+    grep -qx 'approved.example' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "approve visits every domain even when one fails to be approved" {
+    # dejima-allow --project no longer touches a container, but it can still
+    # fail on its own. Under set -e a bare call in the loop would abort after
+    # the first failure and silently skip the rest - which is why the
+    # collector exists. An unwritable store is the cheapest real induction.
+    printf 'one.example\ntwo.example\n' > "$PROJ/.dejima/allowed-domains"
+    mkdir -p "$(store_of "$PROJ")"
+    printf '%s\n' "$PROJ" > "$(store_of "$PROJ")/path"
+    chmod 500 "$(store_of "$PROJ")"
+    run bash -c "printf 'y\n' | '$REPO_ROOT/bin/dejima-project' approve '$PROJ'"
+    chmod 700 "$(store_of "$PROJ")"
+    # Both domains were attempted - the loop did not abort on the first.
+    [[ "$output" == *"one.example"* ]]
+    [[ "$output" == *"two.example"* ]]
+    # And the operator is not told they were approved when nothing was written.
+    [[ "$output" != *"but not applied to a running session"* ]]
+}
