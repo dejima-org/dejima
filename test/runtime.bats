@@ -435,8 +435,19 @@ dexec_node() {
     # Port 22 open, and open through the path that says so out loud.
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
-    run bash -c "docker logs '$test_container' 2>&1 | grep -c 'ALLOW_GITHUB_PUSH=1: opening port 22'"
-    [ "$output" -ge 1 ]
+    # Polled rather than read once, for the reason settled_logs documents: the
+    # json-file driver's writes lag the process that produced them, so a single
+    # read taken here can stop short of a line printed seconds earlier. That is
+    # how this failed in CI - with the port-22 assertion directly above passing,
+    # ie. with the branch that prints this line demonstrably taken. Waiting on
+    # the line cannot mask its absence: one never printed still fails, later.
+    local want="ALLOW_GITHUB_PUSH=1: opening port 22" logs=""
+    for _ in $(seq 1 40); do
+        logs=$(docker logs "$test_container" 2>&1)
+        case "$logs" in *"$want"*) break ;; esac
+        sleep 0.25
+    done
+    [[ "$logs" == *"$want"* ]]
 
     # And the other half of the widening this avoids: GitHub's names keep
     # dnsmasq's rebind protection, which the extra-domains path would have
