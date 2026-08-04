@@ -92,15 +92,14 @@ case "$action" in
         for spec in $pending_deps; do
             "$SCRIPT_DIR/dejima-dep" add "$spec" --project "$project"
         done
-        # dejima-allow records the approval before it touches a
-        # running session, so a nonzero exit here means only that the live
-        # patch or its reachability probe didn't succeed - a declared host
-        # that doesn't serve HTTPS on 443, say. Under set -e that used to
-        # abort the loop and silently skip every remaining domain, so collect
-        # and report instead.
+        # dejima-allow --project alone never touches a running session
+        # (issue #61 - a scope flag records an approval, it doesn't patch a
+        # container), so a nonzero exit here means the approval itself was
+        # refused. Under set -e that used to abort the loop and silently skip
+        # every remaining domain, so collect and report instead.
         unapplied=""
         for dom in $pending_doms; do
-            "$SCRIPT_DIR/dejima-allow" "$dom" --project "$project" || unapplied="$unapplied $dom"
+            "$SCRIPT_DIR/dejima-allow" --project "$project" "$dom" || unapplied="$unapplied $dom"
         done
         if [ -n "$unapplied" ]; then
             echo

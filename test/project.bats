@@ -262,7 +262,7 @@ EOF
     run "$REPO_ROOT/bin/dejima-dep" add apt:branchpkg --project "$wt"
     [ "$status" -eq 0 ]
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" branch.example --project "$wt"
+        "$REPO_ROOT/bin/dejima-allow" --project "$wt" branch.example
     [ "$status" -eq 0 ]
 
     [ ! -d "$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$wt")" ]
@@ -409,7 +409,7 @@ EOF
 
 @test "dejima-allow --project persists without needing a container" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
     [ "$status" -eq 0 ]
     store="$CONFIG_DIR/projects/$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     grep -qx 'crates.io' "$store/allowed-domains"
@@ -420,18 +420,19 @@ EOF
     # dependency approvals need a relaunch - so requiring a live container
     # broke the main path: the domain was never persisted at all.
     stub_docker 0 0
-    run "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
     [ "$status" -eq 0 ]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
-@test "dejima-allow --project records a domain the reachability probe rejects" {
+@test "dejima-allow --project --container records a domain the reachability probe rejects" {
     # A declared host may legitimately not answer on 443 - an internal
     # service, an SSH-only host, an apex that only serves a subdomain. The
     # probe's verdict is worth reporting, but it is not the user's approval
-    # decision, and it used to discard it.
+    # decision, and it used to discard it. --container is required to reach
+    # the probe at all here, since --project alone never goes near docker.
     stub_docker 1 7
-    run "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" --container c1 crates.io
     [ "$status" -eq 2 ]
     [[ "$output" == *"still NOT reachable"* ]]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
@@ -439,7 +440,7 @@ EOF
 
 @test "dejima-allow --global persists without needing a container" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" example.com --global
+        "$REPO_ROOT/bin/dejima-allow" --global example.com
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     [ ! -d "$CONFIG_DIR/projects" ]
@@ -447,19 +448,17 @@ EOF
 
 @test "dejima-allow --global records the approval with no sandbox running" {
     # --global used to require a live container to exit 0 at all. It no
-    # longer does, deliberately: the natural moment to approve a domain for
-    # every future session is when no session is running to patch, and the
-    # store write above is already done by the time this is reached.
-    stub_docker 0 0
-    run "$REPO_ROOT/bin/dejima-allow" example.com --global
+    # longer does, deliberately: --global never goes near docker without an
+    # explicit --container, so this passes with no docker on PATH at all,
+    # not merely with a stub reporting zero running containers.
+    run "$REPO_ROOT/bin/dejima-allow" --global example.com
     [ "$status" -eq 0 ]
-    [[ "$output" == *"applies from the next launch"* ]]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
 }
 
 @test "dejima-allow --global and --project together persist to both stores" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" example.com --global --project "$PROJ"
+        "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" example.com
     [ "$status" -eq 0 ]
     grep -qx 'example.com' "$CONFIG_DIR/allowed-domains"
     grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
@@ -467,42 +466,54 @@ EOF
 
 @test "dejima-allow rejects an invalid domain before persisting to either store" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" 'evil.com; curl x' --global --project "$PROJ"
+        "$REPO_ROOT/bin/dejima-allow" --global --project "$PROJ" 'evil.com; curl x'
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/allowed-domains" ]
     [ ! -d "$CONFIG_DIR/projects" ]
 }
 
-@test "dejima-allow --global records a domain the reachability probe rejects" {
+@test "dejima-allow --global --container records a domain the reachability probe rejects" {
     # --global used to be gated on this probe, refusing any global approval
     # for a host that legitimately doesn't answer on 443 (an SSH-only host,
     # an internal service). It now persists exactly like --project: the
     # probe's verdict is worth reporting, but it is not the approval decision.
+    # --container is required to reach the probe at all here, since --global
+    # alone never goes near docker.
     stub_docker 1 7
-    run "$REPO_ROOT/bin/dejima-allow" crates.io --global
+    run "$REPO_ROOT/bin/dejima-allow" --global --container c1 crates.io
     [ "$status" -eq 2 ]
     [[ "$output" == *"still NOT reachable"* ]]
     grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
 }
 
-@test "dejima-project approve persists every domain when one fails to apply" {
-    # Under set -e the first dejima-allow to exit nonzero used to
-    # abort the loop, silently skipping every domain after it - and, before
-    # persistence moved ahead of the container work, persisting none at all.
+@test "dejima-project approve persists every domain even when a docker call would have failed" {
+    # Under set -e the first dejima-allow to exit nonzero used to abort the
+    # loop, silently skipping every domain after it. dejima-project's internal
+    # call uses --project alone, with no --container, so it no longer goes
+    # near docker at all (issue #61) - a docker stub that fails loudly if
+    # called proves that directly, rather than relying on a reachability
+    # failure to exercise the old abort-the-loop path.
     printf 'apt:libpq-dev\n' > "$PROJ/.dejima/dependencies"
     printf 'crates.io\nstatic.crates.io\n' > "$PROJ/.dejima/allowed-domains"
-    stub_docker 1 7
-    run bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "docker was called: $*" >&2
+exit 97
+EOF
+    chmod +x "$STUB_DIR/docker"
+    run env PATH="$STUB_DIR:$PATH" \
+        bash -c 'echo y | "$1" approve "$2"' _ "$REPO_ROOT/bin/dejima-project" "$PROJ"
     [ "$status" -eq 0 ]
+    [[ "$output" != *"docker was called"* ]]
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
     grep -qx 'static.crates.io' "$(store_of "$PROJ")/allowed-domains"
     grep -qx 'apt:libpq-dev' "$(store_of "$PROJ")/dependencies"
-    [[ "$output" == *"not applied to a running session"* ]]
 }
 
 @test "dejima-allow --project still refuses an invalid domain" {
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" 'evil.com; curl x' --project "$PROJ"
+        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" 'evil.com; curl x'
     [ "$status" -ne 0 ]
 }
 
@@ -557,7 +568,7 @@ EOF
     printf 'static.crates.io\n' > "$PROJ/.dejima/allowed-domains"
     "$REPO_ROOT/bin/dejima-dep" add apt:libpq-dev --global >/dev/null
     run env DEJIMA_ALLOW_SKIP_SESSION=1 \
-        "$REPO_ROOT/bin/dejima-allow" static.crates.io --global
+        "$REPO_ROOT/bin/dejima-allow" --global static.crates.io
     [ "$status" -eq 0 ]
     run "$REPO_ROOT/bin/dejima-project" approve "$PROJ" < /dev/null
     [ "$status" -eq 0 ]
@@ -971,4 +982,61 @@ parse() {
     run parse 1 add cargo:nextest
     [ "$status" -eq 0 ]
     [[ "$output" == *"positional=add cargo:nextest"* ]]
+}
+
+@test "dejima-allow --project never consults docker" {
+    # The complaint in the issue: a project-level invocation talked about
+    # running containers. With a `docker` stub that would fail loudly if
+    # called, a --project run must still succeed - proving it never went near
+    # one, without needing DEJIMA_ALLOW_SKIP_SESSION to hide the evidence.
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "docker was called: $*" >&2
+exit 97
+EOF
+    chmod +x "$STUB_DIR/docker"
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"docker was called"* ]]
+    [[ "$output" != *"No running dejima container"* ]]
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "dejima-allow --global never consults docker" {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "docker was called: $*" >&2
+exit 97
+EOF
+    chmod +x "$STUB_DIR/docker"
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --global crates.io
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"docker was called"* ]]
+    grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
+}
+
+@test "dejima-allow --project --container does both" {
+    stub_docker 1 0
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" --container c1 crates.io
+    [ "$status" -eq 0 ]
+    grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
+    [[ "$output" == *"Verified"* ]]
+}
+
+@test "dejima-allow with no scope flag still patches the running session" {
+    stub_docker 1 0
+    run env PATH="$STUB_DIR:$PATH" "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"allowed for the running session"* ]]
+}
+
+@test "dejima-allow rejects the old argument order" {
+    run env DEJIMA_ALLOW_SKIP_SESSION=1 \
+        "$REPO_ROOT/bin/dejima-allow" crates.io --project "$PROJ"
+    [ "$status" -ne 0 ]
 }

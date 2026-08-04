@@ -6,38 +6,37 @@
 # actually needs, it should tell you the exact command to run here rather
 # than try to work around the firewall.
 #
-# Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]
-#   dejima-allow crates.io                     # this running session only
-#   dejima-allow crates.io --global            # + persist for every project
-#   dejima-allow crates.io --project ~/myproj  # + persist for one project
+# Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>
+#   dejima-allow crates.io                      # this running session only
+#   dejima-allow --global crates.io             # persist for every project
+#   dejima-allow --project crates.io            # persist for the project in $PWD
+#   dejima-allow --project ~/myproj crates.io   # persist for one named project
+#
+# --project and --global are approvals for future sessions and deliberately do
+# not touch a running container: a scope flag means "record this", not "patch
+# the thing running right now". Pass --container as well to do both.
 set -euo pipefail
 
-domain=""
-global=0
-project=""
-container=""
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=dejima-project-lib.sh
+source "$SCRIPT_DIR/dejima-project-lib.sh"
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --global) global=1; shift ;;
-        --project) project="$2"; shift 2 ;;
-        --container) container="$2"; shift 2 ;;
-        -*) echo "Unknown option: $1" >&2; exit 1 ;;
-        *)
-            if [ -n "$domain" ]; then
-                echo "Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
-                exit 1
-            fi
-            domain="$1"
-            shift
-            ;;
-    esac
-done
-
-if [ -z "$domain" ]; then
-    echo "Usage: dejima-allow <domain> [--global] [--project <path>] [--container <name>]" >&2
+usage() {
+    echo "Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>" >&2
     exit 1
+}
+
+# 1: the domain is the required trailing positional, which is what tells
+# parse_scope_args whether a token after --project is a path or the domain.
+parse_scope_args 1 "$@" || usage
+[ "${#dj_positional[@]}" -eq 1 ] || usage
+domain="${dj_positional[0]}"
+global="$dj_global"
+project=""
+if [ "$dj_project_set" -eq 1 ]; then
+    project="$(cd "${dj_project:-$PWD}" && pwd)"
 fi
+container="$dj_container"
 
 # Validated up front, not just passed as a positional arg below: this also
 # has to be a well-formed hostname to be a valid dnsmasq server=/domain/...
@@ -58,13 +57,7 @@ fi
 # probe below would refuse any declared domain that legitimately doesn't serve
 # HTTPS on 443. The two scopes are independent, not exclusive: both may be
 # given together, and each persists to its own store.
-if [ -n "$project" ] || [ "$global" -eq 1 ]; then
-    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-    # shellcheck source=dejima-project-lib.sh
-    source "$SCRIPT_DIR/dejima-project-lib.sh"
-fi
 if [ -n "$project" ]; then
-    project="$(cd "$project" && pwd)"
     store="$(ensure_project_store "$project")"
     approve_entry "$store" allowed-domains "$domain"
     echo "Added $domain to the approved domains for $project (applies to every future session in it)."
@@ -78,19 +71,21 @@ fi
 # The live-session update below needs a running container to exec into.
 # Skipped only by the test suite (test/project.bats), which exercises
 # --project persistence on its own, without a container.
-if [ "${DEJIMA_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
+#
+# A scope flag means "record this approval", not "patch what is running now" -
+# so a --project/--global invocation never goes near Docker, and stops
+# reporting on containers the caller did not ask about. --container is the
+# explicit opt-in to doing both.
+session_wanted=1
+if [ -n "$project" ] || [ "$global" -eq 1 ]; then
+    [ -n "$container" ] || session_wanted=0
+fi
+if [ "$session_wanted" -eq 1 ] && [ "${DEJIMA_ALLOW_SKIP_SESSION:-0}" != "1" ]; then
     if [ -z "$container" ]; then
         containers=$(docker ps --filter "label=com.docker.compose.project=dejima" --filter "status=running" --format '{{.Names}}')
         count=$(echo "$containers" | grep -c . || true)
         if [ "$count" -eq 0 ]; then
             echo "No running dejima container found." >&2
-            # With --project or --global (or both) there is nothing left to
-            # do and nothing went wrong: the approval is already recorded and
-            # applies from the next launch.
-            if [ -n "$project" ] || [ "$global" -eq 1 ]; then
-                echo "Nothing to patch for this session; $domain applies from the next launch." >&2
-                exit 0
-            fi
             exit 1
         elif [ "$count" -gt 1 ]; then
             echo "Multiple running dejima containers found; specify one with --container:" >&2

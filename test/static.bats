@@ -1307,6 +1307,11 @@ this line is not json'
     [ "$status" -ne 0 ]
 }
 
+@test "dejima-allow's usage puts the domain last" {
+    grep -q 'Usage: dejima-allow \[--global\] \[--project \[path\]\] \[--container <id>\] <domain>' \
+        "$REPO_ROOT/bin/dejima-allow"
+}
+
 @test "bin/dejima merges approved project domains into ALLOWED_DOMAINS" {
     grep -q 'dejima-project-lib.sh' "$REPO_ROOT/bin/dejima"
     grep -q 'resolve_project_store "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
