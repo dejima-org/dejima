@@ -1994,3 +1994,11 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -ne 0 ]
     grep -q 'never attempts to patch a running session' "$REPO_ROOT/README.md"
 }
+
+@test "README does not attribute container disambiguation to a scope flag" {
+    # A --project/--global-only call sets session_wanted=0 and never reaches
+    # the multiple-containers ambiguity check at all - only the bare form
+    # (or bare + --container) does. Only the bare form can ever refuse on it.
+    run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
