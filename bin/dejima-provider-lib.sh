@@ -474,6 +474,30 @@ provider_validate_selection() {
         fi
     done
 
+    # Autonomy names where the agent stops without asking, so it is a claim
+    # about what the selected forge can actually do. Checked here rather than
+    # left to the briefing: a mismatch discovered by the agent mid-task is a
+    # confusing failure, and this one is knowable at launch.
+    local autonomy push
+    autonomy="$(manifest_get workflow "$workflow" autonomy)" || return 1
+    push="$(manifest_get workflow "$workflow" push)" || return 1
+    case "$autonomy" in
+        open-pr)
+            if ! _set_contains "$caps" pr; then
+                echo "workflow '$workflow' sets autonomy = open-pr, which needs a forge" >&2
+                echo "offering the 'pr' capability - '$forge' offers: ${caps:-none}." >&2
+                return 1
+            fi
+            ;;
+        push-branch)
+            if [ "$push" != "on" ]; then
+                echo "workflow '$workflow' sets autonomy = push-branch but push = off." >&2
+                echo "It cannot stop at a push it never makes." >&2
+                return 1
+            fi
+            ;;
+    esac
+
     # Rule 3 ("a pushing workflow needs a forge that resolves to a host") is
     # deliberately NOT checked here. A forge's own host-bearing keys may have
     # no schema default and install.sh writes them commented out, so a fresh

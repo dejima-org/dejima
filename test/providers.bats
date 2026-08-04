@@ -554,3 +554,39 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$output" = "GH_TOKEN=ghp_example" ]
 }
+
+@test "open-pr autonomy is refused against a forge with no pr capability" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/nopr" "$FAKE_ROOT/workflows/wants-pr" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities =\n' > "$FAKE_ROOT/forges/nopr/forge.conf"
+    # requires is empty, so rule 1 passes and only the autonomy rule can catch this.
+    printf 'requires =\npush = on\nautonomy = open-pr\n' > "$FAKE_ROOT/workflows/wants-pr/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+        bash -c 'source "$1"; provider_validate_selection nopr wants-pr h' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"open-pr"* ]]
+}
+
+@test "push-branch autonomy is refused when the workflow does not push" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/forges/f" "$FAKE_ROOT/workflows/contradiction" "$FAKE_ROOT/harnesses/h"
+    printf 'capabilities =\n' > "$FAKE_ROOT/forges/f/forge.conf"
+    printf 'requires =\npush = off\nautonomy = push-branch\n' > "$FAKE_ROOT/workflows/contradiction/workflow.conf"
+    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+        bash -c 'source "$1"; provider_validate_selection f contradiction h' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"push-branch"* ]]
+}
+
+@test "every shipped workflow's autonomy is supported by a forge that ships" {
+    # worktree-pr/open-pr against gitea, branch-push against none, local-only
+    # against none - the combinations the README tells operators to use.
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "gitea+worktree-pr: $output"; return 1; }
+    run lib provider_validate_selection none branch-push claude-code
+    [ "$status" -eq 0 ] || { echo "none+branch-push: $output"; return 1; }
+    run lib provider_validate_selection none local-only claude-code
+    [ "$status" -eq 0 ] || { echo "none+local-only: $output"; return 1; }
+}
