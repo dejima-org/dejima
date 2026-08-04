@@ -498,15 +498,19 @@ provider_validate_selection() {
             ;;
     esac
 
-    # Rule 3 ("a pushing workflow needs a forge that resolves to a host") is
-    # deliberately NOT checked here. A forge's own host-bearing keys may have
-    # no schema default and install.sh writes them commented out, so a fresh
-    # install would be refused by this rule today - while it launches fine
-    # as-is, with git-push-guard.sh blocking pushes at runtime (see README
-    # "Skip this if you only push to GitHub"). An unconfigured forge is
-    # supported, not broken, until Phase 3 adds `forge = none` as the honest
-    # way to say so - only then does this rule have a correct alternative to
-    # point an operator at, and it becomes a refusal alongside rule 5 below.
+    # Rule 3: a workflow that pushes needs a forge that resolves to somewhere
+    # to push to. Deferred through Phase 2 because refusing an unconfigured
+    # forge had no correct alternative to offer - `forge = none` now exists,
+    # so an operator who genuinely pushes nowhere has an honest way to say it
+    # and this stops being a refusal with no remedy.
+    if [ "$(manifest_get workflow "$workflow" push)" = "on" ]; then
+        if [ -z "$(forge_hosts "$forge")" ]; then
+            echo "workflow '$workflow' pushes, but forge '$forge' resolves to no host." >&2
+            echo "Configure [forge.$forge], or set [core] forge = none and a workflow" >&2
+            echo "that does not push (workflow = local-only) if this sandbox pushes nowhere." >&2
+            return 1
+        fi
+    fi
 
     # config_is_set, not config_get: the question is "did the operator set
     # this key", not "does it have a value" - a key can have a schema
@@ -522,14 +526,33 @@ provider_validate_selection() {
             missing="${missing:+$missing }$key"
         fi
     done
-    # A warning, not a refusal (rule 5), and only when the forge is PARTLY
-    # configured. Wholly unconfigured is the same supported "I don't use
-    # this forge" case rule 3 above defers to Phase 3 for, and must stay
-    # silent; a partial configuration is almost certainly a typo, and saying
-    # so costs nothing. Becomes a refusal in Phase 3 alongside rule 3.
+    # Rule 5: a partly configured forge is a typo, not a choice. Refused rather
+    # than warned now that `forge = none` exists: previously the only way to
+    # say "I don't use a forge" was to leave one half-filled, so refusing would
+    # have broken a supported state. Still scoped to PARTIAL configuration -
+    # nothing set at all is rule 3's case above, and carries its own message.
     if [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
-        echo "Warning: forge '$forge' is partly configured - [forge.$forge] is" >&2
-        echo "missing: $missing. Pushes and PRs will fail until it is set." >&2
+        echo "forge '$forge' is partly configured - [forge.$forge] is missing:" >&2
+        echo "$missing. Set them, or set [core] forge = none if this sandbox" >&2
+        echo "pushes nowhere." >&2
+        return 1
+    fi
+
+    # Rule 3 only catches a wholly unconfigured forge by way of forge_hosts
+    # resolving empty - but a forge like github pins fixed_hosts independent
+    # of any config (the same three hosts for every operator), so forge_hosts
+    # is never empty regardless of whether push_token_file is set. A forge
+    # with exactly one `requires` key can also never be "partly" configured
+    # (rule 5 above): it is either wholly set or wholly unset, so a wholly
+    # unset single-key forge slips past both rules unless this closes it.
+    # Scoped the same way rule 3 is - only when the workflow actually pushes,
+    # and never for a forge like `none` with no `requires` at all.
+    if [ "$push" = "on" ] && [ "$set_n" -eq 0 ] && [ "$unset_n" -gt 0 ]; then
+        echo "workflow '$workflow' pushes, but forge '$forge' has none of its" >&2
+        echo "required settings configured - [forge.$forge] is missing: $missing." >&2
+        echo "Set them, or set [core] forge = none and a workflow that does not" >&2
+        echo "push (workflow = local-only) if this sandbox pushes nowhere." >&2
+        return 1
     fi
     return 0
 }

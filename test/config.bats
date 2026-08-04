@@ -484,7 +484,12 @@ write_config() {
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key" 'command = --evil'
+    # forge = none, workflow = local-only: provider_validate_selection runs
+    # ahead of this check, and the default gitea/worktree-pr pair is refused
+    # unconfigured (see providers.bats) - this test is about core.command,
+    # not about forge selection, so it sidesteps that with the honest
+    # "no forge, no push" pair instead of configuring one just to get past it.
+    write_config '[core]' "ssh_key = $key" 'command = --evil' 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
     HOME="$FAKE_HOME" SSH_AUTH_SOCK= run "$REPO_ROOT/bin/dejima" "$workspace"
     [ "$status" -ne 0 ]
@@ -673,7 +678,7 @@ write_config() {
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key"
+    write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
@@ -704,7 +709,8 @@ EOF
     : > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" \
-        '[forge.gitea]' 'token_file = /nonexistent/gitea-token'
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
+        'token_file = /nonexistent/gitea-token'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
@@ -808,7 +814,7 @@ EOF
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key" \
+    write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only' \
         '[logging]' 'loki_url = https://loki.example.invalid'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
@@ -999,7 +1005,7 @@ EOF
     rw="$(mktemp -d)"
     ro="$(mktemp -d)"
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" \
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  '[mounts]' "read_write = $rw" "readonly = $ro"
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1024,7 +1030,12 @@ EOF
     # though an actual session was told correctly. briefing_compose now
     # reads the same DEJIMA_RW_MOUNTS a real launch would.
     rw="$(mktemp -d)"
-    write_config '[mounts]' "read_write = $rw"
+    # forge = none, workflow = local-only: --print-briefing now runs after
+    # provider_validate_selection too, and the default gitea/worktree-pr pair
+    # is refused unconfigured - this test is about the mounts sentence, not
+    # forge selection.
+    write_config '[core]' 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $rw"
     run "$REPO_ROOT/bin/dejima" --print-briefing
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"outlive the container too: $rw"* ]]
@@ -1039,7 +1050,8 @@ EOF
     # rule never runs, which would pass this test for the wrong reason.
     mkdir -p "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin"
     for guarded in "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin" "$REPO_ROOT"; do
-        write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $guarded"
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                     '[mounts]' "read_write = $guarded"
         _rw_launch "$workspace"
         [ "$status" -ne 0 ] || { echo "accepted a writable mount over $guarded"; return 1; }
         [[ "$output" == *"Refusing"* ]] \
@@ -1047,13 +1059,15 @@ EOF
     done
     # The workspace is already mounted read-write; naming it again is a config
     # error worth surfacing, not a harmless duplicate.
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $workspace"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $workspace"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Refusing"* ]]
     # A bare home directory contains several guarded paths, so the same
     # both-directions rule catches it without needing an entry of its own.
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $RW_HOME"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $RW_HOME"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Refusing"* ]]
@@ -1070,6 +1084,7 @@ EOF
     workspace="$(mktemp -d)"
     mkdir -p "$RW_HOME/data"
     write_config '[core]' "ssh_key = $RW_KEY" "share_dir = $RW_HOME/share" \
+                 'forge = none' 'workflow = local-only' \
                  '[audit]' "dir = $RW_HOME/data/store/audit" \
                  '[mounts]' "read_write = $RW_HOME/data"
     [ ! -e "$RW_HOME/data/store" ]
@@ -1089,7 +1104,7 @@ EOF
     # overlap rule under test never runs.
     mkdir -p "$store/audit"
     for key in dir baselines_dir; do
-        write_config '[core]' "ssh_key = $RW_KEY" \
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                      '[audit]' "$key = $store/audit" \
                      '[mounts]' "read_write = $store/audit"
         _rw_launch "$workspace"
@@ -1105,7 +1120,7 @@ EOF
     _rw_setup
     workspace="$(mktemp -d)"
     outer="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" \
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  '[audit]' "dir = $outer/nested/audit" \
                  '[mounts]' "read_write = $outer"
     _rw_launch "$workspace"
@@ -1122,7 +1137,7 @@ EOF
     workspace="$(mktemp -d)"
     for spelling in "/" "/." "//"; do
         d="$(mktemp -d)"
-        write_config '[core]' "ssh_key = $RW_KEY" \
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                      '[mounts]' "readonly = $d" "read_write = ${d}${spelling}"
         _rw_launch "$workspace"
         [ "$status" -ne 0 ] || { echo "both lists accepted '$d' vs '${d}${spelling}'"; return 1; }
@@ -1137,7 +1152,8 @@ EOF
     _rw_setup
     d="$(mktemp -d)"
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $d" "readonly = $d"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $d" "readonly = $d"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"both name the same"* ]]
@@ -1147,7 +1163,8 @@ EOF
 @test "a read_write entry that is not an existing directory is refused" {
     _rw_setup
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' 'read_write = /nonexistent/nowhere'
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' 'read_write = /nonexistent/nowhere'
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not an existing directory"* ]]

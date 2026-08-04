@@ -199,14 +199,8 @@ if [ "$PRINT_CONFIG" = 1 ]; then
 fi
 
 # The selected forge/workflow/harness combination, resolved and validated
-# before anything is built or mounted. provider_validate_selection enforces
-# rules 1, 2 and 6 as refusals and rule 5 (a partly-configured forge) as a
-# warning - see its definition. Rule 3 ("a pushing workflow needs a forge
-# that resolves to a host") is deliberately NOT enforced here: it is
-# deferred to Phase 3, which adds `forge = none` as the honest way to say
-# "no forge" - enforcing it now would refuse the supported "I don't use a
-# forge" configuration that git-push-guard.sh already handles at runtime
-# (see README "Skip this if you only push to GitHub").
+# before anything is built or mounted - see provider_validate_selection's own
+# definition for the full set of rules it enforces, all as refusals.
 DEJIMA_FORGE_NAME="$(config_get core forge)"
 DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
