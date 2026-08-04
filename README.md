@@ -117,8 +117,8 @@ see the whole resolved schema, real values included.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `[core] harness` | `claude-code` | agent harness the container runs |
-| `[core] forge` | `gitea` | forge integration — `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
-| `[core] workflow` | `worktree-pr` | workflow `sandbox-context.sh` tells the agent to follow — `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
+| `[core] forge` | `none` | forge integration — `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow — `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`) — also settable per launch with `--cmd` |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only) — also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
@@ -149,15 +149,29 @@ see the whole resolved schema, real values included.
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
-**Gitea/Forgejo is the default forge** — `gitea-pr`, and the only push target
-`git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo, set
-`[core] forge = github` to push and open PRs through `gh` instead (see
-"GitHub push" below for the posture change that opens, and why its
-`push_token_file` is a separate credential from the read-only `[github]
-token_file`). If this sandbox pushes nowhere — read-only work, or a workflow
-that only commits locally — set `[core] forge = none` and
-`[core] workflow = local-only`; that pair is the honest way to say so, rather
-than leaving `[forge.gitea]` half-filled. `dejima --allow-github-push` is a
+**No forge is the default** — `[core] forge = none` with
+`[core] workflow = local-only`: the sandbox commits locally and pushes
+nowhere. A fresh install has no forge credentials, so defaulting to a pushing
+pair would be claiming a setup that isn't there — and a pushing workflow whose
+forge resolves to no host is refused at launch, which would make an
+out-of-the-box `dejima` refuse to start. Pushing is something you opt into.
+
+> **Changed default (was `gitea` + `worktree-pr`).** If your
+> `~/.config/dejima/config` has no explicit `[core] forge` / `[core] workflow`
+> lines, it used to resolve to `gitea` + `worktree-pr` and now resolves to
+> `none` + `local-only` — your sandbox will stop pushing and stop opening PRs.
+> To keep the old behaviour, write both lines out under `[core]`:
+> `forge = gitea` and `workflow = worktree-pr` (and fill in `[forge.gitea]`,
+> which that pair has always required). `./install.sh` prints this notice
+> when it finds a config in that state.
+
+To push, set `[core] workflow` to `worktree-pr` (push + open a PR) or
+`branch-push` (push, stop at the branch), and pick the forge to push to:
+`[core] forge = gitea` for a Gitea/Forgejo instance (fill in `[forge.gitea]`
+per "Gitea/Forgejo PR workflow" below), or `[core] forge = github` to push and
+open PRs through `gh` (see "GitHub push" below for the posture change that
+opens, and why its `push_token_file` is a separate credential from the
+read-only `[github] token_file`). `dejima --allow-github-push` is a
 per-launch *addition* to whichever forge is selected, not a substitute for
 selecting one: a pushing workflow is still refused at launch unless its forge
 resolves to a host and its required keys are filled in, so the flag alone
@@ -174,10 +188,11 @@ hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected by `[core] forge`, `[core] workflow` and
 `[core] harness` respectively. Ships today: `forges/gitea`, `forges/github`,
 `forges/none`, `workflows/worktree-pr`, `workflows/branch-push`,
-`workflows/local-only`, `harnesses/claude-code` — Gitea/Forgejo and
-worktree-and-PR are only the *defaults*, not the only option; the rest of
-this document defaults to describing them because that's what a fresh
-install runs with.
+`workflows/local-only`, `harnesses/claude-code`. The defaults are
+`forges/none` and `workflows/local-only` — a fresh install commits locally
+and pushes nowhere; the rest of this document spends most of its words on
+Gitea/Forgejo and worktree-and-PR because that's the setup with the most to
+configure, not because it's what you get out of the box.
 
 A provider is **data**, never sourced or executed: its manifest (`forge.conf`,
 `workflow.conf`, `harness.conf`) is parsed with the same discipline as the
@@ -230,14 +245,14 @@ sandbox escape if you get it wrong.
    → [Prerequisites](#prerequisites),
    [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
 
-That is not yet enough to run `dejima`. The starter config `install.sh`
-writes has every key commented out at its default, which means
-`[core] forge = gitea` and `[core] workflow = worktree-pr` with no Gitea host
-configured — and a workflow that pushes is refused at launch unless its forge
-resolves to somewhere to push to. Pick one of the three sections below first:
-fill in `[forge.gitea]`, or set `[core] forge = github`, or — if this sandbox
-should push nowhere — `[core] forge = none` with `[core] workflow =
-local-only`, which needs nothing else configured at all.
+That is enough to run `dejima`. The starter config `install.sh` writes has
+every key commented out at its default, which means `[core] forge = none` and
+`[core] workflow = local-only`: the agent works in the sandbox and commits
+locally, and nothing is pushed anywhere. To have it push, pick one of the two
+forge sections below and set `[core] workflow` to `worktree-pr` or
+`branch-push` — a pushing workflow is refused at launch unless its forge
+resolves to somewhere to push to, so the forge is not optional once you
+choose one of them.
 
 ### Gitea/Forgejo PR workflow
 

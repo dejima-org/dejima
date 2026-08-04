@@ -349,11 +349,22 @@ resolved value is already correct even when the operator never wrote it.
 | --- | --- | --- |
 | forge | `gitea` | PRs and issues via `gitea-pr`/`gitea-issue`, shipped into the image |
 | forge | `github` | PRs and issues via `gh`; needs its own write-capable `push_token_file`; opens `ssh.github.com:22` when the selected workflow pushes |
-| forge | `none` | no capabilities; pair with `local-only` |
+| forge | `none` | **default** - no capabilities, no host; pair with `local-only` |
 | workflow | `worktree-pr` | worktree → push → PR, stops at the PR |
 | workflow | `branch-push` | worktree → push, stops at the branch |
-| workflow | `local-only` | commits locally, pushes nothing |
-| harness | `claude-code` | the only harness today |
+| workflow | `local-only` | **default** - commits locally, pushes nothing |
+| harness | `claude-code` | **default**, and the only harness today |
+
+**The shipped defaults are deliberately the non-pushing pair**
+(`forge = none`, `workflow = local-only`). A fresh install has no forge host
+and no forge credential, so any default naming a real forge would be an
+assertion about the operator's setup that nothing has established - and,
+because a pushing workflow whose forge resolves to no host is refused (see
+[Validation](#validation)), such a default would make an unconfigured
+`dejima` refuse to launch at all. The defaults instead say the one thing
+that is true of every fresh install: this sandbox pushes nowhere yet.
+Pushing is opted into by naming both a pushing workflow and a forge that
+resolves.
 
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access

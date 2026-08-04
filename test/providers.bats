@@ -189,8 +189,9 @@ assert_remedy_forges_exist() {
 
 @test "a pushing workflow on a forge with no hosts is refused" {
     # gitea's ssh_host/api have no schema default and install.sh writes them
-    # commented out, so this is what a fresh, unedited install now hits -
-    # `forge = none` (Task 1) is the honest way to say "no forge" instead.
+    # commented out, so this is what an operator who selects a pushing
+    # workflow without configuring the forge hits - `forge = none` (the
+    # shipped default) is the honest way to say "no forge" instead.
     FAKE_ROOT="$(mktemp -d)"
     mkdir -p "$FAKE_ROOT/forges/hostless" "$FAKE_ROOT/workflows/pusher" "$FAKE_ROOT/harnesses/h"
     # keys is non-empty - this forge IS configurable, just not configured -
@@ -221,6 +222,25 @@ assert_remedy_forges_exist() {
     run lib provider_validate_selection gitea worktree-pr claude-code
     [ "$status" -ne 0 ]
     [[ "$output" == *"api"* ]]
+}
+
+@test "the shipped defaults are a non-pushing pair that validates with no forge configured" {
+    # A fresh install must launch. The defaults were gitea + worktree-pr,
+    # which is a PUSHING pair, and rule 3 refuses a pushing workflow whose
+    # forge resolves to no host - so an unedited config was refused at every
+    # launch until a forge was configured. Driven off the schema rather than
+    # the literal names, so a future default that reintroduces the
+    # contradiction fails here, next to the rule it contradicts, instead of
+    # in twenty-odd launcher tests that never mention forges.
+    printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
+    local forge workflow harness
+    forge="$(lib config_default core.forge)"
+    workflow="$(lib config_default core.workflow)"
+    harness="$(lib config_default core.harness)"
+    [ "$(lib manifest_get workflow "$workflow" push)" = "off" ] \
+        || { echo "default workflow '$workflow' pushes - a fresh install has no forge to push to"; return 1; }
+    run lib provider_validate_selection "$forge" "$workflow" "$harness"
+    [ "$status" -eq 0 ] || { echo "the shipped defaults do not validate unconfigured: $output"; return 1; }
 }
 
 @test "a non-pushing workflow against an unconfigured forge is still fine" {

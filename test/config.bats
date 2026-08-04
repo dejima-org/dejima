@@ -995,6 +995,24 @@ run_install() {
     [ -f "$CONFIG_DIR/remote.conf" ]
 }
 
+@test "install.sh reports the changed forge/workflow defaults to a config that relies on them" {
+    # The defaults moved from gitea + worktree-pr to none + local-only, which
+    # silently stops an existing sandbox pushing. Same stance as the
+    # remote.conf notice above: a config whose meaning changed under the
+    # operator gets told so, with the lines that restore the old behaviour.
+    write_config '[core]' 'firewall = on'
+    run_install
+    [[ "$output" == *"forge = gitea"* ]]
+    [[ "$output" == *"workflow = worktree-pr"* ]]
+    [[ "$output" == *"local-only"* ]]
+}
+
+@test "install.sh stays quiet about the defaults once forge and workflow are explicit" {
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    run_install
+    [[ "$output" != *"have changed"* ]]
+}
+
 @test "the README documents the config file, not the retired variables" {
     # The retired variables must be gone from the setup instructions...
     run grep -nE '^\| `(SANDBOX_CMD|SANDBOX_EXTRA_MOUNTS|SANDBOX_NVIM_CONFIG|SANDBOX_SHARE_DIR|SANDBOX_CREDENTIAL_PROXY|LOKI_URL|ENABLE_FIREWALL|GITEA_SSH_HOST|GITEA_API|GITEA_TOKEN)`' \
@@ -1315,8 +1333,12 @@ EOF
     # exercises the real launch path to verify the refusal actually stops it.
     _rw_setup
     workspace="$(mktemp -d)"
-    # Configure gitea forge with a valid config plus a token file with a newline.
-    printf '[core]\nfirewall = on\nssh_key = %s\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+    # Configure gitea forge with a valid config plus a token file with a
+    # newline. forge/workflow are named explicitly because this test is about
+    # a gitea token reaching the container: the shipped defaults select no
+    # forge at all, so leaving them implicit would mean nothing ever reads
+    # token_file and the refusal under test could never fire.
+    printf '[core]\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
         "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
     printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
     STUB_DIR="$(mktemp -d)"
