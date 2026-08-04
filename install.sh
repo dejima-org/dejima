@@ -92,10 +92,34 @@ if [ ! -f "$SETTINGS" ]; then
     echo '{}' > "$SETTINGS"
 fi
 
+# The registration that went with the symlink removed above. Two things
+# depend on it going: Claude Code reports a missing hook command on every
+# session start while it points at a path that no longer exists, and - until
+# the dedupe below stopped matching it - it also stood in for the
+# registration it was renamed from, so `register_hook merge-guard.sh`
+# skipped and the merge guard was registered nowhere at all. Dropped only
+# when the path it names is gone, so an operator's own file at that name
+# keeps its registration, matching the symlink check above.
+if [ ! -e "$old_merge_guard" ] && jq -e --arg s "/gitea-merge-guard.sh" \
+    '[.hooks.PreToolUse[]?.hooks[]?.command // empty] | any(endswith($s))' \
+    "$SETTINGS" >/dev/null 2>&1; then
+    echo "Removing: stale pre-rename gitea-merge-guard.sh registration from $SETTINGS"
+    settings_tmp=$(mktemp)
+    jq --arg s "/gitea-merge-guard.sh" \
+        '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
+            | map(.hooks = ((.hooks // []) | map(select((.command // "") | endswith($s) | not))))
+            | map(select((.hooks | length) > 0)))' \
+        "$SETTINGS" > "$settings_tmp" && mv "$settings_tmp" "$SETTINGS"
+fi
+
 register_hook() {
     local event="$1" matcher="$2" script_name="$3" description="$4"
-    if jq -e --arg s "$script_name" \
-        "[.hooks.${event}[]?.hooks[]?.command // empty] | any(test(\$s))" \
+    # endswith on the leading slash, not test(): test() is an unanchored
+    # regex, so a hook whose name merely ends in another's - which is what a
+    # rename like gitea-merge-guard.sh -> merge-guard.sh produces - read as
+    # already registered, and the new hook was silently never added.
+    if jq -e --arg s "/$script_name" \
+        "[.hooks.${event}[]?.hooks[]?.command // empty] | any(endswith(\$s))" \
         "$SETTINGS" >/dev/null 2>&1; then
         echo "Skipping: $script_name already registered as a $event hook"
         return
