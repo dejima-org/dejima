@@ -21,7 +21,8 @@ code. `bin/dejima` resolves the selected forge/workflow/harness **on the
 host** and passes only the resolved results into the container - which
 hosts pushes are allowed to, which branches are protected, the literal merge
 command to block, plus the forge's own environment variables (a Gitea API
-token, in the shipped forge's case) - never a manifest or a provider
+token for `gitea`, a write-capable PAT for `github`, nothing for `none`) -
+never a manifest or a provider
 directory itself. The one thing a provider ships that does run is a forge's
 `bin/`, copied into the image at build time as an ordinary program on
 `PATH`, no different from any other CLI baked into it.

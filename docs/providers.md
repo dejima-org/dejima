@@ -120,7 +120,7 @@ operator can set, resolved the same way as any other config key
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
 | `merge_block` | `?command` | (empty) | The literal command prefix `hooks/merge-guard.sh` refuses inside the sandbox (e.g. `gitea-pr merge`) - only when the workflow's `block_merge = on`. |
 | `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
-| `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work (used only for the partial-configuration warning below, not a launch-time gate today). |
+| `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work - checked at launch by two refusal rules (partly-configured, and none-configured-with-a-fixed-host) when the workflow pushes; see [Validation](#validation). A key with a non-empty schema default never counts as missing for either check. |
 | `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
