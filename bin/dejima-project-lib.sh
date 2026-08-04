@@ -181,6 +181,8 @@ ensure_project_store() {
         if [ "$owner" != "$path" ]; then
             echo "Note: recorded under the existing approvals for $owner, which" >&2
             echo "$path inherits - so it applies to $owner and everything under it." >&2
+            echo "Any declaration this call writes still goes to $path/.dejima -" >&2
+            echo "the approval and the declaration do not have to share a directory." >&2
         fi
         printf '%s' "$existing"
         return 0
@@ -247,6 +249,27 @@ approve_entry() {
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
     touch "$store/$kind"
     grep -qxF "$entry" "$store/$kind" || printf '%s\n' "$entry" >> "$store/$kind"
+}
+
+# Record an entry in the project's OWN declaration - the committed, shared
+# .dejima/<kind> file. This grants nothing (see this file's header: a
+# declaration is parsed, never sourced, and lives on a session-writable
+# mount), which is exactly why it is safe to write from the host. What it buys
+# is visibility: without it, a domain approved with --project is invisible to
+# dejima-project status, to hooks/sandbox-context.sh, and to everyone else on
+# the project.
+#
+# Validated with the same dispatch approve_entry uses, so the two can never
+# disagree about what a well-formed entry is.
+declare_entry() {
+    local project="$1" kind="$2" entry="$3" validator dir file
+    validator="$(_approved_validator "$kind")" || return 1
+    "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
+    dir="$project/.dejima"
+    mkdir -p "$dir" || { echo "Could not create $dir" >&2; return 1; }
+    file="$dir/$kind"
+    touch "$file" || { echo "Could not write $file" >&2; return 1; }
+    grep -qxF "$entry" "$file" || printf '%s\n' "$entry" >> "$file"
 }
 
 unapprove_entry() {

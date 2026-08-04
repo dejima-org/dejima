@@ -81,7 +81,9 @@ case "$action" in
         else
             store="$(ensure_project_store "$project")"
             approve_entry "$store" dependencies "$spec"
+            declare_entry "$project" dependencies "$spec"
             echo "Approved $spec for $project."
+            echo "Declared it in $project/.dejima/dependencies - commit that to share it."
         fi
         # Unlike dejima-allow, this cannot touch a running session:
         # it needs an image rebuild. Say so, or an agent will keep insisting

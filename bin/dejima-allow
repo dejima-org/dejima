@@ -60,7 +60,9 @@ fi
 if [ -n "$project" ]; then
     store="$(ensure_project_store "$project")"
     approve_entry "$store" allowed-domains "$domain"
+    declare_entry "$project" allowed-domains "$domain"
     echo "Added $domain to the approved domains for $project (applies to every future session in it)."
+    echo "Declared it in $project/.dejima/allowed-domains - commit that to share it."
 fi
 if [ "$global" -eq 1 ]; then
     store="$(ensure_global_store)"

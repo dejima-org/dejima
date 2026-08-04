@@ -1098,3 +1098,63 @@ EOF
     run "$REPO_ROOT/bin/dejima-dep" add apt:ripgrep --project "$PROJ"
     [ "$status" -ne 0 ]
 }
+
+@test "dejima-allow --project writes the declaration as well as the approval" {
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com
+    [ "$status" -eq 0 ]
+    grep -qx 'example.com' "$PROJ/.dejima/allowed-domains"
+    grep -qx 'example.com' "$(store_of "$PROJ")/allowed-domains"
+}
+
+@test "dejima-allow --project creates .dejima when the project has none" {
+    rm -rf "$PROJ/.dejima"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com
+    [ "$status" -eq 0 ]
+    grep -qx 'example.com' "$PROJ/.dejima/allowed-domains"
+}
+
+@test "declaring the same entry twice appends nothing" {
+    "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com >/dev/null
+    "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com >/dev/null
+    [ "$(grep -cx 'example.com' "$PROJ/.dejima/allowed-domains")" -eq 1 ]
+}
+
+@test "dejima-allow --global writes no declaration" {
+    # There is no project to declare in, and creating a .dejima in $PWD would
+    # be a surprise edit to whatever directory the user happened to be in.
+    run bash -c "cd '$PROJ' && '$REPO_ROOT/bin/dejima-allow' --global example.com"
+    [ "$status" -eq 0 ]
+    [ ! -f "$PROJ/.dejima/allowed-domains" ]
+}
+
+@test "dejima-dep add --project writes the declaration as well as the approval" {
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    grep -qx 'apt:ripgrep' "$PROJ/.dejima/dependencies"
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+}
+
+@test "dejima-dep remove --project leaves the declaration alone" {
+    # Withdrawing one machine's approval is not the same decision as editing a
+    # file the whole team shares, so remove touches only the approval.
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep >/dev/null
+    run "$REPO_ROOT/bin/dejima-dep" remove --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    grep -qx 'apt:ripgrep' "$PROJ/.dejima/dependencies"
+    run "$REPO_ROOT/bin/dejima-dep" list --project "$PROJ"
+    [[ "$output" != *"apt:ripgrep"* ]]
+}
+
+@test "a declaration written from a worktree says where it landed" {
+    # The approval attaches to the parent's store (existing inheritance), but
+    # the declaration goes to the checkout the caller named - a file on that
+    # branch. Both facts have to be visible or the pair looks lost.
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:parentpkg >/dev/null
+    wt="$PROJ/.worktrees/feat"
+    mkdir -p "$wt"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$wt" branch.example
+    [ "$status" -eq 0 ]
+    grep -qx 'branch.example' "$wt/.dejima/allowed-domains"
+    grep -qx 'branch.example' "$(store_of "$PROJ")/allowed-domains"
+    [[ "$output" == *"$wt/.dejima"* ]]
+}
