@@ -869,3 +869,106 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [[ "$output" == *"the audit baseline store"* ]]
     [[ "$output" == *"write its own acknowledgements"* ]]
 }
+
+# --- issue #61: the optional-path rule for --project ---
+
+# Runs parse_scope_args in a subshell and prints its results one per line, so a
+# test can assert on each independently. Everything after $1 is passed to the
+# parser verbatim.
+parse() {
+    local required="$1"; shift
+    bash -c '
+        source "$1"; required="$2"; shift 2
+        parse_scope_args "$required" "$@" || exit $?
+        printf "global=%s\n" "$dj_global"
+        printf "project=%s\n" "$dj_project"
+        printf "project_set=%s\n" "$dj_project_set"
+        printf "container=%s\n" "$dj_container"
+        printf "positional=%s\n" "${dj_positional[*]-}"
+    ' _ "$LIB" "$required" "$@"
+}
+
+@test "--project with only the required positional after it means the current directory" {
+    run parse 1 --project example.com
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project="$'\n'* ]] || [[ "$output" == *"project="* ]]
+    [[ "$output" == *"project_set=1"* ]]
+    [[ "$output" == *"positional=example.com"* ]]
+}
+
+@test "--project takes a path when a positional still follows it" {
+    run parse 1 --project /tmp/myproj example.com
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project=/tmp/myproj"* ]]
+    [[ "$output" == *"positional=example.com"* ]]
+}
+
+@test "a forgotten positional is not silently swallowed as the project path" {
+    # The failure this rule has to degrade safely for: the caller meant to name
+    # a domain and named only a path. It must reach the domain validator (which
+    # rejects it) rather than quietly becoming the scope.
+    run parse 1 --project /tmp/myproj
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"positional=/tmp/myproj"* ]]
+    [[ "$output" == *"project="$'\n'* ]] || [[ "$output" != *"project=/tmp/myproj"* ]]
+}
+
+@test "--project takes a path for a command that requires no trailing positional" {
+    # `dejima-dep list --project ~/p` has nothing after the path to protect, so
+    # the naive "never consume the last token" rule would send this to the
+    # current directory instead. Required-count-aware is why it does not.
+    run parse 0 --project /tmp/myproj
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project=/tmp/myproj"* ]]
+    [[ "$output" == *"positional="$'\n'* ]] || [[ "$output" != *"positional=/tmp"* ]]
+}
+
+@test "--project with nothing after it at all means the current directory" {
+    run parse 0 --project
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project_set=1"* ]]
+    [[ "$output" != *"project=/"* ]]
+}
+
+@test "--container's value is never mistaken for the project path or a positional" {
+    run parse 1 --project --container abc123 example.com
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"container=abc123"* ]]
+    [[ "$output" == *"positional=example.com"* ]]
+    [[ "$output" != *"project=abc123"* ]]
+}
+
+@test "--container's value is counted correctly when deciding the project path" {
+    # The lookahead must skip --container's value, or it would count it as a
+    # positional and consume /tmp/myproj's successor by mistake.
+    run parse 1 --project /tmp/myproj --container abc123 example.com
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project=/tmp/myproj"* ]]
+    [[ "$output" == *"container=abc123"* ]]
+    [[ "$output" == *"positional=example.com"* ]]
+}
+
+@test "the old argument order is rejected rather than reinterpreted" {
+    run parse 1 example.com --global
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"global=1"* ]]
+    [[ "$output" == *"positional=example.com"* ]]
+}
+
+@test "an unknown option is refused" {
+    run parse 1 --nope example.com
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown option"* ]]
+}
+
+@test "--container without a value is refused" {
+    run parse 1 --container
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--container"* ]]
+}
+
+@test "multiple positionals are preserved in order" {
+    run parse 1 add cargo:nextest
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"positional=add cargo:nextest"* ]]
+}

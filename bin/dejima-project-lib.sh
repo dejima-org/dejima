@@ -67,6 +67,71 @@ read_declared() {
     return 0
 }
 
+# Shared argument parsing for dejima-allow and dejima-dep, so the two CLIs
+# cannot drift on what --project means.
+#
+# The hard part is that --project's path is OPTIONAL, which makes
+# `--project X` ambiguous on its own: X could be the path, or the required
+# positional. Deciding by "is X the last token" is wrong for `dejima-dep list
+# --project ~/p`, which has no trailing positional to protect and would
+# silently resolve to the current directory instead - the scope quietly
+# becoming one the caller did not name. So the decision is made against how
+# many positionals the command actually requires after the flag:
+#
+#   --project takes the next token as its path only if doing so still leaves
+#   the command its required trailing positional(s).
+#
+# Required counts are per-command constants declared by the caller, not
+# inferred here.
+#
+# Sets dj_global, dj_project, dj_project_set, dj_container and the
+# dj_positional array. dj_project_set exists because "--project with no path"
+# (the current directory) and "no --project at all" are different scopes and
+# an empty dj_project cannot tell them apart.
+parse_scope_args() {
+    local required="$1"; shift
+    local -a args=("$@")
+    local n="${#args[@]}" i=0 k tok cand after
+
+    dj_global=0; dj_project=""; dj_project_set=0; dj_container=""
+    dj_positional=()
+
+    while [ "$i" -lt "$n" ]; do
+        tok="${args[$i]}"
+        case "$tok" in
+            --global) dj_global=1; i=$((i + 1)) ;;
+            --container)
+                cand="${args[$((i + 1))]:-}"
+                if [ -z "$cand" ]; then
+                    echo "--container needs a container name or id." >&2
+                    return 1
+                fi
+                dj_container="$cand"; i=$((i + 2)) ;;
+            --project)
+                dj_project_set=1; i=$((i + 1))
+                cand="${args[$i]:-}"
+                case "$cand" in ''|-*) continue ;; esac
+                # Count the positionals strictly after the candidate, skipping
+                # --container's value - counting that as a positional would
+                # make the candidate look safe to consume when it is not.
+                after=0; k=$((i + 1))
+                while [ "$k" -lt "$n" ]; do
+                    case "${args[$k]}" in
+                        --container) k=$((k + 2)) ;;
+                        -*)          k=$((k + 1)) ;;
+                        *)           after=$((after + 1)); k=$((k + 1)) ;;
+                    esac
+                done
+                if [ "$after" -ge "$required" ]; then
+                    dj_project="$cand"; i=$((i + 1))
+                fi ;;
+            -*) echo "Unknown option: $tok" >&2; return 1 ;;
+            *)  dj_positional+=("$tok"); i=$((i + 1)) ;;
+        esac
+    done
+    return 0
+}
+
 # The global store is config_root() itself, not a subdirectory of it - the
 # two filenames below can never collide with projects/<slug>, since a slug
 # is a sanitized absolute path and always begins with "-".
