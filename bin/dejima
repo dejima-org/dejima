@@ -157,6 +157,62 @@ if ! config_exists; then
     exit 1
 fi
 
+# A selected forge's env_export can name a variable core also fills from its
+# own config. Today that is GH_TOKEN, which core sets from the read-only
+# credential at [github] token_file - one every session gets regardless of
+# which forge is selected - and which a forge exporting the same name takes over
+# for the launch, since a single variable can only carry one token. Said out
+# loud rather than left as two configured credentials with one silently
+# ignored: an operator who set both is entitled to know which is in effect. A
+# warning, not a refusal - the forge's value winning is exactly what
+# selecting that forge asked for.
+#
+# Driven off the manifest's env_export rather than off the forge's name: the
+# collision is a property of the variable a forge exports, identical for any
+# forge that exports it, and core has no business knowing which forge that is
+# today. Checked here, ahead of --print-config's own exit below (like
+# _warn_legacy_env above it) rather than down by the GH_TOKEN block further
+# down that --print-config never reaches, so --print-config reports it too.
+#
+# Both files, not just core's: a forge key resolving to nothing is the
+# "wholly unconfigured" case forge_env_exports deliberately emits no pair for
+# (see its own comment), leaving core's own value in effect - so claiming the
+# forge's key won would be false in exactly that state. The warning only
+# means something once both are actually set.
+_warn_forge_env_collisions() {
+    local forge="$1" pair name ref core core_name core_section core_leaf
+    local core_file forge_file
+    for pair in $(manifest_get forge "$forge" env_export); do
+        name="${pair%%=*}"
+        ref="${pair#*=}"
+        # Only the "@" form (the CONTENTS of the file a config key names) can
+        # carry one of core's own credentials.
+        [ "${ref:0:1}" = "@" ] || continue
+        # NAME=<core section> <core key>, for every variable core fills from
+        # the config file itself.
+        for core in "GH_TOKEN=github token_file"; do
+            core_name="${core%%=*}"
+            [ "$name" = "$core_name" ] || continue
+            core_section="${core#*=}"
+            core_leaf="${core_section##* }"
+            core_section="${core_section%% *}"
+            core_file="$(config_get "$core_section" "$core_leaf")"
+            forge_file="$(config_get "forge.$forge" "${ref:1}")"
+            [ -f "$core_file" ] && [ -s "$core_file" ] || continue
+            [ -f "$forge_file" ] && [ -s "$forge_file" ] || continue
+            echo "Note: [$core_section] $core_leaf is not used while [core] forge = $forge." >&2
+            echo "$name comes from [forge.$forge] ${ref:1} for this launch." >&2
+        done
+    done
+}
+# Guarded on config_get succeeding: an invalid [core] forge already made
+# config_get print the real error (via config_validate) and return empty,
+# so feeding that empty value on to _warn_forge_env_collisions would only
+# add a second, spurious "invalid forge name:" line on top of it.
+if _core_forge="$(config_get core forge)"; then
+    _warn_forge_env_collisions "$_core_forge"
+fi
+
 # --print-config resolves the whole precedence chain and exits, before any
 # workspace argument is required and before anything is built or mounted.
 # It exists for two reasons: it answers "one config file now - what is
@@ -173,14 +229,8 @@ if [ "$PRINT_CONFIG" = 1 ]; then
 fi
 
 # The selected forge/workflow/harness combination, resolved and validated
-# before anything is built or mounted. provider_validate_selection enforces
-# rules 1, 2 and 6 as refusals and rule 5 (a partly-configured forge) as a
-# warning - see its definition. Rule 3 ("a pushing workflow needs a forge
-# that resolves to a host") is deliberately NOT enforced here: it is
-# deferred to Phase 3, which adds `forge = none` as the honest way to say
-# "no forge" - enforcing it now would refuse the supported "I don't use a
-# forge" configuration that git-push-guard.sh already handles at runtime
-# (see README "Skip this if you only push to GitHub").
+# before anything is built or mounted - see provider_validate_selection's own
+# definition for the full set of rules it enforces, all as refusals.
 DEJIMA_FORGE_NAME="$(config_get core forge)"
 DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
@@ -299,19 +349,50 @@ if [ "$PRINT_BRIEFING" = 1 ]; then
     exit 0
 fi
 
-if ! DEJIMA_FORGE_HOSTS="$(forge_hosts "$DEJIMA_FORGE_NAME")"; then
+if ! _forge_all_hosts="$(forge_hosts "$DEJIMA_FORGE_NAME")"; then
     exit 1
 fi
 DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
+# A forge declaring hosts_allowlisted_by_core says its hosts are ones core
+# already allowlists in its own right - the GitHub ranges every session can
+# read from over 443. Those must NOT reach DEJIMA_FORGE_HOSTS, which
+# entrypoint.sh folds into EXTRA_ALLOWED_DOMAINS: that path resolves a name
+# into the port-UNRESTRICTED allowed-domains ipset and exempts it from
+# dnsmasq's stop-dns-rebind, both of which are deliberate for an internal,
+# self-hosted forge host and both of which are a widening for a public one.
+# It would also make init-firewall.sh's startup self-check ("port 22 was
+# reachable without the push grant") fail, killing the container outright.
+#
+# They still reach DEJIMA_PUSH_HOSTS: git-push-guard.sh's allowlist is a
+# separate question from which names the firewall resolves, and a push to a
+# host the guard doesn't know is refused inside the container regardless of
+# how the packets would have been routed.
+ALLOW_CORE_PUSH_GRANT="$ALLOW_GITHUB_PUSH_FLAG"
+if [ "$(manifest_get forge "$DEJIMA_FORGE_NAME" hosts_allowlisted_by_core)" = "on" ]; then
+    DEJIMA_FORGE_HOSTS=""
+    # And pushing to them therefore goes through core's own push grant
+    # (ALLOW_GITHUB_PUSH below), which opens port 22 to the same ranges the
+    # read-only path already allows on 443 - logged, self-checked, and the
+    # documented way that port opens. Only when the workflow actually pushes:
+    # a non-pushing workflow has no reason to open it.
+    if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
+        ALLOW_CORE_PUSH_GRANT=1
+    fi
+else
+    DEJIMA_FORGE_HOSTS="$_forge_all_hosts"
+fi
 if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
-    DEJIMA_PUSH_HOSTS="$DEJIMA_FORGE_HOSTS"
+    DEJIMA_PUSH_HOSTS="$_forge_all_hosts"
 else
     DEJIMA_PUSH_HOSTS=""
 fi
 # --allow-github-push's actual effect: git-push-guard.sh only ever checks
 # DEJIMA_PUSH_HOSTS, so granting it a github.com push means adding these
 # hosts to that list, not just exporting ALLOW_GITHUB_PUSH (which nothing
-# reads anymore now that the guard is forge/workflow-driven).
+# reads anymore now that the guard is forge/workflow-driven). Keyed to the
+# flag alone, not to ALLOW_CORE_PUSH_GRANT: a forge whose own hosts these
+# are has already contributed them above, and adding them twice would leave
+# the guard's list carrying each name two or three times over.
 if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
     DEJIMA_PUSH_HOSTS="${DEJIMA_PUSH_HOSTS:+$DEJIMA_PUSH_HOSTS }github.com ssh.github.com"
 fi
@@ -607,7 +688,7 @@ cleanup() {
     # STATE is dropped from the rm -f above and freed only after compare has
     # read it, so this function's own cleanup can't race the audit that
     # needs it - and its removal is guarded too, so it stays truly last.
-    "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    DEJIMA_RW_MOUNTS="$DEJIMA_RW_MOUNTS" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
@@ -652,18 +733,19 @@ export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
-# --allow-github-push is the only way to grant this - same principle as
-# ALLOWED_DOMAINS above: this opens a push path, so an exported value already
-# sitting in the operator's shell profile must not be able to silently grant
-# it, with nothing recording that it did.
-if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+# The --allow-github-push flag and a selected forge whose hosts_allowlisted_by_core
+# says these are its own push hosts (see ALLOW_CORE_PUSH_GRANT above) are the
+# only two ways to grant this - same principle as ALLOWED_DOMAINS above: this
+# opens a push path, so an exported value already sitting in the operator's
+# shell profile must not be able to silently grant it, with nothing recording
+# that it did. Both ways in are recorded: one in the command that used the
+# flag, the other in the config file that selected the forge.
+if [ "$ALLOW_CORE_PUSH_GRANT" = 1 ]; then
     export ALLOW_GITHUB_PUSH=1
 else
     # Plain assignment, not "${ALLOW_GITHUB_PUSH:-0}" - same reason
     # ALLOWED_DOMAINS above is plain. This opens a push path, so an exported
-    # value in a shell profile must not be able to grant it silently; the
-    # --allow-github-push flag is the only way in, and it is recorded in the
-    # command that used it.
+    # value in a shell profile must not be able to grant it silently.
     export ALLOW_GITHUB_PUSH=0
 fi
 export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')}"
@@ -810,7 +892,10 @@ fi
 # DEJIMA_RW_MOUNTS is deliberately not forwarded into the container as an
 # environment variable: hooks/sandbox-context.sh no longer reads it (the
 # writable-mounts sentence reaches the session through the composed briefing
-# instead), so passing it would just be a value nothing inside consumes.
+# instead), so passing it would just be a value nothing inside consumes. It
+# IS forwarded the other direction, host-side, to the exit-time dejima-audit
+# invocation in cleanup() below - that report's header names these paths so
+# an operator reading any finding knows what else the session could reach.
 for path in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
     extra_mounts+=(-v "$path:$path")
 done

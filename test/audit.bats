@@ -1710,3 +1710,23 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
     [ -f "$sc/$(key_of '.git/hooks/pre-commit').diff" ]
 }
+
+@test "the report header names the writable mounts a session could reach" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    run env DEJIMA_RW_MOUNTS="/srv/specs /srv/notes" "$AUDIT" compare "$WS" "$STATE"
+    [[ "$output" == *"/srv/specs"* ]]
+    [[ "$output" == *"/srv/notes"* ]]
+    # Named as reachable-but-unhashed, not reported as a finding: writing to
+    # one is the point of configuring it, so it must not read as an alert.
+    [[ "$output" != *"! /srv/specs"* ]]
+}
+
+@test "the report says nothing about writable mounts when there are none" {
+    mkdir -p "$WS/.git/hooks"; printf 'a\n' > "$WS/.git/hooks/pre-commit"
+    snap
+    printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
+    run "$AUDIT" compare "$WS" "$STATE"
+    [[ "$output" != *"writable"* ]]
+}

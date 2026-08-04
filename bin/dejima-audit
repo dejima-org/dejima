@@ -1193,6 +1193,15 @@ case "$cmd" in
                 echo "Changes below happened while this session ran - not necessarily because"
                 echo "of it. A concurrent dejima/Claude Code session, or your own edits during"
                 echo "the run, land in this same diff; see docs/security.md."
+                # Named, never hashed. Writing to a writable mount is the entire
+                # point of configuring one, so a finding per write would fire on
+                # every legitimate use and train the reader to skim - the exact
+                # failure the audit's severity tiers exist to avoid. What the
+                # operator needs instead is the blast radius: reading any finding
+                # below, they should know what else this session could reach.
+                if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
+                    echo "also writable by this session, not hashed: $(sanitize "$DEJIMA_RW_MOUNTS")"
+                fi
                 [ "${#crit[@]}" -gt 0 ] && printf 'CRITICAL %s\n' "${crit[@]}"
                 [ "${#warn[@]}" -gt 0 ] && printf 'WARNING  %s\n' "${warn[@]}"
                 [ "${#info[@]}" -gt 0 ] && printf 'INFO     %s\n' "${info[@]}"
@@ -1256,6 +1265,15 @@ case "$cmd" in
             echo " dejima: host-persistence surfaces changed in"
             echo " $(sanitize "$ws") while this session ran"
             echo "----------------------------------------------------------------"
+            # Named, never hashed. Writing to a writable mount is the entire
+            # point of configuring one, so a finding per write would fire on
+            # every legitimate use and train the reader to skim - the exact
+            # failure the audit's severity tiers exist to avoid. What the
+            # operator needs instead is the blast radius: reading any finding
+            # below, they should know what else this session could reach.
+            if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
+                echo " also writable by this session, not hashed: $(sanitize "$DEJIMA_RW_MOUNTS")"
+            fi
             if [ "${#info[@]}" -gt 0 ]; then
                 echo "  ${#info[@]} routine file change(s) - not listed"
             fi

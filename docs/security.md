@@ -21,7 +21,8 @@ code. `bin/dejima` resolves the selected forge/workflow/harness **on the
 host** and passes only the resolved results into the container - which
 hosts pushes are allowed to, which branches are protected, the literal merge
 command to block, plus the forge's own environment variables (a Gitea API
-token, in the shipped forge's case) - never a manifest or a provider
+token for `gitea`, a write-capable PAT for `github`, nothing for `none`) -
+never a manifest or a provider
 directory itself. The one thing a provider ships that does run is a forge's
 `bin/`, copied into the image at build time as an ordinary program on
 `PATH`, no different from any other CLI baked into it.
@@ -477,8 +478,10 @@ hands to whichever session starts against it. See
   rather than repo-scoped, so a compromised session can still reach (and
   push to) other repos on that host you have access to. This doesn't extend
   to GitHub by default: port 22 there is blocked unless `--allow-github-push`
-  is given, so the forwarded agent has no transport to use for it at all
-  otherwise (see "GitHub push: blocked by default, optional opt-in" above).
+  is given, or `[core] forge = github` is selected with a workflow that
+  pushes (which opens the same grant), so the forwarded agent otherwise has
+  no transport to use for it at all (see "GitHub push: blocked by default,
+  optional opt-in" above).
 - `[core] ssh_key` (see "Headless git push without agent forwarding") is a
   second, independent credential-loading path with the same "signs for any
   Gitea repo it has access to" shape as the forwarded agent above - the

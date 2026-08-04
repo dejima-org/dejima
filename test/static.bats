@@ -1679,9 +1679,17 @@ EOF
     chmod +x "$DEJIMA_T/docker"
     : > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
+    # forge = none, workflow = local-only: provider_validate_selection runs
+    # ahead of the audit-startup path these tests are actually about, and the
+    # default gitea/worktree-pr pair is refused unconfigured (see
+    # providers.bats) - this fixture sidesteps that with the honest
+    # "no forge, no push" pair rather than configuring a forge just to get
+    # past validation.
     cat > "$DEJIMA_T/config/config" <<EOF
 [core]
 ssh_key = $DEJIMA_T/sandbox-key
+forge = none
+workflow = local-only
 [audit]
 dir = $DEJIMA_T/audit
 EOF
@@ -1885,25 +1893,61 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # prose leak would both defeat the point, so each file gets its own
     # narrow, justified exclusion for the specific lines that are not a
     # forge coupling - everything else in scope must still match nothing.
-    local f matches fail=0
+    #
+    # Two scans, because they have different subjects:
+    #
+    # (1) `gitea` and `github.com` as substrings, case-insensitively. This is
+    #     the original scan, and it is what catches a PROSE leak ("push to
+    #     the Gitea remote") as much as a coupling.
+    #
+    # (2) Every name `provider_list forge` reports, in literal position.
+    #     Derived from the shipped directories rather than written out here,
+    #     so a forge is covered the day it lands - which is exactly what
+    #     scan 1 missed: `github` became a shipped FORGE name, and a bare
+    #     `github` matches neither of scan 1's alternatives, so core could
+    #     (and did) compare a forge name to a literal with this test green.
+    #
+    #     "Literal position" means quoted, backticked, bracketed as a config
+    #     section, prefixed `forge.`, under `forges/`, or a `case` arm -
+    #     every shape a lookup or comparison actually takes here. It is not a
+    #     bare-word scan because two shipped names cannot survive one: `none`
+    #     is an ordinary English word this repo's prose uses constantly, and
+    #     `github` is also the name of a CORE feature that predates the forge
+    #     axis (GitHub read-only: `[github] token_file`, the `github.com`
+    #     credential helper, `--allow-github-push`). Operator-facing remedy
+    #     text naming a config VALUE (`set [core] forge = none`, `or [core]
+    #     forge = github`) is deliberately outside these shapes too: a rule
+    #     that refuses a combination has to be able to say which one works,
+    #     and "pick a different forge" without saying which is a worse
+    #     message, not a purer one.
+    local f matches fail=0 name literals="" body
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        # The last alternative is a `case` arm - anchored to the start of a
+        # line (optionally after other arms' `|`) so it is the shape bash
+        # actually uses, not any prose that happens to close a parenthesis
+        # after the word.
+        literals="${literals:+$literals|}[\"'\`]$name[\"'\`]|\\[$name\\]|forge\\.$name|forges/$name|^[[:space:]]*[(|]?$name\\)|\\|$name\\)"
+    done < <(bash -c 'source "$1"; provider_list forge' _ "$REPO_ROOT/bin/dejima-provider-lib.sh")
+    [ -n "$literals" ] || { echo "no shipped forges to build the pattern from"; return 1; }
     for f in "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-config-lib.sh" \
              "$REPO_ROOT/bin/dejima-provider-lib.sh" "$REPO_ROOT/docker/entrypoint.sh" \
              "$REPO_ROOT/docker/docker-compose.yml" "$REPO_ROOT/hooks/git-push-guard.sh" \
              "$REPO_ROOT/hooks/merge-guard.sh" "$REPO_ROOT/hooks/sandbox-context.sh"; do
-        matches="$(grep -inE 'gitea|github\.com' "$f" || true)"
+        # _warn_legacy_env's table names the OLD environment variables
+        # (GITEA_SSH_HOST, GITEA_API, ...) dejima read directly before the
+        # manifest schema replaced them - a one-time migration aid for an
+        # operator's existing shell profile. Those names only ever meant
+        # gitea (nothing else was ever wired that way) and do not change when
+        # a forge is added or removed, so excluding the function body - the
+        # same range test/config.bats isolates by name for its own "every
+        # retired variable" test - is exempting history, not a live coupling.
+        # A no-op for every other file here: none of them define it.
+        body="$(sed '/^_warn_legacy_env()/,/^}/d' "$f")"
+        matches="$(grep -inE 'gitea|github\.com' <<< "$body" || true)"
+        matches="$matches"$'\n'"$(grep -nE "$literals" <<< "$body" || true)"
         case "$f" in
             */bin/dejima)
-                # _warn_legacy_env's table names the OLD environment
-                # variables (GITEA_SSH_HOST, GITEA_API, ...) dejima read
-                # directly before the manifest schema replaced them - a
-                # one-time migration aid for an operator's existing shell
-                # profile. Those names only ever meant gitea (nothing else
-                # was ever wired that way) and do not change when a forge is
-                # added or removed, so excluding the function body - the same
-                # range test/config.bats isolates by name for its own
-                # "every retired variable" test - is exempting history, not a
-                # live coupling.
-                matches="$(sed '/^_warn_legacy_env()/,/^}/d' "$f" | grep -inE 'gitea|github\.com' || true)"
                 # A citation of an external issue URL, the same category as
                 # hooks/sandbox-context.sh:3 below.
                 matches="$(grep -vE 'claude-code/issues/29162' <<< "$matches" || true)"
@@ -1913,6 +1957,13 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
                 # docker/entrypoint.sh and docker-compose.yml already get
                 # below, not a forge coupling.
                 matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                # `[github] token_file` and the pairing that resolves it: the
+                # CORE config section holding the read-only GitHub credential
+                # every session gets whatever forge is selected. Same feature
+                # as the exception above, in its config-file spelling - the
+                # section predates the forge axis and would still exist with
+                # every forge directory deleted.
+                matches="$(grep -vE '\[github\] token_file|GH_TOKEN=github token_file' <<< "$matches" || true)"
                 ;;
             */bin/dejima-config-lib.sh)
                 # core.forge's schema DEFAULT - real data (today there is
@@ -1938,6 +1989,9 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
                 matches="$(grep -vE 'anthropics/claude-code/tree' <<< "$matches" || true)"
                 ;;
         esac
+        # The two scans are concatenated with a newline, so an empty one
+        # leaves a blank line rather than nothing at all.
+        matches="$(grep -v '^$' <<< "$matches" || true)"
         if [ -n "$matches" ]; then
             echo "$f still names a forge:"
             echo "$matches"

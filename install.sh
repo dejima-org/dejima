@@ -212,13 +212,41 @@ if config_exists; then
 else
     mkdir -p "$(config_root)"
     echo "Writing a starter config to $CONFIG_FILE"
+    # An operator with GITEA_SSH_HOST/GITEA_API still exported was pushing to
+    # a Gitea/Forgejo instance before the config file existed, so the starter
+    # config keeps them pushing: forge and workflow are written out
+    # explicitly rather than left at the (non-pushing) shipped defaults, and
+    # gitea's own keys are enumerated so there is somewhere for the seeds to
+    # land - _config_keys enumerates only the SELECTED forge's keys, and with
+    # no config file yet that selection is the default, `none`.
+    _starter_forge="$(config_default core.forge)"
+    _starter_workflow="$(config_default core.workflow)"
+    _starter_extra_keys=""
+    if [ -n "${GITEA_SSH_HOST:-}" ] || [ -n "${GITEA_API:-}" ]; then
+        _starter_forge=gitea
+        _starter_workflow=worktree-pr
+        _starter_extra_keys="$(_config_extra_keys_for forge gitea)"
+    fi
     # Seeded from any legacy variables still exported, so the one-time
     # migration is a review rather than a retyping. Everything else is
     # written commented-out at its schema default, so the file doubles as
     # the reference for what can be set.
     {
         printf '# dejima configuration. See README.md.\n'
-        printf '# Every key below is shown at its default; uncomment to change one.\n\n'
+        printf '# Every key below is shown at its default; uncomment to change one.\n'
+        printf '#\n'
+        printf '# [core] forge and [core] workflow are the exception: they are written\n'
+        printf '# out uncommented, so this file states what it selects rather than\n'
+        printf '# inheriting whatever a future release defaults to.\n'
+        printf '#\n'
+        printf '# Those two decide whether this sandbox pushes at all. The shipped\n'
+        printf '# default is forge = none with workflow = local-only: the agent\n'
+        printf '# commits locally and pushes NOWHERE. To push, set workflow to\n'
+        printf '# worktree-pr (push + open a PR) or branch-push, and set forge to\n'
+        printf '# gitea (fill in [forge.gitea]) or github (fill in [forge.github]\n'
+        printf '# push_token_file). A pushing workflow whose forge resolves to no\n'
+        printf '# host is refused at launch, not launched with pushing quietly\n'
+        printf '# broken.\n\n'
         _section=""
         while IFS= read -r _key; do
             [ -n "$_key" ] || continue
@@ -233,6 +261,8 @@ else
             case "$_key" in
                 forge.gitea.ssh_host)      _seed="${GITEA_SSH_HOST:-}" ;;
                 forge.gitea.api)           _seed="${GITEA_API:-}" ;;
+                core.forge)                _seed="$_starter_forge" ;;
+                core.workflow)             _seed="$_starter_workflow" ;;
                 core.command)              _seed="${SANDBOX_CMD:-}" ;;
                 core.ssh_key)              _seed="${SANDBOX_SSH_KEY:-}" ;;
                 mounts.readonly)           _seed="${SANDBOX_EXTRA_MOUNTS:-}" ;;
@@ -258,7 +288,7 @@ else
             else
                 printf '# %s = %s\n' "$_leaf" "$_default"
             fi
-        done < <(_config_keys)
+        done < <(_config_keys; [ -z "$_starter_extra_keys" ] || printf '%s\n' "$_starter_extra_keys")
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 fi
@@ -267,6 +297,31 @@ if [ -f "$(config_root)/remote.conf" ]; then
     echo
     echo "Note: $(config_root)/remote.conf is no longer read - its keys moved to the"
     echo "[remote-access] section of $CONFIG_FILE. Left in place for you to remove."
+fi
+
+# The [core] forge/workflow defaults changed from gitea+worktree-pr to
+# none+local-only, which silently stops an existing sandbox pushing if the
+# operator was relying on the defaults. Reported for the same reason the
+# remote.conf note above is: a config that means something different after an
+# upgrade than it did before must not change meaning quietly. Only for a
+# config that PARSES - config_is_set cannot distinguish "absent" from "the
+# file is broken", and a broken config already fails loudly at launch.
+if config_exists && config_validate 2>/dev/null; then
+    if ! config_is_set core forge || ! config_is_set core workflow; then
+        echo
+        echo "Note: the defaults for [core] forge and [core] workflow have changed."
+        echo "They were 'gitea' and 'worktree-pr'; they are now 'none' and 'local-only'."
+        echo "$CONFIG_FILE does not set both of them explicitly, so this"
+        echo "sandbox now commits locally and pushes NOWHERE where it used to push and"
+        echo "open a Gitea/Forgejo PR."
+        echo
+        echo "To keep pushing, write both lines out under [core]:"
+        echo "    forge = gitea"
+        echo "    workflow = worktree-pr"
+        echo "(with [forge.gitea] ssh_host and api filled in, which that pair has always"
+        echo "required). To confirm the new behaviour instead, write 'forge = none' and"
+        echo "'workflow = local-only' explicitly and this note stops appearing."
+    fi
 fi
 
 echo "Done. Try: $BIN_DIR/dejima ~/some/project"

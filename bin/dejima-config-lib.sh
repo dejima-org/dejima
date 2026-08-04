@@ -46,8 +46,8 @@
 _config_table() {
     cat <<'EOF'
 core.harness	provider:harness	claude-code
-core.forge	provider:forge	gitea
-core.workflow	provider:workflow	worktree-pr
+core.forge	provider:forge	none
+core.workflow	provider:workflow	local-only
 core.command	identifier	claude
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared

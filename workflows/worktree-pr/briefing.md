@@ -4,9 +4,9 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   working copy, and changing its branch out from under them is disruptive
   even if you switch it back.
 <!-- core: worktree -->
-- Push that branch to the Gitea remote, then run `{{pr_command}} create` from
-  the worktree. Never push to GitHub (read-only, and not reachable for
-  push regardless), and never push directly to main/master, on any remote.
+- Push that branch to the remote, then run `{{pr_command}} create` from
+  the worktree. Never push directly to {{blocked_branches}}, on any remote,
+  and never to a host the preamble above didn't say this session can push to.
   A `git-push-guard.sh` hook enforces both as a backstop, but treat them
   as the actual workflow to follow, not just a filter to route around.
   Merging is the operator's call, not yours - a `merge-guard.sh`
@@ -25,7 +25,7 @@ Git workflow - do this even though nothing stops you from doing otherwise:
 <!-- end -->
 <!-- requires: issues -->
 - Name the issues a PR resolves in its body: `Fixes #N` (`Closes` and
-  `Resolves` work too) tells Gitea to close them when it merges. Use
+  `Resolves` work too) tells the forge to close them when it merges. Use
   `Refs #N` for work that is partial or merely related, so those stay
   open. Prefer the keyword to closing anything yourself once it lands,
   because of the line above - you stop at the PR, and the merge happens

@@ -464,6 +464,18 @@ write_config() {
     [[ "$output" == *"invalid value"* ]]
 }
 
+@test "an invalid [core] forge reports one error, not two" {
+    # config_get already prints "invalid value for [core] forge ..." and
+    # returns empty; the collision-warning pass right after it used to feed
+    # that empty value on to manifest_get, which failed a second time with
+    # its own "invalid forge name:" line - noise on top of the real error.
+    write_config '[core]' 'forge = not-a-real-forge'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value for [core] forge"* ]]
+    [[ "$output" != *"invalid forge name"* ]]
+}
+
 @test "--print-config does not need Docker or a workspace argument" {
     write_config '[core]' 'firewall = on'
     PATH="/nonexistent:$PATH" run "$REPO_ROOT/bin/dejima" --print-config
@@ -484,7 +496,12 @@ write_config() {
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key" 'command = --evil'
+    # forge = none, workflow = local-only: provider_validate_selection runs
+    # ahead of this check, and the default gitea/worktree-pr pair is refused
+    # unconfigured (see providers.bats) - this test is about core.command,
+    # not about forge selection, so it sidesteps that with the honest
+    # "no forge, no push" pair instead of configuring one just to get past it.
+    write_config '[core]' "ssh_key = $key" 'command = --evil' 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
     HOME="$FAKE_HOME" SSH_AUTH_SOCK= run "$REPO_ROOT/bin/dejima" "$workspace"
     [ "$status" -ne 0 ]
@@ -673,7 +690,7 @@ write_config() {
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key"
+    write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
@@ -704,7 +721,8 @@ EOF
     : > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" \
-        '[forge.gitea]' 'token_file = /nonexistent/gitea-token'
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
+        'token_file = /nonexistent/gitea-token'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
@@ -734,6 +752,182 @@ EOF
     [[ "$output" == *"set the path, not the token"* ]]
 }
 
+@test "selecting the github forge warns that [github] token_file is unused" {
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' 'workflow = branch-push' \
+        '[github]' "token_file = $ro" \
+        '[forge.github]' "push_token_file = $tok"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"[github] token_file is not used"* ]]
+    [[ "$output" == *"push_token_file"* ]]
+}
+
+@test "the github token_file warning is silent for any other forge" {
+    write_config '[core]' 'forge = gitea' '[github]' "token_file = $CONFIG_DIR/ro"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"is not used"* ]]
+}
+
+@test "the github token_file warning is silent when push_token_file is not also set" {
+    # The warning claims GH_TOKEN comes from push_token_file - false unless
+    # that is actually configured too. Wholly unconfigured (push_token_file
+    # unset) is the same silent case provider_validate_selection's own
+    # partial-config refusal defers to, not something to say out loud here.
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' "[github]" "token_file = $ro"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"is not used"* ]]
+}
+
+@test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
+    # Finding 1 regression: forge_env_exports used to emit `GH_TOKEN=` (empty)
+    # whenever push_token_file was unset, and `-e GH_TOKEN=` on `docker
+    # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
+    # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
+    # [github] token_file value every session is supposed to get regardless
+    # of forge. Asserted on the actual argument list handed to `docker`, not
+    # on a warning, so this catches the container-facing symptom directly.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local ro="$CONFIG_DIR/ro-token"
+    printf 'ghp_readonly\n' > "$ro"
+    write_config '[core]' 'forge = github' 'workflow = local-only' \
+        '[github]' "token_file = $ro"
+    workspace="$(mktemp -d)"
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! grep -qxF 'GH_TOKEN=' "$docker_log" \
+        || { echo "GH_TOKEN= reached docker, clobbering the read-only token"; cat "$docker_log"; return 1; }
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+# Records both the environment `docker` is invoked with and its full
+# argument list - the two places a resolved DEJIMA_*/ALLOW_* value can reach
+# the container, and the only observable evidence of the firewall posture a
+# launch actually asks for without booting one (test/runtime.bats has the
+# other half, and needs Docker).
+stub_docker_log() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "ALLOW_GITHUB_PUSH=$ALLOW_GITHUB_PUSH" >> "$SANDBOX_TEST_DOCKER_LOG"
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+}
+
+@test "the github forge's hosts reach the push guard, never the extra-domains allowlist" {
+    # entrypoint.sh folds DEJIMA_FORGE_HOSTS into EXTRA_ALLOWED_DOMAINS,
+    # which init-firewall.sh resolves into the port-UNRESTRICTED
+    # allowed-domains ipset and dns-proxy.sh exempts from stop-dns-rebind.
+    # Right for a self-hosted forge host, a silent widening for GitHub's
+    # public names - and the firewall's own startup self-check refuses to
+    # bring the container up when github.com:22 is reachable without the
+    # push grant, so this also used to be a container that never started.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    # A pushing workflow refuses to launch without a push credential; a
+    # dedicated key file is the headless form of that, and keeps this test
+    # independent of whether the host running it has an agent.
+    local key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' 'forge = github' 'workflow = worktree-pr' \
+        "ssh_key = $key" \
+        '[forge.github]' "push_token_file = $tok"
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Nothing of this forge's in the extra-domains list at all.
+    grep -qxF 'DEJIMA_FORGE_HOSTS=' "$docker_log" \
+        || { echo "DEJIMA_FORGE_HOSTS was not empty:"; grep '^DEJIMA_FORGE_HOSTS' "$docker_log"; return 1; }
+    # But the guard still knows them, or the push it is told to make is
+    # refused inside the container.
+    grep -qxF 'DEJIMA_PUSH_HOSTS=github.com ssh.github.com api.github.com' "$docker_log" \
+        || { echo "push hosts wrong:"; grep '^DEJIMA_PUSH_HOSTS' "$docker_log"; return 1; }
+    # And port 22 opens through the documented, logged, self-checked path.
+    grep -qxF 'ALLOW_GITHUB_PUSH=1' "$docker_log" \
+        || { echo "the push grant was not opened"; return 1; }
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "the github forge with a non-pushing workflow leaves port 22 shut" {
+    # The grant is tied to the workflow actually pushing, not to the forge
+    # being selected - local-only never pushes, so there is nothing to open.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    write_config '[core]' 'forge = github' 'workflow = local-only' \
+        '[forge.github]' "push_token_file = $tok"
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF 'ALLOW_GITHUB_PUSH=0' "$docker_log" \
+        || { echo "the push grant was opened for a non-pushing workflow"; return 1; }
+    grep -qxF 'DEJIMA_PUSH_HOSTS=' "$docker_log"
+    grep -qxF 'DEJIMA_FORGE_HOSTS=' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "a self-hosted forge's host still takes the extra-domains path" {
+    # The other side of the same manifest key: a forge that does NOT declare
+    # hosts_allowlisted_by_core keeps the behaviour that path exists for -
+    # its host resolved into the allowlist, and no GitHub push grant.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' 'forge = gitea' 'workflow = branch-push' \
+        "ssh_key = $key" \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
+        'token_file = /dev/null'
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF 'DEJIMA_FORGE_HOSTS=git.example api.example' "$docker_log" \
+        || { echo "forge hosts wrong:"; grep '^DEJIMA_FORGE_HOSTS' "$docker_log"; return 1; }
+    grep -qxF 'ALLOW_GITHUB_PUSH=0' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
 @test "logging.loki_url reaches the launch environment" {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"
@@ -741,7 +935,7 @@ EOF
     key="$FAKE_HOME/sandbox-key"
     : > "$key"
     chmod 600 "$key"
-    write_config '[core]' "ssh_key = $key" \
+    write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only' \
         '[logging]' 'loki_url = https://loki.example.invalid'
     workspace="$(mktemp -d)"
     STUB_DIR="$(mktemp -d)"
@@ -799,6 +993,24 @@ run_install() {
     [[ "$output" == *"no longer read"* ]]
     # Reported, not deleted - it is the operator's file.
     [ -f "$CONFIG_DIR/remote.conf" ]
+}
+
+@test "install.sh reports the changed forge/workflow defaults to a config that relies on them" {
+    # The defaults moved from gitea + worktree-pr to none + local-only, which
+    # silently stops an existing sandbox pushing. Same stance as the
+    # remote.conf notice above: a config whose meaning changed under the
+    # operator gets told so, with the lines that restore the old behaviour.
+    write_config '[core]' 'firewall = on'
+    run_install
+    [[ "$output" == *"forge = gitea"* ]]
+    [[ "$output" == *"workflow = worktree-pr"* ]]
+    [[ "$output" == *"local-only"* ]]
+}
+
+@test "install.sh stays quiet about the defaults once forge and workflow are explicit" {
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    run_install
+    [[ "$output" != *"have changed"* ]]
 }
 
 @test "the README documents the config file, not the retired variables" {
@@ -932,7 +1144,7 @@ EOF
     rw="$(mktemp -d)"
     ro="$(mktemp -d)"
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" \
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  '[mounts]' "read_write = $rw" "readonly = $ro"
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -957,7 +1169,12 @@ EOF
     # though an actual session was told correctly. briefing_compose now
     # reads the same DEJIMA_RW_MOUNTS a real launch would.
     rw="$(mktemp -d)"
-    write_config '[mounts]' "read_write = $rw"
+    # forge = none, workflow = local-only: --print-briefing now runs after
+    # provider_validate_selection too, and the default gitea/worktree-pr pair
+    # is refused unconfigured - this test is about the mounts sentence, not
+    # forge selection.
+    write_config '[core]' 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $rw"
     run "$REPO_ROOT/bin/dejima" --print-briefing
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"outlive the container too: $rw"* ]]
@@ -972,7 +1189,8 @@ EOF
     # rule never runs, which would pass this test for the wrong reason.
     mkdir -p "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin"
     for guarded in "$CONFIG_DIR" "$RW_HOME/.claude" "$RW_HOME/.local/bin" "$REPO_ROOT"; do
-        write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $guarded"
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                     '[mounts]' "read_write = $guarded"
         _rw_launch "$workspace"
         [ "$status" -ne 0 ] || { echo "accepted a writable mount over $guarded"; return 1; }
         [[ "$output" == *"Refusing"* ]] \
@@ -980,13 +1198,15 @@ EOF
     done
     # The workspace is already mounted read-write; naming it again is a config
     # error worth surfacing, not a harmless duplicate.
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $workspace"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $workspace"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Refusing"* ]]
     # A bare home directory contains several guarded paths, so the same
     # both-directions rule catches it without needing an entry of its own.
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $RW_HOME"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $RW_HOME"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Refusing"* ]]
@@ -1003,6 +1223,7 @@ EOF
     workspace="$(mktemp -d)"
     mkdir -p "$RW_HOME/data"
     write_config '[core]' "ssh_key = $RW_KEY" "share_dir = $RW_HOME/share" \
+                 'forge = none' 'workflow = local-only' \
                  '[audit]' "dir = $RW_HOME/data/store/audit" \
                  '[mounts]' "read_write = $RW_HOME/data"
     [ ! -e "$RW_HOME/data/store" ]
@@ -1022,7 +1243,7 @@ EOF
     # overlap rule under test never runs.
     mkdir -p "$store/audit"
     for key in dir baselines_dir; do
-        write_config '[core]' "ssh_key = $RW_KEY" \
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                      '[audit]' "$key = $store/audit" \
                      '[mounts]' "read_write = $store/audit"
         _rw_launch "$workspace"
@@ -1038,7 +1259,7 @@ EOF
     _rw_setup
     workspace="$(mktemp -d)"
     outer="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" \
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  '[audit]' "dir = $outer/nested/audit" \
                  '[mounts]' "read_write = $outer"
     _rw_launch "$workspace"
@@ -1055,7 +1276,7 @@ EOF
     workspace="$(mktemp -d)"
     for spelling in "/" "/." "//"; do
         d="$(mktemp -d)"
-        write_config '[core]' "ssh_key = $RW_KEY" \
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                      '[mounts]' "readonly = $d" "read_write = ${d}${spelling}"
         _rw_launch "$workspace"
         [ "$status" -ne 0 ] || { echo "both lists accepted '$d' vs '${d}${spelling}'"; return 1; }
@@ -1070,7 +1291,8 @@ EOF
     _rw_setup
     d="$(mktemp -d)"
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' "read_write = $d" "readonly = $d"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $d" "readonly = $d"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"both name the same"* ]]
@@ -1080,7 +1302,8 @@ EOF
 @test "a read_write entry that is not an existing directory is refused" {
     _rw_setup
     workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" '[mounts]' 'read_write = /nonexistent/nowhere'
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' 'read_write = /nonexistent/nowhere'
     _rw_launch "$workspace"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not an existing directory"* ]]
@@ -1110,8 +1333,12 @@ EOF
     # exercises the real launch path to verify the refusal actually stops it.
     _rw_setup
     workspace="$(mktemp -d)"
-    # Configure gitea forge with a valid config plus a token file with a newline.
-    printf '[core]\nfirewall = on\nssh_key = %s\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+    # Configure gitea forge with a valid config plus a token file with a
+    # newline. forge/workflow are named explicitly because this test is about
+    # a gitea token reaching the container: the shipped defaults select no
+    # forge at all, so leaving them implicit would mean nothing ever reads
+    # token_file and the refusal under test could never fire.
+    printf '[core]\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
         "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
     printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
     STUB_DIR="$(mktemp -d)"

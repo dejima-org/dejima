@@ -107,6 +107,13 @@ provider_list() {
 # default. Types are the config file's own, so one validator set covers both.
 _manifest_table() {
     case "$1" in
+        # hosts_allowlisted_by_core (below) means "core already allowlists
+        # these hosts in its own right" - today that is true only of
+        # GitHub's published ranges (see bin/dejima's ALLOW_GITHUB_PUSH
+        # wiring). A forge whose hosts are not among those must leave it
+        # off: turning it on grants no firewall allowance at all (its hosts
+        # never reach DEJIMA_FORGE_HOSTS) plus an irrelevant GitHub push
+        # grant instead.
         forge) cat <<'EOF'
 capabilities	?list:identifier
 pr_command	?command
@@ -117,6 +124,7 @@ requires	?list:identifier
 host_keys	?list:identifier
 url_keys	?list:identifier
 fixed_hosts	?list:hostname
+hosts_allowlisted_by_core	bool	off
 install	?list:relpath
 env_export	?list:export
 EOF
@@ -474,38 +482,107 @@ provider_validate_selection() {
         fi
     done
 
-    # Rule 3 ("a pushing workflow needs a forge that resolves to a host") is
-    # deliberately NOT checked here. A forge's own host-bearing keys may have
-    # no schema default and install.sh writes them commented out, so a fresh
-    # install would be refused by this rule today - while it launches fine
-    # as-is, with git-push-guard.sh blocking pushes at runtime (see README
-    # "Skip this if you only push to GitHub"). An unconfigured forge is
-    # supported, not broken, until Phase 3 adds `forge = none` as the honest
-    # way to say so - only then does this rule have a correct alternative to
-    # point an operator at, and it becomes a refusal alongside rule 5 below.
+    # Autonomy names where the agent stops without asking, so it is a claim
+    # about what the selected forge can actually do. Checked here rather than
+    # left to the briefing: a mismatch discovered by the agent mid-task is a
+    # confusing failure, and this one is knowable at launch.
+    local autonomy push
+    autonomy="$(manifest_get workflow "$workflow" autonomy)" || return 1
+    push="$(manifest_get workflow "$workflow" push)" || return 1
+    case "$autonomy" in
+        open-pr)
+            if ! _set_contains "$caps" pr; then
+                echo "workflow '$workflow' sets autonomy = open-pr, which needs a forge" >&2
+                echo "offering the 'pr' capability - '$forge' offers: ${caps:-none}." >&2
+                return 1
+            fi
+            ;;
+        push-branch)
+            if [ "$push" != "on" ]; then
+                echo "workflow '$workflow' sets autonomy = push-branch but push = off." >&2
+                echo "It cannot stop at a push it never makes." >&2
+                return 1
+            fi
+            ;;
+    esac
 
-    # config_is_set, not config_get: the question is "did the operator set
-    # this key", not "does it have a value" - a key can have a schema
-    # default, so it always has a value, and testing the value would make a
-    # wholly unconfigured forge (nothing in [forge.<name>] at all) look
-    # partly configured.
+    # Rule 3: a workflow that pushes needs a forge that resolves to somewhere
+    # to push to. Deferred through Phase 2 because refusing an unconfigured
+    # forge had no correct alternative to offer - `forge = none` now exists,
+    # so an operator who genuinely pushes nowhere has an honest way to say it
+    # and this stops being a refusal with no remedy.
+    if [ "$push" = "on" ] && [ -z "$(forge_hosts "$forge")" ]; then
+        if [ -z "$(manifest_get forge "$forge" keys)" ]; then
+            # A forge with no keys at all has nothing to configure - "set
+            # [forge.$forge]" would be a fix that does not exist, so the only
+            # honest remedies are another forge or another workflow.
+            echo "workflow '$workflow' pushes, but forge '$forge' has no host to push" >&2
+            echo "to and nothing to configure. Select a forge that has one ([core]" >&2
+            echo "forge = github needs no host configured), or a workflow that does" >&2
+            echo "not push (workflow = local-only)." >&2
+        else
+            echo "workflow '$workflow' pushes, but forge '$forge' resolves to no host." >&2
+            echo "Configure [forge.$forge], or [core] forge = github to push to GitHub" >&2
+            echo "instead, or [core] forge = none and a workflow that does not push" >&2
+            echo "(workflow = local-only) if this sandbox pushes nowhere." >&2
+        fi
+        return 1
+    fi
+
+    # Set AND non-empty. config_is_set alone answers "did the operator write
+    # this key", which is not the same question: install.sh writes every key
+    # commented out at its default, so uncommenting one and not filling it in
+    # yields `api =` - written, and worth nothing. Every call the forge makes
+    # then fails inside the container, which is precisely what these two
+    # rules exist to catch at launch instead.
+    #
+    # Testing the value is only safe because of the config_default skip
+    # immediately below: a key with a working schema default always resolves
+    # to something, so it is excluded before the emptiness test can read a
+    # wholly unconfigured forge (nothing in [forge.<name>] at all) as partly
+    # configured. A key with no default resolves to empty exactly when it is
+    # unset or blank, which are the same thing to everything downstream.
     set_n=0 unset_n=0 missing=""
     for key in $(manifest_get forge "$forge" requires); do
-        if config_is_set "forge.$forge" "$key"; then
+        [ -z "$(config_default "forge.$forge.$key")" ] || continue
+        if config_is_set "forge.$forge" "$key" && [ -n "$(config_get "forge.$forge" "$key")" ]; then
             set_n=$((set_n + 1))
         else
             unset_n=$((unset_n + 1))
             missing="${missing:+$missing }$key"
         fi
     done
-    # A warning, not a refusal (rule 5), and only when the forge is PARTLY
-    # configured. Wholly unconfigured is the same supported "I don't use
-    # this forge" case rule 3 above defers to Phase 3 for, and must stay
-    # silent; a partial configuration is almost certainly a typo, and saying
-    # so costs nothing. Becomes a refusal in Phase 3 alongside rule 3.
-    if [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
-        echo "Warning: forge '$forge' is partly configured - [forge.$forge] is" >&2
-        echo "missing: $missing. Pushes and PRs will fail until it is set." >&2
+    # Rule 5: a partly configured forge is a typo, not a choice. Refused rather
+    # than warned now that `forge = none` exists: previously the only way to
+    # say "I don't use a forge" was to leave one half-filled, so refusing would
+    # have broken a supported state. Still scoped to PARTIAL configuration -
+    # nothing set at all is rule 3's case above, and carries its own message -
+    # and, like rule 3, only when the workflow actually pushes: a non-pushing
+    # workflow never invokes the forge at all, so a partially filled-in forge
+    # section (e.g. only a host key, set so the firewall allows fetches) is
+    # untidy rather than broken - not a typo worth refusing.
+    if [ "$push" = "on" ] && [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
+        echo "forge '$forge' is partly configured - [forge.$forge] is missing:" >&2
+        echo "$missing. Set them, or set [core] forge = none if this sandbox" >&2
+        echo "pushes nowhere." >&2
+        return 1
+    fi
+
+    # Rule 3 only catches a wholly unconfigured forge by way of forge_hosts
+    # resolving empty - but a forge like github pins fixed_hosts independent
+    # of any config (the same three hosts for every operator), so forge_hosts
+    # is never empty regardless of whether push_token_file is set. A forge
+    # with exactly one `requires` key can also never be "partly" configured
+    # (rule 5 above): it is either wholly set or wholly unset, so a wholly
+    # unset single-key forge slips past both rules unless this closes it.
+    # Scoped the same way rule 3 is - only when the workflow actually pushes,
+    # and never for a forge with no `requires` at all.
+    if [ "$push" = "on" ] && [ "$set_n" -eq 0 ] && [ "$unset_n" -gt 0 ]; then
+        echo "workflow '$workflow' pushes, but forge '$forge' has none of its" >&2
+        echo "required settings configured - [forge.$forge] is missing: $missing." >&2
+        echo "Set them, or set [core] forge = none and a workflow that does not" >&2
+        echo "push (workflow = local-only) if this sandbox pushes nowhere." >&2
+        return 1
     fi
     return 0
 }
@@ -558,6 +635,18 @@ forge_env_exports() {
         else
             value="$(config_get "forge.$forge" "$ref")" || return 1
         fi
+        # An unresolved (empty) value is skipped rather than emitted as
+        # `NAME=`. Harmless for a forge whose variables docker-compose.yml
+        # never declares in its own `environment:` section - an absent -e
+        # flag and an empty one are the same "not set" to a container either
+        # way, and every such variable's consumer already treats unset and
+        # empty identically. Not harmless for GH_TOKEN specifically: compose
+        # DOES declare it there, carrying an independent read-only value
+        # every session gets regardless of which forge is selected. `-e
+        # GH_TOKEN=` on `docker compose run` overrides that entry - emitting
+        # it here whenever a forge's own env_export resolves it empty would
+        # silently replace a configured read-only token with nothing.
+        [ -n "$value" ] || continue
         printf '%s=%s\n' "$name" "$value"
     done
 }
@@ -588,7 +677,7 @@ BRIEFING_FRAGMENT_MAX=16384
 # is a hard refusal (_briefing_substitute below), not a literal passthrough -
 # an unrecognized {{key}} reaching an agent's context verbatim is exactly the
 # kind of silent drift this whole function exists to prevent.
-_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts"
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist"
 
 _briefing_whitelisted() {
     _set_contains "$_BRIEFING_WHITELIST" "$1"
@@ -616,7 +705,7 @@ What this means:
   packages, anything outside the mounted paths, and the container itself go
   away when this run ends.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
-  registry, GitHub read-only, the configured {{forge_name}} host{{forge_ssh_host}}, plus anything
+  registry, {{network_allowlist}}, plus anything
   approved via dejima-allow). Requests to anything else will simply
   fail to connect. That restriction is not only a limit on your reach: it
   is also what bounds where a prompt injection or a compromised dependency
@@ -783,6 +872,38 @@ _briefing_resolve_key() {
                 host="$(config_get "forge.$forge" ssh_host 2>/dev/null)" || host=""
             fi
             [ -z "$host" ] || printf ' (%s)' "$host"
+            ;;
+        # What the session may actually reach, phrased for the selected forge
+        # rather than assembled from two placeholders. Materially different
+        # postures, and the agent acts on this sentence: GitHub is read-only
+        # by default; a forge with hosts of its own adds them; a forge whose
+        # hosts are the ones core already allowlists (hosts_allowlisted_by_core
+        # - the same manifest key bin/dejima reads to open the push grant) has
+        # no separate host to name, and when the workflow pushes, calling that
+        # access read-only would be false in the direction that matters.
+        #
+        # Driven off that key rather than off the forge's name: it is the one
+        # thing that actually decides the posture, so anything else here would
+        # be core guessing at what a manifest already states.
+        network_allowlist)
+            local hosts=""
+            if [ "$(manifest_get forge "$forge" hosts_allowlisted_by_core)" = "on" ]; then
+                if [ "$(manifest_get workflow "$workflow" push)" = "on" ]; then
+                    printf '%s' "GitHub, which this session can also push to"
+                else
+                    printf '%s' "GitHub read-only"
+                fi
+            else
+                if [ -n "$(manifest_get forge "$forge" host_keys)$(manifest_get forge "$forge" url_keys)$(manifest_get forge "$forge" fixed_hosts)" ]; then
+                    hosts=", the configured $forge host"
+                    if config_exists 2>/dev/null; then
+                        local h
+                        h="$(config_get "forge.$forge" ssh_host 2>/dev/null)" || h=""
+                        [ -z "$h" ] || hosts="$hosts ($h)"
+                    fi
+                fi
+                printf '%s' "GitHub read-only$hosts"
+            fi
             ;;
         blocked_branches) manifest_get workflow "$workflow" blocked_branches ;;
         project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;

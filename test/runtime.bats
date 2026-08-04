@@ -196,6 +196,7 @@ teardown() {
     docker rmi "dejima-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-ghforge-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
@@ -398,6 +399,61 @@ dexec_node() {
 
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "a github-forge launch boots, and its port 22 comes from the push grant" {
+    # The container half of test/config.bats' "the github forge's hosts reach
+    # the push guard, never the extra-domains allowlist" - the environment
+    # asserted there, handed to a real container here. Selecting `forge =
+    # github` with a pushing workflow resolves to exactly this: no
+    # DEJIMA_FORGE_HOSTS (core already allowlists GitHub's ranges) and the
+    # push grant open.
+    #
+    # It has to be a boot test, because the failure it guards against was the
+    # container not starting at all: with those three hostnames in
+    # DEJIMA_FORGE_HOSTS, init-firewall.sh resolves them into the
+    # port-unrestricted allowed-domains ipset, its own startup self-check
+    # finds github.com:22 reachable without ALLOW_GITHUB_PUSH=1, and
+    # entrypoint.sh (set -Eeuo pipefail) dies before the agent ever runs.
+    local test_container="dejima-test-ghforge-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -e DEJIMA_FORGE_HOSTS= \
+        -e DEJIMA_PUSH_HOSTS="github.com ssh.github.com api.github.com" \
+        -e ALLOW_GITHUB_PUSH=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    # The container coming up at all is half the assertion.
+    wait_ready "$test_container"
+
+    # Port 22 open, and open through the path that says so out loud.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
+    [ "$status" -eq 0 ]
+    # Polled rather than read once, for the reason settled_logs documents: the
+    # json-file driver's writes lag the process that produced them, so a single
+    # read taken here can stop short of a line printed seconds earlier. That is
+    # how this failed in CI - with the port-22 assertion directly above passing,
+    # ie. with the branch that prints this line demonstrably taken. Waiting on
+    # the line cannot mask its absence: one never printed still fails, later.
+    local want="ALLOW_GITHUB_PUSH=1: opening port 22" logs=""
+    for _ in $(seq 1 40); do
+        logs=$(docker logs "$test_container" 2>&1)
+        case "$logs" in *"$want"*) break ;; esac
+        sleep 0.25
+    done
+    [[ "$logs" == *"$want"* ]]
+
+    # And the other half of the widening this avoids: GitHub's names keep
+    # dnsmasq's rebind protection, which the extra-domains path would have
+    # exempted them from.
+    run docker exec "$test_container" grep 'rebind-domain-ok=/github.com/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
