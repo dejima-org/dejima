@@ -2,26 +2,53 @@
 
 [← dejima README](../README.md)
 
-**Opt-in, and entirely off until you flip one switch.** Nothing here runs and
-no front door exists unless `[remote-access] enabled = on` is set in
-`~/.config/dejima/config`. With it `off` (the default), `dejima` builds
-exactly the `docker compose` invocation it built before this feature
-existed, no session state is written, no notification hook is registered,
-and `dejima-attach`, `dejima-ttyd` and `dejima-notify-watch` each refuse to
-run at all. `install.sh` symlinks those three onto `PATH` and stops there -
-it runs no `systemctl`, copies no unit, and starts nothing.
+**Off by default, and nothing here starts itself.** Remote access is one
+config switch plus work you do by hand: two systemd user units to install,
+a reverse proxy to write, an SSH key to authorise. Until you have done all
+of it, `dejima` behaves exactly as it did before this feature existed. See
+["What `off` means"](#what-off-means) for the specifics.
 
-What this is: a way to get back to a session that is *already running* on
-your machine, from a phone on the same network, when it stops to ask you
-something. What it is not: a way to start a session, a hosted service, or
-anything that should face the internet.
+## What it is
 
-**Both front doors hand out a host shell.** `dejima-attach` attaches a tmux
-client on your own tmux server, and a tmux client is one prefix key away
-from a new window that has nothing to do with any sandbox. Everything below
-follows from that single fact - it is why the listener is on loopback, why
-the proxy needs authentication, and why the bind address is the one step to
-get right.
+A way to get back to a session that is *already running* on your machine,
+from a phone on the same network, when it stops to ask you something. The
+session pushes a notification; you tap it and land in the tmux window that
+session is running in.
+
+It is not a way to *start* a session, and it is not a hosted service.
+**Don't open it to the public internet.**
+
+## What it costs you
+
+**A front door here is a host shell, not a view of one sandbox.** Both of
+them - SSH and web - end at a tmux client on your own tmux server, and a
+tmux client is one prefix key away from a new window that has nothing to do
+with any sandbox. Everything below follows from that single fact: it is why
+the web listener is on loopback, why the proxy needs authentication, and why
+the address that proxy binds is the one step to get right.
+
+So what turning this on adds is **ingress, on your own network**. Anyone who
+can reach the address you put the front door on can have that host shell,
+and "on my LAN" is the whole of the perimeter you are getting - there is no
+second factor here, no per-session authorisation, and no audit of who
+attached. The two things holding that line are:
+
+- **[The bind address](#the-bind-address-is-the-one-thing-to-get-right).**
+  `ttyd` binds `127.0.0.1` and your proxy must bind one specific LAN
+  address - never the wildcard, never a Docker bridge.
+- **Authentication on the proxy.** `ttyd` carries no credential of its own,
+  so a `server` block without `auth_basic` is an unauthenticated host shell
+  for everyone on that network.
+
+What it does **not** add is a way *out* of a sandbox. Configured as
+described below, a compromised session cannot reach `ttyd`, cannot reach
+your proxy, and gains nothing from the fact that your phone can: it has a
+route to exactly one host address, and neither front door is on it. That
+property is worth stating precisely because it is the one a plausible-looking
+mistake inverts - a proxy bound to `0.0.0.0` or to a bridge address is a
+front door opening *inward*, and that is a full sandbox escape rather than a
+degradation. [Verifying it](#verifying-it) is two commands, and worth
+running.
 
 ## `[remote-access]`
 
@@ -88,6 +115,109 @@ pgrep -a ttyd    # confirm the argv is what you just configured
 Skipping this is quiet rather than loud: nothing warns, and the front door
 keeps serving with the old settings, which reads as "the setting had no
 effect" rather than as "the process is older than the file".
+
+## How it works
+
+Almost none of this is in the sandbox. The container writes one empty file
+and knows nothing else about the feature; everything that turns that into a
+notification, and everything that puts a terminal in front of you
+afterwards, runs on the host as your own user.
+
+### The session asks you something
+
+```
+ ┌─ the sandbox container ────────────────────────────────────────────┐
+ │  claude code, at a Notification or Stop hook                       │
+ │       │                                                            │
+ │       │  hooks/dejima-notify.sh writes an empty file named         │
+ │       ▼  `waiting` or `done` - no content, no stdin, no network    │
+ └───────┼────────────────────────────────────────────────────────────┘
+ ════════╪═══ container boundary - one bind-mounted directory ═════════
+ ┌───────▼─── your machine, as your user ─────────────────────────────┐
+ │  ${XDG_RUNTIME_DIR}/dejima/notify/<run-id>/waiting                 │
+ │       │                                                            │
+ │       │  inotify, or a ~6s poll where inotify-tools is absent      │
+ │       ▼                                                            │
+ │  dejima-notify-watch  (systemd --user)                             │
+ │       │  consumes the marker by NAME; never reads its content      │
+ │       │  every byte of the push is composed from host-side data    │
+ │       ▼                                                            │
+ └───────┼────────────────────────────────────────────────────────────┘
+ ════════╪═══════════════ off your machine ════════════════════════════
+         │  curl
+         ▼
+         your ntfy topic ──── push ────►  your phone
+                                          "dejima: <project> needs input"
+                                          link: <base_url>/?arg=<run-id>
+```
+
+The marker directory is the sandbox's entire surface here, and it is
+one-way: a name, out. Nothing the session writes reaches the push, which is
+why the notification says a project needs input and never what it is asking.
+[Notifications](#notifications) has the detail, including where that
+guarantee actually lives.
+
+### You come back
+
+```
+    browser, on the link from the push          any plain SSH client
+         │                                              │
+         │  https://<base_url>/?arg=<run-id>            │  ssh dejima-box
+         │  HTTP Basic over TLS                         │  key with a
+         ▼                                              ▼  forced command
+ ════════╪══════════════════ your LAN ══════════════════╪══════════════
+ ┌─ your machine, as your user ───────────────────────────────────────┐
+ │  nginx, listening on ONE LAN address        sshd                   │
+ │   TLS + auth_basic, plus a default_server    authorized_keys with  │
+ │   that refuses every other name              a forced command      │
+ │       │                                              │             │
+ │       │  proxy_pass http://127.0.0.1:7681            │             │
+ │       ▼                                              │             │
+ │  ttyd --interface 127.0.0.1 --check-origin --url-arg │             │
+ │       │                                              │             │
+ │       └──────────────────────┬───────────────────────┘             │
+ │                              ▼                                     │
+ │                    dejima-attach [<run-id>]                        │
+ │                              │  a grouped tmux session             │
+ │                              ▼                                     │
+ │                    YOUR TMUX SERVER                                │
+ │                     the sandbox's window - and every other         │
+ │                     window on it, one prefix key away              │
+ └────────────────────────────────────────────────────────────────────┘
+ ═════════════════════ container boundary ═════════════════════════════
+ ┌─ the sandbox container ────────────────────────────────────────────┐
+ │  routes to the Docker bridge gateway - your host - and to nothing  │
+ │  else of yours. Neither front door is on that address, which is    │
+ │  the whole reason `ttyd` is on loopback and nginx is on one        │
+ │  named LAN interface. A proxy on `0.0.0.0` or on a bridge puts a   │
+ │  host shell in here.                                               │
+ └────────────────────────────────────────────────────────────────────┘
+```
+
+The web door is the one the notification links into: the browser hits your
+reverse proxy, which authenticates and forwards to a `ttyd` that only this
+host can open a socket to, and `ttyd` runs `dejima-attach` with the run id
+from `?arg=`. The SSH door skips all of that. It is a key in your own
+`authorized_keys` pinned to a forced command, so a plain SSH app on the
+phone runs `dejima-attach` and nothing else no matter what it asks to run,
+and lands on a numbered picker of live sessions. It needs no proxy, no
+`ttyd`, and no notification to have been sent.
+
+Both converge on `dejima-attach`, and both end at *your* tmux server. That
+convergence is the point: the controls worth spending effort on are the two
+front doors, because behind them there is no further boundary to cross - a
+grouped tmux session shares every window on the server, and the prefix key
+opens new ones regardless.
+
+### What `off` means
+
+With `[remote-access] enabled` off (the default), `dejima` builds exactly
+the `docker compose` invocation it built before this feature existed: no
+session state is written, no marker directory is created or mounted, and no
+notification hook is registered. `dejima-attach`, `dejima-ttyd` and
+`dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
+three onto `PATH` and stops there - it runs no `systemctl`, copies no unit,
+and starts nothing.
 
 ## The bind address is the one thing to get right
 
