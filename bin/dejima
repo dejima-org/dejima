@@ -205,7 +205,13 @@ _warn_forge_env_collisions() {
         done
     done
 }
-_warn_forge_env_collisions "$(config_get core forge)"
+# Guarded on config_get succeeding: an invalid [core] forge already made
+# config_get print the real error (via config_validate) and return empty,
+# so feeding that empty value on to _warn_forge_env_collisions would only
+# add a second, spurious "invalid forge name:" line on top of it.
+if _core_forge="$(config_get core forge)"; then
+    _warn_forge_env_collisions "$_core_forge"
+fi
 
 # --print-config resolves the whole precedence chain and exits, before any
 # workspace argument is required and before anything is built or mounted.

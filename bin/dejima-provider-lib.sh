@@ -107,6 +107,13 @@ provider_list() {
 # default. Types are the config file's own, so one validator set covers both.
 _manifest_table() {
     case "$1" in
+        # hosts_allowlisted_by_core (below) means "core already allowlists
+        # these hosts in its own right" - today that is true only of
+        # GitHub's published ranges (see bin/dejima's ALLOW_GITHUB_PUSH
+        # wiring). A forge whose hosts are not among those must leave it
+        # off: turning it on grants no firewall allowance at all (its hosts
+        # never reach DEJIMA_FORGE_HOSTS) plus an irrelevant GitHub push
+        # grant instead.
         forge) cat <<'EOF'
 capabilities	?list:identifier
 pr_command	?command

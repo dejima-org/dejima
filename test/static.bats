@@ -1871,7 +1871,7 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     #     that refuses a combination has to be able to say which one works,
     #     and "pick a different forge" without saying which is a worse
     #     message, not a purer one.
-    local f matches fail=0 name literals=""
+    local f matches fail=0 name literals="" body
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         # The last alternative is a `case` arm - anchored to the start of a

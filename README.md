@@ -919,9 +919,15 @@ forwarding doesn't distinguish push from pull. Use a dedicated,
 **repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
 `--allow-github-push` is set — that's what actually limits the blast radius.
 `--allow-github-push` only changes the firewall/hook's *host* check; it adds
-no credential-loading path of its own. There is deliberately no config-file
-equivalent for this flag — an exported or saved value must not silently
-grant a push path, so it's a per-launch decision only.
+no credential-loading path of its own. The flag itself has no config-file
+equivalent — an exported or saved value must not silently grant a push path,
+so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
+github` (see above) is a config-file path that opens the same port, but not
+silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
+manifest, and only when the selected workflow actually pushes. What it opens
+is the same GitHub ranges the read-only path already allows on port 443, now
+also on port 22, logged like every other allowed connection and verified by
+the firewall's own startup self-check.
 
 `[github] token_file` must point at a **read-only** fine-grained PAT
 regardless of this setting. `gh auth setup-git` (run at container start if

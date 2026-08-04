@@ -12,6 +12,21 @@ teardown() { rm -rf "$CONFIG_DIR" ${FAKE_ROOT:+"$FAKE_ROOT"}; }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
+# Checks the CLAIM a remedy message makes rather than pinning its wording:
+# every "forge = <name>" it names must be a forge that actually exists. A
+# literal like "forge = github" would still pass this after github was
+# renamed or removed, silently advising a value that no longer works.
+assert_remedy_forges_exist() {
+    local text="$1" real name found=0
+    real="$(lib provider_list forge)"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        found=1
+        grep -qxF "$name" <<< "$real" || { echo "remedy names nonexistent forge: $name"; return 1; }
+    done < <(grep -oE 'forge = [a-z0-9-]+' <<< "$text" | awk '{print $3}')
+    [ "$found" -eq 1 ] || { echo "remedy names no forge at all"; return 1; }
+}
+
 @test "every shipped manifest validates" {
     for axis in forge workflow harness; do
         while IFS= read -r name; do
@@ -666,14 +681,16 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 @test "the no-host refusal offers the forge that needs no host configured" {
     # The remedy has to include the one an operator who wants to push would
     # actually pick - pointing only at `forge = none` + local-only answers
-    # the opposite question.
+    # the opposite question. Asserted here as the claim (every forge the
+    # remedy names is real), not the literal wording - see
+    # assert_remedy_forges_exist.
     printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
     run lib provider_validate_selection gitea worktree-pr claude-code
     [ "$status" -ne 0 ]
-    [[ "$output" == *"forge = github"* ]]
+    assert_remedy_forges_exist "$output"
     run lib provider_validate_selection none branch-push claude-code
     [ "$status" -ne 0 ]
-    [[ "$output" == *"forge = github"* ]]
+    assert_remedy_forges_exist "$output"
 }
 
 @test "an unset push_token_file yields no GH_TOKEN pair at all, not an empty one" {

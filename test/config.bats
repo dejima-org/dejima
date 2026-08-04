@@ -464,6 +464,18 @@ write_config() {
     [[ "$output" == *"invalid value"* ]]
 }
 
+@test "an invalid [core] forge reports one error, not two" {
+    # config_get already prints "invalid value for [core] forge ..." and
+    # returns empty; the collision-warning pass right after it used to feed
+    # that empty value on to manifest_get, which failed a second time with
+    # its own "invalid forge name:" line - noise on top of the real error.
+    write_config '[core]' 'forge = not-a-real-forge'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid value for [core] forge"* ]]
+    [[ "$output" != *"invalid forge name"* ]]
+}
+
 @test "--print-config does not need Docker or a workspace argument" {
     write_config '[core]' 'firewall = on'
     PATH="/nonexistent:$PATH" run "$REPO_ROOT/bin/dejima" --print-config
