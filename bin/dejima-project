@@ -161,10 +161,12 @@ case "$action" in
         # called with --container, so neither touches a running container and
         # there is no live patch to succeed or fail here - but each can still
         # fail on its own (an unwritable store, a slug collision, a corrupt
-        # approval list, a declaration path a session has symlinked), and a
-        # bare call would abort the whole script on the first failure,
-        # silently skipping every remaining entry - the deps after it AND all
-        # the domains - with no summary at all. What a failure MEANS is the
+        # approval list), and a bare call would abort the whole script on the
+        # first failure, silently skipping every remaining entry - the deps
+        # after it AND all the domains - with no summary at all. A failed
+        # declaration is deliberately NOT in that list: both CLIs swallow one
+        # and still exit 0, because the approval is what grants and it is
+        # already written by then. What a failure MEANS is the
         # other half: the approval itself did not happen, so neither report
         # below may repeat the old "approved, but not applied to a running
         # session" line, which would call an entry approved when nothing was

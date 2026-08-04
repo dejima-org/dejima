@@ -134,7 +134,11 @@ case "$action" in
             # back to `pending`, the session briefing reports it missing, and
             # the next `dejima-project approve` re-approves it - so say where
             # the durable copy is rather than letting the removal look final.
-            if grep -qxF "$spec" "$project/.dejima/dependencies" 2>/dev/null; then
+            # -f before the grep, not a bare grep: this reads a path the
+            # sandboxed session owns, and a FIFO planted there would hang the
+            # command outright.
+            if [ -f "$project/.dejima/dependencies" ] &&
+                grep -qxF "$spec" "$project/.dejima/dependencies" 2>/dev/null; then
                 echo "$project/.dejima/dependencies still declares it - this command does"
                 echo "not edit the project's committed declaration, so dejima-project"
                 echo "approve will offer it again. Edit that file to drop it for good."

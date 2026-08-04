@@ -280,7 +280,12 @@ declare_entry() {
     # approved_entries' refuse-rather-than-proceed contract then blocks every
     # project's image build until the file is hand-edited; or at any host file
     # at all. The directory is checked as well as the file, because mkdir -p
-    # follows a directory symlink just as happily.
+    # follows a directory symlink just as happily. The file test is widened to
+    # "regular file or absent" rather than just "not a symlink" for the same
+    # reason in a different key: a FIFO planted here blocks touch, the grep and
+    # the append itself for as long as the session declines to open the other
+    # end, wedging a host CLI the user was told to run. (A FIFO named .dejima
+    # needs no test - mkdir -p already refuses to create over one.)
     #
     # A check is not a lock: a session running right now can still swap the
     # path between this test and the write below. That race is the honest
@@ -296,10 +301,11 @@ declare_entry() {
     fi
     mkdir -p "$dir" || { echo "Could not create $dir" >&2; return 1; }
     file="$dir/$kind"
-    if [ -L "$file" ]; then
-        echo "Refusing to write through $file: it is a symlink." >&2
-        echo "A project's .dejima is writable by the sandboxed session, so a symlink" >&2
-        echo "here can point this append at the approval store or any other host file." >&2
+    if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+        echo "Refusing to write through $file: it is a symlink or other special file." >&2
+        echo "A project's .dejima is writable by the sandboxed session: a symlink here" >&2
+        echo "can point this append at the approval store or any other host file, and a" >&2
+        echo "FIFO can block this command for as long as the session leaves it unopened." >&2
         echo "Inspect and remove it, then re-run." >&2
         return 1
     fi

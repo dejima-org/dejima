@@ -1370,3 +1370,30 @@ EOF
     [[ "$output" == *"$PROJ/.dejima/dependencies"* ]]
     [[ "$output" == *"approve will offer it again"* ]]
 }
+
+@test "declaring into a FIFO planted at the declaration path does not hang" {
+    # The other way a session-owned path attacks a host CLI: not misdirecting
+    # the write but never completing it. touch, the duplicate-check grep and
+    # the append all block on a FIFO until someone opens the far end, which
+    # the session simply never does - wedging a command the briefing told the
+    # user to run. `timeout` is the assertion: exit 124 is the bug.
+    rm -f "$PROJ/.dejima/dependencies"
+    mkfifo "$PROJ/.dejima/dependencies"
+    run timeout 5 "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"Refusing"* ]]
+    # and the approval, which is the part that grants, still landed
+    grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
+}
+
+@test "removing with a FIFO planted at the declaration path does not hang" {
+    # The re-offer notice reads the same session-owned path, so it needs the
+    # same guard as the write does.
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep >/dev/null
+    rm -f "$PROJ/.dejima/dependencies"
+    mkfifo "$PROJ/.dejima/dependencies"
+    run timeout 5 "$REPO_ROOT/bin/dejima-dep" remove --project "$PROJ" apt:ripgrep
+    [ "$status" -ne 124 ]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Removed apt:ripgrep"* ]]
+}
