@@ -503,22 +503,34 @@ provider_validate_selection() {
     # forge had no correct alternative to offer - `forge = none` now exists,
     # so an operator who genuinely pushes nowhere has an honest way to say it
     # and this stops being a refusal with no remedy.
-    if [ "$(manifest_get workflow "$workflow" push)" = "on" ]; then
-        if [ -z "$(forge_hosts "$forge")" ]; then
+    if [ "$push" = "on" ] && [ -z "$(forge_hosts "$forge")" ]; then
+        if [ -z "$(manifest_get forge "$forge" keys)" ]; then
+            # A forge with no keys at all (like `none`) has nothing to
+            # configure - "set [forge.$forge]" would be a fix that does not
+            # exist, so the only honest remedy is the workflow.
+            echo "workflow '$workflow' pushes, but forge '$forge' has no host to push" >&2
+            echo "to and nothing to configure. Select a workflow that does not push" >&2
+            echo "instead (workflow = local-only)." >&2
+        else
             echo "workflow '$workflow' pushes, but forge '$forge' resolves to no host." >&2
             echo "Configure [forge.$forge], or set [core] forge = none and a workflow" >&2
             echo "that does not push (workflow = local-only) if this sandbox pushes nowhere." >&2
-            return 1
         fi
+        return 1
     fi
 
     # config_is_set, not config_get: the question is "did the operator set
     # this key", not "does it have a value" - a key can have a schema
     # default, so it always has a value, and testing the value would make a
     # wholly unconfigured forge (nothing in [forge.<name>] at all) look
-    # partly configured.
+    # partly configured. A key whose schema default is non-empty (e.g.
+    # gitea's token_file, defaulting to ~/.config/gitea/token, exactly what
+    # the README's documented setup relies on) is skipped outright - its
+    # resolved value is already correct even when the operator never wrote
+    # it, so it can never count as genuinely missing.
     set_n=0 unset_n=0 missing=""
     for key in $(manifest_get forge "$forge" requires); do
+        [ -z "$(config_default "forge.$forge.$key")" ] || continue
         if config_is_set "forge.$forge" "$key"; then
             set_n=$((set_n + 1))
         else
@@ -530,8 +542,12 @@ provider_validate_selection() {
     # than warned now that `forge = none` exists: previously the only way to
     # say "I don't use a forge" was to leave one half-filled, so refusing would
     # have broken a supported state. Still scoped to PARTIAL configuration -
-    # nothing set at all is rule 3's case above, and carries its own message.
-    if [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
+    # nothing set at all is rule 3's case above, and carries its own message -
+    # and, like rule 3, only when the workflow actually pushes: a non-pushing
+    # workflow never invokes the forge, so e.g. gitea's ssh_host alone (set
+    # only so the firewall allows fetches) is a legitimate configuration, not
+    # a typo.
+    if [ "$push" = "on" ] && [ "$set_n" -gt 0 ] && [ "$unset_n" -gt 0 ]; then
         echo "forge '$forge' is partly configured - [forge.$forge] is missing:" >&2
         echo "$missing. Set them, or set [core] forge = none if this sandbox" >&2
         echo "pushes nowhere." >&2

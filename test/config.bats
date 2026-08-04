@@ -765,7 +765,7 @@ EOF
     # The warning claims GH_TOKEN comes from push_token_file - false unless
     # that is actually configured too. Wholly unconfigured (push_token_file
     # unset) is the same silent case provider_validate_selection's own
-    # partial-config warning defers to, not something to say out loud here.
+    # partial-config refusal defers to, not something to say out loud here.
     local ro="$CONFIG_DIR/ro-token"
     printf 'ghp_readonly\n' > "$ro"
     write_config '[core]' 'forge = github' "[github]" "token_file = $ro"

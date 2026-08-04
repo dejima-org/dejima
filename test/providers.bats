@@ -178,7 +178,9 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     # `forge = none` (Task 1) is the honest way to say "no forge" instead.
     FAKE_ROOT="$(mktemp -d)"
     mkdir -p "$FAKE_ROOT/forges/hostless" "$FAKE_ROOT/workflows/pusher" "$FAKE_ROOT/harnesses/h"
-    printf 'capabilities =\n' > "$FAKE_ROOT/forges/hostless/forge.conf"
+    # keys is non-empty - this forge IS configurable, just not configured -
+    # unlike `none`, which has no keys at all and gets its own message below.
+    printf 'capabilities =\nkeys = ssh_host:?hostname\n' > "$FAKE_ROOT/forges/hostless/forge.conf"
     printf 'requires =\npush = on\n' > "$FAKE_ROOT/workflows/pusher/workflow.conf"
     printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
     run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
@@ -196,11 +198,14 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 }
 
 @test "a partly configured forge is refused, not merely warned about" {
+    # token_file is not named here (and would not need to be, to make this
+    # partial): its schema default (~/.config/gitea/token) means it can
+    # never be genuinely missing, so it never enters set_n/unset_n at all -
+    # see "the shipped selection validates with the documented setup" below.
     printf '[forge.gitea]\nssh_host = git.example\n' > "$CONFIG_DIR/config"
     run lib provider_validate_selection gitea worktree-pr claude-code
     [ "$status" -ne 0 ]
     [[ "$output" == *"api"* ]]
-    [[ "$output" == *"token_file"* ]]
 }
 
 @test "a non-pushing workflow against an unconfigured forge is still fine" {
@@ -210,12 +215,14 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "the shipped selection validates when fully configured" {
-    # provider_validate_selection runs after bin/dejima's own config_exists
-    # gate in real use, so a config file is always present by then - gitea's
-    # requires (ssh_host, api, token_file) all need real values here for the
-    # same reason, now that a partly-configured forge is refused outright.
-    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\ntoken_file = /dev/null\n' \
+@test "the shipped selection validates with the documented setup" {
+    # This is the regression guard for the README/install.sh setup: an
+    # operator is told to set only ssh_host and api and save the token at
+    # token_file's schema default path (~/.config/gitea/token), leaving
+    # token_file itself unset in the config. A key with a non-empty schema
+    # default can never be genuinely missing - its resolved value is already
+    # correct - so it must not make this look partly configured and refused.
+    printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example/v1\n' \
         > "$CONFIG_DIR/config"
     run lib provider_validate_selection gitea worktree-pr claude-code
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -224,17 +231,32 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 @test "a wholly unconfigured forge still validates against a non-pushing workflow" {
     # The supported "I don't use a forge" case is now scoped to a workflow
     # that doesn't push (local-only) - a pushing one is rule 3's refusal
-    # above. gitea's requires includes token_file, which has a schema
-    # default (~/.config/gitea/token) and so ALWAYS resolves to a non-empty
-    # value via config_get, even though nothing here sets it - this must
-    # still count as "unset" (config_is_set, not config_get) or a config
-    # that sets none of gitea's keys would look partly configured and be
-    # refused by rule 5 instead of passing here.
+    # above. Rules 3 and 5 (and the single-required-key check) are all
+    # gated on push = on, so local-only never reaches any of them regardless
+    # of what is or isn't configured.
     printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
-    run lib config_default forge.gitea.token_file
-    [ -n "$output" ] || { echo "test premise broken: token_file has no default"; return 1; }
     run lib provider_validate_selection gitea local-only claude-code
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a partially configured forge still validates against a non-pushing workflow" {
+    # Rule 5 is gated on push = on: local-only never invokes the forge, so
+    # setting only ssh_host (e.g. so the firewall allows fetches) is a
+    # legitimate configuration, not a typo to refuse.
+    printf '[forge.gitea]\nssh_host = git.example\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection gitea local-only claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a pushing workflow against forge = none names the workflow, not [forge.none]" {
+    # none has no keys at all, so "Configure [forge.none]" would be a fix
+    # that does not exist - the only honest remedy is the workflow.
+    printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection none branch-push claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nothing to configure"* ]]
+    [[ "$output" == *"workflow = local-only"* ]]
+    [[ "$output" != *"[forge.none]"* ]]
 }
 
 @test "a pushing workflow against a single-required-key forge with nothing set is refused" {
