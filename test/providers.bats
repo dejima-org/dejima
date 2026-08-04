@@ -450,19 +450,9 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     [[ "$output" == *"GitHub read-only, the configured gitea host (git.example), plus anything"* ]]
 
     # workflows/local-only (Task 4) is what `forge = none` is meant to pair
-    # with - none's capabilities are empty, so no shipped workflow today
-    # accepts it (worktree-pr requires the 'pr' capability). Rather than wait
-    # on a later task, this composes against a throwaway workflow that
-    # requires nothing, using the real none/forge.conf so the resolver is
-    # exercised against Task 1's actual manifest, not a re-typed copy of it.
-    FAKE_ROOT="$(mktemp -d)"
-    mkdir -p "$FAKE_ROOT/forges/none" "$FAKE_ROOT/workflows/w" "$FAKE_ROOT/harnesses/h"
-    cp "$REPO_ROOT/forges/none/forge.conf" "$FAKE_ROOT/forges/none/forge.conf"
-    printf 'requires =\npush = off\nbriefing = briefing.md\n' > "$FAKE_ROOT/workflows/w/workflow.conf"
-    printf 'Nothing forge-specific here.\n' > "$FAKE_ROOT/workflows/w/briefing.md"
-    printf 'command = claude\n' > "$FAKE_ROOT/harnesses/h/harness.conf"
-    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
-        bash -c 'source "$1"; briefing_compose none w h' _ "$LIB"
+    # with - none's capabilities are empty, and local-only requires none, so
+    # this composes the real shipped trio rather than a throwaway workflow.
+    run lib briefing_compose none local-only claude-code
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     # No dangling article, no "none" read as a forge name.
     [[ "$output" == *"GitHub read-only, plus anything"* ]]
@@ -490,4 +480,23 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     # It must not instruct opening a PR - that is worktree-pr's job, and this
     # workflow's whole point is that it stops earlier.
     [[ "$output" != *"create"*"PR"* ]] || { echo "branch-push briefing mentions opening a PR"; return 1; }
+}
+
+@test "local-only pushes nothing and blocks no branches" {
+    run lib manifest_validate workflow local-only
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(lib manifest_get workflow local-only push)" = "off" ]
+    [ "$(lib manifest_get workflow local-only block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow local-only requires_worktree)" = "off" ]
+    [ "$(lib manifest_get workflow local-only autonomy)" = "commit" ]
+    # blocked_branches is empty BECAUSE push is off - there is no push to
+    # block. This pins the pair together: turning push on later without
+    # revisiting this would silently allow a push to main.
+    [ -z "$(lib manifest_get workflow local-only blocked_branches)" ]
+}
+
+@test "none + local-only is a valid, fully unconfigured selection" {
+    run lib provider_validate_selection none local-only claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ]
 }
