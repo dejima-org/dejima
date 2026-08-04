@@ -104,10 +104,13 @@ report() {
         esac
     done < <(read_declared "$decl_dir/$kind" "$validator")
     # Approvals with no declaration behind them - the previously invisible case.
+    # seen accumulates here too, or an entry approved in both stores (global
+    # and project) and undeclared in either would print once per store.
     while read -r tag e; do
         [ -n "$e" ] || continue
         grep -qxF "$e" <<< "$seen" && continue
         printf '  approved  %s (%s, not declared)\n' "$e" "$tag"
+        seen="$seen$e"$'\n'
     done <<< "$approved"
     return 0
 }
@@ -168,15 +171,26 @@ case "$action" in
         # "approved, but not applied to a running session" line, which would
         # tell the user a domain is approved when nothing was recorded.
         failed=""
+        dom_approved=0
         for dom in $pending_doms; do
-            "$SCRIPT_DIR/dejima-allow" --project "$project" "$dom" || failed="$failed $dom"
+            if "$SCRIPT_DIR/dejima-allow" --project "$project" "$dom"; then
+                dom_approved=1
+            else
+                failed="$failed $dom"
+            fi
         done
         echo
         if [ -n "$failed" ]; then
             echo "NOT approved for $project (dejima-allow failed):$failed" >&2
             echo "Fix the cause and re-run; nothing was recorded for those." >&2
         fi
-        echo "Restart the sandbox for the approved entries to take effect."
+        # Only when something actually landed - the dep loop above has no
+        # failure path to check, so its mere presence counts, but a domain
+        # loop that failed every domain must not follow "NOT approved" with a
+        # line that reads as success.
+        if [ -n "$pending_deps" ] || [ "$dom_approved" -eq 1 ]; then
+            echo "Restart the sandbox for the approved entries to take effect."
+        fi
         ;;
     *)
         echo "Usage: dejima-project <status|approve> [<path>]" >&2

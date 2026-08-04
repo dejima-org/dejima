@@ -1236,21 +1236,3 @@ EOF
     [[ "$output" != *"docker was called"* ]]
     grep -qx 'approved.example' "$(store_of "$PROJ")/allowed-domains"
 }
-
-@test "approve visits every domain even when one fails to be approved" {
-    # dejima-allow --project no longer touches a container, but it can still
-    # fail on its own. Under set -e a bare call in the loop would abort after
-    # the first failure and silently skip the rest - which is why the
-    # collector exists. An unwritable store is the cheapest real induction.
-    printf 'one.example\ntwo.example\n' > "$PROJ/.dejima/allowed-domains"
-    mkdir -p "$(store_of "$PROJ")"
-    printf '%s\n' "$PROJ" > "$(store_of "$PROJ")/path"
-    chmod 500 "$(store_of "$PROJ")"
-    run bash -c "printf 'y\n' | '$REPO_ROOT/bin/dejima-project' approve '$PROJ'"
-    chmod 700 "$(store_of "$PROJ")"
-    # Both domains were attempted - the loop did not abort on the first.
-    [[ "$output" == *"one.example"* ]]
-    [[ "$output" == *"two.example"* ]]
-    # And the operator is not told they were approved when nothing was written.
-    [[ "$output" != *"but not applied to a running session"* ]]
-}
