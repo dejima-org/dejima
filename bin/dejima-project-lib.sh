@@ -265,10 +265,9 @@ approve_entry() {
 # Validated with the same dispatch approve_entry uses, so the two can never
 # disagree about what a well-formed entry is.
 declare_entry() {
-    local project="$1" kind="$2" entry="$3" validator dir file
+    local project="$1" kind="$2" entry="$3" validator
     validator="$(_approved_validator "$kind")" || return 1
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
-    dir="$project/.dejima"
     # This is the one write in this file that lands on the session-writable
     # bind mount, so it is the one that must not follow a symlink. A
     # compromised session can plant one and then ask the user - through the
@@ -276,41 +275,89 @@ declare_entry() {
     # run the CLI that trips it. Following it would aim a host-privileged
     # append anywhere the user can write: at ~/.config/dejima/allowed-domains,
     # silently turning a project approval into a global one; at
-    # ~/.config/dejima/dependencies, where a domain is a corrupt entry and
-    # approved_entries' refuse-rather-than-proceed contract then blocks every
-    # project's image build until the file is hand-edited; or at any host file
-    # at all. The directory is checked as well as the file, because mkdir -p
-    # follows a directory symlink just as happily. The file test is widened to
-    # "regular file or absent" rather than just "not a symlink" for the same
-    # reason in a different key: a FIFO planted here blocks touch, the grep and
-    # the append itself for as long as the session declines to open the other
-    # end, wedging a host CLI the user was told to run. (A FIFO named .dejima
-    # needs no test - mkdir -p already refuses to create over one.)
+    # ~/.config/dejima/dependencies, where the entry is installed as root at
+    # image build, on the one code path with no egress firewall in front of it;
+    # or at any host file at all.
     #
-    # A check is not a lock: a session running right now can still swap the
-    # path between this test and the write below. That race is the honest
-    # bound of this guard, and the reason the documented moment to run these
-    # CLIs is with nothing running - which is also the moment the workflow
-    # already calls for, since approving a dependency needs a relaunch anyway.
-    if [ -L "$dir" ]; then
-        echo "Refusing to write through $dir: it is a symlink." >&2
-        echo "A project's .dejima is writable by the sandboxed session, so a symlink" >&2
-        echo "here can point this append at the approval store or any other host file." >&2
-        echo "Inspect and remove it, then re-run." >&2
-        return 1
-    fi
-    mkdir -p "$dir" || { echo "Could not create $dir" >&2; return 1; }
-    file="$dir/$kind"
-    if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
-        echo "Refusing to write through $file: it is a symlink or other special file." >&2
-        echo "A project's .dejima is writable by the sandboxed session: a symlink here" >&2
-        echo "can point this append at the approval store or any other host file, and a" >&2
-        echo "FIFO can block this command for as long as the session leaves it unopened." >&2
-        echo "Inspect and remove it, then re-run." >&2
-        return 1
-    fi
-    touch "$file" || { echo "Could not write $file" >&2; return 1; }
-    grep -qxF "$entry" "$file" || printf '%s\n' "$entry" >> "$file"
+    # A test would not be enough. The briefing tells the agent to have the user
+    # run `dejima-allow --project` from a terminal outside the sandbox, so the
+    # session is normally still LIVE while this runs - and since it is the one
+    # asking for the command, it picks the moment and can spin a rename loop
+    # across any window between a check and the write. So there is no check:
+    # the guard is the open itself. O_NOFOLLOW makes a symlink at either path
+    # fail the open outright, the directory is opened O_DIRECTORY and the file
+    # is opened relative to that fd, so neither can be swapped for the other's
+    # sake afterwards, and the whole read-then-append happens through that one
+    # fd. A session that wins the swap gets an open of the object it replaced,
+    # not a redirected write.
+    #
+    # bash cannot open a path that way, so this is python3 - a hard dependency
+    # already (install.sh refuses to install without it). O_NONBLOCK and the
+    # S_ISREG check cover the non-symlink shapes: a FIFO planted here would
+    # otherwise block a host CLI the user was told to run for as long as the
+    # session declines to open the other end.
+    python3 - "$project/.dejima" "$kind" "$entry" <<'PY'
+import errno, os, stat, sys
+
+directory, name, entry = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.join(directory, name)
+why = (
+    "A project's .dejima is writable by the sandboxed session, so a link or",
+    "special file planted here would aim this host-side append at the approval",
+    "store, or at any other file you can write.",
+    "Inspect and remove it, then re-run.",
+)
+
+
+def refuse(*lines):
+    for line in lines:
+        sys.stderr.write(line + "\n")
+    raise SystemExit(1)
+
+
+try:
+    os.makedirs(directory, 0o755)
+except FileExistsError:
+    pass
+except OSError as exc:
+    refuse("Could not create %s: %s" % (directory, exc.strerror))
+
+try:
+    dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as exc:
+    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+        refuse("Refusing to write through %s: it is a symlink, or not a directory at all." % directory, *why)
+    refuse("Could not open %s: %s" % (directory, exc.strerror))
+
+try:
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o644,
+        dir_fd=dirfd,
+    )
+except OSError as exc:
+    if exc.errno in (errno.ELOOP, errno.ENXIO):
+        refuse("Refusing to write through %s: it is a symlink or other special file." % path, *why)
+    refuse("Could not write %s: %s" % (path, exc.strerror))
+finally:
+    os.close(dirfd)
+
+# Before any buffered wrapper touches it: a FIFO is opened without blocking
+# thanks to O_NONBLOCK, but it is not seekable, and refusing it is the point.
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    os.close(fd)
+    refuse("Refusing to write to %s: it is not a regular file." % path, *why)
+
+with os.fdopen(fd, "r+b") as fh:
+    body = fh.read()
+    line = entry.encode()
+    if line not in body.split(b"\n"):
+        # O_APPEND, so this lands at the end whatever else has written since.
+        # The leading newline is for a declaration the session left unterminated
+        # - without it the append would extend that last line instead.
+        fh.write((b"" if not body or body.endswith(b"\n") else b"\n") + line + b"\n")
+PY
 }
 
 unapprove_entry() {

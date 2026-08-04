@@ -759,9 +759,12 @@ promote it. That it is session-writable is exactly why both tools refuse to
 write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**:
 a compromised session can plant one and then ask you to run the command that
 follows it, which would aim a host-side append at your approval store or at
-any other file you can write. The check can't beat a session editing the path
-underneath it, which is one more reason the documented moment to run these is
-with nothing running.
+any other file you can write. The refusal is the `open` itself rather than a
+test before it — `O_NOFOLLOW` on both, with the file opened relative to the
+already-opened directory — so a session that is still running while you type
+the command cannot swap either path out from under the write. Expect that:
+the agent briefing tells the agent to ask you to run `dejima-allow --project`
+from a terminal outside the sandbox, so the session usually *is* live.
 
 Neither writer has an inverse for the declaration. `dejima-dep remove
 --project` withdraws the approval and deliberately leaves the declaration

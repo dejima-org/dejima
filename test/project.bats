@@ -1386,6 +1386,81 @@ EOF
     grep -qx 'apt:ripgrep' "$(store_of "$PROJ")/dependencies"
 }
 
+# The two above plant the link and wait. A session does not have to wait: the
+# briefing tells it to ask the user to run `dejima-allow --project` from a
+# terminal outside the sandbox, so the session is normally still running when
+# the CLI does, and it is the one that chose the moment. The tests below are
+# that session - a loop swapping the path while the writer works. A
+# check-then-write loses this; both were written against the old guard first
+# and it lost both, appending to the victim within a few hundred attempts.
+#
+# The assertion is one-sided on purpose: the victim must never be written. The
+# refusal count is only there to prove the swap window was real, so a run where
+# the swapper never landed cannot pass vacuously.
+swap_loop() {
+    python3 - "$1" "$2" <<'PY' &
+import os, sys, time
+
+path, target = sys.argv[1], sys.argv[2]
+held = path + ".held"
+end = time.time() + 60
+while time.time() < end:
+    try:
+        os.rename(path, held)
+        os.symlink(target, path)
+    except OSError:
+        pass
+    time.sleep(0.004)
+    try:
+        os.unlink(path)
+        os.rename(held, path)
+    except OSError:
+        pass
+    time.sleep(0.004)
+PY
+    SWAPPER=$!
+}
+
+declare_repeatedly() {
+    bash -c '
+        source "$1"
+        refused=0
+        for _ in $(seq 1 60); do
+            declare_entry "$2" allowed-domains evil.example >/dev/null 2>&1 \
+                || refused=$((refused + 1))
+        done
+        printf "%s\n" "$refused"
+    ' _ "$LIB" "$PROJ"
+}
+
+@test "a session swapping the declaration file mid-write cannot redirect it" {
+    local victim refused
+    victim="$(mktemp -d)/victim"
+    printf 'original\n' > "$victim"
+    printf 'declared.example\n' > "$PROJ/.dejima/allowed-domains"
+    swap_loop "$PROJ/.dejima/allowed-domains" "$victim"
+    refused="$(declare_repeatedly)"
+    kill "$SWAPPER" 2>/dev/null || true
+    [ "$(cat "$victim")" = "original" ]
+    [ "$refused" -gt 0 ]
+    rm -rf "$(dirname "$victim")"
+}
+
+@test "a session swapping the .dejima directory mid-write cannot redirect it" {
+    # The directory needs the same treatment as the file: a guard that only
+    # opened the file safely would still create or append inside whatever
+    # directory the path resolved to at the moment of the open.
+    local elsewhere refused
+    elsewhere="$(mktemp -d)"
+    printf 'original\n' > "$elsewhere/allowed-domains"
+    swap_loop "$PROJ/.dejima" "$elsewhere"
+    refused="$(declare_repeatedly)"
+    kill "$SWAPPER" 2>/dev/null || true
+    [ "$(cat "$elsewhere/allowed-domains")" = "original" ]
+    [ "$refused" -gt 0 ]
+    rm -rf "$elsewhere"
+}
+
 @test "removing with a FIFO planted at the declaration path does not hang" {
     # The re-offer notice reads the same session-owned path, so it needs the
     # same guard as the write does.
