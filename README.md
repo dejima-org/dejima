@@ -347,6 +347,13 @@ that gets deferred rather than done: `list`, `view`, `create`, `comment`,
 `close` and `reopen`, so a problem found mid-session becomes a ticket instead
 of a footnote on an unrelated PR.
 
+`gitea-actions` closes the other half of that loop. A sandbox cannot run the
+tests that need a Docker daemon, so CI is where they run, and without a way
+to read a run the only route from a red build back into the session is the
+operator pasting the log in by hand. `gitea-actions runs`, `jobs <run>` and
+`logs [run]` do that instead — with no run given, the newest one for `HEAD`,
+and by default only the jobs that failed. It reads and never writes.
+
 Because the session stops at the PR and you merge afterwards, the sandbox
 context tells Claude to put `Fixes #N` in the PR body rather than to close
 issues by hand once they land — the merge is the last step in that sequence
@@ -969,7 +976,7 @@ likely to collide with a real container you have running.
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH — see [docs/providers.md](docs/providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` — data, never sourced or executed; see [docs/providers.md](docs/providers.md) |
-| `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it) and `gitea-issue` (list, view, create, comment on, close and reopen issues) |
+| `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |

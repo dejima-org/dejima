@@ -781,17 +781,17 @@ EOF
     rm -rf "$d"
 }
 
-@test "neither gitea CLI passes the token as a command-line argument" {
+@test "no gitea CLI passes the token as a command-line argument" {
     # /proc makes argv world-readable, so a token in a curl invocation is
     # visible to every other process for the life of the request - and this
     # runs alongside agents that read process listings.
     #
-    # Both files, because they are deliberate copies of each other rather
+    # Every file, because they are deliberate copies of each other rather
     # than a shared library (see forges/gitea/bin/gitea-issue's header for
     # why), and a duplicated security property is exactly the kind that
     # drifts.
     local f
-    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue; do
+    for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue forges/gitea/bin/gitea-actions; do
         run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
         [ "$status" -ne 0 ]
         grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
@@ -818,6 +818,15 @@ EOF
     # branch attached - so without type=issues every open PR shows up as an
     # issue and the work list reads as twice as long as it is.
     grep -q 'type=issues' "$REPO_ROOT/forges/gitea/bin/gitea-issue"
+}
+
+@test "gitea-actions only reads - it issues no request that could change anything" {
+    # It authenticates with the same write-scoped token as gitea-pr, so
+    # "it only fetches runs and logs" has to be a property of the file and
+    # not merely of what its subcommands are named.
+    run grep -nE '\-X (POST|PUT|PATCH|DELETE)|--data|[^a-z-]-d ' \
+        "$REPO_ROOT/forges/gitea/bin/gitea-actions"
+    [ "$status" -ne 0 ]
 }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {

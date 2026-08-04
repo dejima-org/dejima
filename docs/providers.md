@@ -136,7 +136,7 @@ keys          = ssh_host:?hostname api:?url token_file:path=~/.config/gitea/toke
 requires      = ssh_host api token_file
 host_keys     = ssh_host
 url_keys      = api
-install       = <its two CLIs, listed relative to its own bin/ directory>
+install       = <its CLIs, listed relative to its own bin/ directory>
 env_export    = GITEA_API=api GITEA_SSH_HOST=ssh_host GITEA_TOKEN=@token_file
 ```
 
@@ -146,9 +146,9 @@ prose refers to `gitea-pr`/`gitea-issue`; `hooks/merge-guard.sh` blocks
 config keys (`ssh_host`, `api`, `token_file`) from `keys`; an operator is
 expected to set all three (`requires`); `ssh_host` is a literal hostname and
 `api` is a URL, both of which end up in the firewall allowlist and the push
-guard's host list; `install` names the two executables under its own `bin/`
-subdirectory (`gitea-pr` and `gitea-issue`), which is what the Dockerfile
-copies into the image; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
+guard's host list; `install` names the executables under its own `bin/`
+subdirectory (`gitea-pr`, `gitea-issue` and `gitea-actions`), which is what
+the Dockerfile copies into the image; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
 and `GITEA_TOKEN` (the *contents* of the file at `token_file`, not its path)
 as environment variables.
 
