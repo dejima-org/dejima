@@ -807,6 +807,115 @@ EOF
     rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
 }
 
+# Records both the environment `docker` is invoked with and its full
+# argument list - the two places a resolved DEJIMA_*/ALLOW_* value can reach
+# the container, and the only observable evidence of the firewall posture a
+# launch actually asks for without booting one (test/runtime.bats has the
+# other half, and needs Docker).
+stub_docker_log() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+echo "ALLOW_GITHUB_PUSH=$ALLOW_GITHUB_PUSH" >> "$SANDBOX_TEST_DOCKER_LOG"
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+}
+
+@test "the github forge's hosts reach the push guard, never the extra-domains allowlist" {
+    # entrypoint.sh folds DEJIMA_FORGE_HOSTS into EXTRA_ALLOWED_DOMAINS,
+    # which init-firewall.sh resolves into the port-UNRESTRICTED
+    # allowed-domains ipset and dns-proxy.sh exempts from stop-dns-rebind.
+    # Right for a self-hosted forge host, a silent widening for GitHub's
+    # public names - and the firewall's own startup self-check refuses to
+    # bring the container up when github.com:22 is reachable without the
+    # push grant, so this also used to be a container that never started.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    # A pushing workflow refuses to launch without a push credential; a
+    # dedicated key file is the headless form of that, and keeps this test
+    # independent of whether the host running it has an agent.
+    local key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' 'forge = github' 'workflow = worktree-pr' \
+        "ssh_key = $key" \
+        '[forge.github]' "push_token_file = $tok"
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Nothing of this forge's in the extra-domains list at all.
+    grep -qxF 'DEJIMA_FORGE_HOSTS=' "$docker_log" \
+        || { echo "DEJIMA_FORGE_HOSTS was not empty:"; grep '^DEJIMA_FORGE_HOSTS' "$docker_log"; return 1; }
+    # But the guard still knows them, or the push it is told to make is
+    # refused inside the container.
+    grep -qxF 'DEJIMA_PUSH_HOSTS=github.com ssh.github.com api.github.com' "$docker_log" \
+        || { echo "push hosts wrong:"; grep '^DEJIMA_PUSH_HOSTS' "$docker_log"; return 1; }
+    # And port 22 opens through the documented, logged, self-checked path.
+    grep -qxF 'ALLOW_GITHUB_PUSH=1' "$docker_log" \
+        || { echo "the push grant was not opened"; return 1; }
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "the github forge with a non-pushing workflow leaves port 22 shut" {
+    # The grant is tied to the workflow actually pushing, not to the forge
+    # being selected - local-only never pushes, so there is nothing to open.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local tok="$CONFIG_DIR/push-token"
+    printf 'ghp_example\n' > "$tok"
+    write_config '[core]' 'forge = github' 'workflow = local-only' \
+        '[forge.github]' "push_token_file = $tok"
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF 'ALLOW_GITHUB_PUSH=0' "$docker_log" \
+        || { echo "the push grant was opened for a non-pushing workflow"; return 1; }
+    grep -qxF 'DEJIMA_PUSH_HOSTS=' "$docker_log"
+    grep -qxF 'DEJIMA_FORGE_HOSTS=' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
+@test "a self-hosted forge's host still takes the extra-domains path" {
+    # The other side of the same manifest key: a forge that does NOT declare
+    # hosts_allowlisted_by_core keeps the behaviour that path exists for -
+    # its host resolved into the allowlist, and no GitHub push grant.
+    FAKE_HOME="$(mktemp -d)"
+    mkdir -p "$FAKE_HOME/.claude"
+    echo '{}' > "$FAKE_HOME/.claude/settings.json"
+    local key="$FAKE_HOME/sandbox-key"
+    : > "$key"
+    chmod 600 "$key"
+    write_config '[core]' 'forge = gitea' 'workflow = branch-push' \
+        "ssh_key = $key" \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
+        'token_file = /dev/null'
+    workspace="$(mktemp -d)"
+    stub_docker_log
+    docker_log="$(mktemp)"
+    HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF 'DEJIMA_FORGE_HOSTS=git.example api.example' "$docker_log" \
+        || { echo "forge hosts wrong:"; grep '^DEJIMA_FORGE_HOSTS' "$docker_log"; return 1; }
+    grep -qxF 'ALLOW_GITHUB_PUSH=0' "$docker_log"
+    rm -rf "$FAKE_HOME" "$workspace" "$docker_log"
+}
+
 @test "logging.loki_url reaches the launch environment" {
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"

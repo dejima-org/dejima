@@ -117,6 +117,7 @@ requires	?list:identifier
 host_keys	?list:identifier
 url_keys	?list:identifier
 fixed_hosts	?list:hostname
+hosts_allowlisted_by_core	bool	off
 install	?list:relpath
 env_export	?list:export
 EOF
@@ -505,32 +506,39 @@ provider_validate_selection() {
     # and this stops being a refusal with no remedy.
     if [ "$push" = "on" ] && [ -z "$(forge_hosts "$forge")" ]; then
         if [ -z "$(manifest_get forge "$forge" keys)" ]; then
-            # A forge with no keys at all (like `none`) has nothing to
-            # configure - "set [forge.$forge]" would be a fix that does not
-            # exist, so the only honest remedy is the workflow.
+            # A forge with no keys at all has nothing to configure - "set
+            # [forge.$forge]" would be a fix that does not exist, so the only
+            # honest remedies are another forge or another workflow.
             echo "workflow '$workflow' pushes, but forge '$forge' has no host to push" >&2
-            echo "to and nothing to configure. Select a workflow that does not push" >&2
-            echo "instead (workflow = local-only)." >&2
+            echo "to and nothing to configure. Select a forge that has one ([core]" >&2
+            echo "forge = github needs no host configured), or a workflow that does" >&2
+            echo "not push (workflow = local-only)." >&2
         else
             echo "workflow '$workflow' pushes, but forge '$forge' resolves to no host." >&2
-            echo "Configure [forge.$forge], or set [core] forge = none and a workflow" >&2
-            echo "that does not push (workflow = local-only) if this sandbox pushes nowhere." >&2
+            echo "Configure [forge.$forge], or [core] forge = github to push to GitHub" >&2
+            echo "instead, or [core] forge = none and a workflow that does not push" >&2
+            echo "(workflow = local-only) if this sandbox pushes nowhere." >&2
         fi
         return 1
     fi
 
-    # config_is_set, not config_get: the question is "did the operator set
-    # this key", not "does it have a value" - a key can have a schema
-    # default, so it always has a value, and testing the value would make a
-    # wholly unconfigured forge (nothing in [forge.<name>] at all) look
-    # partly configured. A key whose schema default is non-empty (e.g. a
-    # token_file key that defaults to a path under ~/.config) is skipped
-    # outright - it already has a working value even when the operator
-    # never wrote it, so it can never count as genuinely missing.
+    # Set AND non-empty. config_is_set alone answers "did the operator write
+    # this key", which is not the same question: install.sh writes every key
+    # commented out at its default, so uncommenting one and not filling it in
+    # yields `api =` - written, and worth nothing. Every call the forge makes
+    # then fails inside the container, which is precisely what these two
+    # rules exist to catch at launch instead.
+    #
+    # Testing the value is only safe because of the config_default skip
+    # immediately below: a key with a working schema default always resolves
+    # to something, so it is excluded before the emptiness test can read a
+    # wholly unconfigured forge (nothing in [forge.<name>] at all) as partly
+    # configured. A key with no default resolves to empty exactly when it is
+    # unset or blank, which are the same thing to everything downstream.
     set_n=0 unset_n=0 missing=""
     for key in $(manifest_get forge "$forge" requires); do
         [ -z "$(config_default "forge.$forge.$key")" ] || continue
-        if config_is_set "forge.$forge" "$key"; then
+        if config_is_set "forge.$forge" "$key" && [ -n "$(config_get "forge.$forge" "$key")" ]; then
             set_n=$((set_n + 1))
         else
             unset_n=$((unset_n + 1))
@@ -561,7 +569,7 @@ provider_validate_selection() {
     # (rule 5 above): it is either wholly set or wholly unset, so a wholly
     # unset single-key forge slips past both rules unless this closes it.
     # Scoped the same way rule 3 is - only when the workflow actually pushes,
-    # and never for a forge like `none` with no `requires` at all.
+    # and never for a forge with no `requires` at all.
     if [ "$push" = "on" ] && [ "$set_n" -eq 0 ] && [ "$unset_n" -gt 0 ]; then
         echo "workflow '$workflow' pushes, but forge '$forge' has none of its" >&2
         echo "required settings configured - [forge.$forge] is missing: $missing." >&2
@@ -859,15 +867,25 @@ _briefing_resolve_key() {
             [ -z "$host" ] || printf ' (%s)' "$host"
             ;;
         # What the session may actually reach, phrased for the selected forge
-        # rather than assembled from two placeholders. Three cases, because
-        # all three are materially different postures and the agent acts on
-        # this sentence: GitHub is read-only by default; a forge with hosts
-        # adds them; `github` as the FORGE means this session can push there,
-        # so calling it read-only would be false in the direction that matters.
+        # rather than assembled from two placeholders. Materially different
+        # postures, and the agent acts on this sentence: GitHub is read-only
+        # by default; a forge with hosts of its own adds them; a forge whose
+        # hosts are the ones core already allowlists (hosts_allowlisted_by_core
+        # - the same manifest key bin/dejima reads to open the push grant) has
+        # no separate host to name, and when the workflow pushes, calling that
+        # access read-only would be false in the direction that matters.
+        #
+        # Driven off that key rather than off the forge's name: it is the one
+        # thing that actually decides the posture, so anything else here would
+        # be core guessing at what a manifest already states.
         network_allowlist)
             local hosts=""
-            if [ "$forge" = "github" ]; then
-                printf '%s' "GitHub, which this session can also push to"
+            if [ "$(manifest_get forge "$forge" hosts_allowlisted_by_core)" = "on" ]; then
+                if [ "$(manifest_get workflow "$workflow" push)" = "on" ]; then
+                    printf '%s' "GitHub, which this session can also push to"
+                else
+                    printf '%s' "GitHub read-only"
+                fi
             else
                 if [ -n "$(manifest_get forge "$forge" host_keys)$(manifest_get forge "$forge" url_keys)$(manifest_get forge "$forge" fixed_hosts)" ]; then
                     hosts=", the configured $forge host"

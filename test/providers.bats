@@ -606,6 +606,76 @@ lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
     done
 }
 
+@test "the github forge routes its hosts through core's allowlist, not the extra-domains one" {
+    # The manifest half of the launcher behaviour asserted in test/config.bats
+    # ("the github forge's hosts never reach the extra-domains allowlist").
+    # Those three hosts are public SaaS names already covered by core's
+    # GitHub ranges: sending them down the extra-domains path would put them
+    # in the port-unrestricted allowed-domains ipset AND exempt them from
+    # dnsmasq's stop-dns-rebind, and the firewall's startup self-check
+    # ("github.com:22 was reachable without ALLOW_GITHUB_PUSH=1") would then
+    # refuse to bring the container up at all.
+    [ "$(lib manifest_get forge github hosts_allowlisted_by_core)" = "on" ]
+    # Still resolved by forge_hosts, which is what keeps rule 3 (a pushing
+    # workflow needs a forge with a host) satisfied and what fills
+    # DEJIMA_PUSH_HOSTS so git-push-guard.sh permits the push.
+    [ -n "$(lib forge_hosts github)" ]
+    # Off unless a manifest says otherwise: a self-hosted forge's host is
+    # exactly the internal address the extra-domains path exists for.
+    [ "$(lib manifest_get forge gitea hosts_allowlisted_by_core)" = "off" ]
+    [ "$(lib manifest_get forge none hosts_allowlisted_by_core)" = "off" ]
+}
+
+@test "the network-posture sentence follows the manifest, not the forge's name" {
+    # Same key, read for the briefing: with a pushing workflow the session
+    # really can push to GitHub, and with a non-pushing one it really cannot
+    # (bin/dejima only opens the push grant when the workflow pushes), so the
+    # sentence has to say two different things for the same forge.
+    printf '[forge.github]\npush_token_file = /dev/null\n' > "$CONFIG_DIR/config"
+    run lib briefing_compose github local-only claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"GitHub read-only"* ]]
+    [[ "$output" != *"can also push to"* ]]
+    # And no dangling "the configured github host" - core allowlists those,
+    # there is nothing for an operator to have configured.
+    [[ "$output" != *"configured github host"* ]]
+}
+
+@test "a required key that is set but empty counts as missing" {
+    # install.sh writes every key commented out at its default, so
+    # uncommenting one and not filling it in yields `api =` - set, and worth
+    # nothing. config_is_set alone called that configured, and the launch
+    # went ahead with every gitea call failing inside the container instead.
+    printf '[forge.gitea]\nssh_host = git.example\napi =\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"api"* ]]
+}
+
+@test "a single required key that is set but empty is refused too" {
+    # The same hole in the other rule: github's one `requires` key can never
+    # be "partly" configured, so an empty push_token_file would otherwise
+    # sail past both this rule and rule 3 (fixed_hosts means it always
+    # resolves to a host) and launch with no push credential at all.
+    printf '[core]\nforge = github\n[forge.github]\npush_token_file =\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection github branch-push claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"push_token_file"* ]]
+}
+
+@test "the no-host refusal offers the forge that needs no host configured" {
+    # The remedy has to include the one an operator who wants to push would
+    # actually pick - pointing only at `forge = none` + local-only answers
+    # the opposite question.
+    printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
+    run lib provider_validate_selection gitea worktree-pr claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"forge = github"* ]]
+    run lib provider_validate_selection none branch-push claude-code
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"forge = github"* ]]
+}
+
 @test "an unset push_token_file yields no GH_TOKEN pair at all, not an empty one" {
     # docker-compose.yml declares GH_TOKEN itself, carrying the independent
     # read-only [github] token_file value. `-e GH_TOKEN=` (the pair

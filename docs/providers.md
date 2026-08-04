@@ -124,6 +124,7 @@ operator can set, resolved the same way as any other config key
 | `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
+| `hosts_allowlisted_by_core` | `bool` | `off` | `on` means this forge's hosts are ones core already allowlists in its own right - GitHub's published ranges, which every session can read from over 443 whatever forge is selected. Core then keeps them out of `DEJIMA_FORGE_HOSTS` (the extra-domains path, which resolves a name into the port-unrestricted `allowed-domains` ipset and exempts it from DNS-rebind protection - right for an internal self-hosted host, a silent widening for a public one) and, when the workflow pushes, opens core's own GitHub push grant to them instead: port 22 to those same ranges, logged and verified by the firewall's startup self-check. They still reach `DEJIMA_PUSH_HOSTS`, so `git-push-guard.sh` permits the push. |
 | `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into the image - the only manifest key naming something that actually gets copied and executed. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
@@ -267,11 +268,14 @@ see.
 Only resolved values, never an unresolved manifest or a provider directory
 itself:
 
-- `DEJIMA_FORGE_HOSTS` - every hostname the selected forge needs reachable
-  (`host_keys`, the host part of `url_keys`, plus `fixed_hosts`), unioned by
-  `forge_hosts`.
-- `DEJIMA_PUSH_HOSTS` - `DEJIMA_FORGE_HOSTS` when the workflow's `push = on`,
-  otherwise empty.
+- `DEJIMA_FORGE_HOSTS` - every hostname the selected forge needs *added to
+  the firewall's allowlist* (`host_keys`, the host part of `url_keys`, plus
+  `fixed_hosts`), unioned by `forge_hosts`. Empty for a forge declaring
+  `hosts_allowlisted_by_core` - core already allows those, and adding them
+  here would widen them to every port and drop their DNS-rebind protection.
+- `DEJIMA_PUSH_HOSTS` - every hostname `forge_hosts` resolves (including a
+  `hosts_allowlisted_by_core` forge's, which the entry above omits) when the
+  workflow's `push = on`, otherwise empty.
 - `DEJIMA_BLOCKED_BRANCHES` - the workflow's `blocked_branches`.
 - `DEJIMA_MERGE_BLOCK` - the forge's `merge_block`, but only when the
   workflow's `block_merge = on`; otherwise empty.
@@ -309,11 +313,16 @@ every launch:
   mid-task.
 - A pushing workflow (`push = on`) needs a forge that resolves to somewhere
   to push to. A wholly unconfigured forge with nothing to configure at all
-  (`forge = none`) is refused with "select a workflow that does not push
-  instead"; a forge that has config keys but none of them resolve to a host
-  is refused with "configure it, or select `forge = none`".
+  (`forge = none`) is refused, pointing at a forge that needs no host
+  configured (`forge = github`) or a workflow that does not push; a forge
+  that has config keys but none of them resolve to a host is refused with
+  "configure it, or select `forge = github`, or `forge = none` with a
+  workflow that does not push".
 - A forge whose `requires` keys are **partly** set - some configured, some
-  not - is refused as a likely typo, but only when the workflow actually
+  not (a key written but left empty, as `install.sh`'s commented-out starter
+  config makes easy, counts as not set: it resolves to nothing, and every
+  call the forge makes with it would fail inside the container) - is refused
+  as a likely typo, but only when the workflow actually
   pushes: a non-pushing workflow never invokes the forge, so e.g. gitea's
   `ssh_host` alone (set only so the firewall allows fetches) is a legitimate
   configuration, not a typo. A wholly unconfigured forge is never flagged by
@@ -349,7 +358,13 @@ resolved value is already correct even when the operator never wrote it.
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
 every session gets regardless (clone, fetch, `gh` API calls over port 443)
-never needs port 22 at all. And `[forge.github] push_token_file` is
+never needs port 22 at all. It opens it through core's existing GitHub push
+grant (`ALLOW_GITHUB_PUSH`, the same one `--allow-github-push` uses), which
+its `hosts_allowlisted_by_core = on` is what asks for: port 22 to GitHub's
+published ranges and nothing else, logged like every other allowed
+connection and verified by the firewall's own startup self-check. Only when
+the selected workflow actually pushes - `forge = github` with
+`workflow = local-only` leaves port 22 shut. And `[forge.github] push_token_file` is
 deliberately a *separate*, write-capable token from `[github] token_file`
 (a read-only fine-grained PAT used for read access independent of which
 forge is selected): promoting the read-only token to push duty would defeat

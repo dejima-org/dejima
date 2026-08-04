@@ -150,16 +150,18 @@ see the whole resolved schema, real values included.
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
 **Gitea/Forgejo is the default forge** — `gitea-pr`, and the only push target
-`git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo, either
-set `[core] forge = github` to push and open PRs through `gh` instead (see
+`git-push-guard.sh` allows by default. If you don't use Gitea/Forgejo, set
+`[core] forge = github` to push and open PRs through `gh` instead (see
 "GitHub push" below for the posture change that opens, and why its
 `push_token_file` is a separate credential from the read-only `[github]
-token_file`), or use `dejima --allow-github-push` per launch to push straight
-to whatever remote is configured without changing the forge at all. If this
-sandbox pushes nowhere — read-only work, or a workflow that only commits
-locally — set `[core] forge = none` and `[core] workflow = local-only`; that
-pair is the honest way to say so, rather than leaving `[forge.gitea]`
-half-filled. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea
+token_file`). If this sandbox pushes nowhere — read-only work, or a workflow
+that only commits locally — set `[core] forge = none` and
+`[core] workflow = local-only`; that pair is the honest way to say so, rather
+than leaving `[forge.gitea]` half-filled. `dejima --allow-github-push` is a
+per-launch *addition* to whichever forge is selected, not a substitute for
+selecting one: a pushing workflow is still refused at launch unless its forge
+resolves to a host and its required keys are filled in, so the flag alone
+will not get an unconfigured `[forge.gitea]` past validation. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea
 fork exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api`
 at a Forgejo instance just works. See
 [docs/providers.md](docs/providers.md#shipped-providers) for every shipped
@@ -228,7 +230,14 @@ sandbox escape if you get it wrong.
    → [Prerequisites](#prerequisites),
    [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
 
-That is enough to run `dejima`.
+That is not yet enough to run `dejima`. The starter config `install.sh`
+writes has every key commented out at its default, which means
+`[core] forge = gitea` and `[core] workflow = worktree-pr` with no Gitea host
+configured — and a workflow that pushes is refused at launch unless its forge
+resolves to somewhere to push to. Pick one of the three sections below first:
+fill in `[forge.gitea]`, or set `[core] forge = github`, or — if this sandbox
+should push nowhere — `[core] forge = none` with `[core] workflow =
+local-only`, which needs nothing else configured at all.
 
 ### Gitea/Forgejo PR workflow
 
@@ -246,8 +255,10 @@ Set `[core] forge = github` instead of the above to push and open PRs
 against GitHub directly through `gh`, rather than a Gitea/Forgejo instance.
 This is a persistent, per-config choice — different from the per-launch
 `--allow-github-push` flag (see "GitHub push" below), and it opens
-`ssh.github.com:22` for push every time this forge is selected, not just for
-one launch.
+`ssh.github.com:22` for push every time this forge is selected with a
+workflow that pushes, not just for one launch. It opens it through the same
+grant that flag uses, so the posture is the one documented there and nothing
+else about GitHub's treatment changes.
 
 1. Generate a **write-capable** PAT, separate from the read-only
    `[github] token_file` used for read access — promoting the read-only
@@ -653,11 +664,14 @@ default:
   `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
 - whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
   by default) — not port-restricted, so git-over-ssh to the forge works
-  without a blanket "port 22 to anywhere" rule. Selecting `[core] forge =
-  github` adds `ssh.github.com`/`api.github.com`/`github.com` to this same
-  unrestricted allowlist — opening port 22 to GitHub persistently, unlike the
-  default GitHub entry above, which stays 443-only unless `--allow-github-push`
-  is given per launch
+  without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
+  protection because a self-hosted forge host legitimately resolves to an
+  internal address. `[core] forge = github` is deliberately *not* added here:
+  its three hostnames are public names already covered by the GitHub entry
+  above, so they stay on that entry — 443 by default, plus port 22 when the
+  selected workflow pushes, exactly as `--allow-github-push` opens it per
+  launch — rather than picking up all-port egress and losing rebind
+  protection on the way
 
 Everything else is rejected. Run `dejima-allow <domain> --global`
 (or `--project <path>` for one project) to allow more permanently (e.g.
@@ -873,8 +887,11 @@ pretty-printed by default, no extra parsing setup needed.
 
 ## GitHub push: blocked by default, optional opt-in
 
-This section is about `--allow-github-push`, a per-launch flag that pushes
-to whatever remote is already configured without changing the forge. If you
+This section is about `--allow-github-push`, a per-launch flag that adds
+GitHub as a push destination on top of whichever forge is selected, without
+changing that selection. It adds a destination; it does not stand in for a
+forge, so the launch-time rules for the selected forge/workflow pair still
+apply exactly as they would without it. If you
 want GitHub push and PRs as a standing choice instead, set
 `[core] forge = github` — see "GitHub forge (opt-in alternative)" above; it
 also opens `ssh.github.com:22`, but persistently rather than per launch, and
