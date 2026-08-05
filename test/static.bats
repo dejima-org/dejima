@@ -1619,6 +1619,32 @@ EOF
     grep -q 'directory shared by' "$REPO_ROOT/docs/security.md"
 }
 
+# The CI disclosure is the one part of issue #72 that helps a reader whatever
+# else is or isn't mitigated on their runners, so it is pinned in all three
+# places rather than left to survive a future edit on its own. Presence-only
+# greps, same caveat as the two above.
+@test "README and docs/security.md both disclose that push access is CI code execution" {
+    for f in README.md docs/security.md; do
+        grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
+        grep -qi 'forge = none' "$REPO_ROOT/$f"
+    done
+}
+
+@test "docs/ci.md exists and is linked from the README and docs/security.md" {
+    [ -f "$REPO_ROOT/docs/ci.md" ]
+    grep -q 'docs/ci\.md' "$REPO_ROOT/README.md"
+    grep -q '(ci\.md)' "$REPO_ROOT/docs/security.md"
+}
+
+# The whole allowlist argument in docs/ci.md rests on reading the declaration
+# from the branch the operator controls. A future edit that softens this into
+# "read .dejima/allowed-domains" without saying from where would leave the
+# document describing a control that doesn't control anything.
+@test "docs/ci.md says the CI allowlist is read from main, not from the checkout" {
+    grep -q 'origin/main' "$REPO_ROOT/docs/ci.md"
+    grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"
+}
+
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]

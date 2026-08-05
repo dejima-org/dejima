@@ -1029,6 +1029,26 @@ network, and that deserves more room than a section.
 bind address and verifying it, the SSH and web front doors, reading and typing
 on a phone, running behind another reverse proxy, notifications, and attaching.
 
+## CI: push access is code execution elsewhere
+
+If the project has CI, **granting a session push access grants it code
+execution on whatever host that CI runs on** - and nothing in the chain needs
+you. The push guard permits a feature branch, the briefing tells the agent to
+open a pull request without asking, `on: pull_request` fires, and the runner
+executes that commit. Merging is a decision you make *after* the code has
+already run, and it does not take a modified workflow file to get there: a
+workflow that runs a test suite runs every file in it.
+
+The sandbox bounds what a session can reach directly. It does not bound what
+it can arrange to have run elsewhere. Read this one before you point a
+sandbox at a project whose CI you administer - and if you would rather not
+take it on, `[core] forge = none` with `[core] workflow = local-only` declines
+the push grant and the code execution with it.
+
+**→ [docs/ci.md](docs/ci.md)** - why no approval gate is offered, hardening a
+runner, and making CI's egress allowlist a version-controlled artifact read
+from `main`.
+
 ## Security notes
 
 What this sandbox does and does not protect you from - the containment
@@ -1125,6 +1145,7 @@ likely to collide with a real container you have running.
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
+| `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,
