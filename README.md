@@ -687,11 +687,20 @@ default:
 - DNS resolution via a local proxy (see "DNS is allowlisted too")
 - the Docker host itself (not its whole subnet)
 - GitHub's published IP ranges, port 443 only (see "GitHub push" below)
-- `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` (npm and
-  mason's Python-based LSP tools), `release-assets.githubusercontent.com`
-  (GitHub release assets, a separate CDN from github.com's own IPs),
-  `proxy.golang.org`, `sum.golang.org` (`go` module proxy/checksums);
-  `api.anthropic.com` when the credential proxy is off (kill switch or API-key auth)
+- `registry.npmjs.org` and `platform.claude.com` (the harness and its
+  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
+  separate CDN from github.com's own IPs, and where a good deal of tooling
+  fetches its binaries); `api.anthropic.com` when the credential proxy is off
+  (kill switch or API-key auth)
+
+  That is the whole built-in list, and it is meant to stay that way: it covers
+  what the sandbox itself cannot run without, not what a project might want.
+  Language package hosts are approved rather than assumed — `pypi.org`,
+  `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
+  or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
+  built-in list short is that everything on it is reachable from every sandbox
+  on the host whether or not a project has any use for it, and a name granted
+  by being built in is a name nobody ever reviewed
 - whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
   by default) — not port-restricted, so git-over-ssh to the forge works
   without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
