@@ -1490,6 +1490,51 @@ this line is not json'
     grep -q 'dejima-project approve' "$REPO_ROOT/hooks/sandbox-context.sh"
 }
 
+# The hook answers "is this installed?" per kind, and a tarball has no
+# package manager to ask - it is there if its directory is. A tarball spec
+# falling through to the package-name regex would be silently skipped, which
+# reads to the agent as "declared and present" for something that is neither.
+@test "sandbox-context reports a declared tarball dependency that is not unpacked" {
+    local ws; ws="$(mktemp -d)"
+    local sha=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    mkdir -p "$ws/.dejima"
+    printf 'tarball:definitely-not-here@%s:https://example.com/x.tar.gz\n' "$sha" > "$ws/.dejima/dependencies"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    [[ "$out" == *"definitely-not-here"* ]]
+    # The digest reaches the agent intact: it is what the operator is being
+    # asked to approve, so a truncated form would be asking them to agree to
+    # something they cannot see.
+    [[ "$out" == *"$sha"* ]]
+}
+
+# The positive half of the test above. It needs a tarball dependency actually
+# unpacked in the image, which only exists once a project has approved one -
+# so on an image with none it skips rather than silently asserting nothing.
+# A visible skip is the honest form here; a test that arranged its own
+# /opt/dejima entry would be checking that mkdir works.
+#
+# The branch itself is pinned by the source-level test below, which holds
+# regardless of what this image happens to contain.
+@test "sandbox-context does not report a tarball dependency that is unpacked" {
+    local present=""
+    for d in /opt/dejima/*/; do [ -d "$d" ] && present="$(basename "$d")" && break; done
+    [ -n "$present" ] || skip "no unpacked tarball dependency in this image"
+    local ws; ws="$(mktemp -d)"
+    local sha=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    mkdir -p "$ws/.dejima"
+    printf 'tarball:%s@%s:https://example.com/x.tar.gz\n' "$present" "$sha" > "$ws/.dejima/dependencies"
+    local out
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    rm -rf "$ws"
+    [[ "$out" != *"$present"* ]]
+}
+
+@test "sandbox-context decides a tarball is present by its unpack directory" {
+    grep -q '\[ -d "/opt/dejima/\$name" \] && continue' "$REPO_ROOT/hooks/sandbox-context.sh"
+}
+
 @test "sandbox-context reports nothing when no project declarations exist" {
     local ws; ws="$(mktemp -d)"
     local out
