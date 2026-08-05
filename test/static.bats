@@ -1531,6 +1531,35 @@ this line is not json'
     [[ "$out" != *"$present"* ]]
 }
 
+# runtime.bats proves the derived-image dependency mechanism works by
+# declaring apt:cowsay and then finding cowsay installed. That only proves
+# anything while the base image does not ship it - otherwise the assertion
+# passes with the mechanism entirely broken. runtime.bats checks this for
+# itself too, but only where Docker exists; this catches it in the suite that
+# runs everywhere, at the point the package list changes.
+@test "the base image ships none of the packages used as dependency fixtures" {
+    for pkg in $(grep -oE "apt:[a-z0-9.+-]+" "$REPO_ROOT/test/runtime.bats" | cut -d: -f2 | sort -u); do
+        run grep -nE "^ +$pkg \\\\$" "$SANDBOX_DIR/Dockerfile"
+        [ "$status" -ne 0 ] || {
+            echo "$pkg is a dependency-test fixture and is also in the base image" >&2
+            false
+        }
+    done
+}
+
+# The image ships the sandbox's own machinery and the tooling with no route
+# through dejima-dep. A language toolchain has a route - tarball: - so one
+# appearing here means every project carries it with nobody having asked.
+@test "no language toolchain is installed into the base image" {
+    run grep -nE '^(RUN|ENV).*(golang|/usr/local/go|rustup|\.cargo/bin|pyenv|rbenv|sdkman)' \
+        "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || {
+        echo "declare it with dejima-dep instead:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
 @test "sandbox-context decides a tarball is present by its unpack directory" {
     grep -q '\[ -d "/opt/dejima/\$name" \] && continue' "$REPO_ROOT/hooks/sandbox-context.sh"
 }

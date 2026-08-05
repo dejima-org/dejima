@@ -961,6 +961,18 @@ EOF
     local store; store="$(mktemp -d)"
     local df; df="$(mktemp)"
     printf 'apt:cowsay\n' > "$store/dependencies"
+
+    # The positive control, and it is load-bearing: this test proves the
+    # derived layer installed cowsay by finding cowsay installed. If the base
+    # image already carried it, the assertion below would pass with
+    # generate_derived_dockerfile doing nothing at all. Checked here rather
+    # than assumed, because "the base image gained a package" is a change
+    # nobody would connect to this file.
+    run docker run --rm --entrypoint dpkg-query "$IMAGE" -W -f='${Status}' cowsay
+    [[ "$output" != *"install ok installed"* ]] || {
+        echo "cowsay is in the base image, so this test cannot detect a broken derived build" >&2
+        false
+    }
     bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
         _ "$BATS_TEST_DIRNAME/../bin/dejima-project-lib.sh" "$IMAGE" "$store" > "$df"
     docker build -q -t "$derived" -f "$df" "$ctx" >&2
