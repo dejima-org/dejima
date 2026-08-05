@@ -650,7 +650,10 @@ dexec_node() {
 }
 
 @test "the ipset stays in sync with fresh (non-cached) DNS answers, not just the boot-time snapshot" {
-    ip=$(dexec dig +short pypi.org | head -1)
+    # Any built-in domain that resolves to a CDN address will do; this one is
+    # here because it is built in, so keep it on a name from fixed-domains.sh
+    # rather than one a project happens to have approved.
+    ip=$(dexec dig +short registry.npmjs.org | head -1)
     [ -n "$ip" ]
     dexec ipset del allowed-domains "$ip"
     run dexec ipset test allowed-domains "$ip"
@@ -661,7 +664,7 @@ dexec_node() {
     # forward triggers dnsmasq's --ipset= tracking (see dns-proxy.sh).
     dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     sleep 0.5
-    dexec dig +short pypi.org >/dev/null
+    dexec dig +short registry.npmjs.org >/dev/null
     sleep 0.5
     run dexec ipset test allowed-domains "$ip"
     [ "$status" -eq 0 ]

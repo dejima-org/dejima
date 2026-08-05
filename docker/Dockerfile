@@ -133,8 +133,11 @@ RUN asset_url=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-ti
 # Install the latest stable Go toolchain. go.dev's own release JSON gives
 # both the download URL and a SHA256 per file, verified below since this
 # runs as root - same pattern as gosu above. `go build`/`go mod download`
-# need proxy.golang.org and sum.golang.org reachable at runtime - see
-# fixed-domains.sh.
+# need proxy.golang.org and sum.golang.org reachable at runtime, and those are
+# NOT built into the allowlist - a Go project approves them itself, one
+# `dejima-allow --global <domain>` each, or a .dejima/allowed-domains line.
+# Shipping the toolchain is not the same decision as granting every sandbox on
+# the host reach to its module proxy.
 RUN ARCH=$(dpkg --print-architecture) && \
   release_json=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-time 60 \
     'https://go.dev/dl/?mode=json') && \

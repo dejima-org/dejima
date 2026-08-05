@@ -1889,6 +1889,27 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q 'SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"' "$REPO_ROOT/bin/dejima"
 }
 
+# The built-in list grants to every sandbox on the host, for every project,
+# with no review anywhere - so what belongs in it is what the sandbox itself
+# cannot run without. A language package host reaching it is how the list
+# grows one reasonable-looking entry at a time until "allowed by default"
+# covers most of the internet a build would want.
+#
+# The route for these is an approval: `dejima-allow --global`, or a reviewed
+# .dejima/allowed-domains line. Adding one back here means arguing that the
+# sandbox itself needs it.
+@test "no language package host is built into the allowlist" {
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    for d in pypi.org files.pythonhosted.org proxy.golang.org sum.golang.org \
+             crates.io static.crates.io rubygems.org gitlab.com; do
+        ! grep -qx "$d" <<< "$output" || {
+            echo "$d is built in; it should be an approval instead" >&2
+            false
+        }
+    done
+}
+
 @test "api.anthropic.com is in the fixed domains only when the proxy is off" {
     # Not unconditionally allowlisted: with the proxy on, the session reaches
     # the API through the forwarder rather than by resolving this name, so

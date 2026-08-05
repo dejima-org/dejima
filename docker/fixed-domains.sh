@@ -1,14 +1,22 @@
 # Sourced by both init-firewall.sh (IP-based ipset allowlist) and
 # dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
+#
+# What belongs here is what the sandbox's own machinery cannot run without -
+# the harness and its updates, and the release CDN the tools baked into the
+# image fetch binaries from. Nothing else.
+#
+# Language ecosystems and editor tooling deliberately do not: a Python, Go or
+# Rust project reaches its own package host through an approval, either
+# `dejima-allow --global` once or a `.dejima/allowed-domains` line reviewed
+# with the project. The distinction is not tidiness. Every name here is
+# reachable from every sandbox on the host whether or not the project has any
+# use for it, and - since a project's declaration is also what a hardened CI
+# runner reads its allowlist from (docs/ci.md) - a name that is granted by
+# being built in is a name nobody ever reviewed.
 FIXED_DOMAINS=(
     "registry.npmjs.org"
     "platform.claude.com"
-    "gitlab.com"
-    "pypi.org"
-    "files.pythonhosted.org"
     "release-assets.githubusercontent.com"
-    "proxy.golang.org"
-    "sum.golang.org"
 )
 
 # api.anthropic.com is allowlisted only when this session has no credential
