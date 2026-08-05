@@ -699,7 +699,7 @@ EOF
     # reach a real running dejima session (and mutate its live
     # firewall) even if the machine running this test happens to have one -
     # it must fail at "container not found", not at validation.
-    run "$REPO_ROOT/bin/dejima-allow" 'crates.io' --container dejima-test-suite-nonexistent-target
+    run "$REPO_ROOT/bin/dejima-allow" --container dejima-test-suite-nonexistent-target 'crates.io'
     [ "$status" -ne 0 ]
     [[ "$output" != *"Not a valid domain"* ]]
 }
@@ -1355,14 +1355,25 @@ this line is not json'
     [ "$status" -ne 0 ]
 }
 
-@test "dejima-allow's session-skip escape hatch is test-only, never a silent no-op path" {
-    # DEJIMA_ALLOW_SKIP_SESSION exists so test/project.bats can
-    # exercise --project persistence without a live container. It must never
-    # be reachable from the documented interface.
-    run grep -c 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
-    [ "$output" -eq 1 ]
-    run grep 'DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/README.md"
+@test "dejima-allow has no env-triggered path that skips the live session" {
+    # DEJIMA_ALLOW_SKIP_SESSION used to exist as a test-only escape hatch, and
+    # by the end was consulted by nothing: every caller passed --project or
+    # --global, which set session_wanted=0 on their own. An environment
+    # variable that turns a firewall CLI into a silent no-op is worth keeping
+    # out on purpose, not just deleting once - which is what this pins.
+    # Matched on the read and the write, not the bare name: both files below
+    # still name it in a comment explaining why it is gone, and a grep that
+    # tripped on its own rationale would have to be deleted to pass.
+    run grep -n '\${\?DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
     [ "$status" -ne 0 ]
+    run grep -rn --exclude=static.bats 'DEJIMA_ALLOW_SKIP_SESSION=' \
+        "$REPO_ROOT/test" "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "dejima-allow's usage puts the domain last" {
+    grep -q 'Usage: dejima-allow \[--global\] \[--project \[path\]\] \[--container <id>\] <domain>' \
+        "$REPO_ROOT/bin/dejima-allow"
 }
 
 @test "bin/dejima merges approved project domains into ALLOWED_DOMAINS" {
@@ -1590,7 +1601,7 @@ EOF
 }
 
 @test "README documents dejima-dep --global" {
-    grep -q 'dejima-dep add cargo:cargo-nextest --global' "$REPO_ROOT/README.md"
+    grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
 }
 
 @test "README documents that the exit-time audit's findings are not attributed to the session" {
@@ -2047,4 +2058,64 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # fail every time rather than testing anything.
     ! grep -qE '^ *- *runtime$' "$wf"
     grep -q 'test/runtime.bats' "$wf"
+}
+
+@test "the agent briefing teaches the project scope, not just global" {
+    # The observed failure: an agent asked for a project-specific domain to be
+    # added container-wide and globally, because --project was never named.
+    grep -q -- 'dejima-allow --project' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+}
+
+@test "the agent briefing and the context hook use the new argument order" {
+    # A briefing that hands the operator a command the CLI now rejects is worse
+    # than one that says nothing.
+    run grep -nE 'dejima-allow [a-z<][^ ]* +--' \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" "$REPO_ROOT/hooks/sandbox-context.sh"
+    [ "$status" -ne 0 ]
+}
+
+@test "the briefing's container placeholder is the template form, not a shell variable" {
+    # _briefing_core_preamble is a quoted heredoc rendered by placeholder
+    # substitution; a literal $container_id would reach the agent unexpanded.
+    run grep -n 'dejima-allow --container \$container_id' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ]
+    grep -q 'dejima-allow --container {{container_id}}' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+}
+
+@test "README documents dejima-allow with flags before the domain" {
+    grep -q 'dejima-allow --global crates.io' "$REPO_ROOT/README.md"
+    run grep -nE 'dejima-allow [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "README documents dejima-dep with flags before the spec" {
+    grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
+    run grep -nE 'dejima-dep (add|remove) [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "README does not claim --global/--project patch a running session" {
+    # A scope-flag-only call sets session_wanted=0 and never touches docker -
+    # see bin/dejima-allow. Claiming otherwise sends an operator to expect a
+    # live update they will not get.
+    run grep -nE 'which also (updates|patches) the running session' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+    grep -q 'deliberately do not touch a running container' "$REPO_ROOT/README.md"
+}
+
+@test "README does not claim dejima-project approve reports live-session failures" {
+    # approve only ever calls dejima-allow without --container (see
+    # bin/dejima-project's approve case), so a failure there is a persistence
+    # failure, never a live-session one.
+    run grep -n 'could not apply to a running session' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
+    grep -q 'never attempts to patch a running session' "$REPO_ROOT/README.md"
+}
+
+@test "README does not attribute container disambiguation to a scope flag" {
+    # A --project/--global-only call sets session_wanted=0 and never reaches
+    # the multiple-containers ambiguity check at all - only the bare form
+    # (or bare + --container) does. Only the bare form can ever refuse on it.
+    run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ]
 }

@@ -9,7 +9,10 @@
 #   compromised session can write these. They grant nothing; they are read
 #   only to compare against reality and suggest a command for the user to
 #   run. Parsed, never sourced - executing a file on a session-writable
-#   mount is a host-shell persistence path.
+#   mount is a host-shell persistence path. declare_entry also WRITES one,
+#   which is why it refuses to follow a symlink: a host-side write onto a
+#   session-writable path is the one direction this split does not otherwise
+#   cover.
 #
 #   ~/.config/dejima/{allowed-domains,dependencies} - a GLOBAL
 #   APPROVAL, applying to every project.
@@ -67,6 +70,71 @@ read_declared() {
     return 0
 }
 
+# Shared argument parsing for dejima-allow and dejima-dep, so the two CLIs
+# cannot drift on what --project means.
+#
+# The hard part is that --project's path is OPTIONAL, which makes
+# `--project X` ambiguous on its own: X could be the path, or the required
+# positional. Deciding by "is X the last token" is wrong for `dejima-dep list
+# --project ~/p`, which has no trailing positional to protect and would
+# silently resolve to the current directory instead - the scope quietly
+# becoming one the caller did not name. So the decision is made against how
+# many positionals the command actually requires after the flag:
+#
+#   --project takes the next token as its path only if doing so still leaves
+#   the command its required trailing positional(s).
+#
+# Required counts are per-command constants declared by the caller, not
+# inferred here.
+#
+# Sets dj_global, dj_project, dj_project_set, dj_container and the
+# dj_positional array. dj_project_set exists because "--project with no path"
+# (the current directory) and "no --project at all" are different scopes and
+# an empty dj_project cannot tell them apart.
+parse_scope_args() {
+    local required="$1"; shift
+    local -a args=("$@")
+    local n="${#args[@]}" i=0 k tok cand after
+
+    dj_global=0; dj_project=""; dj_project_set=0; dj_container=""
+    dj_positional=()
+
+    while [ "$i" -lt "$n" ]; do
+        tok="${args[$i]}"
+        case "$tok" in
+            --global) dj_global=1; i=$((i + 1)) ;;
+            --container)
+                cand="${args[$((i + 1))]:-}"
+                if [ -z "$cand" ]; then
+                    echo "--container needs a container name or id." >&2
+                    return 1
+                fi
+                dj_container="$cand"; i=$((i + 2)) ;;
+            --project)
+                dj_project_set=1; i=$((i + 1))
+                cand="${args[$i]:-}"
+                case "$cand" in ''|-*) continue ;; esac
+                # Count the positionals strictly after the candidate, skipping
+                # --container's value - counting that as a positional would
+                # make the candidate look safe to consume when it is not.
+                after=0; k=$((i + 1))
+                while [ "$k" -lt "$n" ]; do
+                    case "${args[$k]}" in
+                        --container) k=$((k + 2)) ;;
+                        -*)          k=$((k + 1)) ;;
+                        *)           after=$((after + 1)); k=$((k + 1)) ;;
+                    esac
+                done
+                if [ "$after" -ge "$required" ]; then
+                    dj_project="$cand"; i=$((i + 1))
+                fi ;;
+            -*) echo "Unknown option: $tok" >&2; return 1 ;;
+            *)  dj_positional+=("$tok"); i=$((i + 1)) ;;
+        esac
+    done
+    return 0
+}
+
 # The global store is config_root() itself, not a subdirectory of it - the
 # two filenames below can never collide with projects/<slug>, since a slug
 # is a sanitized absolute path and always begins with "-".
@@ -81,6 +149,32 @@ ensure_global_store() {
 # one project has one identity everywhere in this repo.
 project_slug() {
     printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/-/g'
+}
+
+# $project is `cd <path> && pwd`'s LOGICAL resolution: a symlinked path
+# component's name survives in the string. declare_entry's makedirs/open, and
+# every other plain filesystem call, resolve the same path PHYSICALLY - so
+# when a component is a symlink, "$project/.dejima" and the directory that
+# actually gets created or opened are not the same place.
+#
+# A legitimate symlinked checkout (a worktree, a bind mount, a symlinked home
+# directory) looks exactly like this too, and this function cannot tell the
+# two apart - only the operator running the command can, so it discloses the
+# mismatch rather than refusing on it. Refusing would break the ordinary case
+# outright, with no way forward.
+#
+# Deliberately not used to change how $project itself is resolved: doing the
+# approval lookup/write physically as well would move the *approval* to
+# wherever the symlink targets, turning a declaration-only redirect into an
+# actual cross-project grant - strictly worse than the mismatch this discloses.
+disclose_project_symlink() {
+    local logical="$1" physical
+    physical="$(cd -P "$logical" && pwd -P)"
+    if [ "$physical" != "$logical" ]; then
+        echo "Note: $logical is reached through a symlink; it resolves to" >&2
+        echo "$physical, and that is where its .dejima declaration actually" >&2
+        echo "lives - not $logical." >&2
+    fi
 }
 
 # The store a writer must use: whatever a reader would resolve to, created
@@ -116,6 +210,8 @@ ensure_project_store() {
         if [ "$owner" != "$path" ]; then
             echo "Note: recorded under the existing approvals for $owner, which" >&2
             echo "$path inherits - so it applies to $owner and everything under it." >&2
+            echo "Any declaration this call writes still goes to $path/.dejima -" >&2
+            echo "the approval and the declaration do not have to share a directory." >&2
         fi
         printf '%s' "$existing"
         return 0
@@ -182,6 +278,132 @@ approve_entry() {
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
     touch "$store/$kind"
     grep -qxF "$entry" "$store/$kind" || printf '%s\n' "$entry" >> "$store/$kind"
+}
+
+# Record an entry in the project's OWN declaration - the committed, shared
+# .dejima/<kind> file. This grants nothing (see this file's header: a
+# declaration is parsed, never sourced, and lives on a session-writable
+# mount), which is exactly why it is safe to write from the host. What it buys
+# is visibility: without it, a domain approved with --project is invisible to
+# dejima-project status, to hooks/sandbox-context.sh, and to everyone else on
+# the project.
+#
+# Validated with the same dispatch approve_entry uses, so the two can never
+# disagree about what a well-formed entry is.
+declare_entry() {
+    local project="$1" kind="$2" entry="$3" validator
+    validator="$(_approved_validator "$kind")" || return 1
+    "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
+    # This is the one write in this file that lands on the session-writable
+    # bind mount, so it is the one that must not follow a symlink. A
+    # compromised session can plant one and then ask the user - through the
+    # startup briefing, which tells it to hand over exactly this command - to
+    # run the CLI that trips it. Following it would aim a host-privileged
+    # append anywhere the user can write: at ~/.config/dejima/allowed-domains,
+    # silently turning a project approval into a global one; at
+    # ~/.config/dejima/dependencies, where the entry is installed as root at
+    # image build, on the one code path with no egress firewall in front of it;
+    # or at any host file at all.
+    #
+    # A test would not be enough. The briefing tells the agent to have the user
+    # run `dejima-allow --project` from a terminal outside the sandbox, so the
+    # session is normally still LIVE while this runs - and since it is the one
+    # asking for the command, it picks the moment and can spin a rename loop
+    # across any window between a check and the write. So there is no check:
+    # the guard is the open itself. O_NOFOLLOW makes a symlink at either path
+    # fail the open outright, the directory is opened O_DIRECTORY and the file
+    # is opened relative to that fd, so neither can be swapped for the other's
+    # sake afterwards, and the whole read-then-append happens through that one
+    # fd. A session that wins the swap gets an open of the object it replaced,
+    # not a redirected write.
+    #
+    # bash cannot open a path that way, so this is python3 - a hard dependency
+    # already (install.sh refuses to install without it). O_NONBLOCK and the
+    # S_ISREG check cover the non-symlink shapes: a FIFO planted here would
+    # otherwise block a host CLI the user was told to run for as long as the
+    # session declines to open the other end.
+    python3 - "$project/.dejima" "$kind" "$entry" "$DEJIMA_MAX_DECLARED" <<'PY'
+import errno, os, stat, sys
+
+directory, name, entry = sys.argv[1], sys.argv[2], sys.argv[3]
+MAX_DECLARED = int(sys.argv[4])
+# A ceiling on the read-back below, not on what a project may declare. The
+# largest legitimate file is MAX_DECLARED entries of a domain's 253 bytes plus
+# comments - tens of KiB - so this is orders of magnitude clear of anything
+# real, and exists only to stop a session-owned file from being unbounded.
+LIMIT = 1 << 20
+path = os.path.join(directory, name)
+why = (
+    "A project's .dejima is writable by the sandboxed session, so a link or",
+    "special file planted here would aim this host-side append at the approval",
+    "store, or at any other file you can write.",
+    "Inspect and remove it, then re-run.",
+)
+
+
+def refuse(*lines):
+    for line in lines:
+        sys.stderr.write(line + "\n")
+    raise SystemExit(1)
+
+
+try:
+    os.makedirs(directory, 0o755)
+except FileExistsError:
+    pass
+except OSError as exc:
+    refuse("Could not create %s: %s" % (directory, exc.strerror))
+
+try:
+    dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as exc:
+    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+        refuse("Refusing to write through %s: it is a symlink, or not a directory at all." % directory, *why)
+    refuse("Could not open %s: %s" % (directory, exc.strerror))
+
+try:
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o644,
+        dir_fd=dirfd,
+    )
+except OSError as exc:
+    if exc.errno in (errno.ELOOP, errno.ENXIO):
+        refuse("Refusing to write through %s: it is a symlink or other special file." % path, *why)
+    refuse("Could not write %s: %s" % (path, exc.strerror))
+finally:
+    os.close(dirfd)
+
+# Before any buffered wrapper touches it: a FIFO is opened without blocking
+# thanks to O_NONBLOCK, but it is not seekable, and refusing it is the point.
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    os.close(fd)
+    refuse("Refusing to write to %s: it is not a regular file." % path, *why)
+
+with os.fdopen(fd, "r+b") as fh:
+    # Bounded, because the duplicate check has to read back a file the session
+    # owns, and `truncate -s 8G` makes an arbitrarily large one at zero disk
+    # cost. Reading LIMIT + 1 rather than trusting fstat's size: the file can
+    # grow between the two, and this way the ceiling holds whatever it does.
+    body = fh.read(LIMIT + 1)
+    if len(body) > LIMIT:
+        refuse(
+            "Refusing to read %s back: it is larger than %d bytes." % (path, LIMIT),
+            "A project's .dejima is writable by the sandboxed session, and this",
+            "command has to read the file back to skip an entry already declared -",
+            "so an oversized one exhausts this machine's memory instead of",
+            "misdirecting the write. A real declaration is a few hundred short",
+            "lines; read_declared stops reading entries at %d." % MAX_DECLARED,
+            "Inspect and truncate it, then re-run.",
+        )
+    line = entry.encode()
+    if line not in body.split(b"\n"):
+        # O_APPEND, so this lands at the end whatever else has written since.
+        # The leading newline is for a declaration the session left unterminated
+        # - without it the append would extend that last line instead.
+        fh.write((b"" if not body or body.endswith(b"\n") else b"\n") + line + b"\n")
+PY
 }
 
 unapprove_entry() {

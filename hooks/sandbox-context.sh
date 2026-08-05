@@ -182,7 +182,7 @@ if [ -f "$decl_dir/allowed-domains" ]; then
   Tell the user to run, outside the sandbox:
     dejima-project approve \"$project_dir\"
   (or, for one domain right now:
-    bin/dejima-allow <domain> --container $container_id)"
+    bin/dejima-allow --container $container_id <domain>)"
     fi
 fi
 

@@ -300,14 +300,22 @@ something:
 ```sh
 dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # approve the declared set
-dejima-allow crates.io --project ~/myproject
-dejima-dep add cargo:cargo-nextest --global
+dejima-allow --project ~/myproject crates.io
+dejima-dep add --global cargo:cargo-nextest
 ```
 
-Domains apply at the next launch, and `dejima-allow` also patches a running
-session. Dependencies need an image rebuild, so they always land on the next
-one. →
-[Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
+`dejima-allow` with no scope flag patches a running session; `--project` or
+`--global` instead records an approval for future sessions, and domains
+apply at their next launch. Dependencies need an image rebuild, so they
+always land on the next one.
+
+`--project` records two things: the approval in `~/.config/dejima` (which is
+what actually grants) and a declaration in the project's own
+`.dejima/allowed-domains` (which is committed, so the rest of the project gets
+it too). `--global` writes only the approval — there is no project to declare
+in.
+
+→ [Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
 [Adding a domain to a running session](#adding-a-domain-to-a-running-session)
 
 ### Log shipping
@@ -695,7 +703,7 @@ default:
   launch — rather than picking up all-port egress and losing rebind
   protection on the way
 
-Everything else is rejected. Run `dejima-allow <domain> --global`
+Everything else is rejected. Run `dejima-allow --global <domain>`
 (or `--project <path>` for one project) to allow more permanently (e.g.
 `crates.io` for a Rust project), or `dejima --no-firewall` to disable the
 firewall entirely for one launch (debugging only).
@@ -727,8 +735,8 @@ Approved domains only take effect at container start. For a domain a
 sandbox — it has no privilege to do this itself):
 
 ```sh
-dejima-allow crates.io                # this session only
-dejima-allow crates.io --global       # + persist for every project
+dejima-allow crates.io                    # this running session only
+dejima-allow --container <id> crates.io   # a specific session, if more than one is running
 ```
 
 It first adds the domain to the running dnsmasq's allowlist (appends a
@@ -737,17 +745,21 @@ file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
 `docker exec -u root`. It finishes by checking the domain is actually
 reachable from inside that same container and prints a definitive verdict
-— exit code 2 if it isn't. That check is a report on the live session only,
-not a gate on approval: `--global`/`--project` persistence is recorded
-first and unconditionally, since the domain being approved may legitimately
-not answer on 443 (an internal service, an SSH-only host) and the natural
-moment to add a global approval is precisely when nothing is running to
-probe in the first place. (`--project` persistence likewise does not need a
-running container at all — see below.) `--global` writes the domain to the
-global approval store for every future session; `--global` and `--project`
-are not mutually exclusive here - give both together and each persists to
-its own store. If more than one dejima container is running, pass
-`--container <name>` to disambiguate - `docker ps` finds it, or use the
+— exit code 2 if it isn't.
+
+`--global` and `--project` are the opposite of this: they record an approval
+for *future* sessions and deliberately do not touch a running container, even
+together - see
+[Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies)
+below, since the domain being approved may legitimately not answer on 443 (an
+internal service, an SSH-only host) and the natural moment to add an approval
+is precisely when nothing is running to probe in the first place. Pass
+`--container <id>` alongside a scope flag to do both in one call:
+`dejima-allow --global --container <id> crates.io` records the approval and
+patches that session immediately, in that order, so the approval is never
+lost to a live-session failure. If more than one dejima container is
+running, the bare form above refuses and asks you to disambiguate with
+`--container <name>` - `docker ps` finds it, or use the
 container's own ID, which `sandbox-context.sh` already hands the agent in
 its startup context (and which is always available inside the sandbox as
 `cat /etc/hostname`), so there's no need for it to guess one and risk
@@ -795,8 +807,8 @@ A project can declare what it needs in two committed files:
 ```
 
 **Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a compromised session could write these files - they are only
-ever read to compare against reality and suggest a command. Approvals live
+read-write, so a compromised session could write these files - they are read
+only to compare against reality and suggest a command. Approvals live
 outside the container, under `~/.config/dejima/` by default
 (`$DEJIMA_CONFIG_DIR` relocates the whole tree) - global at its
 root, per project under `projects/<slug>/` - and are written only by tools
@@ -805,34 +817,77 @@ you run on the host:
 ```sh
 dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # review and approve the declared set
-dejima-allow crates.io --project ~/myproject
-dejima-allow crates.io --global       # applies to every project
-dejima-dep add cargo:cargo-nextest --project ~/myproject
-dejima-dep add cargo:cargo-nextest --global
+dejima-allow --project ~/myproject crates.io
+dejima-allow --global crates.io       # applies to every project
+dejima-dep add --project ~/myproject cargo:cargo-nextest
+dejima-dep add --global cargo:cargo-nextest
 ```
+
+Two of those tools also write the declaration, so an approval you make by
+hand does not stay invisible to everyone else on the project:
+`dejima-allow --project` appends to `.dejima/allowed-domains`, and
+`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
+approval first — that is the part that grants — and report separately on the
+declaration, so a project you can't write to still gets you the approval.
+`--global` writes no declaration at all: there is no project to declare in.
+
+The declaration those two write still grants nothing; it is the same
+untrusted file the section above describes, and writing to it does not
+promote it. That it is session-writable is exactly why both tools refuse to
+write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**:
+a compromised session can plant one and then ask you to run the command that
+follows it, which would aim a host-side append at your approval store or at
+any other file you can write. The refusal is the `open` itself rather than a
+test before it — `O_NOFOLLOW` on both, with the file opened relative to the
+already-opened directory — so a session that is still running while you type
+the command cannot swap `.dejima` or the declaration file out from under the
+write. (Those two leaves are what the session controls. A symlink further up
+a `--project` path you supply yourself is still resolved through.) Expect the
+session to be live: the agent briefing tells the agent to ask you to run
+`dejima-allow --project` from a terminal outside the sandbox. The same write
+reads the file back to skip an already-declared entry, and that read is
+capped — a session can make its own `.dejima/<kind>` arbitrarily large for
+free, and an oversized one is refused rather than loaded into your memory.
+
+Neither writer has an inverse for the declaration. `dejima-dep remove
+--project` withdraws the approval and deliberately leaves the declaration
+alone (it says so, since `dejima-project approve` will otherwise offer the
+entry again); `dejima-allow --project` has no `remove` at all. Taking
+something back from the project itself means editing `.dejima/` and
+committing that.
 
 `dejima-project status`/`approve` classify a declared entry against
 the union of global and project approvals, so something already approved
 globally shows as approved, not pending. Unlike `dejima-allow`,
 `dejima-dep`'s `--global` and `--project` are mutually exclusive -
-an entry belongs to exactly one scope.
+an entry belongs to exactly one scope. `dejima-dep` has no `--container`
+scope either, and refuses the flag rather than ignoring it: a dependency
+needs an image rebuild, so there is nothing to patch in a live session.
 
-Approved domains join the allowlist at the next launch (or immediately, for
-`dejima-allow`, which also updates the running session). Approved
-dependencies are baked into a derived image built `FROM` the shared base -
-first `dejima:<username>-global`, if the global store has any
+Approved domains join the allowlist at the next launch. `dejima-allow` can
+also patch a running session immediately, but only when it is run bare or
+with `--container` - approving here (`--project`/`--global`, with no
+`--container`) never touches one; see
+[Adding a domain to a running session](#adding-a-domain-to-a-running-session).
+Approved dependencies are baked into a derived image built `FROM` the shared
+base - first `dejima:<username>-global`, if the global store has any
 dependency approved, then `dejima:<username>-<slug>` on top of that,
 if the project store does - so they need an image rebuild: they take effect
 on the **next** launch.
 
 Because of that rebuild, the usual moment to approve is *after* leaving the
 sandbox — so persistence (`--global` or `--project`) never requires a running
-container, and is never gated on the reachability probe `dejima-allow`
-runs against a live session. Recording the approval is your decision;
-patching a live session and verifying the domain answers on 443 are
-best-effort on top of it, and `dejima-project approve` reports at the
-end which domains it could not apply to a running session rather than
-stopping at the first one.
+container.
+
+`dejima-project approve` never attempts to patch a running session: it only
+ever calls `dejima-allow` without `--container`, so recording the approval
+is the only thing it does. If an individual approval can't be recorded — an
+unwritable store, a slug collision, a corrupt approval list — it reports
+that entry as not approved and keeps going, rather than stopping at the
+first failure; that holds for dependencies and domains alike, so one bad
+entry can't cost you the rest of the set. It then exits non-zero if anything
+failed, so `dejima-project approve ~/myproject && dejima` won't launch a
+session missing the approvals you just confirmed.
 
 A session whose project declares something it doesn't have is told so in its
 startup context, with the exact command to hand you. Project approvals are

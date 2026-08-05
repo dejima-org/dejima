@@ -5,9 +5,10 @@
 # grant itself one - the same split bin/dejima-allow uses for
 # domains.
 #
-# Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]
-#   dejima-dep add cargo:cargo-nextest --project ~/myproject
-#   dejima-dep add cargo:cargo-nextest --global
+# Usage: dejima-dep <add|remove|list> [--global | --project [path]] [<spec>]
+#   dejima-dep add --project ~/myproject cargo:cargo-nextest
+#   dejima-dep add --project cargo:cargo-nextest   # the project in $PWD
+#   dejima-dep add --global cargo:cargo-nextest
 #   dejima-dep list
 #
 # A spec is <apt|npm|pip|cargo>:<name>. The dependencies actually installed
@@ -23,31 +24,44 @@ spec=""
 project=""
 global=0
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --global) global=1; shift ;;
-        --project) project="$2"; shift 2 ;;
-        -*) echo "Unknown option: $1" >&2; exit 1 ;;
-        *)
-            if [ -z "$action" ]; then action="$1"
-            elif [ -z "$spec" ]; then spec="$1"
-            else echo "Unexpected argument: $1" >&2; exit 1
-            fi
-            shift
-            ;;
-    esac
-done
-
 usage() {
-    echo "Usage: dejima-dep <add|remove|list> [<spec>] [--global | --project <path>]" >&2
+    echo "Usage: dejima-dep <add|remove|list> [--global | --project [path]] [<spec>]" >&2
     exit 1
 }
 
-[ -n "$action" ] || usage
+# The action is read first so the required trailing count is known before
+# parsing the rest: add/remove need a spec after any --project path, list does
+# not - and that count is exactly what decides whether a token after --project
+# is the path or the spec.
+case "${1:-}" in
+    add|remove) action="$1"; shift; required=1 ;;
+    list)       action="$1"; shift; required=0 ;;
+    *)          usage ;;
+esac
+
+parse_scope_args "$required" "$@" || usage
+case "${#dj_positional[@]}" in
+    0) spec="" ;;
+    1) spec="${dj_positional[0]}" ;;
+    *) usage ;;
+esac
+global="$dj_global"
+[ "$dj_project_set" -eq 0 ] || project="${dj_project:-$PWD}"
+
+# The shared parser knows --container because dejima-allow needs it. Before
+# that parser existed this CLI answered "Unknown option" here, and silently
+# accepting the flag now would be worse than the duplication it replaced: a
+# caller who believes they scoped an approval to one session would get project
+# scope - a persistent grant - and a zero exit telling them they were right.
+if [ -n "$dj_container" ]; then
+    echo "dejima-dep has no --container scope: a dependency needs an image" >&2
+    echo "rebuild, so there is nothing to patch in a live session." >&2
+    exit 1
+fi
 
 # An entry belongs to exactly one scope; silently picking one would misplace
 # an approval.
-if [ "$global" -eq 1 ] && [ -n "$project" ]; then
+if [ "$global" -eq 1 ] && [ "$dj_project_set" -eq 1 ]; then
     echo "--global and --project are mutually exclusive." >&2
     exit 1
 fi
@@ -56,6 +70,7 @@ fi
 # put a misleading $PWD-derived path in error messages.
 if [ "$global" -eq 0 ]; then
     project="$(cd "${project:-$PWD}" && pwd)"
+    disclose_project_symlink "$project"
 fi
 
 case "$action" in
@@ -79,6 +94,18 @@ case "$action" in
             store="$(ensure_project_store "$project")"
             approve_entry "$store" dependencies "$spec"
             echo "Approved $spec for $project."
+            # Printed only after the approval above, and guarded rather than
+            # left to set -e: the approval is what grants, and it is already
+            # written by this point. Letting a declare_entry failure abort
+            # here would exit before this echo ever ran, leaving the operator
+            # thinking nothing happened when a spec had, in fact, just been
+            # approved.
+            if declare_entry "$project" dependencies "$spec"; then
+                echo "Declared it in $project/.dejima/dependencies - commit that to share it."
+            else
+                echo "The approval above IS recorded; only the project's own .dejima" >&2
+                echo "declaration could not be written." >&2
+            fi
         fi
         # Unlike dejima-allow, this cannot touch a running session:
         # it needs an image rebuild. Say so, or an agent will keep insisting
@@ -101,6 +128,22 @@ case "$action" in
             [ -n "$store" ] || { echo "No approved config for $project." >&2; exit 1; }
             unapprove_entry "$store" dependencies "$spec"
             echo "Removed $spec from $project (takes effect on the next launch)."
+            # `add --project` writes a declaration; this deliberately does not
+            # take one back, since withdrawing one machine's approval is not
+            # the same decision as editing a file the whole team shares. That
+            # asymmetry used to be invisible and self-undoing: the entry goes
+            # back to `pending`, the session briefing reports it missing, and
+            # the next `dejima-project approve` re-approves it - so say where
+            # the durable copy is rather than letting the removal look final.
+            # -f before the grep, not a bare grep: this reads a path the
+            # sandboxed session owns, and a FIFO planted there would hang the
+            # command outright.
+            if [ -f "$project/.dejima/dependencies" ] &&
+                grep -qxF "$spec" "$project/.dejima/dependencies" 2>/dev/null; then
+                echo "$project/.dejima/dependencies still declares it - this command does"
+                echo "not edit the project's committed declaration, so dejima-project"
+                echo "approve will offer it again. Edit that file to drop it for good."
+            fi
         fi
         ;;
     *) usage ;;

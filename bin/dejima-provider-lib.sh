@@ -714,11 +714,18 @@ What this means:
   allowlist is load-bearing for you too, not just for the host - working
   around it would give up that protection, not merely lift the one limit
   it appears to. If a task needs one more domain and nothing else, that's
-  a quick fix, not a reason to stop: tell the user to run
-  `bin/dejima-allow <domain> --container {{container_id}}` (add
-  `--global` to persist it past this session) from a terminal outside the
-  sandbox, then continue. Quote that --container value exactly as written
-  here - it is this container's real ID, not something to infer.
+  a quick fix, not a reason to stop. Tell the user to run, from a terminal
+  outside the sandbox, whichever of these matches why the domain is needed:
+    bin/dejima-allow --container {{container_id}} <domain>  # just this session
+    bin/dejima-allow --project <path> <domain>              # this project, always
+    bin/dejima-allow --global <domain>                      # every project
+  Pick deliberately rather than asking for all three: a domain this project
+  needs is --project, not --global - a global grant widens every other
+  project's firewall too, which is rarely what one project's dependency
+  calls for. --project also records the domain in the project's own
+  .dejima/allowed-domains, so it is shared with everyone working on it
+  rather than living on one machine. Quote that --container value exactly as
+  written here - it is this container's real ID, not something to infer.
 - Stay within the task you were given. Since there are no permission
   prompts here, be more conservative than usual about anything destructive,
   irreversible, or outside the project directory.
