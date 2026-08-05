@@ -47,6 +47,74 @@ push grant declines the code execution with it — `[core] forge = none` with
 This applies to any project developed in a dejima sandbox, not only to this
 repository. **→ [docs/ci.md](ci.md)** for the reasoning and the setup.
 
+## To your forge, the sandbox is you
+
+By default a session authenticates with your credentials: your SSH key through
+the forwarded agent, and a token generated under your account. A push, a pull
+request, a comment or a merge made from inside the sandbox is therefore
+**indistinguishable at the forge from one you made yourself** — not similar to
+it, identical.
+
+The consequence is worth stating flatly, because it is easy to configure
+around without noticing: **every control your forge offers that keys on
+identity is a guard rather than a boundary.** Branch protection's merge
+whitelist, its push whitelist, required approvals, and the audit log all
+answer the question "who did this", and there is only one answer available.
+Putting yourself on a merge whitelist puts the sandbox on it too.
+
+Three specific consequences:
+
+- **Required approvals are not merely weak here, they are unusable.** A forge
+  will not let a pull request's author approve it, and the sandbox opens pull
+  requests as you — so requiring one approval means nobody can give it.
+- **The forge's audit trail cannot attribute.** "You pushed this" and "a
+  session pushed this" are the same recorded event. This is the same shape as
+  the exit-time audit's time-window caveat above: a record of what happened,
+  not of who caused it.
+- **It compounds the SSH agent's reach.** The agent already signs for any repo
+  your key can reach (below); the identity is what makes the resulting action
+  land as yours everywhere it reaches.
+
+### Give the sandbox its own identity
+
+This is configuration, not a missing feature. Create a dedicated forge account
+with **write** access to the repositories a session should work on, and point
+the sandbox at it instead of at you:
+
+- `[forge.gitea] token_file` — that account's token, rather than one issued
+  under yours.
+- `[core] ssh_key` — a deploy key belonging to it, rather than your forwarded
+  agent. See "Headless git push without agent forwarding" in the README.
+
+With the two identities separated, the same settings stop being decorative:
+
+| Setting | What it becomes |
+| --- | --- |
+| Merge whitelist: you | The session genuinely cannot merge |
+| Push whitelist on `main`: you, or nobody | The session pushes feature branches and nothing else |
+| Require approvals ≥ 1 | Usable — the session authors, you approve |
+
+That last row is the one that turns "the operator merges, the agent does not"
+from a convention into something the forge enforces.
+
+**Verify which credential a push actually uses.** Nothing here enforces one:
+`[core] ssh_key` is a second, independent credential path (below), so if your
+own agent is *also* forwarded, a push may still be signed by your personal
+key and the separate identity becomes decorative for exactly the operation it
+was meant to constrain. Make a test push and read what the forge attributes
+it to, rather than assuming.
+
+Two things a separate identity does **not** do:
+
+- It does not reduce what a compromised session can do inside the container,
+  or to the mounted project. It changes what that session can do *to your
+  forge*, and who the forge thinks did it.
+- It does not touch CI. A write-capable account can still push a feature
+  branch, and pushing a branch is what makes CI execute code — see the
+  section above. It also has no bearing on the token the forge injects into a
+  CI job, which is a third principal again, subject to none of the settings in
+  that table. **→ [docs/ci.md](ci.md)**
+
 ## Provider trust
 
 Forges, workflows and harnesses (`forges/`, `workflows/`, `harnesses/`) are

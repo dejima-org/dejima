@@ -98,6 +98,20 @@ this the untrusted party can edit the thing that is supposed to constrain it.
 
 This costs nothing and it is the single highest-value item in this document.
 
+**Branch protection needs a second identity to protect anything.** By default
+a session authenticates as you, so a merge whitelist, a push whitelist and an
+approval requirement all admit the sandbox exactly as they admit you — and
+required approvals are unusable outright, since a forge will not let a pull
+request's author approve it and the session opens them as you. Giving the
+sandbox its own forge account is what turns those settings from decoration
+into enforcement, and it is configuration rather than a missing feature:
+[docs/security.md](security.md#to-your-forge-the-sandbox-is-you).
+
+Note that it does not help with the rest of this document. A write-capable
+account still pushes feature branches, which is what makes CI run code, and
+the token the forge injects into a job is a third principal subject to none of
+those settings.
+
 ## The runner host
 
 Treat it as what it is: a machine that exists to run untrusted code, because
