@@ -2,7 +2,14 @@
 # container (https://github.com/anthropics/claude-code/tree/main/.devcontainer),
 # substantially extended and reworked for this project's own sandboxing model
 # (parametrized SANDBOX_USER, DNS proxy + ulogd2 logging, gosu-based privilege
-# drop, nvim/Go/Playwright/tree-sitter toolchain, gitea-pr helper, etc).
+# drop, nvim/Playwright/tree-sitter toolchain, gitea-pr helper, etc).
+#
+# What belongs in here is what the sandbox itself needs, plus the editor and
+# browser tooling that has no route through the dependency mechanism. Language
+# toolchains and per-project utilities do have one - `dejima-dep`, including
+# tarball: for a release archive - so they are declared by the projects that
+# want them rather than carried by every sandbox on the host. Anything added
+# below is added for every project, forever, with no review anywhere.
 FROM node:22
 
 ARG TZ
@@ -30,7 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   procps \
   fzf \
   zsh \
-  man-db \
   unzip \
   gnupg2 \
   gh \
@@ -45,27 +51,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ulogd2 \
   ulogd2-json \
   nano \
-  vim \
   ripgrep \
   fd-find \
   build-essential \
   python3 \
   python3-pip \
-  python3-venv \
   xz-utils \
-  bats \
-  cowsay \
-  fortune-mod \
-  fortunes-min \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && ln -s "$(command -v fdfind)" /usr/local/bin/fd
-
-# cowsay/cowthink/fortune install to /usr/games on Debian, which isn't on
-# PATH by default - nvim start-screen plugins commonly shell out to them by
-# bare name for a dashboard header. Set via ENV (not a profile.d script) so it's
-# picked up by every process unconditionally, including nvim's non-login
-# subprocess spawns, which wouldn't source /etc/profile.d.
-ENV PATH=/usr/games:$PATH
 
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
@@ -97,13 +90,6 @@ RUN useradd -r -s /usr/sbin/nologin ulogd
 # of re-running all of it. That single ordering was most of the cost of the
 # override rebuild: it was 1169s of a 1379s test run, for a difference that
 # amounts to one useradd.
-ARG GIT_DELTA_VERSION=0.18.2
-RUN ARCH=$(dpkg --print-architecture) && \
-  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
-    "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
-  dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
-  rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
-
 # gosu lets entrypoint.sh (root) drop to the node user for the actual
 # session after setting up the firewall, without leaving any setuid/sudo
 # escalation path available to node afterward. Verified against the
@@ -130,27 +116,15 @@ RUN asset_url=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-ti
   tar -C /usr/local --strip-components=1 -xzf nvim.tar.gz && \
   rm nvim.tar.gz
 
-# Install the latest stable Go toolchain. go.dev's own release JSON gives
-# both the download URL and a SHA256 per file, verified below since this
-# runs as root - same pattern as gosu above. `go build`/`go mod download`
-# need proxy.golang.org and sum.golang.org reachable at runtime, and those are
-# NOT built into the allowlist - a Go project approves them itself, one
-# `dejima-allow --global <domain>` each, or a .dejima/allowed-domains line.
-# Shipping the toolchain is not the same decision as granting every sandbox on
-# the host reach to its module proxy.
-RUN ARCH=$(dpkg --print-architecture) && \
-  release_json=$(curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --max-time 60 \
-    'https://go.dev/dl/?mode=json') && \
-  filename=$(echo "$release_json" | jq -r --arg arch "$ARCH" \
-    '[.[] | select(.stable == true)][0].files[] | select(.os == "linux" and .arch == $arch and .kind == "archive") | .filename') && \
-  sha256=$(echo "$release_json" | jq -r --arg arch "$ARCH" \
-    '[.[] | select(.stable == true)][0].files[] | select(.os == "linux" and .arch == $arch and .kind == "archive") | .sha256') && \
-  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
-    -O go.tar.gz "https://go.dev/dl/${filename}" && \
-  echo "${sha256}  go.tar.gz" | sha256sum -c - && \
-  tar -C /usr/local -xzf go.tar.gz && \
-  rm go.tar.gz
-ENV PATH=$PATH:/usr/local/go/bin
+# No Go toolchain here. A Go project declares one:
+#
+#   dejima-dep add --global tarball:go@<sha256>:https://go.dev/dl/go<ver>.linux-amd64.tar.gz
+#
+# and gets a pinned toolchain in the version it actually wants, rather than
+# whatever this image was built with. Shipping a language runtime is not the
+# same decision as every sandbox on the host carrying one - and the module
+# proxy it needs (proxy.golang.org, sum.golang.org) is an approval too, for
+# the same reason.
 
 # System libraries Chromium needs (fonts, libnss, libatk, etc.) for
 # Playwright, installed here since it needs apt/root - the actual
