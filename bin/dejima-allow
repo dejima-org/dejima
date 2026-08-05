@@ -35,6 +35,7 @@ global="$dj_global"
 project=""
 if [ "$dj_project_set" -eq 1 ]; then
     project="$(cd "${dj_project:-$PWD}" && pwd)"
+    disclose_project_symlink "$project"
 fi
 container="$dj_container"
 

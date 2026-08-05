@@ -151,6 +151,32 @@ project_slug() {
     printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/-/g'
 }
 
+# $project is `cd <path> && pwd`'s LOGICAL resolution: a symlinked path
+# component's name survives in the string. declare_entry's makedirs/open, and
+# every other plain filesystem call, resolve the same path PHYSICALLY - so
+# when a component is a symlink, "$project/.dejima" and the directory that
+# actually gets created or opened are not the same place.
+#
+# A legitimate symlinked checkout (a worktree, a bind mount, a symlinked home
+# directory) looks exactly like this too, and this function cannot tell the
+# two apart - only the operator running the command can, so it discloses the
+# mismatch rather than refusing on it. Refusing would break the ordinary case
+# outright, with no way forward.
+#
+# Deliberately not used to change how $project itself is resolved: doing the
+# approval lookup/write physically as well would move the *approval* to
+# wherever the symlink targets, turning a declaration-only redirect into an
+# actual cross-project grant - strictly worse than the mismatch this discloses.
+disclose_project_symlink() {
+    local logical="$1" physical
+    physical="$(cd -P "$logical" && pwd -P)"
+    if [ "$physical" != "$logical" ]; then
+        echo "Note: $logical is reached through a symlink; it resolves to" >&2
+        echo "$physical, and that is where its .dejima declaration actually" >&2
+        echo "lives - not $logical." >&2
+    fi
+}
+
 # The store a writer must use: whatever a reader would resolve to, created
 # for this exact path only when nothing above already covers it. Creating one
 # per path unconditionally would be wrong in the workflow inheritance exists

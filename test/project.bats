@@ -1315,6 +1315,66 @@ EOF
     rm -rf "$(dirname "$victim")"
 }
 
+
+# --- disclosing a symlinked project path, not refusing it ---
+#
+# `cd <path> && pwd` is LOGICAL, so a symlinked component's name survives in
+# $project even though declare_entry's makedirs/open resolve it PHYSICALLY.
+# A planted symlink component and a legitimate symlinked checkout look
+# identical from here, so the CLI cannot refuse - only disclose where the
+# write actually lands and let the operator judge.
+
+@test "dejima-allow --project through a symlinked component discloses the physical target" {
+    local attacker victim
+    attacker="$(mktemp -d)"
+    victim="$(mktemp -d)"
+    mkdir -p "$victim/.dejima"
+    printf 'legit.example\n' > "$victim/.dejima/allowed-domains"
+    ln -s "$victim" "$attacker/planted"
+    run "$REPO_ROOT/bin/dejima-allow" --project "$attacker/planted" evil.example
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reached through a symlink"* ]]
+    [[ "$output" == *"$victim"* ]]
+    # The declaration really does land in the victim's existing file, and the
+    # approval really does NOT follow it there - the notice is disclosure of
+    # exactly this, not a claim that it also fixed it.
+    grep -qx 'legit.example' "$victim/.dejima/allowed-domains"
+    grep -qx 'evil.example' "$victim/.dejima/allowed-domains"
+    grep -qx 'evil.example' "$(store_of "$attacker/planted")/allowed-domains"
+    [ ! -e "$(store_of "$victim")/allowed-domains" ]
+    rm -rf "$attacker" "$victim"
+}
+
+@test "dejima-allow --project with no symlinked component prints no disclosure" {
+    run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.com
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"reached through a symlink"* ]]
+}
+
+@test "dejima-dep add --project through a symlinked component discloses the physical target" {
+    local attacker victim
+    attacker="$(mktemp -d)"
+    victim="$(mktemp -d)"
+    mkdir -p "$victim/.dejima"
+    printf 'apt:legit\n' > "$victim/.dejima/dependencies"
+    ln -s "$victim" "$attacker/planted"
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$attacker/planted" apt:evil
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reached through a symlink"* ]]
+    [[ "$output" == *"$victim"* ]]
+    grep -qx 'apt:legit' "$victim/.dejima/dependencies"
+    grep -qx 'apt:evil' "$victim/.dejima/dependencies"
+    grep -qx 'apt:evil' "$(store_of "$attacker/planted")/dependencies"
+    [ ! -e "$(store_of "$victim")/dependencies" ]
+    rm -rf "$attacker" "$victim"
+}
+
+@test "dejima-dep add --project with no symlinked component prints no disclosure" {
+    run "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:ripgrep
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"reached through a symlink"* ]]
+}
+
 @test "dejima-project approve attempts every dependency even when one fails" {
     # The dep loop had no collector, so under set -e the first failure aborted
     # the whole script: the second dep and BOTH domains were never attempted

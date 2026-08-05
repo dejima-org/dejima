@@ -70,6 +70,7 @@ fi
 # put a misleading $PWD-derived path in error messages.
 if [ "$global" -eq 0 ]; then
     project="$(cd "${project:-$PWD}" && pwd)"
+    disclose_project_symlink "$project"
 fi
 
 case "$action" in
