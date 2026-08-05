@@ -1095,6 +1095,25 @@ if remote_enabled; then
     DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
     mkdir -p -m 700 "$DEJIMA_NOTIFY_DIR"
 
+    # Verify what was just created, because everything downstream assumes it.
+    # A leaf left behind root-owned by an earlier container restart (see
+    # entrypoint.sh) is the shape this catches: mkdir -p succeeds against an
+    # existing directory regardless of who owns it, so without this the mount
+    # goes ahead and the failure surfaces later as EACCES in a hook.
+    #
+    # A warning rather than a refusal. Remote access is opt-in, and the rest
+    # of the session works without it - blocking a launch over undeliverable
+    # notifications would cost more than it saves. The neighbouring state-dir
+    # check does refuse, but that one is about a symlink handing a session an
+    # attacker-chosen path; this one is only about the feature working.
+    if [ ! -O "$DEJIMA_NOTIFY_DIR" ] || [ ! -w "$DEJIMA_NOTIFY_DIR" ]; then
+        echo "warning: $DEJIMA_NOTIFY_DIR is not a directory this user owns and can write." >&2
+        echo "Remote access is enabled, so notifications and dejima-attach will not work for" >&2
+        echo "this session. A leftover root-owned directory here is usually Docker's doing," >&2
+        echo "from a container that was restarted rather than relaunched; removing it and" >&2
+        echo "starting again clears it." >&2
+    fi
+
     # $TMUX_PANE is set by tmux in the launching shell. Empty when the
     # sandbox wasn't started from tmux: the session is still registered, just
     # listed as not-attachable, rather than silently omitted.

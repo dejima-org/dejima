@@ -1272,3 +1272,66 @@ EOF
     [[ "$logs" == *"'tls'"* ]] || dump "the refusal did not name the valid values"
     [[ "$logs" == *"'loopback'"* ]] || dump "the refusal did not name the valid values"
 }
+
+# The three-symptom failure entrypoint.sh's marker-directory check exists to
+# name: notifications stop, the session vanishes from dejima-attach, and the
+# notify hook reports EACCES - with no obvious moment they started.
+#
+# It is Docker's answer to a missing bind source that produces it. bin/dejima
+# creates the marker directory per launch and removes it on exit, so a
+# container that is RESTARTED rather than relaunched has no source left, and
+# Docker creates one root-owned rather than refusing. The directory then
+# exists, so the hook's own `[ -d ]` guard passes and the write fails instead.
+@test "a marker directory the sandbox user cannot write is reported at startup" {
+    local container; container="$(container_name)"
+    local host_dir; host_dir="$(mktemp -d)"
+    # Root-owned and not writable by the sandbox user: what Docker leaves
+    # behind for a missing bind source. Built here rather than by removing a
+    # source, so the test does not depend on Docker's fallback behaviour to
+    # set up a test OF the consequences of that behaviour.
+    chmod 755 "$host_dir"
+
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -e DEJIMA_NOTIFY_DIR=/run/dejima-notify \
+        -v "$host_dir:/run/dejima-notify:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$container"
+
+    run settled_logs "$container"
+    [[ "$output" == *"not writable by"* ]]
+    [[ "$output" == *"RESTARTED rather than"* ]]
+    # Reported, not repaired: chowning would restore notifications while the
+    # session stayed absent from a registry this container never sees.
+    run docker exec "$container" stat -c '%U' /run/dejima-notify
+    [ "$output" = "root" ]
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    rm -rf "$host_dir"
+}
+
+# Remote access is opt-in and off by default. The check above must say nothing
+# at all for the sessions that never asked for it, which is every session by
+# default - a warning about an unconfigured optional feature is noise on every
+# start, and noise is what stops warnings being read.
+@test "no marker-directory warning when remote access is not enabled" {
+    local container; container="$(container_name)"
+    docker run -d --name "$container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$container"
+
+    run settled_logs "$container"
+    [[ "$output" != *"dejima-notify"* ]]
+    [[ "$output" != *"remote access is enabled"* ]]
+
+    docker rm -f "$container" >/dev/null 2>&1 || true
+}
