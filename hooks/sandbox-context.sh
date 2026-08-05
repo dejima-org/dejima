@@ -133,6 +133,21 @@ if [ -f "$decl_dir/dependencies" ]; then
         # a leading dash (e.g. "--allow-unauthenticated") must not validate
         # as a name, or this hook would echo into the agent's context an
         # entry the project's own approve/status commands treat as rejected.
+        #
+        # A tarball spec carries a digest and a URL rather than a bare name,
+        # so it is matched separately and answered by whether its directory
+        # is there. Reporting one as missing has to print the whole spec, and
+        # that is deliberate: the digest is the part that makes the operator's
+        # approval mean something, so a truncated form would be asking them to
+        # approve something they cannot see.
+        if [[ "$spec" == tarball:* ]]; then
+            name="${spec#tarball:}"; name="${name%%@*}"
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+            [ -d "/opt/dejima/$name" ] && continue
+            missing_deps_n=$((missing_deps_n + 1))
+            [ "$missing_deps_n" -le "$MAX_LISTED" ] && missing_deps="$missing_deps $spec"
+            continue
+        fi
         [[ "$spec" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
         kind="${spec%%:*}"
         name="${spec#*:}"

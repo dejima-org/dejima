@@ -136,6 +136,95 @@ dockerfile_for() {
     done
 }
 
+TARBALL_SHA=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+@test "valid_dep_spec accepts a well-formed tarball spec" {
+    for spec in \
+        "tarball:go@$TARBALL_SHA:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz" \
+        "tarball:nvim@$TARBALL_SHA:https://github.com/neovim/neovim/releases/download/v0.11.0/nvim-linux-x86_64.tar.gz" \
+        "tarball:a@$TARBALL_SHA:https://example.com/x?v=1.2%2B3"; do
+        run bash -c 'source "$1"; valid_dep_spec "$2"' _ "$LIB" "$spec"
+        [ "$status" -eq 0 ]
+    done
+}
+
+# The URL and the name are interpolated into a root RUN line in the generated
+# Dockerfile, so this is the boundary that keeps a declaration from becoming a
+# build-time root shell. The digest cases matter for a different reason: a
+# spec without one would be an approval of a name whose contents the far end
+# can change afterwards, which is not something an operator can agree to once.
+@test "valid_dep_spec rejects a tarball spec that is shell-active, unpinned or not https" {
+    for spec in \
+        "tarball:go@$TARBALL_SHA:https://x.dev/\$(id).tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a;id.tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a\`id\`.tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a b.tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a'\''.tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a\\\\b.tar.gz" \
+        "tarball:go@$TARBALL_SHA:https://x.dev/a|id" \
+        "tarball:go@$TARBALL_SHA:http://x.dev/a.tar.gz" \
+        "tarball:go@$TARBALL_SHA:ftp://x.dev/a.tar.gz" \
+        "tarball:go@$TARBALL_SHA:/etc/passwd" \
+        "tarball:go@deadbeef:https://x.dev/a.tar.gz" \
+        "tarball:go@${TARBALL_SHA}Z:https://x.dev/a.tar.gz" \
+        "tarball:go@:https://x.dev/a.tar.gz" \
+        "tarball:go:https://x.dev/a.tar.gz" \
+        "tarball:go@$TARBALL_SHA" \
+        "tarball:@$TARBALL_SHA:https://x.dev/a.tar.gz" \
+        "tarball:-go@$TARBALL_SHA:https://x.dev/a.tar.gz"; do
+        run bash -c 'source "$1"; valid_dep_spec "$2"' _ "$LIB" "$spec"
+        [ "$status" -ne 0 ] || { echo "accepted: $spec" >&2; false; }
+    done
+}
+
+# A name becomes a directory under /opt/dejima, so a traversal token in it
+# would place the unpacked archive somewhere else entirely.
+@test "valid_dep_spec rejects a tarball name that walks out of its directory" {
+    for name in .. . ../evil a/b /abs; do
+        run bash -c 'source "$1"; valid_dep_spec "$2"' _ "$LIB" \
+            "tarball:$name@$TARBALL_SHA:https://x.dev/a.tar.gz"
+        [ "$status" -ne 0 ] || { echo "accepted name: $name" >&2; false; }
+    done
+}
+
+@test "generate_derived_dockerfile verifies a tarball's digest before unpacking it" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'tarball:go@%s:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz\n' "$TARBALL_SHA" > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"https://go.dev/dl/go1.25.0.linux-amd64.tar.gz"* ]]
+    [[ "$output" == *"$TARBALL_SHA  /tmp/go.tar"* ]]
+    [[ "$output" == *"/opt/dejima/go"* ]]
+    [[ "$output" == *"ENV PATH=\$PATH:/opt/dejima/go/bin"* ]]
+
+    # An archive extracted first and verified after has already written
+    # whatever it contained, so the ordering is the property, not the presence
+    # of a checksum line anywhere in the file.
+    sha_line=$(grep -n 'sha256sum -c' <<< "$output" | head -1 | cut -d: -f1)
+    tar_line=$(grep -n 'tar -C /opt/dejima/go' <<< "$output" | head -1 | cut -d: -f1)
+    [ "$sha_line" -lt "$tar_line" ]
+}
+
+@test "generate_derived_dockerfile unpacks tarballs as root, before the drop to the sandbox user" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'tarball:go@%s:https://go.dev/dl/go.tar.gz\nnpm:typescript\n' "$TARBALL_SHA" > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [ "$status" -eq 0 ]
+    tar_line=$(grep -n 'tar -C /opt/dejima/go' <<< "$output" | head -1 | cut -d: -f1)
+    drop_line=$(grep -n 'USER \${SANDBOX_USER}' <<< "$output" | head -1 | cut -d: -f1)
+    [ "$tar_line" -lt "$drop_line" ]
+    [[ "$(grep -E '^(USER|ENTRYPOINT)' <<< "$output" | tail -2)" == "USER root
+ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
+}
+
+@test "generate_derived_dockerfile emits no tarball layer when none is approved" {
+    store=$(bash -c 'source "$1"; ensure_project_store "$2"' _ "$LIB" "$PROJ")
+    printf 'apt:libpq-dev\n' > "$store/dependencies"
+    run bash -c 'source "$1"; generate_derived_dockerfile base:tag "$2"' _ "$LIB" "$store"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/opt/dejima"* ]]
+}
+
 @test "read_declared skips comments/blanks and marks invalid entries rejected" {
     cat > "$PROJ/.dejima/dependencies" <<'EOF'
 # project deps

@@ -38,7 +38,49 @@ DEJIMA_MAX_DECLARED=200
 # generated RUN line as an option instead, quietly weakening apt/pip/npm/
 # cargo's own signature/lockfile checks.
 valid_dep_spec() {
-    [[ "$1" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
+    [[ "$1" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && return 0
+    valid_tarball_spec "$1"
+}
+
+# tarball:<name>@<sha256>:<url> - a release archive unpacked into the image,
+# for a toolchain no package ecosystem ships in a usable version.
+#
+# The digest is mandatory and is what makes this an approval at all. Without
+# it the operator would be approving a *name* whose contents the other end can
+# change afterwards, which is not a decision anyone can make once; with it,
+# what was approved is a specific archive and nothing else can take its place.
+# The generated build verifies it before unpacking, not after.
+#
+# The character classes are narrower than the URL grammar allows, for the same
+# reason as above: this string is interpolated into a Dockerfile RUN line that
+# runs as root. Everything shell-active is excluded rather than quoted around
+# - no $, backtick, quote, backslash, whitespace, or ;|&<>() - so there is no
+# quoting to get wrong later. https only: the digest already provides
+# integrity, but there is no reason to also accept a plaintext fetch.
+DEJIMA_MAX_TARBALL_URL=512
+valid_tarball_spec() {
+    local spec="$1" rest name sha url
+    [[ "$spec" == tarball:* ]] || return 1
+    rest="${spec#tarball:}"
+
+    name="${rest%%@*}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    # Becomes a directory under /opt/dejima; a name that walks out of it, or
+    # that is a relative-path token, is not a name.
+    case "$name" in .|..) return 1 ;; esac
+
+    rest="${rest#"$name"}"
+    [[ "$rest" == @* ]] || return 1
+    rest="${rest#@}"
+
+    sha="${rest%%:*}"
+    [[ "$sha" =~ ^[a-f0-9]{64}$ ]] || return 1
+
+    url="${rest#"$sha"}"
+    [[ "$url" == :* ]] || return 1
+    url="${url#:}"
+    [ ${#url} -le "$DEJIMA_MAX_TARBALL_URL" ] || return 1
+    [[ "$url" =~ ^https://[A-Za-z0-9._~/?=+%-]+$ ]] || return 1
 }
 
 # read_declared <file> <validator-fn>
@@ -414,6 +456,40 @@ unapprove_entry() {
     mv "$tmp" "$store/$kind"
 }
 
+# One RUN per tarball dependency, as root, before the drop to the sandbox
+# user. Each unpacks into its own directory under /opt/dejima and puts that
+# directory's bin/ on PATH.
+#
+# --strip-components=1 is what makes a single convention cover the real cases:
+# a Go archive has everything under go/, an nvim release under
+# nvim-linux-<arch>/, and stripping one level puts bin/ in the same place for
+# both. So the spec needs no destination or layout fields, and there is
+# nothing per-dependency for an operator to get wrong.
+#
+# The digest is checked BEFORE unpacking. A tar that is extracted first and
+# verified after has already written whatever it contained.
+#
+# -xaf rather than -xzf: compression is detected from the archive, so xz and
+# zstd releases work without the spec having to say which it is.
+_emit_tarball_layers() {
+    local spec rest name sha url
+    for spec in "$@"; do
+        [ -n "$spec" ] || continue
+        rest="${spec#tarball:}"
+        name="${rest%%@*}"
+        rest="${rest#"$name"@}"
+        sha="${rest%%:*}"
+        url="${rest#"$sha":}"
+        printf 'RUN mkdir -p /opt/dejima/%s && \\\n' "$name"
+        printf '  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \\\n'
+        printf '    -O /tmp/%s.tar "%s" && \\\n' "$name" "$url"
+        printf '  echo "%s  /tmp/%s.tar" | sha256sum -c - && \\\n' "$sha" "$name"
+        printf '  tar -C /opt/dejima/%s --strip-components=1 -xaf /tmp/%s.tar && \\\n' "$name" "$name"
+        printf '  rm /tmp/%s.tar\n' "$name"
+        printf 'ENV PATH=$PATH:/opt/dejima/%s/bin\n' "$name"
+    done
+}
+
 # Prints a Dockerfile that layers approved packages onto the shared base
 # image. Only validated tokens are interpolated (approved_entries refuses
 # anything else), so a RUN line here can't become a root-context injection.
@@ -424,6 +500,7 @@ unapprove_entry() {
 # init-firewall.sh locks egress down.
 generate_derived_dockerfile() {
     local base="$1" store="$2" entries apt npm pip cargo spec name
+    local -a tarballs=()
     entries="$(approved_entries "$store" dependencies)" \
         || { echo "refusing to build from a corrupt dependency list in $store" >&2; return 1; }
 
@@ -432,10 +509,11 @@ generate_derived_dockerfile() {
         [ -n "$spec" ] || continue
         name="${spec#*:}"
         case "$spec" in
-            apt:*)   apt="$apt $name" ;;
-            npm:*)   npm="$npm $name" ;;
-            pip:*)   pip="$pip $name" ;;
-            cargo:*) cargo="$cargo $name" ;;
+            apt:*)     apt="$apt $name" ;;
+            npm:*)     npm="$npm $name" ;;
+            pip:*)     pip="$pip $name" ;;
+            cargo:*)   cargo="$cargo $name" ;;
+            tarball:*) tarballs+=("$spec") ;;
         esac
     done <<< "$entries"
 
@@ -443,6 +521,7 @@ generate_derived_dockerfile() {
     printf 'USER root\n'
     [ -n "$apt" ] && printf 'RUN apt-get update && apt-get install -y --no-install-recommends%s \\\n  && apt-get clean && rm -rf /var/lib/apt/lists/*\n' "$apt"
     [ -n "$pip" ] && printf 'RUN pip install --break-system-packages%s\n' "$pip"
+    _emit_tarball_layers "${tarballs[@]+"${tarballs[@]}"}"
     printf 'USER ${SANDBOX_USER}\n'
     [ -n "$npm" ] && printf 'RUN npm install -g%s\n' "$npm"
     if [ -n "$cargo" ]; then

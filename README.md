@@ -812,8 +812,44 @@ A project can declare what it needs in two committed files:
 
 ```
 .dejima/allowed-domains    # one domain per line
-.dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line
+.dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line, or a
+                           # tarball:<name>@<sha256>:<url> release archive
 ```
+
+### Tarball dependencies
+
+For a toolchain no package ecosystem ships in a version you can use — a
+current Go, say, where Debian's is several releases behind — a dependency can
+name a release archive instead:
+
+```sh
+dejima-dep add --global tarball:go@<sha256>:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+```
+
+It unpacks with `--strip-components=1` into `/opt/dejima/<name>`, and
+`/opt/dejima/<name>/bin` goes on `PATH`. That one convention covers the usual
+shapes without the spec needing layout options: a Go archive has everything
+under `go/`, an nvim release under `nvim-linux-<arch>/`, and stripping one
+level puts `bin/` in the same place for both. Compression is detected from the
+archive, so `.tar.gz`, `.tar.xz` and `.tar.zst` all work.
+
+**The digest is mandatory**, and it is checked before anything is unpacked.
+Without one you would be approving a *name* whose contents the far end can
+change afterwards, which isn't a decision anyone can make once. With one, what
+you approved is a specific archive and nothing else can take its place. Two
+consequences worth knowing:
+
+- **A tarball dependency names one architecture**, because a digest does.
+  Unlike a package name, it can't resolve per-host, so a mixed-architecture
+  fleet needs a spec per project rather than one global one.
+- **Upgrading is an approval, not a version bump.** A new release is a new
+  digest, so it goes through `dejima-dep add` and `dejima-project approve`
+  again — which is the point, not friction to route around.
+
+The URL's character set is deliberately narrower than URLs allow: the spec is
+interpolated into a `RUN` line that runs as root at build time, so anything
+shell-active is refused outright rather than quoted around, and only `https`
+is accepted.
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a compromised session could write these files - they are read

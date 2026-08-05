@@ -11,7 +11,9 @@
 #   dejima-dep add --global cargo:cargo-nextest
 #   dejima-dep list
 #
-# A spec is <apt|npm|pip|cargo>:<name>. The dependencies actually installed
+# A spec is <apt|npm|pip|cargo>:<name>, or tarball:<name>@<sha256>:<url> for a
+# release archive no package ecosystem ships in a usable version (a current Go
+# toolchain, say). The dependencies actually installed
 # for a project are the union of its global and project approvals.
 set -euo pipefail
 
@@ -85,7 +87,7 @@ case "$action" in
         ;;
     add)
         [ -n "$spec" ] || usage
-        valid_dep_spec "$spec" || { echo "Not a valid dependency spec: $spec" >&2; echo "Expected <apt|npm|pip|cargo>:<name>" >&2; exit 1; }
+        valid_dep_spec "$spec" || { echo "Not a valid dependency spec: $spec" >&2; echo "Expected <apt|npm|pip|cargo>:<name>, or tarball:<name>@<sha256>:<url>" >&2; exit 1; }
         if [ "$global" -eq 1 ]; then
             store="$(ensure_global_store)"
             approve_entry "$store" dependencies "$spec"
