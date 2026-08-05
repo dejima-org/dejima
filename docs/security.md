@@ -10,6 +10,43 @@ at repositories you already trust. Everything below is about how bad a
 compromised session *inside* that trust boundary can get, not a claim that
 one can't happen.
 
+## CI: push access is code execution elsewhere
+
+The controls in this document bound what a session can reach *directly*. They
+do not bound what it can arrange to have run somewhere else, and if the
+project has CI, **granting a session push access grants it code execution on
+whatever host that CI runs on.** No operator action is needed anywhere in the
+chain: the push guard permits a feature branch, the briefing tells the agent
+to open a pull request without asking, `on: pull_request` fires, and the
+runner checks out that commit and executes it. The you-merge-not-the-agent
+gate sits strictly downstream — by the time anyone reads the diff, it has
+already run.
+
+Nor does the code have to be a modified workflow file. A workflow that runs a
+test suite runs every file in it, so a plausible-looking helper in a test file
+is executed just as surely, and far more quietly, than an edited workflow
+would be.
+
+Relative to the sandbox, a run adds three things: **execution on a host you
+own**, outside the container and outside the allowlist; **egress from a
+network position you own**, with no firewall and no DNS proxy in front of it;
+and **whatever credentials the run is handed**, including the token the forge
+injects into every job whether the workflow asks for one or not.
+
+There is deliberately no approval gate offered for this. Every version of one
+— changing the trigger, dispatching by hand, leaving the runner stopped, the
+forge's own fork-PR approvals, filtering egress from inside the workflow — is
+reachable from the branch, covered by a credential the session already holds,
+or not a gate at all. The mitigations are environmental instead: a runner host
+you are willing to lose, job containers with no Docker socket, deny-by-default
+egress whose allowlist is read from `main` rather than from the branch, and no
+secret a run does not need. And where none of that is available, declining the
+push grant declines the code execution with it — `[core] forge = none` with
+`[core] workflow = local-only`.
+
+This applies to any project developed in a dejima sandbox, not only to this
+repository. **→ [docs/ci.md](ci.md)** for the reasoning and the setup.
+
 ## Provider trust
 
 Forges, workflows and harnesses (`forges/`, `workflows/`, `harnesses/`) are
