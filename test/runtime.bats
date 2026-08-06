@@ -370,6 +370,26 @@ dexec_node() {
     [ -n "$output" ]
 }
 
+@test "the session user cannot address a resolver directly, so the DNS allowlist is not bypassable" {
+    # init-firewall.sh opens UDP/TCP 53 to any destination for root-owned
+    # sockets, because that is what Docker's embedded resolver forwards
+    # external names from and without it nothing in here resolves at all.
+    # This is the assertion that the opening stops there. `node` is the
+    # session user and there is no sudo in the image, so if it could reach a
+    # resolver of its own choosing it could carry data out in the query name
+    # itself - the exact thing dns-proxy.sh exists to prevent, and something
+    # no allowlist of *names* can catch once the *resolver* is attacker-chosen.
+    #
+    # 1.1.1.1 rather than an unrouted address: it answers if it is reachable,
+    # so a pass here means the packet was stopped and not that the probe was
+    # aimed at nothing.
+    run dexec_node dig +short registry.npmjs.org
+    [ -n "$output" ]
+
+    run dexec_node dig +time=2 +tries=1 @1.1.1.1 definitely-not-allowed.example.org
+    [ "$status" -ne 0 ]
+}
+
 @test "api.anthropic.com resolves in proxy-off mode (kill switch / API-key auth)" {
     # api.anthropic.com is left off the allowlist when the credential proxy is
     # on, so a bypass of the /etc/hosts pin that resolves the name by DNS gets

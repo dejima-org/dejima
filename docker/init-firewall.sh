@@ -76,10 +76,13 @@ else
     echo "No Docker DNS rules were present to restore"
 fi
 
-# Allow localhost. DNS resolution goes entirely through Docker's embedded
-# resolver at 127.0.0.11 (see resolv.conf), which stays on loopback, so this
-# also covers DNS - no need for a separate "UDP/53 to anywhere" rule, which
-# would just be an unrestricted-destination exfil channel.
+# Allow localhost. Every DNS query this container makes starts here: to
+# dnsmasq on 127.0.0.1, and from there to Docker's embedded resolver on
+# 127.0.0.11 (see resolv.conf). What this rule does NOT cover is the hop
+# after that, where the embedded resolver forwards an external name to the
+# host's nameservers - see the owner-matched rule further down, which is
+# there because that hop can leave this namespace. Still no "UDP/53 to
+# anywhere" rule, which would be an unrestricted-destination exfil channel.
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
@@ -305,6 +308,40 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
+# Docker's embedded resolver does not answer external names itself - it
+# forwards them to the host's nameservers, and on current Docker it does that
+# from inside THIS network namespace. Those queries therefore traverse the
+# chain below like any other packet, and nothing here can match them: the
+# host's resolver is neither in an ipset nor the bridge gateway. They reach
+# the catch-all REJECT, every lookup comes back SERVFAIL, and the container
+# dies in a self-check that says only that a host was unreachable.
+#
+# The comment on the loopback rule above used to claim DNS "stays on
+# loopback, so this also covers DNS". Only the first hop does. Two hosts with
+# byte-identical /etc/resolv.conf behaved differently here, so this is not a
+# property of any host's configuration and cannot be assumed either way.
+#
+# --uid-owner 0 is what keeps this from being the hole the DNS allowlist
+# exists to close. The forwarding socket belongs to dockerd, which is root;
+# the session runs as `node` and there is no sudo in the image, so a
+# compromised session still cannot address a resolver directly and still has
+# no path to a name dns-proxy.sh has not allowed. What this does newly permit
+# is DNS from processes that are already root in a container holding
+# NET_ADMIN - which could simply flush this ruleset instead, so it grants
+# nothing that was not already available.
+#
+# Guarded rather than asserted: xt_owner is a module, and a kernel without it
+# should leave a container that says why (the DNS self-check below), not one
+# that aborts here with an iptables usage error.
+if iptables -A OUTPUT -p udp --dport 53 -m owner --uid-owner 0 -j ACCEPT 2>/dev/null; then
+    iptables -A OUTPUT -p tcp --dport 53 -m owner --uid-owner 0 -j ACCEPT 2>/dev/null \
+        || echo "WARNING: could not add the TCP/53 rule for root-owned sockets - large answers may fail" >&2
+else
+    echo "WARNING: the iptables owner match is unavailable, so Docker's embedded" >&2
+    echo "resolver cannot forward out of this namespace. If DNS works anyway this" >&2
+    echo "host forwards elsewhere and nothing is wrong; the self-check below says which." >&2
+fi
+
 # Then allow only specific outbound traffic to allowed domains. This isn't
 # port-restricted, so it also covers git-over-ssh (port 22) to the
 # configured forge's hosts, which are already in the ipset above - no
@@ -340,6 +377,33 @@ iptables -A OUTPUT -j NFLOG --nflog-group 2 --nflog-prefix "reject"
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 echo "Firewall rules applied. Self-checking..."
+
+# DNS before either connectivity check, because both of those resolve a name
+# before they connect and neither can tell you that resolution is what failed.
+# The negative control is the trap: with DNS dead it fails for the wrong
+# reason and prints "example.com is unreachable, as it should be", so a
+# container with no working DNS at all reports a passing check and then dies
+# on the positive control naming a host rather than the cause. Reading that
+# output backwards took an afternoon; it should take one line.
+if ! dns_probe=$(dig +short +time=3 +tries=2 A api.github.com 2>&1) || [ -z "$dns_probe" ]; then
+    echo "ERROR: self-check failed - DNS does not resolve inside the sandbox." >&2
+    echo >&2
+    echo "The path is: this container -> dnsmasq on 127.0.0.1 (dns-proxy.sh) ->" >&2
+    echo "Docker's embedded resolver on 127.0.0.11 -> the host's nameservers." >&2
+    echo "Only the first two hops are on loopback. If Docker forwards the last" >&2
+    echo "one from inside this namespace, it traverses the OUTPUT chain, matches" >&2
+    echo "nothing, and is rejected - which reads as SERVFAIL, not as a firewall." >&2
+    echo >&2
+    echo "  dig said: ${dns_probe:-(empty answer)}" >&2
+    echo "  packets taken by the catch-all OUTPUT reject so far:" >&2
+    iptables -L OUTPUT -vn 2>/dev/null \
+        | awk '/icmp-admin-prohibited/ {print "    " $1 " packets, " $2 " bytes"}' >&2
+    echo "  dnsmasq's last words:" >&2
+    tail -5 /var/log/dnsmasq.log 2>/dev/null | sed 's/^/    /' >&2
+    exit 1
+fi
+echo "self-check ok - DNS resolves an allowlisted name"
+
 # --max-time as well as --connect-timeout on both self-checks: a connect that
 # succeeds and then stalls is not covered by --connect-timeout, and while these
 # two sit inside `if` (so set -e cannot take the script down the way it could
