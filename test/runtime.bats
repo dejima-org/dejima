@@ -207,6 +207,7 @@ teardown() {
     docker rm -f "dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-ghforge-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-ghextra-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
@@ -485,6 +486,54 @@ dexec_node() {
     # dnsmasq's rebind protection, which the extra-domains path would have
     # exempted them from.
     run docker exec "$test_container" grep 'rebind-domain-ok=/github.com/' /etc/dnsmasq-sandbox.conf
+    [ "$status" -ne 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+}
+
+@test "a GitHub name declared as an extra domain stays port-restricted, so push stays unreachable" {
+    # .dejima/allowed-domains is read with the project and is meant to widen
+    # what a session can reach. It must not widen how. GitHub's addresses are
+    # confined to 443 by init-firewall.sh, and that is the entire read-only
+    # guarantee - with 22 shut there is no transport left for the forwarded
+    # ssh-agent's key to push with, whatever a hook does or does not catch.
+    #
+    # allowed-domains carries no port restriction, so before ipset_for_domain
+    # this path put GitHub's address there and opened 22. It surfaced as an
+    # intermittent startup failure rather than as a silent hole only because
+    # the port-22 self-check re-resolves the name: it catches the hole when
+    # GitHub's second answer matches the first, and misses it when the name
+    # has rotated in between. This test does not depend on that coin flip.
+    local test_container="dejima-test-ghextra-$(basename "$BATS_FILE_TMPDIR")"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -e DEJIMA_FORGE_HOSTS= \
+        -e ALLOWED_DOMAINS="github.com api.github.com" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+
+    # Coming up at all is part of the assertion: the port-22 self-check runs
+    # during startup, and with the address in the wrong set it fails the boot.
+    wait_ready "$test_container"
+
+    # Resolved inside the container, through the same dnsmasq that answered
+    # during startup - so this asks about the address actually allowlisted,
+    # not one a fresh lookup from elsewhere happened to return.
+    local ip
+    ip=$(docker exec "$test_container" dig +short A github.com | head -1)
+    [ -n "$ip" ]
+
+    run docker exec "$test_container" ipset test github-domains "$ip"
+    [ "$status" -eq 0 ]
+
+    run docker exec "$test_container" ipset test allowed-domains "$ip"
+    [ "$status" -ne 0 ]
+
+    # And the property those two sets exist to produce.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true

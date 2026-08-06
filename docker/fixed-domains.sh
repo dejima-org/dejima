@@ -46,3 +46,33 @@ GITHUB_DNS_SUFFIXES=(
     "githubusercontent.com"
     "githubassets.com"
 )
+
+# Which ipset an allowlisted name's addresses belong in.
+#
+# GitHub's are restricted to port 443 by init-firewall.sh, and that
+# restriction is the read-only guarantee - there is no transport left for the
+# forwarded ssh-agent's key to push with. allowed-domains carries no port
+# restriction at all, so an address that reaches it is reachable on 22 as
+# well, and a GitHub address that reaches it silently undoes the whole
+# arrangement.
+#
+# dns-proxy.sh gets this right for free: dnsmasq applies the longest matching
+# ipset= line, so GitHub names go to github-domains however they were
+# allowlisted. Every other path has to ask, and two did not - the
+# extra-domains loop in init-firewall.sh and the live add in bin/dejima-allow
+# both added unconditionally to allowed-domains. A project with github.com in
+# its .dejima/allowed-domains therefore opened port 22 to whichever address
+# GitHub returned at container start, for as long as that answer stayed
+# cached. It presented as an intermittent startup failure, because the
+# port-22 self-check re-resolves the name and only sees the hole when the
+# second answer matches the first.
+ipset_for_domain() {
+    local domain="$1" suffix
+    for suffix in "${GITHUB_DNS_SUFFIXES[@]}"; do
+        if [ "$domain" = "$suffix" ] || [[ "$domain" == *".$suffix" ]]; then
+            printf 'github-domains'
+            return 0
+        fi
+    done
+    printf 'allowed-domains'
+}
