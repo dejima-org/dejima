@@ -17,8 +17,34 @@
 # covering every unrelated area at once.
 name: tests
 
+# pull_request_target, not pull_request, and the difference is the whole
+# security posture of this file.
+#
+# Under `pull_request` the workflow is read from the HEAD of the pull request -
+# so the branch under test decides what runs and, critically, `runs-on:`. A
+# branch can point its jobs at any runner its repository can reach, which
+# means every control the runner provides (no Docker socket, deny-by-default
+# egress) is opt-out by whoever wrote the branch.
+#
+# Under `pull_request_target` Gitea reads the workflow from the BASE branch,
+# and explicitly discards any pull_request_target workflow found on the head
+# commit - so a branch can neither edit this file's copy nor introduce its
+# own. What runs here, and where, is whatever `main` says.
+#
+# The cost is that the checkout no longer defaults to the code under test: the
+# run's ref is the base branch. Every job that means to test the branch has to
+# say so, which is why the checkouts below carry an explicit ref. A bare
+# checkout here would test `main` on every pull request and pass regardless of
+# the change - green checks that mean nothing.
+#
+# This does NOT make the repository safe on its own. A branch can still add a
+# workflow of its own with `on: pull_request`, and that runs from the head
+# with whatever `runs-on:` it likes. The only thing stopping that is which
+# runners the repository can reach at all - see docs/ci.md, "A label is not a
+# boundary". What this buys is that the intended CI is trustworthy, and that
+# escaping it requires adding a file rather than editing one.
 on:
-  pull_request:
+  pull_request_target:
 
 # No `concurrency:` block. Gitea does not implement one - the word appears
 # nowhere in its actions models or services as of 1.25 - so writing it here
@@ -69,7 +95,12 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates
+      # The code under test, named explicitly - see the header. Without `ref`
+      # this checks out the base branch and the suite passes without ever
+      # seeing the change.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       # As an ordinary user, not root. One test leaves a directory mode 500 and
       # asserts that the CLI's rm -rf refuses it and says so; root walks
       # through that on CAP_DAC_OVERRIDE and the test fails for a reason that
@@ -255,6 +286,8 @@ jobs:
           echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       # The build dominates this job, and inside setup_file it is a `docker
       # build -q` that prints nothing at all - so tens of minutes of ordinary
@@ -326,6 +359,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bats python3 ca-certificates
+      # No `ref:` here, deliberately - unlike the suites above. These assert on
+      # the RUNNER, not on the change, so the assertions should come from the
+      # base branch rather than from the branch they are meant to hold for.
+      # Under pull_request_target that is what a bare checkout gives, which
+      # means a branch can neither weaken these tests nor delete them.
       - uses: actions/checkout@v4
       - run: bats test/ci-runner.bats
         env:
@@ -343,6 +381,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bats python3 ca-certificates
+      # Base branch, same as the job above and for the same reason.
       - uses: actions/checkout@v4
       - run: bats test/ci-runner.bats
         env:

@@ -1738,6 +1738,28 @@ EOF
 # repository's - so the only lever here is which runner its jobs may land on.
 # A generic label gives that lever away, which is what these pin.
 
+# pull_request_target reads this workflow from the base branch, which is what
+# pins runs-on out of a branch's reach. Reverting to pull_request hands that
+# back, silently.
+@test "the workflow is read from the base branch, not the branch under test" {
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    grep -qE '^  pull_request_target:' "$wf"
+    run grep -nE '^  pull_request:' "$wf"
+    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+}
+
+# The trap in that conversion: the run's ref is the BASE branch, so a bare
+# checkout tests main and passes regardless of the change. Every suite that
+# means to test the branch has to name the head explicitly - and a green run
+# is exactly what it looks like when one does not.
+@test "every suite that tests the branch checks out the branch" {
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    # Both branch-testing jobs pin the head sha; the runner-env jobs must not,
+    # since their assertions should come from the base branch.
+    [ "$(grep -c 'pull_request.head.sha' "$wf")" -eq 2 ]
+    [ "$(grep -c 'uses: actions/checkout@v4' "$wf")" -eq 4 ]
+}
+
 @test "no workflow job runs on a generic runner label" {
     run grep -nE '^\s*runs-on:\s*(ubuntu|windows|macos|self-hosted)' \
         "$REPO_ROOT"/.gitea/workflows/*.yml

@@ -189,11 +189,59 @@ that of the weakest runner it can reach, not the one its workflow names.** An
 instance-level general-purpose runner is reachable from every repository on
 that instance, including any that takes agent-authored branches.
 
+### Pinning the workflow with `pull_request_target`
+
+Half of this is fixable, and worth fixing: **`runs-on` does not have to come
+from the branch.**
+
+Under `on: pull_request` the workflow is read from the head of the pull
+request, so the branch decides what runs and where. Under
+`on: pull_request_target` Gitea reads it from the **base branch**, and
+explicitly discards any `pull_request_target` workflow found on the head
+commit — a branch can neither edit the base copy nor introduce its own. What
+runs, and on which runner, is whatever `main` says.
+
+Two consequences to handle rather than discover:
+
+- **The checkout no longer defaults to the code under test.** The run's ref is
+  the base branch, so a bare `actions/checkout` fetches `main` and the suite
+  passes without ever seeing the change. Jobs that test the branch must name
+  it: `ref: ${{ github.event.pull_request.head.sha }}`. Jobs that assert on
+  the *runner* should keep the bare checkout, so their assertions come from
+  `main` and a branch can neither weaken nor delete them.
+- **The job runs with the base repository's token and secrets**, because the
+  forge treats it as trusted. On a forge where a same-repo `pull_request` run
+  already gets a permissive token this changes nothing, but it is why the
+  pattern carries warnings elsewhere: give such a run no secret you would not
+  hand the branch.
+
+This does not make the repository safe on its own. A branch can still add a
+workflow of its own with `on: pull_request`, which runs from the head with
+whatever `runs-on` it likes. What it buys is that the *intended* CI is
+trustworthy, and that escaping it means adding a file rather than editing
+one — a much louder diff.
+
+### Closing the rest: reachability
+
 Three ways out, in rough order of preference:
 
 1. **Do not register general-purpose runners at instance level** on an
    instance that hosts repositories receiving agent-authored branches. Scope
-   them to the organizations or repositories that need them.
+   them to the owners or repositories that need them.
+
+   This is cheaper than it first appears, because a runner can belong to an
+   **owner** — a user as well as an organization — and then serves every
+   repository that owner has. Gitea's runner model spells out the three
+   cases: global (`OwnerID` and `RepoID` both zero), org/user level
+   (`OwnerID` set), and repository level (`RepoID` set). So an instance with
+   sixty personal repositories and two general-purpose runners needs two
+   re-registrations at user scope, not sixty at repository scope — and then
+   the repositories that receive agent-authored branches live under a
+   *different* owner, whose reachable runners are all hardened.
+
+   That is the arrangement that makes the invariant hold: a branch naming a
+   label no reachable runner carries finds nothing, and the job queues rather
+   than running somewhere unprepared.
 2. **Harden every runner that repository can reach**, so landing on a
    different one changes nothing that matters.
 3. **Move the repository** to an instance or organization whose reachable
