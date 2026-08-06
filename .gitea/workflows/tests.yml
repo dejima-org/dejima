@@ -110,6 +110,31 @@ jobs:
       # needs to run at all, and apt-get is what everything below needs.
       image: node:20-bookworm
     steps:
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
+      - name: Check the job network can resolve before installing anything
+        run: |
+          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
+          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
+          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
+          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "" >&2
+          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
+          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          exit 1
+
       - name: Install test dependencies
         run: |
           apt-get update
@@ -183,6 +208,31 @@ jobs:
       # nothing to do with what the test asserts. That test is the containment
       # argument for the ttyd front door, so it is not one to skip in CI.
     steps:
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
+      - name: Check the job network can resolve before installing anything
+        run: |
+          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
+          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
+          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
+          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "" >&2
+          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
+          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          exit 1
+
       - name: Install test dependencies
         run: |
           apt-get update
@@ -374,6 +424,31 @@ jobs:
     container:
       image: node:20-bookworm
     steps:
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
+      - name: Check the job network can resolve before installing anything
+        run: |
+          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
+          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
+          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
+          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "" >&2
+          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
+          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          exit 1
+
       - name: Install test dependencies
         run: |
           apt-get update
@@ -396,6 +471,31 @@ jobs:
     container:
       image: node:20-bookworm
     steps:
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
+      - name: Check the job network can resolve before installing anything
+        run: |
+          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
+          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          echo "" >&2
+          echo "This job's resolver:" >&2
+          sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
+          echo "" >&2
+          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
+          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
+          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "" >&2
+          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
+          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          exit 1
+
       - name: Install test dependencies
         run: |
           apt-get update
