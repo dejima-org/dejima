@@ -6,7 +6,7 @@
 CI runs.** That is the whole of it, and everything below is either why it
 cannot be gated or what to do about it instead.
 
-> **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.example.com/branderson/dejima-ci-hardener)
+> **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
 > is a self-contained tool that does it — installed on the CI box, never on a
 > dejima host, and it does not assume you have read this.
 
@@ -219,9 +219,9 @@ which legitimately resolves to a private address.
 The runner pins its job containers at that resolver - per-runner rather than
 daemon-wide, because a daemon-wide setting also reaches containers a
 privileged job creates over the Docker socket, which have firewalls of their
-own and no route to it. Then two chains filter: `DOCKER-USER` for everything the job forwards off the bridge, and
-`INPUT` for the resolver itself, because the gateway address belongs to the
-host. Block IPv6 outright unless you have built the same allowlist for it — an
+own and no route to it. Then two chains filter: `DOCKER-USER` for everything
+the job forwards off the bridge, and `INPUT` for the resolver itself, because
+the gateway address belongs to the host. Block IPv6 outright unless you have built the same allowlist for it — an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
@@ -256,9 +256,10 @@ a fetch that errors should leave the previous allowlist in place, never fall
 back to allowing everything — an allowlist builder is exactly the kind of
 script whose failure mode is easy to get backwards, because the broken version
 looks like a working one right up until it matters.
-dejima-ci-hardener's `dejima-ci-allowlist` is that, including the distinction that costs you here: a repository
-with no declaration is a 404 and ordinary, while a 401 or a 500 means this run
-does not know what the allowlist is and must not render one.
+dejima-ci-hardener's `dejima-ci-allowlist` is that, including the distinction
+that costs you here: a repository with no declaration is a 404 and ordinary,
+while a 401 or a 500 means this run does not know what the allowlist is and
+must not render one.
 
 Two things to be deliberate about:
 

@@ -1094,7 +1094,7 @@ the push grant and the code execution with it.
 what that leaves, hardening a runner, and making CI's egress allowlist a
 version-controlled artifact read from `main`.
 
-**→ [dejima-ci-hardener](https://gitbox.example.com/branderson/dejima-ci-hardener)** - the *how*: a self-contained tool that
+**→ [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)** - the *how*: a self-contained tool that
 hardens a CI runner, installed on the CI box and nowhere near a dejima host.
 Nothing in this repository needs to be copied onto a runner.
 
