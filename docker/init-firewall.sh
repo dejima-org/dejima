@@ -272,13 +272,17 @@ if [ -n "${EXTRA_ALLOWED_DOMAINS:-}" ]; then
             continue
         fi
 
+        # Not always allowed-domains: that set carries no port restriction,
+        # so a GitHub address landing in it is reachable on 22 as well and the
+        # read-only guarantee is gone. See ipset_for_domain.
+        target_set=$(ipset_for_domain "$domain")
         while read -r ip; do
             if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
                 echo "WARNING: Invalid IP from DNS for $domain: $ip, skipping"
                 continue
             fi
-            echo "Adding $ip for $domain"
-            ipset add allowed-domains "$ip" 2>/dev/null || true
+            echo "Adding $ip for $domain (-> $target_set)"
+            ipset add "$target_set" "$ip" 2>/dev/null || true
         done < <(echo "$ips")
     done
 fi

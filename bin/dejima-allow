@@ -20,6 +20,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
+# For ipset_for_domain: the live add below writes into a running container's
+# ipsets, and which set a name belongs in is the container's rule, not this
+# script's. Sourced rather than restated so the two cannot drift - the same
+# reason init-firewall.sh and dns-proxy.sh share this file.
+# shellcheck source=../docker/fixed-domains.sh
+source "$SCRIPT_DIR/../docker/fixed-domains.sh"
 
 usage() {
     echo "Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>" >&2
@@ -133,9 +139,13 @@ if [ "$session_wanted" -eq 1 ]; then
         exit 1
     fi
 
+    # allowed-domains carries no port restriction, so a GitHub address added
+    # there is reachable on 22 as well - which is the read-only guarantee gone,
+    # from a command whose whole output says it granted one domain.
+    target_set=$(ipset_for_domain "$domain")
     for ip in $ips; do
-        echo "Allowing $ip ($domain)"
-        docker exec -u root "$container" ipset add allowed-domains "$ip" -exist
+        echo "Allowing $ip ($domain -> $target_set)"
+        docker exec -u root "$container" ipset add "$target_set" "$ip" -exist
     done
 
     echo "$domain allowed for the running session ($container)."
