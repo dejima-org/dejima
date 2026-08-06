@@ -1764,8 +1764,19 @@ EOF
 @test "the workflow is read from the base branch, not the branch under test" {
     local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
     grep -qE '^  pull_request_target:' "$wf"
-    run grep -nE '^  pull_request:' "$wf"
-    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+
+    # pull_request may still be present, but only while the transition is
+    # explicitly in progress - it takes an untrusted run from the head with
+    # branch-controlled runs-on, which is the thing being removed. Requiring
+    # the marker means the day it is dropped, this fails until the trigger
+    # goes with it, rather than the pair quietly becoming permanent.
+    if grep -qE '^  pull_request:' "$wf"; then
+        grep -q 'TRANSITIONAL' "$wf" || {
+            echo "pull_request is still enabled without the transitional note -" >&2
+            echo "it hands runs-on back to the branch. Remove the trigger." >&2
+            false
+        }
+    fi
 }
 
 # The trap in that conversion: the run's ref is the BASE branch, so a bare

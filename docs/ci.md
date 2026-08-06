@@ -210,7 +210,23 @@ explicitly discards any `pull_request_target` workflow found on the head
 commit — a branch can neither edit the base copy nor introduce its own. What
 runs, and on which runner, is whatever `main` says.
 
-Two consequences to handle rather than discover:
+**Adopting it takes two merges, not one.** The trigger only takes effect once
+it is on the base branch, because that is where it is read from — and a
+`pull_request_target` workflow on a pull request's head is explicitly ignored.
+So the change that introduces it cannot be tested by it: with only
+`pull_request_target` on the branch and only `pull_request` on `main`, the
+head's copy is skipped, the base has nothing to contribute, and **no checks
+run at all** — which looks like a broken workflow rather than a bootstrap
+problem.
+
+Carry both triggers through the first merge, then remove `pull_request` in a
+follow-up. The first change is tested by its own copy from the head, as
+today; the follow-up is tested by the copy now on `main`. In between, pull
+requests get both an untrusted run from the head and a trusted one from the
+base — noisy, and for the untrusted half no worse than the status quo, so
+keep the window short.
+
+Two more consequences to handle rather than discover:
 
 - **The checkout no longer defaults to the code under test.** The run's ref is
   the base branch, so a bare `actions/checkout` fetches `main` and the suite
