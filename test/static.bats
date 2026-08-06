@@ -1811,6 +1811,43 @@ EOF
         | sed -E 's/^\s*runs-on:\s*//')
 }
 
+# Remote access is opt-in and off by default, so the marker-directory check
+# must be inside the "was it configured at all" guard. Outside it, every
+# ordinary session gets a warning about a feature it never asked for - and a
+# warning that fires on every start is one nobody reads.
+@test "the marker-directory check only runs when remote access is configured" {
+    local f="$REPO_ROOT/docker/entrypoint.sh"
+    grep -q 'if \[ -n "${DEJIMA_NOTIFY_DIR:-}" \]; then' "$f"
+    # The check's own output must sit inside that guard, not before it.
+    guard=$(grep -n 'if \[ -n "${DEJIMA_NOTIFY_DIR:-}" \]; then' "$f" | head -1 | cut -d: -f1)
+    warn=$(grep -n 'remote access is enabled, but' "$f" | head -1 | cut -d: -f1)
+    [ "$guard" -lt "$warn" ]
+}
+
+# Chowning it would restore notifications while the session stayed absent from
+# dejima-attach, because the registry entry is written host-side and never
+# mounted here - a session that looked fixed with half the feature still
+# broken. The remedy is relaunching, which the message names.
+@test "the marker-directory check reports rather than repairs" {
+    local f="$REPO_ROOT/docker/entrypoint.sh"
+    run grep -nE 'chown[^|]*DEJIMA_NOTIFY_DIR|chmod[^|]*DEJIMA_NOTIFY_DIR' "$f"
+    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+    grep -q "start a new session with 'dejima'" "$f"
+}
+
+# bin/dejima warns and continues rather than refusing. The neighbouring
+# state-dir check does refuse, but that one is about a symlink handing a
+# session an attacker-chosen path; this one is only about an optional feature
+# working, and blocking a launch over undeliverable notifications costs more
+# than it saves.
+@test "bin/dejima warns about an unusable marker directory without refusing" {
+    local line
+    line=$(grep -n 'is not a directory this user owns and can write' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ -n "$line" ]
+    run sed -n "$((line)),$((line + 6))p" "$REPO_ROOT/bin/dejima"
+    [[ "$output" != *"exit 1"* ]]
+}
+
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]
