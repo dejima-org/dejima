@@ -829,6 +829,37 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "gitea-actions asks for nothing that needs to own the repo" {
+    # Gitea gates /repos/{o}/{r}/actions/runs - and the job and log endpoints
+    # reached through it - behind reqOwner(). A sandbox should hold a token
+    # for a dedicated account that is a collaborator and nothing more, and
+    # that account is refused there with "user should be the owner of the
+    # repo". No scope grants ownership, so a reader who hits this reaches for
+    # a wider token, which is the wrong direction and the reason this is
+    # pinned rather than left to the comment explaining it.
+    #
+    # Anchored on GITEA_API, not on the path: the log route is a web URL
+    # under the same-looking /actions/runs/N/jobs/M prefix, and it is fine.
+    local f="$REPO_ROOT/forges/gitea/bin/gitea-actions"
+    run grep -nE '\$\{?GITEA_API\}?[^"]*actions/(runs|jobs)' "$f"
+    [ "$status" -ne 0 ]
+    # The three it may use instead, each reachable with plain read access.
+    grep -q 'actions/tasks' "$f"
+    grep -q 'commits/.*statuses' "$f"
+    grep -q 'GITEA_WEB' "$f"
+}
+
+@test "the gitea CLIs format their own tables, rather than shelling out to column" {
+    # util-linux's `column` is not in the sandbox image, and it is the last
+    # command in the pipeline - so a missing one fails with 127 after the
+    # request has already succeeded, which reads as an API problem rather
+    # than a missing tool. bin/dejima-audit and bin/dejima-attach pad with
+    # printf for the same reason; this keeps the forge CLIs consistent with
+    # them.
+    run grep -rn 'column -t' "$REPO_ROOT/forges/"
+    [ "$status" -ne 0 ]
+}
+
 @test "gitea-issue is installed into the image alongside gitea-pr" {
     grep -q 'COPY forges/' "$SANDBOX_DIR/Dockerfile"
     # install -m 755, not a plain cp, so the executable bit surviving isn't

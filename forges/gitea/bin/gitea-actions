@@ -10,6 +10,24 @@
 # Its reason to exist is a sandboxed agent's: CI is where the tests that
 # cannot run in the sandbox actually run, and without this the only way to
 # see why one failed is for the operator to paste the log in by hand.
+#
+# Nothing here touches /repos/{owner}/{repo}/actions/runs, or the job and
+# log endpoints reached through it, however natural they look. Gitea gates
+# that group behind reqOwner(): a token belonging to a dedicated non-owner
+# account - which is what a sandbox should be given - is refused with "user
+# should be the owner of the repo", and no scope grants ownership, so
+# widening the token cannot fix it. The three sources used instead need only
+# read access to the repo:
+#
+#   actions/tasks            one record per job, carrying its run number,
+#                            head_sha, event and result
+#   commits/<sha>/statuses   the same jobs as commit statuses, and the only
+#                            place a job's index is visible
+#   the web log route        the run view's own endpoint, which takes the
+#                            same token header as the API
+#
+# The job index matters because it is what addresses a log, and it is not a
+# field anywhere - only the tail of a status's target_url.
 set -euo pipefail
 
 GITEA_TOKEN_FILE="${GITEA_TOKEN_FILE:-$HOME/.config/gitea/token}"
@@ -99,57 +117,81 @@ function gitea_owner_repo() {
     echo "$owner_repo"
 }
 
-# The API addresses runs by an internal id; every URL a human has shows the
-# per-repo run number instead, and the two are unrelated. Everything below
-# takes the number and resolves it here, against one page of the run list.
-#
-# With no number, HEAD's commit: a run list is not what someone who just
-# pushed is asking for. Matched on head_sha rather than on branch because a
-# pull_request run reports no branch at all - its ref is refs/pull/N/head.
+# Sets `tasks_json`. The list pages by TASK - one record per job - so a run
+# costs as many records as it has jobs, and `limit` is ignored unless `page`
+# comes with it. Taken as one page, sized for a few dozen runs of a ten-job
+# workflow; a lookup that falls off the end says which it was.
+function fetch_tasks() {
+    api_or_die "list runs" \
+        "${GITEA_API}/repos/${owner}/${repo}/actions/tasks?page=1&limit=$TASK_SCAN"
+    tasks_json="$json"
+}
+
+# Sets `run_number` and `run_sha`. With no number, HEAD's commit: a run list
+# is not what someone who just pushed is asking for. Matched on head_sha
+# rather than on branch because a pull_request run reports no branch at all -
+# its ref is refs/pull/N/head.
 function resolve_run() {
     local want="${1:-}" sha
-    api_or_die "list runs" "${GITEA_API}/repos/${owner}/${repo}/actions/runs?page=1&limit=$RUN_SCAN"
+    fetch_tasks
     if [ -n "$want" ]; then
-        run_id=$(echo "$json" | jq -r --argjson n "$want" \
-            'first(.workflow_runs[] | select(.run_number == $n) | .id) // empty')
-        if [ -z "$run_id" ]; then
-            echo "No run numbered $want in the last $RUN_SCAN runs (raise --limit, or see 'gitea-actions runs')" >&2
+        run_sha=$(echo "$tasks_json" | jq -r --argjson n "$want" \
+            'first(.workflow_runs[] | select(.run_number == $n) | .head_sha) // empty')
+        if [ -z "$run_sha" ]; then
+            echo "No run numbered $want in the last $TASK_SCAN job records (see 'gitea-actions runs')" >&2
             exit 1
         fi
+        run_number="$want"
     else
         sha=$(git rev-parse HEAD 2>/dev/null) || {
             echo "Not in a git repository, so there is no HEAD to look up - pass a run number" >&2
             exit 1
         }
-        run_id=$(echo "$json" | jq -r --arg sha "$sha" \
-            'first(.workflow_runs[] | select(.head_sha == $sha) | .id) // empty')
-        if [ -z "$run_id" ]; then
-            echo "No run for HEAD (${sha:0:8}) in the last $RUN_SCAN runs - unpushed, or still queued?" >&2
+        run_number=$(echo "$tasks_json" | jq -r --arg sha "$sha" \
+            'first(.workflow_runs[] | select(.head_sha == $sha) | .run_number) // empty')
+        if [ -z "$run_number" ]; then
+            echo "No run for HEAD (${sha:0:8}) in the last $TASK_SCAN job records - unpushed, or still queued?" >&2
             exit 1
         fi
+        run_sha="$sha"
     fi
-    run_number=$(echo "$json" | jq -r --argjson id "$run_id" \
-        'first(.workflow_runs[] | select(.id == $id) | .run_number)')
 }
 
-# Sets `jobs_json` for the resolved run. The job index a URL shows is the
-# tail of the job's html_url, not a field of its own, and the list does not
-# arrive in that order.
+# Sets `jobs_json` for the resolved run, from the commit's statuses - the one
+# place a job's index is visible to a token that does not own the repo.
+#
+# A status is written more than once per job (queued, then finished) and the
+# list arrives newest first, so the newest per context wins. `context` is
+# "<workflow> / <job> (<event>)"; the job name is pulled out of it for
+# display, and matching keeps the whole string so either form works. Filtered
+# by run number as well as by commit, since a re-run puts a second run's
+# statuses on the same commit.
 function fetch_jobs() {
     api_or_die "list jobs for run $run_number" \
-        "${GITEA_API}/repos/${owner}/${repo}/actions/runs/${run_id}/jobs"
-    jobs_json=$(echo "$json" | jq '[.jobs[] | {
-        index: (.html_url | split("/") | last | tonumber),
-        id, name,
-        result: (if .status == "completed" then .conclusion else .status end)
-    }] | sort_by(.index)')
+        "${GITEA_API}/repos/${owner}/${repo}/commits/${run_sha}/statuses?page=1&limit=100"
+    jobs_json=$(echo "$json" | jq --arg rn "$run_number" '
+        [.[] | select(.target_url | test("/actions/runs/" + $rn + "/jobs/[0-9]+$"))]
+        | group_by(.context) | map(first)
+        | map({
+            index: (.target_url | split("/") | last | tonumber),
+            name: (.context | sub("^[^/]+/ *"; "") | sub(" *\\([^()]*\\)$"; "")),
+            context,
+            result: .status
+          })
+        | sort_by(.index)')
+    if [ "$(echo "$jobs_json" | jq 'length')" -eq 0 ]; then
+        echo "Run $run_number (${run_sha:0:8}) reports no jobs." >&2
+        echo "Gitea publishes a run's jobs as statuses on its commit, and this" >&2
+        echo "commit has none for that run - so there is nothing to address a log by." >&2
+        exit 1
+    fi
 }
 
 function print_job_log() {
-    local id="$1" name="$2" result="$3"
+    local index="$1" name="$2" result="$3"
     echo "=== $name ($result) ==="
     api_or_die "fetch logs for job $name" \
-        "${GITEA_API}/repos/${owner}/${repo}/actions/jobs/${id}/logs"
+        "${GITEA_WEB}/${owner}/${repo}/actions/runs/${run_number}/jobs/${index}/logs"
     if [ "$KEEP_TIMESTAMPS" = 1 ]; then
         echo "$json"
     else
@@ -161,7 +203,7 @@ function print_job_log() {
     echo
 }
 
-RUN_SCAN=50
+TASK_SCAN=600
 KEEP_TIMESTAMPS=0
 
 if [ "$#" -lt 1 ]; then
@@ -179,6 +221,15 @@ case "$subcommand" in
         owner_repo=$(gitea_owner_repo)
         owner="${owner_repo%%/*}"
         repo="${owner_repo##*/}"
+        # Logs come from the run view's own endpoint rather than the API, so
+        # the web root is needed as well. Derived from GITEA_API because that
+        # is the only address the caller configures.
+        GITEA_WEB="${GITEA_API%/api/v1}"
+        if [ "$GITEA_WEB" = "$GITEA_API" ]; then
+            echo "GITEA_API ($GITEA_API) does not end in /api/v1, so the web root" >&2
+            echo "cannot be derived from it - logs are read from a non-API route." >&2
+            exit 1
+        fi
         ;;
     *)
         usage
@@ -195,14 +246,28 @@ case "$subcommand" in
                 *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
             esac
         done
-        api_or_die "list runs" "${GITEA_API}/repos/${owner}/${repo}/actions/runs?page=1&limit=$limit"
-        echo "$json" | jq -r '.workflow_runs[] | [
-            (.run_number | tostring),
-            (if .status == "completed" then .conclusion else .status end),
-            .event,
-            (.head_sha[0:8]),
-            .display_title
-        ] | @tsv' | column -t -s $'\t'
+        fetch_tasks
+        # One record per job, so a run appears once for each job it has.
+        # Folded here into a row per run, whose result is the worst of them:
+        # a run with one failed job is a failed run, and reporting it as
+        # seven successes and a failure is not what the caller asked.
+        echo "$tasks_json" | jq -r --argjson limit "$limit" '
+            [.workflow_runs[]] | group_by(.run_number)
+            | map({
+                run: .[0].run_number,
+                event: .[0].event,
+                sha: (.[0].head_sha[0:8]),
+                title: .[0].display_title,
+                result: (if   any(.[]; .status == "failure")   then "failure"
+                         elif any(.[]; .status == "cancelled") then "cancelled"
+                         elif any(.[]; .status != "success")   then "in_progress"
+                         else "success" end)
+              })
+            | sort_by(.run) | reverse | .[0:$limit] | .[]
+            | [(.run | tostring), .result, .event, .sha, .title] | @tsv' |
+        while IFS=$'\t' read -r run result event sha title; do
+            printf '%-5s %-11s %-20s %-8s %s\n' "$run" "$result" "$event" "$sha" "$title"
+        done
         ;;
     jobs)
         run_arg=""
@@ -212,7 +277,9 @@ case "$subcommand" in
         fetch_jobs
         echo "run $run_number:"
         echo "$jobs_json" | jq -r '.[] | [(.index | tostring), .result, .name] | @tsv' |
-            column -t -s $'\t'
+        while IFS=$'\t' read -r index result name; do
+            printf '%-3s %-11s %s\n' "$index" "$result" "$name"
+        done
         ;;
     logs)
         run_arg=""
@@ -237,7 +304,7 @@ case "$subcommand" in
             if [[ "$job_want" =~ ^[0-9]+$ ]]; then
                 selected=$(echo "$jobs_json" | jq --argjson i "$job_want" '[.[] | select(.index == $i)]')
             else
-                selected=$(echo "$jobs_json" | jq --arg n "$job_want" '[.[] | select(.name | contains($n))]')
+                selected=$(echo "$jobs_json" | jq --arg n "$job_want" '[.[] | select(.context | contains($n))]')
             fi
             if [ "$(echo "$selected" | jq 'length')" -eq 0 ]; then
                 echo "No job matching '$job_want' in run $run_number:" >&2
@@ -254,8 +321,8 @@ case "$subcommand" in
             fi
         fi
 
-        while IFS=$'\t' read -r id name result; do
-            print_job_log "$id" "$name" "$result"
-        done < <(echo "$selected" | jq -r '.[] | [(.id | tostring), .name, .result] | @tsv')
+        while IFS=$'\t' read -r index name result; do
+            print_job_log "$index" "$name" "$result"
+        done < <(echo "$selected" | jq -r '.[] | [(.index | tostring), .name, .result] | @tsv')
         ;;
 esac
