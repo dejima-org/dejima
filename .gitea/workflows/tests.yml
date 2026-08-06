@@ -122,21 +122,45 @@ jobs:
       #
       # Uses only what the image already has: getent is libc, and the
       # resolver's address is in resolv.conf.
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Retried rather than decided on one attempt: a resolver can be a moment
+      # behind a container's start, and apt itself retries, so failing a whole
+      # job on a single lookup would be stricter than the step it is
+      # protecting. Six attempts over ~15s, then a diagnosis.
+      #
+      # Uses only what the image already has: getent is libc.
       - name: Check the job network can resolve before installing anything
         run: |
-          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
-          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
           echo "" >&2
           echo "This job's resolver:" >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           echo "" >&2
-          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
-          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
-          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
-          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "If other jobs in this same run resolved fine, the runners are" >&2
+          echo "configured differently: check that EVERY runner answering this" >&2
+          echo "label has --dns=<gateway> in container.options and the same" >&2
+          echo "container.network. A runner missing it fails only the jobs that" >&2
+          echo "happen to land on it, which looks intermittent." >&2
           echo "" >&2
-          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
-          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          echo "If every job failed, check on the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
           exit 1
 
       - name: Install test dependencies
@@ -220,21 +244,45 @@ jobs:
       #
       # Uses only what the image already has: getent is libc, and the
       # resolver's address is in resolv.conf.
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Retried rather than decided on one attempt: a resolver can be a moment
+      # behind a container's start, and apt itself retries, so failing a whole
+      # job on a single lookup would be stricter than the step it is
+      # protecting. Six attempts over ~15s, then a diagnosis.
+      #
+      # Uses only what the image already has: getent is libc.
       - name: Check the job network can resolve before installing anything
         run: |
-          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
-          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
           echo "" >&2
           echo "This job's resolver:" >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           echo "" >&2
-          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
-          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
-          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
-          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "If other jobs in this same run resolved fine, the runners are" >&2
+          echo "configured differently: check that EVERY runner answering this" >&2
+          echo "label has --dns=<gateway> in container.options and the same" >&2
+          echo "container.network. A runner missing it fails only the jobs that" >&2
+          echo "happen to land on it, which looks intermittent." >&2
           echo "" >&2
-          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
-          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          echo "If every job failed, check on the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
           exit 1
 
       - name: Install test dependencies
@@ -436,21 +484,45 @@ jobs:
       #
       # Uses only what the image already has: getent is libc, and the
       # resolver's address is in resolv.conf.
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Retried rather than decided on one attempt: a resolver can be a moment
+      # behind a container's start, and apt itself retries, so failing a whole
+      # job on a single lookup would be stricter than the step it is
+      # protecting. Six attempts over ~15s, then a diagnosis.
+      #
+      # Uses only what the image already has: getent is libc.
       - name: Check the job network can resolve before installing anything
         run: |
-          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
-          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
           echo "" >&2
           echo "This job's resolver:" >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           echo "" >&2
-          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
-          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
-          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
-          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "If other jobs in this same run resolved fine, the runners are" >&2
+          echo "configured differently: check that EVERY runner answering this" >&2
+          echo "label has --dns=<gateway> in container.options and the same" >&2
+          echo "container.network. A runner missing it fails only the jobs that" >&2
+          echo "happen to land on it, which looks intermittent." >&2
           echo "" >&2
-          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
-          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          echo "If every job failed, check on the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
           exit 1
 
       - name: Install test dependencies
@@ -483,21 +555,45 @@ jobs:
       #
       # Uses only what the image already has: getent is libc, and the
       # resolver's address is in resolv.conf.
+      # Before apt, because apt's failure for this says "Unable to locate
+      # package bats" and nothing about why. On a runner behind the egress
+      # allowlist a name that does not resolve is the resolver or the
+      # allowlist, not the package - and ci-runner.bats, which would say so
+      # precisely, cannot run yet because installing it is what just failed.
+      #
+      # Retried rather than decided on one attempt: a resolver can be a moment
+      # behind a container's start, and apt itself retries, so failing a whole
+      # job on a single lookup would be stricter than the step it is
+      # protecting. Six attempts over ~15s, then a diagnosis.
+      #
+      # Uses only what the image already has: getent is libc.
       - name: Check the job network can resolve before installing anything
         run: |
-          if getent hosts deb.debian.org >/dev/null 2>&1; then exit 0; fi
-          echo "deb.debian.org did not resolve, so this job cannot install anything." >&2
+          for attempt in 1 2 3 4 5 6; do
+            if getent hosts deb.debian.org >/dev/null 2>&1; then
+              [ "$attempt" -eq 1 ] || echo "resolved on attempt $attempt"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "deb.debian.org did not resolve after 6 attempts, so this job" >&2
+          echo "cannot install anything." >&2
           echo "" >&2
           echo "This job's resolver:" >&2
           sed -n 's/^nameserver/  nameserver/p' /etc/resolv.conf >&2
           echo "" >&2
-          echo "On a runner behind the dejima-ci-hardener allowlist, check in order:" >&2
-          echo "  dejima-ci-allowlist show      - is there a server= line for this name?" >&2
-          echo "  systemctl status dnsmasq      - is the resolver running?" >&2
-          echo "  iptables -S INPUT | grep -w 53 - is port 53 allowed from the job bridge?" >&2
+          echo "If other jobs in this same run resolved fine, the runners are" >&2
+          echo "configured differently: check that EVERY runner answering this" >&2
+          echo "label has --dns=<gateway> in container.options and the same" >&2
+          echo "container.network. A runner missing it fails only the jobs that" >&2
+          echo "happen to land on it, which looks intermittent." >&2
           echo "" >&2
-          echo "An empty allowlist refuses every name: with no-resolv and no server=" >&2
-          echo "lines there is no upstream for anything, which looks exactly like this." >&2
+          echo "If every job failed, check on the runner host, in order:" >&2
+          echo "  dejima-ci-allowlist show      - a server= line for this name?" >&2
+          echo "  systemctl status dnsmasq      - running?" >&2
+          echo "  iptables -S DEJIMA-CI-IN      - port 53 allowed from the bridge?" >&2
+          echo "  journalctl -u dnsmasq -n 50   - does the query arrive, and is it" >&2
+          echo "                                  forwarded without a reply?" >&2
           exit 1
 
       - name: Install test dependencies
