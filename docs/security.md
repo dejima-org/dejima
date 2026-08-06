@@ -104,6 +104,28 @@ key and the separate identity becomes decorative for exactly the operation it
 was meant to constrain. Make a test push and read what the forge attributes
 it to, rather than assuming.
 
+**Write access, and specifically not ownership.** Add the account as a
+collaborator on the repositories it works on. Write is the ceiling here, not
+a floor: an account that owns a repository — or holds admin on it — can merge
+its own work and edit the settings in the table above, so every row of that
+table goes back to being decorative. `write:repository` and `write:issue` are
+the scopes its token needs (README, "Gitea/Forgejo PR workflow"), and nothing
+about that changes for a collaborator.
+
+One consequence is worth knowing before you meet it, because it presents as a
+misconfiguration and the obvious fix is the wrong one. Parts of Gitea's API
+are gated on *ownership* rather than on permission: `GET
+/repos/{owner}/{repo}/actions/runs` answers a non-owner with `"user should be
+the owner of the repo"` no matter which scopes the token carries. Read that
+way it looks like a scope error, and the reflex is to widen the token — which
+cannot work, since no scope grants ownership, and whose only real remedy is
+handing the sandbox your own token. That would undo this whole section.
+
+`gitea-actions` therefore reads CI through `actions/tasks`, the commit's
+statuses and the run view's log route, none of which are owner-gated. If some
+future need lands on an owner-only endpoint, leaving that capability
+unavailable is the better trade than promoting the account.
+
 Two things a separate identity does **not** do:
 
 - It does not reduce what a compromised session can do inside the container,
