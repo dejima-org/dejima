@@ -863,7 +863,13 @@ echo 200
 STUB
         chmod +x "$d/stub/curl"
         git -C "$d/repo" init -q -b feature
-        git -C "$d/repo" commit -q --allow-empty -m "seed"
+        # Identity passed per-command rather than inherited: a CI container
+        # has no git config, and `commit` there exits 128 with "Author
+        # identity unknown" - a precondition this suite was taking from
+        # whoever ran it. The commit exists only so create's
+        # `rev-parse --abbrev-ref HEAD` has a branch to report.
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
         git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
     fi
     : > "$d/payload"
