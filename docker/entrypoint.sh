@@ -252,6 +252,41 @@ fi
 [ -n "${ANTHROPIC_BASE_URL:-}" ] || unset ANTHROPIC_BASE_URL
 [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || unset ANTHROPIC_AUTH_TOKEN
 
+# Remote access is opt-in and off by default, so this whole block is skipped
+# for the sessions that never asked for it: DEJIMA_NOTIFY_DIR is set only by
+# bin/dejima's remote_enabled branch. An unset value is the ordinary case and
+# says nothing.
+#
+# Set-but-unusable is different, and it is worth a line at startup because of
+# how it otherwise presents. The marker directory is a bind mount whose source
+# bin/dejima creates per launch and removes on exit, so restarting the
+# container - `docker start`, or a restart policy - rather than relaunching
+# `dejima` leaves the source gone. Docker's answer to a missing bind source is
+# not to refuse: it creates one, root-owned. The directory then exists, so the
+# notify hook's own `[ -d ]` guard passes and every notification fails with
+# EACCES instead; the session is also absent from `dejima-attach`, because its
+# registry entry went with the same directory. Three unrelated-looking symptoms
+# and no obvious moment they started.
+#
+# Reported, not repaired. Chowning this would restore notifications while the
+# session stayed missing from the registry - which bin/dejima writes host-side
+# and never mounts here - so a session would look fixed while half of the
+# feature was still broken. Relaunching is the actual remedy, and it is one the
+# message can name.
+if [ -n "${DEJIMA_NOTIFY_DIR:-}" ]; then
+    if [ ! -d "$DEJIMA_NOTIFY_DIR" ]; then
+        echo "WARNING: remote access is enabled, but $DEJIMA_NOTIFY_DIR is not a directory." >&2
+        echo "Notifications will not be delivered for this session." >&2
+    elif ! gosu "$SANDBOX_USER" test -w "$DEJIMA_NOTIFY_DIR"; then
+        echo "WARNING: remote access is enabled, but $DEJIMA_NOTIFY_DIR is not writable by" >&2
+        echo "$SANDBOX_USER - so notifications will fail, and this session will not appear in" >&2
+        echo "dejima-attach. This is what a container that was RESTARTED rather than" >&2
+        echo "relaunched looks like: bin/dejima creates the marker directory per launch and" >&2
+        echo "removes it on exit, and Docker recreated the missing bind source as root." >&2
+        echo "Stop this container and start a new session with 'dejima' to restore both." >&2
+    fi
+fi
+
 # Test harness hook (test/): everything above this point is the real
 # startup sequence - DNS proxy, firewall, IPv6 block, logging,
 # privilege-drop prep. Skip execing $SANDBOX_CMD so the suite can `docker
