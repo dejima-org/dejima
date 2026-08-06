@@ -1,5 +1,12 @@
 # dejima
 
+**Unsupervised agentic development you can take responsibility for.**
+
+An agent with permission prompts turned off gets a lot done, and will
+occasionally do something you would not have allowed. dejima is for making
+the first worth having and the second survivable, without handing over your
+machine, your network, your credentials, or the last word on what ships.
+
 Runs a coding agent — Claude Code by default, or whatever command you point
 it at — inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
@@ -23,6 +30,13 @@ Around that core is most of what running an agent unattended actually takes:
   open pull requests and issues against Gitea or Forgejo and pull review
   feedback back in, on a token scoped for exactly that. Merging stays a
   human decision, made outside the sandbox.
+- **CI hardening, because push access is code execution.** A session opens a
+  pull request, the workflow fires, and your runner executes that commit
+  before you've read a line of it. The container bounds what a session reaches
+  directly, not what it can arrange to have run elsewhere. So this one is
+  work on the runner: [docs/ci.md](docs/ci.md) for what it takes, and
+  [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
+  for a tool that does it.
 - **The CI exposure, stated up front.** Push access is code execution on
   whatever host your CI runs on: a session opens a pull request, the workflow
   fires, and the runner executes that commit before you have read a line of
@@ -101,6 +115,68 @@ walls. The in-session hooks catch the obvious cases, but nobody is reviewing
 each action before it lands, and a bad `rm` in the mounted project is just a
 bad `rm`. That produces more care, not less, the way you drive differently on a
 road with no barrier.
+
+## Using this responsibly
+
+dejima bounds what a session can reach. It has nothing to say about whether
+what that session wrote should exist. That part is yours.
+
+**Check whether they want it first.** A growing number of projects state that
+they do not accept AI-assisted contributions. Fork-and-review is the right
+workflow when a project is open to the work; it is not a way around a project
+that has said no. Read CONTRIBUTING before you start, not after.
+
+**Don't point it at repositories you don't own.** With an auto-push workflow a
+session opens branches and pull requests on its own. Maintainers are already
+drowning in low-effort AI pull requests. Fork the project, point dejima at
+your fork, review and merge there, and open the upstream PR yourself, once
+you would have been happy to have written it by hand.
+
+**Don't point it at proprietary code.** dejima works to keep your code out of
+an attacker's hands, and will sometimes fail. Point it only at code you could
+survive losing.
+
+**Look at what else is in the directory.** The project is bind-mounted
+read-write, so a stray `.env`, a database dump or a key someone left in the
+tree is in there with the agent, reachable by anything the session runs.
+Whether your *code* is sensitive is the easy half of the question.
+
+**An allowlist entry is a grant, not a convenience.** Adding a domain is one
+command. Adding your production API, a deploy webhook or a payment provider
+gives an unattended agent the ability to act on the world. Unlike code, that
+never passes through a diff on its way out. Allowlist things that can be
+wrong without being expensive.
+
+**Safe and responsible are not the same thing.** What you merge to `main`
+becomes the baseline for everything after it: for your users, and for
+dejima's own CI hardening, which reads `main` as trusted. Agents write
+insecure and broken code. Prompt injection is not solved, and no firewall
+short of an air gap prevents it. Supply-chain malware arrives through
+allowlisted sources. Keeping that out of `main` is your job, not the
+container's.
+
+**Give it its own identity, then own what you merge.** A session should
+authenticate to your forge as itself, not as you. [docs/security.md](docs/security.md)
+covers how, and dejima's own development uses a separate account. With that
+in place its commits and pull requests are visibly the agent's work. What
+makes them yours is merging them, and the people reading your `main` will
+hold you to that no matter whose name is on the commit.
+
+**Understand what you ship.** dejima makes development fast enough that not
+reading the diff gets tempting. A good model is not a substitute for
+engineering judgement or human review, and nothing here changes that.
+
+**This is not a blastproof box.** It's an improvement over running an agent
+directly on your machine. A determined attacker, or one with a container
+escape, defeats all of it. Use it at your own risk.
+
+**dejima's security says nothing about your software's.** Security isn't
+retrofittable: it's a property of how something was built, at every step. If
+what you build inside dejima turns out to be insecure, that isn't something a
+sandbox could have prevented.
+
+→ **[docs/responsible-use.md](docs/responsible-use.md)** for the reasoning
+behind each of these, and the fork-and-review workflow in full.
 
 ## Prerequisites
 
