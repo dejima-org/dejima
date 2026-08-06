@@ -220,6 +220,8 @@ teardown() {
     docker rm -f "dejima-test-tls-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-nohosts-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
     docker rm -f "dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-notifydir-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    docker rm -f "dejima-test-nonotify-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -1283,13 +1285,23 @@ EOF
 # Docker creates one root-owned rather than refusing. The directory then
 # exists, so the hook's own `[ -d ]` guard passes and the write fails instead.
 @test "a marker directory the sandbox user cannot write is reported at startup" {
-    local container; container="$(container_name)"
+    # Its own container, not container_name() - that one is created in
+    # setup_file and used by every dexec test in this file. Starting a second
+    # container under that name conflicts, and removing it at the end of this
+    # body would take the shared one with it.
+    local container="dejima-test-notifydir-$(basename "$BATS_FILE_TMPDIR")"
     local host_dir; host_dir="$(mktemp -d)"
-    # Root-owned and not writable by the sandbox user: what Docker leaves
-    # behind for a missing bind source. Built here rather than by removing a
-    # source, so the test does not depend on Docker's fallback behaviour to
-    # set up a test OF the consequences of that behaviour.
-    chmod 755 "$host_dir"
+    # Unwritable by the sandbox user, which is the property the check keys on.
+    # Built here rather than by removing a bind source, so the test does not
+    # depend on Docker's fallback behaviour to set up a test OF the
+    # consequences of that behaviour.
+    #
+    # chmod rather than mounting :ro. A read-only mount would make the
+    # "not repaired" assertion below vacuous - root could not chown it even
+    # if entrypoint.sh tried. Mode 555 leaves it repairable by root inside the
+    # container and still unwritable by the session user, so that assertion
+    # means something.
+    chmod 555 "$host_dir"
 
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
@@ -1297,7 +1309,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_NOTIFY_DIR=/run/dejima-notify \
-        -v "$host_dir:/run/dejima-notify:ro" \
+        -v "$host_dir:/run/dejima-notify" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$container"
@@ -1307,10 +1319,14 @@ EOF
     [[ "$output" == *"RESTARTED rather than"* ]]
     # Reported, not repaired: chowning would restore notifications while the
     # session stayed absent from a registry this container never sees.
-    run docker exec "$container" stat -c '%U' /run/dejima-notify
-    [ "$output" = "root" ]
+    #
+    # Asserted as "still not writable by the session user" rather than "still
+    # owned by root": ownership depends on who ran the suite, since mktemp -d
+    # follows the caller, while writability is the property the check reads
+    # and the one repairing it would change.
+    run docker exec -u node "$container" test -w /run/dejima-notify
+    [ "$status" -ne 0 ]
 
-    docker rm -f "$container" >/dev/null 2>&1 || true
     rm -rf "$host_dir"
 }
 
@@ -1319,7 +1335,7 @@ EOF
 # default - a warning about an unconfigured optional feature is noise on every
 # start, and noise is what stops warnings being read.
 @test "no marker-directory warning when remote access is not enabled" {
-    local container; container="$(container_name)"
+    local container="dejima-test-nonotify-$(basename "$BATS_FILE_TMPDIR")"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -1332,6 +1348,4 @@ EOF
     run settled_logs "$container"
     [[ "$output" != *"dejima-notify"* ]]
     [[ "$output" != *"remote access is enabled"* ]]
-
-    docker rm -f "$container" >/dev/null 2>&1 || true
 }
