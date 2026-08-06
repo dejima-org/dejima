@@ -85,6 +85,16 @@ wait_ready() {
         if docker exec "$container" pgrep -x -f 'sleep infinity' >/dev/null 2>&1; then
             return 0
         fi
+        # A container that has already exited is never going to become ready,
+        # and polling it for the full two minutes turns a startup failure - an
+        # aborted entrypoint, say - into a wait long enough to read as a hang.
+        # The reason is in its logs, which are printed either way; this only
+        # decides how long it takes to see them.
+        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" = false ]; then
+            echo "container $container exited during startup - log:" >&2
+            settled_logs "$container" >&2
+            return 1
+        fi
         sleep 1
     done
     echo "container $container never reached the post-entrypoint sleep - startup log:" >&2

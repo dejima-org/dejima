@@ -6,6 +6,10 @@
 CI runs.** That is the whole of it, and everything below is either why it
 cannot be gated or what to do about it instead.
 
+> **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.example.com/branderson/dejima-ci-hardener)
+> is a self-contained tool that does it — installed on the CI box, never on a
+> dejima host, and it does not assume you have read this.
+
 The chain needs no operator action at any step. A session writes code; the
 push guard permits a feature branch, which is what it exists to allow; the
 session opens a pull request, which its briefing tells it to do without asking
@@ -141,6 +145,7 @@ rather than leaving at their defaults are `docker_host: "-"`, an empty
 `valid_volumes` (the default, but worth stating so an edit has to be
 deliberate), `privileged: false`, a fixed `network` (below), `capacity: 1`,
 `cache.enabled: false`, and a label nothing else carries.
+dejima-ci-hardener ships both configs, with the reasoning inline.
 
 **Prefer a new runner over reconfiguring an existing one.** A general-purpose
 runner often exists precisely to build images, and taking its socket away
@@ -185,76 +190,47 @@ image pulls and action fetches happen from the host rather than from the job.
 For a suite that installs a few packages and checks out a repository, the job
 needs the forge and a package mirror, and nothing else.
 
-### A fixed network for jobs
+### A fixed network for jobs, a resolver, and both firewall chains
 
 Point `container.network` at a network you created, with a named bridge, so
 that the interface name, subnet and gateway are stable enough to write rules
 against. Left empty, `act_runner` creates a network per job and there is no
-stable interface to match on.
-
-```sh
-docker network create \
-  --opt com.docker.network.bridge.name=dejima-ci0 \
-  --subnet 203.0.113.0/24 \
-  dejima-ci
-```
-
-(That subnet is a documentation range, per RFC 5737. Substitute a private
-range that does not collide with anything you route to.)
+stable interface to match on. Give it a **private** subnet: `stop-dns-rebind`
+below rejects answers in the private ranges, so a reserved-but-not-private
+bridge subnet is one that check silently does not cover.
 
 With `runner.capacity: 1` one job occupies that network at a time. Above one,
 concurrent jobs share a broadcast domain and can reach each other's service
 containers, which is worth knowing before raising it.
 
-### DNS and the firewall
-
-The shape is the same one dejima uses inside its own container
-(`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one layer out:
-allowlist the *names* and let the answers populate the set of allowed
-*addresses*.
+The DNS and firewall shape is the same one dejima uses inside its own
+container (`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one
+layer out: allowlist the *names* and let the answers populate the set of
+allowed *addresses*.
 
 `dnsmasq` binds the bridge gateway. With `no-resolv` and one `server=` line
 per allowed name, every other name gets `REFUSED` — not resolved-then-blocked,
 refused, which closes off encoding data into query names to a domain you never
 allowed. `ipset=/#/ci-allow` adds every answer it serves to the firewall's
 set, so a destination that rotates its edge addresses stays reachable without
-a resolver cron chasing it.
+a resolver cron chasing it. `rebind-domain-ok` exempts a self-hosted forge,
+which legitimately resolves to a private address.
 
-```
-no-resolv
-server=/deb.debian.org/198.51.100.53
-ipset=/#/ci-allow
-rebind-domain-ok=/gitea.example.com/
-```
-
-`rebind-domain-ok` matters for a self-hosted forge: `stop-dns-rebind` rejects
-private answers, and an internal forge legitimately has one.
-
-Point the daemon at that resolver so containers inherit it:
-
-```json
-{ "dns": ["203.0.113.1"] }
-```
-
-Then filter, remembering both chains:
-
-```sh
-# Job egress: everything forwarded off the bridge passes here first.
-iptables -I DOCKER-USER -i dejima-ci0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A DOCKER-USER -i dejima-ci0 -m set --match-set ci-allow dst -p tcp -m multiport --dports 80,443 -j ACCEPT
-iptables -A DOCKER-USER -i dejima-ci0 -j REJECT
-
-# The resolver lives on the host, so it is INPUT, not FORWARD.
-iptables -A INPUT -i dejima-ci0 -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -i dejima-ci0 -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -i dejima-ci0 -j REJECT
-```
-
-Block IPv6 outright unless you have built the same allowlist for it. An
+The runner pins its job containers at that resolver - per-runner rather than
+daemon-wide, because a daemon-wide setting also reaches containers a
+privileged job creates over the Docker socket, which have firewalls of their
+own and no route to it. Then two chains filter: `DOCKER-USER` for everything the job forwards off the bridge, and
+`INPUT` for the resolver itself, because the gateway address belongs to the
+host. Block IPv6 outright unless you have built the same allowlist for it — an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
-### The allowlist comes from `main`, not from the checkout
+**The working configuration for all of this is in [`ci/`](../ci/), and
+[`ci/README.md`](../ci/README.md) is the step-by-step.** It is deliberately not
+reproduced here: two copies of a firewall rule drift, and the one in `ci/` is
+the one with the ordering constraints and the substitution notes attached.
+
+## The allowlist comes from `main`, not from the checkout
 
 A dejima project already carries a version-controlled statement of where it is
 allowed to reach: `.dejima/allowed-domains`. Use it — read from
@@ -280,6 +256,9 @@ a fetch that errors should leave the previous allowlist in place, never fall
 back to allowing everything — an allowlist builder is exactly the kind of
 script whose failure mode is easy to get backwards, because the broken version
 looks like a working one right up until it matters.
+dejima-ci-hardener's `dejima-ci-allowlist` is that, including the distinction that costs you here: a repository
+with no declaration is a 404 and ordinary, while a 401 or a 500 means this run
+does not know what the allowlist is and must not render one.
 
 Two things to be deliberate about:
 

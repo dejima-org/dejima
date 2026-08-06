@@ -29,7 +29,21 @@ on:
 
 jobs:
   sandbox:
-    runs-on: ubuntu-latest
+    # A label carried only by a runner configured for this - see ci/ and
+    # docs/ci.md. Not a generic one, even though these suites genuinely do run
+    # anywhere a shell does, because "runs anywhere" is a statement about what
+    # the job needs and not about what it should be handed.
+    #
+    # Whether a job container gets the Docker socket is a property of the
+    # runner's config.yaml (container.docker_host), not of anything this file
+    # can ask for or refuse. So a job that needs nothing still receives
+    # whatever its runner grants everything it runs, and naming a specific
+    # label is the only way this file gets a say in which runner that is.
+    #
+    # If no runner carries this label, these jobs queue. That is the intended
+    # failure: it is a better one than a green run on a host that grants
+    # everything.
+    runs-on: dejima-ci
     strategy:
       # One suite per job. fail-fast off because these cover unrelated areas -
       # cancelling the other six on the first failure would hide whether a
@@ -72,18 +86,20 @@ jobs:
           su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
 
   host-docker:
-    # Not ubuntu-latest, unlike the job above. This one only works on a runner
-    # configured for it - host network namespace, the Docker socket, and the
-    # shared volume below - and none of that is anything the workflow can ask
-    # for. On a generic runner it fails the preflight check outright.
+    # A different label from the job above, and the only one in this file that
+    # asks for anything privileged. This job needs the host network namespace,
+    # the Docker socket and the shared volume below, none of which a workflow
+    # can request - they are granted by the runner or not at all, so on a
+    # runner without them it fails the preflight check outright.
     #
-    # ubuntu-latest is a label every runner carries, so which one picked this
-    # up was a coin flip, and a re-run that happened to land on an unconfigured
-    # runner failed on a repo that had not changed. A label only the configured
-    # runner has makes that unrepresentable rather than merely diagnosable: no
-    # runner matching it means this job queues instead of running somewhere it
-    # cannot work. The sandbox job stays on ubuntu-latest, because it genuinely
-    # does run anywhere.
+    # A label carried by exactly one configured runner makes landing somewhere
+    # unusable unrepresentable rather than merely diagnosable: no runner
+    # matching it means this queues instead of running somewhere it cannot
+    # work. A generic label would make which runner picked it up a coin flip.
+    #
+    # The runner behind this label can be taken by anything it runs (see
+    # ci/act-runner-runtime.example.yaml), so it belongs on a host that exists
+    # for that and holds nothing else.
     runs-on: dejima-runtime
     container:
       image: node:20-bookworm
@@ -291,3 +307,43 @@ jobs:
           # own BATS_*_TMPDIR on paths that mean the same thing on both sides
           # of the socket, which is all any of those mounts need.
           TMPDIR: /tmp/dejima-ci
+
+  # The runner's own configuration, asserted from inside a job on it. Separate
+  # jobs rather than steps on the two above, because the point is that these
+  # are two different runners and either can be wrong on its own - one red
+  # check per tier says which.
+  #
+  # These fail on how the RUNNER is configured, not on anything in a pull
+  # request. A red check here means the machine needs attention; it does not
+  # mean the branch does.
+  runner-env-sandbox:
+    runs-on: dejima-ci
+    name: runner-env (sandbox)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+      - uses: actions/checkout@v4
+      - run: bats test/ci-runner.bats
+        env:
+          # Declared, not detected: landing on the wrong runner should fail
+          # rather than quietly select a different set of assertions.
+          DEJIMA_CI_TIER: sandbox
+
+  runner-env-host-docker:
+    runs-on: dejima-runtime
+    name: runner-env (host-docker)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats python3 ca-certificates
+      - uses: actions/checkout@v4
+      - run: bats test/ci-runner.bats
+        env:
+          DEJIMA_CI_TIER: host-docker

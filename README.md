@@ -1090,9 +1090,13 @@ sandbox at a project whose CI you administer - and if you would rather not
 take it on, `[core] forge = none` with `[core] workflow = local-only` declines
 the push grant and the code execution with it.
 
-**→ [docs/ci.md](docs/ci.md)** - why no approval gate is offered, hardening a
-runner, and making CI's egress allowlist a version-controlled artifact read
-from `main`.
+**→ [docs/ci.md](docs/ci.md)** - the *why*: no approval gate is offered and
+what that leaves, hardening a runner, and making CI's egress allowlist a
+version-controlled artifact read from `main`.
+
+**→ [dejima-ci-hardener](https://gitbox.example.com/branderson/dejima-ci-hardener)** - the *how*: a self-contained tool that
+hardens a CI runner, installed on the CI box and nowhere near a dejima host.
+Nothing in this repository needs to be copied onto a runner.
 
 ## Security notes
 
@@ -1191,6 +1195,7 @@ likely to collide with a real container you have running.
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
+| `ci/` | Worked runner, resolver and firewall examples for the setup `docs/ci.md` describes; installed by nothing, and belongs on a CI machine rather than a dejima one |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,

@@ -1719,6 +1719,33 @@ EOF
     grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"
 }
 
+# --- the labels this repo's own workflow asks for ---
+#
+# Whether a job container gets the Docker socket is settled by the runner's
+# config.yaml - which lives in dejima-ci-hardener's territory, not this
+# repository's - so the only lever here is which runner its jobs may land on.
+# A generic label gives that lever away, which is what these pin.
+
+@test "no workflow job runs on a generic runner label" {
+    run grep -nE '^\s*runs-on:\s*(ubuntu|windows|macos|self-hosted)' \
+        "$REPO_ROOT"/.gitea/workflows/*.yml
+    [ "$status" -ne 0 ] || {
+        echo "a generic label lets this job land on a runner nobody hardened:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
+@test "every workflow job runs on a dejima-specific label" {
+    while IFS= read -r label; do
+        [[ "$label" == dejima-* ]] || {
+            echo "unexpected runs-on label: $label" >&2
+            false
+        }
+    done < <(grep -hE '^\s*runs-on:' "$REPO_ROOT"/.gitea/workflows/*.yml \
+        | sed -E 's/^\s*runs-on:\s*//')
+}
+
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -ne 0 ]
@@ -1750,6 +1777,10 @@ SCANNED_PATHS=(README.md docs docker bin forges workflows harnesses hooks instal
     }
 }
 
+# The exemption above is only defensible while it is the address the docs
+# actually recommend. If the recommendation changes and this does not, the
+# exemption starts covering an address nothing points at - a hole rather than
+# a carve-out.
 @test "no hostname under a private-network suffix is used as a documentation example" {
     run grep -rnIE '[A-Za-z0-9-]+\.(localdomain|lan|internal|home\.arpa)\b' \
         "${SCANNED_PATHS[@]/#/$REPO_ROOT/}"
@@ -2158,15 +2189,21 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -ne 0 ]
 }
 
-@test "every sandbox suite is in the CI matrix, and runtime.bats is not" {
+@test "every suite is run by CI, and the two that need their own job have one" {
     # Derived from the directory rather than a list kept here, so adding a
     # test file fails this until the workflow is told about it. A suite nobody
     # wired into CI runs nowhere, and nothing else would say so.
+    #
+    # Two suites are not matrix entries because they cannot be. runtime.bats
+    # needs a Docker daemon; ci-runner.bats asserts on the runner itself and
+    # has to run once per tier rather than once per suite. Both are checked
+    # below for having a job of their own instead - "not in the matrix" must
+    # not be a way to be in neither.
     local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
     local f base missing=""
     for f in "$REPO_ROOT"/test/*.bats; do
         base="$(basename "$f" .bats)"
-        [ "$base" = "runtime" ] && continue
+        case "$base" in runtime|ci-runner) continue ;; esac
         grep -qE "^ *- *$base\$" "$wf" || missing="$missing $base"
     done
     [ -z "$missing" ] || {
@@ -2179,6 +2216,13 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # fail every time rather than testing anything.
     ! grep -qE '^ *- *runtime$' "$wf"
     grep -q 'test/runtime.bats' "$wf"
+
+    # ci-runner.bats likewise, and once per tier: a single job would leave one
+    # of the two runners unasserted, which is the thing it exists to catch.
+    ! grep -qE '^ *- *ci-runner$' "$wf"
+    grep -q 'test/ci-runner.bats' "$wf"
+    grep -q 'DEJIMA_CI_TIER: sandbox' "$wf"
+    grep -q 'DEJIMA_CI_TIER: host-docker' "$wf"
 }
 
 @test "the agent briefing teaches the project scope, not just global" {
