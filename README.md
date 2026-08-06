@@ -23,6 +23,14 @@ Around that core is most of what running an agent unattended actually takes:
   open pull requests and issues against Gitea or Forgejo and pull review
   feedback back in, on a token scoped for exactly that. Merging stays a
   human decision, made outside the sandbox.
+- **The CI exposure, stated up front.** Push access is code execution on
+  whatever host your CI runs on: a session opens a pull request, the workflow
+  fires, and the runner executes that commit before you have read a line of
+  it. The container bounds what a session reaches directly — not what it can
+  arrange to have run elsewhere. That work happens on the runner:
+  [docs/ci.md](docs/ci.md) for what it takes, and
+  [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
+  for a tool that does it.
 - **Logging.** Every DNS lookup and rejected connection, shipped to Loki —
   and, opt-in, the session transcript alongside them.
 - **Remote access, opt-in and off by default.** Attach to a live session
