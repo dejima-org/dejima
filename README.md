@@ -418,39 +418,20 @@ By default the container's entry point is bare `claude` (always running with
 `docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
-Typical loop: point it at a project, ask Claude to implement something and
-open a PR (`gitea-pr` is on `PATH`); from the host, `gitea-pr comments <PR#>`
-to pull review feedback, feed it back in, repeat. Merging is yours — see
-`merge-guard.sh` below. `gitea-issue` is on `PATH` too, for the work
-that gets deferred rather than done: `list`, `view`, `create`, `comment`,
-`close` and `reopen`, so a problem found mid-session becomes a ticket instead
-of a footnote on an unrelated PR.
+Typical loop: point it at a project, ask for a change, and let the session
+work. It commits to a feature branch, pushes it, and opens a pull request —
+then it stops. You review and merge that PR yourself, wherever you normally
+read them. Merging is the one step the sandbox is not allowed to take, and
+`merge-guard.sh` blocks it from the inside.
 
-`gitea-actions` closes the other half of that loop. A sandbox cannot run the
-tests that need a Docker daemon, so CI is where they run, and without a way
-to read a run the only route from a red build back into the session is the
-operator pasting the log in by hand. `gitea-actions runs`, `jobs <run>` and
-`logs [run]` do that instead — with no run given, the newest one for `HEAD`,
-and by default only the jobs that failed. It reads and never writes.
+That boundary is the shape of the loop rather than a limit on it: every
+session ends at something you read before it lands, and nothing reaches your
+default branch without you.
 
-Because the session stops at the PR and you merge afterwards, the sandbox
-context tells Claude to put `Fixes #N` in the PR body rather than to close
-issues by hand once they land — the merge is the last step in that sequence
-that still happens, and it happens when the agent is gone. `Refs #N` is the
-deliberate opposite, for work that touches a ticket without finishing it.
-
-Both take `--body-file FILE` (or `-` for stdin) as well as `--body`. Prefer it
-for anything with an apostrophe, a backtick or a code fence in it — a body
-passed on a command line has to survive shell quoting first.
-
-Inside the sandbox there's a second reason, and it argues for a real file over
-a heredoc. `deny-dangerous-bash.sh` matches patterns anywhere in the Bash
-command string, and it has no way to tell an instruction from prose that
-merely mentions one — so a PR or issue body that discusses restarting a host,
-or quotes a destructive command it is warning about, gets the whole call
-blocked. Writing the body to a file first keeps that text out of the command
-string entirely. A heredoc doesn't: the body is still part of the command the
-hook reads, so it solves the quoting problem but not this one.
+How far the session goes is the `[core] workflow` setting — `worktree-pr`
+pushes and opens the PR described above, `branch-push` stops at the push, and
+`local-only` commits and pushes nowhere. See
+[Provider axes](#provider-axes-forge-workflow-harness).
 
 ### Using a different editor/application
 
