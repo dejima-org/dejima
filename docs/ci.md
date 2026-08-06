@@ -221,7 +221,9 @@ daemon-wide, because a daemon-wide setting also reaches containers a
 privileged job creates over the Docker socket, which have firewalls of their
 own and no route to it. Then two chains filter: `DOCKER-USER` for everything
 the job forwards off the bridge, and `INPUT` for the resolver itself, because
-the gateway address belongs to the host. Block IPv6 outright unless you have built the same allowlist for it — an
+the gateway address belongs to the host.
+
+Block IPv6 outright unless you have built the same allowlist for it — an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
