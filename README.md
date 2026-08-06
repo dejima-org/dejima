@@ -1085,10 +1085,16 @@ already run, and it does not take a modified workflow file to get there: a
 workflow that runs a test suite runs every file in it.
 
 The sandbox bounds what a session can reach directly. It does not bound what
-it can arrange to have run elsewhere. Read this one before you point a
-sandbox at a project whose CI you administer - and if you would rather not
-take it on, `[core] forge = none` with `[core] workflow = local-only` declines
-the push grant and the code execution with it.
+it can arrange to have run elsewhere.
+
+**This holds for projects with no CI, too** - a branch can add the first
+workflow, so what matters is which runners the repository can *reach*, not
+what it runs today. That is a property of the forge rather than the project,
+and it is worth one question per project before you start. On hosted runners
+the answer is reassuring; with self-hosted runners in reach it is the thing to
+look at. And if you would rather not take it on at all,
+`[core] forge = none` with `[core] workflow = local-only` declines the push
+grant and the code execution with it.
 
 **→ [docs/ci.md](docs/ci.md)** - the *why*: no approval gate is offered and
 what that leaves, hardening a runner, and making CI's egress allowlist a

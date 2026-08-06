@@ -28,6 +28,15 @@ itself. The sandbox bounds what a session can reach directly. It does not
 bound what it can arrange to have run elsewhere, and CI is the shortest path
 elsewhere.
 
+**And it applies to projects with no CI at all.** A branch can add the first
+workflow, so what matters is not what a repository's workflows do today but
+which runners its branches can reach — which is a property of the forge, not
+of the project. If you read one section of this document before pointing a
+sandbox at something, make it
+[what a repository can reach](#closing-the-rest-what-a-repository-can-reach);
+it is a question to answer per project, and for a project on hosted runners
+the answer is reassuring.
+
 ## What a run actually adds
 
 The code CI executes is code the session already had. Relative to the sandbox,
@@ -221,49 +230,73 @@ whatever `runs-on` it likes. What it buys is that the *intended* CI is
 trustworthy, and that escaping it means adding a file rather than editing
 one — a much louder diff.
 
-### Closing the rest: reachability
+### Closing the rest: what a repository can reach
 
-Three ways out, in rough order of preference:
+The rule underneath everything here:
 
-1. **Do not register general-purpose runners at instance level** on an
-   instance that hosts repositories receiving agent-authored branches. Scope
-   them to the owners or repositories that need them.
+> **Every runner reachable from a repository that receives agent-authored
+> branches must be one you would accept an attacker running code on.**
 
-   This is cheaper than it first appears, because a runner can belong to an
-   **owner** — a user as well as an organization — and then serves every
-   repository that owner has. Gitea's runner model spells out the three
-   cases: global (`OwnerID` and `RepoID` both zero), org/user level
-   (`OwnerID` set), and repository level (`RepoID` set). So an instance with
-   sixty personal repositories and two general-purpose runners needs two
-   re-registrations at user scope, not sixty at repository scope — and then
-   the repositories that receive agent-authored branches live under a
-   *different* owner, whose reachable runners are all hardened.
+Note what that does *not* say. It says nothing about what the repository's
+workflows currently do, because a branch can add the first one. **A project
+with no CI at all is still exposed**, on a forge where its branches can reach
+a runner — and that is the case people do not expect, because there is nothing
+in the repository to look at.
 
-   That is the arrangement that makes the invariant hold: a branch naming a
-   label no reachable runner carries finds nothing, and the job queues rather
-   than running somewhere unprepared.
-2. **Harden every runner that repository can reach**, so landing on a
-   different one changes nothing that matters.
-3. **Move the repository** to an instance or organization whose reachable
-   runners are all hardened.
+So before pointing a sandbox at a project, ask one question: *what runners can
+this repository's branches reach?*
 
-The runner-environment tests in `test/ci-runner.bats` do not close this
-either, and for the same reason: they are jobs in the same workflow file, so a
-branch that redirects `runs-on` can drop them in the same commit. What they
-catch is a *misconfigured* runner, not a *redirected* job.
+**If the answer is "hosted runners only"** — GitHub-hosted and nothing
+self-hosted attached — this is the mildest case, and it is worth saying so
+rather than alarming people. The runner is disposable and is not your machine,
+so "execution on a host you own" largely evaporates: there is no LAN behind
+it and nothing of yours on it. What remains is the third item, credentials:
+give pull-request runs no secrets they do not need and a read-only token
+(`permissions: contents: read`), and do not attach a self-hosted runner to
+that repository.
 
-What does survive the branch is the run log — it records which runner took
-each job, so a job that executed somewhere unexpected is visible afterwards.
-And a required status check on the runner-environment jobs means a pull
-request that deletes them cannot be *merged*. Both are after the fact, which
-is this document's whole point: the code has already run.
+**If self-hosted runners are reachable**, that is the sharp case, and there are
+three ways to hold the rule — none of which require moving or renaming
+anything.
 
-On capabilities: `--cap-drop=ALL` is the reflex and it breaks `apt-get`, which
-needs `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID` and `SETGID` to unpack a
-package. Drop what the job demonstrably does not need instead of dropping
-everything and discovering the list by failure, and pair whatever you drop
-with `--security-opt=no-new-privileges`, which costs nothing and does not
-depend on getting the list right.
+**1. Turn CI off for that repository, if it does not use CI.** Disabling the
+Actions unit means no workflow runs for that repository at all, so no runner is
+reachable and a branch cannot add the first workflow. Changing it back needs
+*admin* on the repository — Gitea's API puts repository settings behind
+`reqAdmin()` — so a bot account with Write cannot undo it. For a project that
+was not using CI anyway this costs nothing and closes the vector outright. It
+is the first thing to reach for and the most commonly overlooked.
+
+**2. Scope the dangerous runner down, rather than moving the repository out.**
+The instinct is to move agent-developed repositories somewhere with only
+hardened runners. For a public project that means breaking its name, its
+links and its ownership, which nobody should be asked to do.
+
+Invert it. A runner can belong to an **owner** — a user as well as an
+organization — and then serves that owner's repositories; Gitea's runner model
+names the three cases: global (`OwnerID` and `RepoID` both zero), org/user
+level (`OwnerID` set), repository level (`RepoID` set). So:
+
+- Make the *hardened* runner the owner-level default, so every repository gets
+  it.
+- Register the *permissive* runner — the one with the Docker socket, or with
+  unrestricted egress — at **repository** scope, for only the repositories
+  that genuinely need it.
+
+Most repositories need a runner that can run tests, not one that can build
+images. Scoping the dangerous capability to the few that need it is usually a
+handful of registrations, and nothing moves or is renamed.
+
+**3. Do not grant push.** `[core] forge = none` with
+`[core] workflow = local-only`. The session commits locally and stops; you
+review the diff and push it yourself. No branch, no workflow, no runner, and
+the vector is closed completely rather than bounded. The cost is one push
+after the review you were going to do anyway — and it is the only option here
+that does not depend on getting a forge's configuration right.
+
+If none of the three is available for a given project, that is worth knowing
+plainly: pointing a sandbox at it means accepting that a compromised session
+can run code on whatever that repository can reach.
 
 ## Egress
 
@@ -447,6 +480,10 @@ can still add a workflow of its own.
 - **Code still runs.** Everything here bounds *where* and *with what*, not
   *whether*. There is no point in the flow at which a human reads the diff
   before execution.
+- **A repository with no workflows is not therefore safe.** A branch can add
+  one, so the exposure follows from which runners the repository can reach,
+  not from what it currently runs. Disabling the Actions unit is what makes
+  "this project has no CI" into a property rather than a coincidence.
 - **An allowed destination is still an exfiltration channel** through its own
   request surface — a query string, a lookup, an issue body. Domain
   allowlisting closes off reaching somewhere *new*; it cannot inspect what is

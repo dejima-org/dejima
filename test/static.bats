@@ -1719,6 +1719,26 @@ EOF
 # of this document said jobs "cannot land anywhere else", which is true only of
 # a branch that is not trying - the exact distinction the rest of the document
 # is built on. Pinned so it cannot quietly come back.
+# The counterintuitive half of the advisory, and the one a reader is most
+# likely to skip: a project with no CI is exposed too, because a branch adds
+# the first workflow. If that goes missing, the document reads as being about
+# people who already run CI, which is the smaller group.
+@test "docs/ci.md says a project with no CI is exposed too" {
+    grep -q 'applies to projects with no CI at all' "$REPO_ROOT/docs/ci.md"
+    grep -q 'no workflows is not therefore safe' "$REPO_ROOT/docs/ci.md"
+    grep -qi 'holds for projects with no CI' "$REPO_ROOT/README.md"
+}
+
+# Moving a public project to another owner breaks its name, its links and its
+# ownership. It must not read as the recommended answer, and the alternatives
+# that require moving nothing have to be present.
+@test "docs/ci.md offers answers that do not require moving a repository" {
+    local f="$REPO_ROOT/docs/ci.md"
+    grep -q 'Scope the dangerous runner down, rather than moving' "$f"
+    grep -q 'Turn CI off for that repository' "$f"
+    grep -q 'Do not grant push' "$f"
+}
+
 @test "docs/ci.md does not present the runner label as a boundary" {
     grep -q 'A label is not a boundary' "$REPO_ROOT/docs/ci.md"
     grep -q 'weakest runner it can reach' "$REPO_ROOT/docs/ci.md"
