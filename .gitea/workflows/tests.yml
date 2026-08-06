@@ -43,29 +43,6 @@ name: tests
 # runners the repository can reach at all - see docs/ci.md, "A label is not a
 # boundary". What this buys is that the intended CI is trustworthy, and that
 # escaping it requires adding a file rather than editing one.
-# pull_request_target, not pull_request, and the difference is the whole
-# security posture of this file.
-#
-# Under `pull_request` the workflow is read from the HEAD of the pull request -
-# so the branch under test decides what runs and, critically, `runs-on:`. A
-# branch can point its jobs at any runner its repository can reach, which
-# means every control the runner provides is opt-out by whoever wrote the
-# branch.
-#
-# Under `pull_request_target` Gitea reads the workflow from the BASE branch,
-# and explicitly discards any pull_request_target workflow found on the head
-# commit - so a branch can neither edit this file's copy nor introduce its
-# own. What runs here, and where, is whatever `main` says.
-#
-# The cost is that the checkout no longer defaults to the code under test: the
-# run's ref is the base branch. Every job that means to test the branch says
-# so explicitly below. A bare checkout would test `main` on every pull request
-# and pass regardless of the change.
-#
-# This does NOT make the repository safe on its own. A branch can still add a
-# workflow of its own with `on: pull_request`, and that runs from the head
-# with whatever `runs-on:` it likes. Only which runners the repository can
-# reach at all stops that - see docs/ci.md, "A label is not a boundary".
 on:
   pull_request_target:
 
