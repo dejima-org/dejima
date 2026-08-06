@@ -1746,6 +1746,22 @@ EOF
     [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
 }
 
+# The shared-identity point is what decides whether an operator's branch
+# protection does anything, and it is the kind of thing that reads as a
+# digression to a later editor. Pinned in both places, and pinned together
+# with the separation that fixes it - stating the problem without the remedy
+# would leave a reader with nothing to do about it.
+@test "docs/security.md documents that the sandbox authenticates as the operator" {
+    grep -q 'the sandbox is you' "$REPO_ROOT/docs/security.md"
+    grep -qi 'guard rather than a boundary' "$REPO_ROOT/docs/security.md"
+    grep -q 'forge.gitea. token_file' "$REPO_ROOT/docs/security.md"
+    grep -q 'core. ssh_key' "$REPO_ROOT/docs/security.md"
+}
+
+@test "docs/ci.md's branch-protection prerequisite links the shared-identity section" {
+    grep -q 'security.md#to-your-forge-the-sandbox-is-you' "$REPO_ROOT/docs/ci.md"
+}
+
 @test "docs/ci.md says the CI allowlist is read from main, not from the checkout" {
     grep -q 'origin/main' "$REPO_ROOT/docs/ci.md"
     grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"
