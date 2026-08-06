@@ -1714,6 +1714,18 @@ EOF
 # from the branch the operator controls. A future edit that softens this into
 # "read .dejima/allowed-domains" without saying from where would leave the
 # document describing a control that doesn't control anything.
+# runs-on lives in the workflow file, which lives in the branch, so a
+# dedicated label routes honest jobs and stops nothing else. An earlier version
+# of this document said jobs "cannot land anywhere else", which is true only of
+# a branch that is not trying - the exact distinction the rest of the document
+# is built on. Pinned so it cannot quietly come back.
+@test "docs/ci.md does not present the runner label as a boundary" {
+    grep -q 'A label is not a boundary' "$REPO_ROOT/docs/ci.md"
+    grep -q 'weakest runner it can reach' "$REPO_ROOT/docs/ci.md"
+    run grep -n 'cannot land anywhere else' "$REPO_ROOT/docs/ci.md"
+    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+}
+
 @test "docs/ci.md says the CI allowlist is read from main, not from the checkout" {
     grep -q 'origin/main' "$REPO_ROOT/docs/ci.md"
     grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"

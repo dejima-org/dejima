@@ -102,10 +102,13 @@ that is what it does on every pull request.
   and start receiving jobs, including their secrets.
 - **Rebuilt from a snapshot on a schedule**, so that persistence on it has a
   bounded lifetime rather than an indefinite one.
-- **Register runners at repository scope**, not instance scope, so an
-  unrelated repository cannot schedule work onto a runner you hardened for
-  this one. Gitea's own FAQ describes gitea.com doing this for its public
-  runners.
+- **Register runners at repository or organization scope**, not instance
+  scope. This matters in both directions, and the second is the one that bites:
+  an unrelated repository cannot schedule work onto a runner you hardened for
+  this one, *and* this repository cannot schedule work onto a runner nobody
+  hardened. An instance-level runner is reachable from every repository on the
+  instance — see "A label is not a boundary" below. Gitea's own FAQ describes
+  gitea.com doing this for its public runners.
 
 Two runners on one VM give you label tiering, not host separation: a job that
 cannot get the Docker socket still shares a kernel and a network with a runner
@@ -150,9 +153,62 @@ dejima-ci-hardener ships both configs, with the reasoning inline.
 **Prefer a new runner over reconfiguring an existing one.** A general-purpose
 runner often exists precisely to build images, and taking its socket away
 breaks it. Register a second runner with a label of its own, and name that
-label in the workflow. Jobs then cannot land anywhere else — and if no runner
-carries the label yet, they queue rather than running somewhere that grants
-everything, which is a better failure than a green run on the wrong host.
+label in the workflow — and if no runner carries the label yet, the job queues
+rather than running somewhere unprepared, which is a better failure than a
+green run on the wrong host.
+
+### A label is not a boundary
+
+That last paragraph describes routing, not containment, and the difference
+matters enough to state on its own.
+
+**`runs-on:` is in the workflow file, and the workflow file is in the branch.**
+A branch can name any label it likes. So a dedicated label keeps *honest* jobs
+on the runner you prepared; it does nothing against a branch that would rather
+run somewhere else. A session that changes `runs-on: dejima-ci` to
+`runs-on: ubuntu-latest`, pushes, and opens a pull request has stepped outside
+every control on this page — no allowlist, no socket restriction, no firewall
+— provided some runner answering `ubuntu-latest` will take the job.
+
+Whether one will is a property of **where your runners are registered**, which
+is the actual boundary:
+
+| Registered at | Which repositories it serves |
+| --- | --- |
+| Instance | **every repository on the instance** |
+| Organization | that organization's repositories |
+| Repository | that repository |
+
+Gitea has no per-repository runner ACL — its FAQ says so directly, and points
+at registration scope as the control instead: gitea.com registers its runners
+for one organization "so our runners will not execute jobs from other
+repositories."
+
+So the property to hold onto is this: **a repository's CI security posture is
+that of the weakest runner it can reach, not the one its workflow names.** An
+instance-level general-purpose runner is reachable from every repository on
+that instance, including any that takes agent-authored branches.
+
+Three ways out, in rough order of preference:
+
+1. **Do not register general-purpose runners at instance level** on an
+   instance that hosts repositories receiving agent-authored branches. Scope
+   them to the organizations or repositories that need them.
+2. **Harden every runner that repository can reach**, so landing on a
+   different one changes nothing that matters.
+3. **Move the repository** to an instance or organization whose reachable
+   runners are all hardened.
+
+The runner-environment tests in `test/ci-runner.bats` do not close this
+either, and for the same reason: they are jobs in the same workflow file, so a
+branch that redirects `runs-on` can drop them in the same commit. What they
+catch is a *misconfigured* runner, not a *redirected* job.
+
+What does survive the branch is the run log — it records which runner took
+each job, so a job that executed somewhere unexpected is visible afterwards.
+And a required status check on the runner-environment jobs means a pull
+request that deletes them cannot be *merged*. Both are after the fact, which
+is this document's whole point: the code has already run.
 
 On capabilities: `--cap-drop=ALL` is the reflex and it breaks `apt-get`, which
 needs `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID` and `SETGID` to unpack a
