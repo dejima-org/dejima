@@ -6,6 +6,10 @@
 CI runs.** That is the whole of it, and everything below is either why it
 cannot be gated or what to do about it instead.
 
+> **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
+> is a self-contained tool that does it — installed on the CI box, never on a
+> dejima host, and it does not assume you have read this.
+
 The chain needs no operator action at any step. A session writes code; the
 push guard permits a feature branch, which is what it exists to allow; the
 session opens a pull request, which its briefing tells it to do without asking
@@ -23,6 +27,15 @@ This applies to any project developed in a dejima sandbox, not only to dejima
 itself. The sandbox bounds what a session can reach directly. It does not
 bound what it can arrange to have run elsewhere, and CI is the shortest path
 elsewhere.
+
+**And it applies to projects with no CI at all.** A branch can add the first
+workflow, so what matters is not what a repository's workflows do today but
+which runners its branches can reach — which is a property of the forge, not
+of the project. If you read one section of this document before pointing a
+sandbox at something, make it
+[what a repository can reach](#closing-the-rest-what-a-repository-can-reach);
+it is a question to answer per project, and for a project on hosted runners
+the answer is reassuring.
 
 ## What a run actually adds
 
@@ -98,10 +111,13 @@ that is what it does on every pull request.
   and start receiving jobs, including their secrets.
 - **Rebuilt from a snapshot on a schedule**, so that persistence on it has a
   bounded lifetime rather than an indefinite one.
-- **Register runners at repository scope**, not instance scope, so an
-  unrelated repository cannot schedule work onto a runner you hardened for
-  this one. Gitea's own FAQ describes gitea.com doing this for its public
-  runners.
+- **Register runners at repository or organization scope**, not instance
+  scope. This matters in both directions, and the second is the one that bites:
+  an unrelated repository cannot schedule work onto a runner you hardened for
+  this one, *and* this repository cannot schedule work onto a runner nobody
+  hardened. An instance-level runner is reachable from every repository on the
+  instance — see "A label is not a boundary" below. Gitea's own FAQ describes
+  gitea.com doing this for its public runners.
 
 Two runners on one VM give you label tiering, not host separation: a job that
 cannot get the Docker socket still shares a kernel and a network with a runner
@@ -141,20 +157,162 @@ rather than leaving at their defaults are `docker_host: "-"`, an empty
 `valid_volumes` (the default, but worth stating so an edit has to be
 deliberate), `privileged: false`, a fixed `network` (below), `capacity: 1`,
 `cache.enabled: false`, and a label nothing else carries.
+dejima-ci-hardener ships both configs, with the reasoning inline.
 
 **Prefer a new runner over reconfiguring an existing one.** A general-purpose
 runner often exists precisely to build images, and taking its socket away
 breaks it. Register a second runner with a label of its own, and name that
-label in the workflow. Jobs then cannot land anywhere else — and if no runner
-carries the label yet, they queue rather than running somewhere that grants
-everything, which is a better failure than a green run on the wrong host.
+label in the workflow — and if no runner carries the label yet, the job queues
+rather than running somewhere unprepared, which is a better failure than a
+green run on the wrong host.
 
-On capabilities: `--cap-drop=ALL` is the reflex and it breaks `apt-get`, which
-needs `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID` and `SETGID` to unpack a
-package. Drop what the job demonstrably does not need instead of dropping
-everything and discovering the list by failure, and pair whatever you drop
-with `--security-opt=no-new-privileges`, which costs nothing and does not
-depend on getting the list right.
+### A label is not a boundary
+
+That last paragraph describes routing, not containment, and the difference
+matters enough to state on its own.
+
+**`runs-on:` is in the workflow file, and the workflow file is in the branch.**
+A branch can name any label it likes. So a dedicated label keeps *honest* jobs
+on the runner you prepared; it does nothing against a branch that would rather
+run somewhere else. A session that changes `runs-on: dejima-ci` to
+`runs-on: ubuntu-latest`, pushes, and opens a pull request has stepped outside
+every control on this page — no allowlist, no socket restriction, no firewall
+— provided some runner answering `ubuntu-latest` will take the job.
+
+Whether one will is a property of **where your runners are registered**, which
+is the actual boundary:
+
+| Registered at | Which repositories it serves |
+| --- | --- |
+| Instance | **every repository on the instance** |
+| Organization | that organization's repositories |
+| Repository | that repository |
+
+Gitea has no per-repository runner ACL — its FAQ says so directly, and points
+at registration scope as the control instead: gitea.com registers its runners
+for one organization "so our runners will not execute jobs from other
+repositories."
+
+So the property to hold onto is this: **a repository's CI security posture is
+that of the weakest runner it can reach, not the one its workflow names.** An
+instance-level general-purpose runner is reachable from every repository on
+that instance, including any that takes agent-authored branches.
+
+### Pinning the workflow with `pull_request_target`
+
+Half of this is fixable, and worth fixing: **`runs-on` does not have to come
+from the branch.**
+
+Under `on: pull_request` the workflow is read from the head of the pull
+request, so the branch decides what runs and where. Under
+`on: pull_request_target` Gitea reads it from the **base branch**, and
+explicitly discards any `pull_request_target` workflow found on the head
+commit — a branch can neither edit the base copy nor introduce its own. What
+runs, and on which runner, is whatever `main` says.
+
+**Adopting it takes two merges, not one.** The trigger only takes effect once
+it is on the base branch, because that is where it is read from — and a
+`pull_request_target` workflow on a pull request's head is explicitly ignored.
+So the change that introduces it cannot be tested by it: with only
+`pull_request_target` on the branch and only `pull_request` on `main`, the
+head's copy is skipped, the base has nothing to contribute, and **no checks
+run at all** — which looks like a broken workflow rather than a bootstrap
+problem.
+
+Carry both triggers through the first merge, then remove `pull_request` in a
+follow-up. The first change is tested by its own copy from the head, as
+today; the follow-up is tested by the copy now on `main`. In between, pull
+requests get both an untrusted run from the head and a trusted one from the
+base — noisy, and for the untrusted half no worse than the status quo, so
+keep the window short.
+
+Two more consequences to handle rather than discover:
+
+- **The checkout no longer defaults to the code under test.** The run's ref is
+  the base branch, so a bare `actions/checkout` fetches `main` and the suite
+  passes without ever seeing the change. Jobs that test the branch must name
+  it: `ref: ${{ github.event.pull_request.head.sha }}`. Jobs that assert on
+  the *runner* should keep the bare checkout, so their assertions come from
+  `main` and a branch can neither weaken nor delete them.
+- **The job runs with the base repository's token and secrets**, because the
+  forge treats it as trusted. On a forge where a same-repo `pull_request` run
+  already gets a permissive token this changes nothing, but it is why the
+  pattern carries warnings elsewhere: give such a run no secret you would not
+  hand the branch.
+
+This does not make the repository safe on its own. A branch can still add a
+workflow of its own with `on: pull_request`, which runs from the head with
+whatever `runs-on` it likes. What it buys is that the *intended* CI is
+trustworthy, and that escaping it means adding a file rather than editing
+one — a much louder diff.
+
+### Closing the rest: what a repository can reach
+
+The rule underneath everything here:
+
+> **Every runner reachable from a repository that receives agent-authored
+> branches must be one you would accept an attacker running code on.**
+
+Note what that does *not* say. It says nothing about what the repository's
+workflows currently do, because a branch can add the first one. **A project
+with no CI at all is still exposed**, on a forge where its branches can reach
+a runner — and that is the case people do not expect, because there is nothing
+in the repository to look at.
+
+So before pointing a sandbox at a project, ask one question: *what runners can
+this repository's branches reach?*
+
+**If the answer is "hosted runners only"** — GitHub-hosted and nothing
+self-hosted attached — this is the mildest case, and it is worth saying so
+rather than alarming people. The runner is disposable and is not your machine,
+so "execution on a host you own" largely evaporates: there is no LAN behind
+it and nothing of yours on it. What remains is the third item, credentials:
+give pull-request runs no secrets they do not need and a read-only token
+(`permissions: contents: read`), and do not attach a self-hosted runner to
+that repository.
+
+**If self-hosted runners are reachable**, that is the sharp case, and there are
+three ways to hold the rule — none of which require moving or renaming
+anything.
+
+**1. Turn CI off for that repository, if it does not use CI.** Disabling the
+Actions unit means no workflow runs for that repository at all, so no runner is
+reachable and a branch cannot add the first workflow. Changing it back needs
+*admin* on the repository — Gitea's API puts repository settings behind
+`reqAdmin()` — so a bot account with Write cannot undo it. For a project that
+was not using CI anyway this costs nothing and closes the vector outright. It
+is the first thing to reach for and the most commonly overlooked.
+
+**2. Scope the dangerous runner down, rather than moving the repository out.**
+The instinct is to move agent-developed repositories somewhere with only
+hardened runners. For a public project that means breaking its name, its
+links and its ownership, which nobody should be asked to do.
+
+Invert it. A runner can belong to an **owner** — a user as well as an
+organization — and then serves that owner's repositories; Gitea's runner model
+names the three cases: global (`OwnerID` and `RepoID` both zero), org/user
+level (`OwnerID` set), repository level (`RepoID` set). So:
+
+- Make the *hardened* runner the owner-level default, so every repository gets
+  it.
+- Register the *permissive* runner — the one with the Docker socket, or with
+  unrestricted egress — at **repository** scope, for only the repositories
+  that genuinely need it.
+
+Most repositories need a runner that can run tests, not one that can build
+images. Scoping the dangerous capability to the few that need it is usually a
+handful of registrations, and nothing moves or is renamed.
+
+**3. Do not grant push.** `[core] forge = none` with
+`[core] workflow = local-only`. The session commits locally and stops; you
+review the diff and push it yourself. No branch, no workflow, no runner, and
+the vector is closed completely rather than bounded. The cost is one push
+after the review you were going to do anyway — and it is the only option here
+that does not depend on getting a forge's configuration right.
+
+If none of the three is available for a given project, that is worth knowing
+plainly: pointing a sandbox at it means accepting that a compromised session
+can run code on whatever that repository can reach.
 
 ## Egress
 
@@ -185,76 +343,49 @@ image pulls and action fetches happen from the host rather than from the job.
 For a suite that installs a few packages and checks out a repository, the job
 needs the forge and a package mirror, and nothing else.
 
-### A fixed network for jobs
+### A fixed network for jobs, a resolver, and both firewall chains
 
 Point `container.network` at a network you created, with a named bridge, so
 that the interface name, subnet and gateway are stable enough to write rules
 against. Left empty, `act_runner` creates a network per job and there is no
-stable interface to match on.
-
-```sh
-docker network create \
-  --opt com.docker.network.bridge.name=dejima-ci0 \
-  --subnet 203.0.113.0/24 \
-  dejima-ci
-```
-
-(That subnet is a documentation range, per RFC 5737. Substitute a private
-range that does not collide with anything you route to.)
+stable interface to match on. Give it a **private** subnet: `stop-dns-rebind`
+below rejects answers in the private ranges, so a reserved-but-not-private
+bridge subnet is one that check silently does not cover.
 
 With `runner.capacity: 1` one job occupies that network at a time. Above one,
 concurrent jobs share a broadcast domain and can reach each other's service
 containers, which is worth knowing before raising it.
 
-### DNS and the firewall
-
-The shape is the same one dejima uses inside its own container
-(`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one layer out:
-allowlist the *names* and let the answers populate the set of allowed
-*addresses*.
+The DNS and firewall shape is the same one dejima uses inside its own
+container (`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one
+layer out: allowlist the *names* and let the answers populate the set of
+allowed *addresses*.
 
 `dnsmasq` binds the bridge gateway. With `no-resolv` and one `server=` line
 per allowed name, every other name gets `REFUSED` — not resolved-then-blocked,
 refused, which closes off encoding data into query names to a domain you never
 allowed. `ipset=/#/ci-allow` adds every answer it serves to the firewall's
 set, so a destination that rotates its edge addresses stays reachable without
-a resolver cron chasing it.
+a resolver cron chasing it. `rebind-domain-ok` exempts a self-hosted forge,
+which legitimately resolves to a private address.
 
-```
-no-resolv
-server=/deb.debian.org/198.51.100.53
-ipset=/#/ci-allow
-rebind-domain-ok=/gitea.example.com/
-```
+The runner pins its job containers at that resolver - per-runner rather than
+daemon-wide, because a daemon-wide setting also reaches containers a
+privileged job creates over the Docker socket, which have firewalls of their
+own and no route to it. Then two chains filter: `DOCKER-USER` for everything
+the job forwards off the bridge, and `INPUT` for the resolver itself, because
+the gateway address belongs to the host.
 
-`rebind-domain-ok` matters for a self-hosted forge: `stop-dns-rebind` rejects
-private answers, and an internal forge legitimately has one.
-
-Point the daemon at that resolver so containers inherit it:
-
-```json
-{ "dns": ["203.0.113.1"] }
-```
-
-Then filter, remembering both chains:
-
-```sh
-# Job egress: everything forwarded off the bridge passes here first.
-iptables -I DOCKER-USER -i dejima-ci0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A DOCKER-USER -i dejima-ci0 -m set --match-set ci-allow dst -p tcp -m multiport --dports 80,443 -j ACCEPT
-iptables -A DOCKER-USER -i dejima-ci0 -j REJECT
-
-# The resolver lives on the host, so it is INPUT, not FORWARD.
-iptables -A INPUT -i dejima-ci0 -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -i dejima-ci0 -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -i dejima-ci0 -j REJECT
-```
-
-Block IPv6 outright unless you have built the same allowlist for it. An
+Block IPv6 outright unless you have built the same allowlist for it — an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
-### The allowlist comes from `main`, not from the checkout
+**The working configuration for all of this is in [`ci/`](../ci/), and
+[`ci/README.md`](../ci/README.md) is the step-by-step.** It is deliberately not
+reproduced here: two copies of a firewall rule drift, and the one in `ci/` is
+the one with the ordering constraints and the substitution notes attached.
+
+## The allowlist comes from `main`, not from the checkout
 
 A dejima project already carries a version-controlled statement of where it is
 allowed to reach: `.dejima/allowed-domains`. Use it — read from
@@ -280,6 +411,10 @@ a fetch that errors should leave the previous allowlist in place, never fall
 back to allowing everything — an allowlist builder is exactly the kind of
 script whose failure mode is easy to get backwards, because the broken version
 looks like a working one right up until it matters.
+dejima-ci-hardener's `dejima-ci-allowlist` is that, including the distinction
+that costs you here: a repository with no declaration is a 404 and ordinary,
+while a 401 or a 500 means this run does not know what the allowlist is and
+must not render one.
 
 Two things to be deliberate about:
 
@@ -361,6 +496,10 @@ can still add a workflow of its own.
 - **Code still runs.** Everything here bounds *where* and *with what*, not
   *whether*. There is no point in the flow at which a human reads the diff
   before execution.
+- **A repository with no workflows is not therefore safe.** A branch can add
+  one, so the exposure follows from which runners the repository can reach,
+  not from what it currently runs. Disabling the Actions unit is what makes
+  "this project has no CI" into a property rather than a coincidence.
 - **An allowed destination is still an exfiltration channel** through its own
   request surface — a query string, a lookup, an issue body. Domain
   allowlisting closes off reaching somewhere *new*; it cannot inspect what is

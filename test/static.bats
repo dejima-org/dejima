@@ -1714,9 +1714,101 @@ EOF
 # from the branch the operator controls. A future edit that softens this into
 # "read .dejima/allowed-domains" without saying from where would leave the
 # document describing a control that doesn't control anything.
+# runs-on lives in the workflow file, which lives in the branch, so a
+# dedicated label routes honest jobs and stops nothing else. An earlier version
+# of this document said jobs "cannot land anywhere else", which is true only of
+# a branch that is not trying - the exact distinction the rest of the document
+# is built on. Pinned so it cannot quietly come back.
+# The counterintuitive half of the advisory, and the one a reader is most
+# likely to skip: a project with no CI is exposed too, because a branch adds
+# the first workflow. If that goes missing, the document reads as being about
+# people who already run CI, which is the smaller group.
+@test "docs/ci.md says a project with no CI is exposed too" {
+    grep -q 'applies to projects with no CI at all' "$REPO_ROOT/docs/ci.md"
+    grep -q 'no workflows is not therefore safe' "$REPO_ROOT/docs/ci.md"
+    grep -qi 'holds for projects with no CI' "$REPO_ROOT/README.md"
+}
+
+# Moving a public project to another owner breaks its name, its links and its
+# ownership. It must not read as the recommended answer, and the alternatives
+# that require moving nothing have to be present.
+@test "docs/ci.md offers answers that do not require moving a repository" {
+    local f="$REPO_ROOT/docs/ci.md"
+    grep -q 'Scope the dangerous runner down, rather than moving' "$f"
+    grep -q 'Turn CI off for that repository' "$f"
+    grep -q 'Do not grant push' "$f"
+}
+
+@test "docs/ci.md does not present the runner label as a boundary" {
+    grep -q 'A label is not a boundary' "$REPO_ROOT/docs/ci.md"
+    grep -q 'weakest runner it can reach' "$REPO_ROOT/docs/ci.md"
+    run grep -n 'cannot land anywhere else' "$REPO_ROOT/docs/ci.md"
+    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+}
+
 @test "docs/ci.md says the CI allowlist is read from main, not from the checkout" {
     grep -q 'origin/main' "$REPO_ROOT/docs/ci.md"
     grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"
+}
+
+# --- the labels this repo's own workflow asks for ---
+#
+# Whether a job container gets the Docker socket is settled by the runner's
+# config.yaml - which lives in dejima-ci-hardener's territory, not this
+# repository's - so the only lever here is which runner its jobs may land on.
+# A generic label gives that lever away, which is what these pin.
+
+# pull_request_target reads this workflow from the base branch, which is what
+# pins runs-on out of a branch's reach. Reverting to pull_request hands that
+# back, silently.
+@test "the workflow is read from the base branch, not the branch under test" {
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    grep -qE '^  pull_request_target:' "$wf"
+
+    # pull_request may still be present, but only while the transition is
+    # explicitly in progress - it takes an untrusted run from the head with
+    # branch-controlled runs-on, which is the thing being removed. Requiring
+    # the marker means the day it is dropped, this fails until the trigger
+    # goes with it, rather than the pair quietly becoming permanent.
+    if grep -qE '^  pull_request:' "$wf"; then
+        grep -q 'TRANSITIONAL' "$wf" || {
+            echo "pull_request is still enabled without the transitional note -" >&2
+            echo "it hands runs-on back to the branch. Remove the trigger." >&2
+            false
+        }
+    fi
+}
+
+# The trap in that conversion: the run's ref is the BASE branch, so a bare
+# checkout tests main and passes regardless of the change. Every suite that
+# means to test the branch has to name the head explicitly - and a green run
+# is exactly what it looks like when one does not.
+@test "every suite that tests the branch checks out the branch" {
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
+    # Both branch-testing jobs pin the head sha; the runner-env jobs must not,
+    # since their assertions should come from the base branch.
+    [ "$(grep -c 'pull_request.head.sha' "$wf")" -eq 2 ]
+    [ "$(grep -c 'uses: actions/checkout@v4' "$wf")" -eq 4 ]
+}
+
+@test "no workflow job runs on a generic runner label" {
+    run grep -nE '^\s*runs-on:\s*(ubuntu|windows|macos|self-hosted)' \
+        "$REPO_ROOT"/.gitea/workflows/*.yml
+    [ "$status" -ne 0 ] || {
+        echo "a generic label lets this job land on a runner nobody hardened:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
+@test "every workflow job runs on a dejima-specific label" {
+    while IFS= read -r label; do
+        [[ "$label" == dejima-* ]] || {
+            echo "unexpected runs-on label: $label" >&2
+            false
+        }
+    done < <(grep -hE '^\s*runs-on:' "$REPO_ROOT"/.gitea/workflows/*.yml \
+        | sed -E 's/^\s*runs-on:\s*//')
 }
 
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
@@ -1750,6 +1842,10 @@ SCANNED_PATHS=(README.md docs docker bin forges workflows harnesses hooks instal
     }
 }
 
+# The exemption above is only defensible while it is the address the docs
+# actually recommend. If the recommendation changes and this does not, the
+# exemption starts covering an address nothing points at - a hole rather than
+# a carve-out.
 @test "no hostname under a private-network suffix is used as a documentation example" {
     run grep -rnIE '[A-Za-z0-9-]+\.(localdomain|lan|internal|home\.arpa)\b' \
         "${SCANNED_PATHS[@]/#/$REPO_ROOT/}"
@@ -2158,15 +2254,21 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     [ "$status" -ne 0 ]
 }
 
-@test "every sandbox suite is in the CI matrix, and runtime.bats is not" {
+@test "every suite is run by CI, and the two that need their own job have one" {
     # Derived from the directory rather than a list kept here, so adding a
     # test file fails this until the workflow is told about it. A suite nobody
     # wired into CI runs nowhere, and nothing else would say so.
+    #
+    # Two suites are not matrix entries because they cannot be. runtime.bats
+    # needs a Docker daemon; ci-runner.bats asserts on the runner itself and
+    # has to run once per tier rather than once per suite. Both are checked
+    # below for having a job of their own instead - "not in the matrix" must
+    # not be a way to be in neither.
     local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
     local f base missing=""
     for f in "$REPO_ROOT"/test/*.bats; do
         base="$(basename "$f" .bats)"
-        [ "$base" = "runtime" ] && continue
+        case "$base" in runtime|ci-runner) continue ;; esac
         grep -qE "^ *- *$base\$" "$wf" || missing="$missing $base"
     done
     [ -z "$missing" ] || {
@@ -2179,6 +2281,13 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     # fail every time rather than testing anything.
     ! grep -qE '^ *- *runtime$' "$wf"
     grep -q 'test/runtime.bats' "$wf"
+
+    # ci-runner.bats likewise, and once per tier: a single job would leave one
+    # of the two runners unasserted, which is the thing it exists to catch.
+    ! grep -qE '^ *- *ci-runner$' "$wf"
+    grep -q 'test/ci-runner.bats' "$wf"
+    grep -q 'DEJIMA_CI_TIER: sandbox' "$wf"
+    grep -q 'DEJIMA_CI_TIER: host-docker' "$wf"
 }
 
 @test "the agent briefing teaches the project scope, not just global" {

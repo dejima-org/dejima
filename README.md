@@ -1085,14 +1085,24 @@ already run, and it does not take a modified workflow file to get there: a
 workflow that runs a test suite runs every file in it.
 
 The sandbox bounds what a session can reach directly. It does not bound what
-it can arrange to have run elsewhere. Read this one before you point a
-sandbox at a project whose CI you administer - and if you would rather not
-take it on, `[core] forge = none` with `[core] workflow = local-only` declines
-the push grant and the code execution with it.
+it can arrange to have run elsewhere.
 
-**→ [docs/ci.md](docs/ci.md)** - why no approval gate is offered, hardening a
-runner, and making CI's egress allowlist a version-controlled artifact read
-from `main`.
+**This holds for projects with no CI, too** - a branch can add the first
+workflow, so what matters is which runners the repository can *reach*, not
+what it runs today. That is a property of the forge rather than the project,
+and it is worth one question per project before you start. On hosted runners
+the answer is reassuring; with self-hosted runners in reach it is the thing to
+look at. And if you would rather not take it on at all,
+`[core] forge = none` with `[core] workflow = local-only` declines the push
+grant and the code execution with it.
+
+**→ [docs/ci.md](docs/ci.md)** - the *why*: no approval gate is offered and
+what that leaves, hardening a runner, and making CI's egress allowlist a
+version-controlled artifact read from `main`.
+
+**→ [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)** - the *how*: a self-contained tool that
+hardens a CI runner, installed on the CI box and nowhere near a dejima host.
+Nothing in this repository needs to be copied onto a runner.
 
 ## Security notes
 
@@ -1191,6 +1201,7 @@ likely to collide with a real container you have running.
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
+| `ci/` | Worked runner, resolver and firewall examples for the setup `docs/ci.md` describes; installed by nothing, and belongs on a CI machine rather than a dejima one |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point — it resolves the project path,
