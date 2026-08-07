@@ -865,7 +865,11 @@ else
     for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
     case "$url" in
         */reviews/*/comments)
-            echo '[{"user":{"login":"reviewer"},"path":"docs/thing.md","position":118,"diff_hunk":"@@ -105,0 +115,2 @@\n+a line the reviewer is looking at","body":"this bit is confusing"}]' ;;
+            # Three comments, two of them one thread. The resolved thread has a
+            # reply carrying `resolver: null`, because Gitea stamps only a
+            # thread's root - which is the case that made a closed thread read
+            # as open.
+            echo '[{"user":{"login":"reviewer"},"path":"docs/thing.md","position":118,"resolver":null,"diff_hunk":"@@ -105,0 +115,2 @@\n+a line the reviewer is looking at","body":"this bit is confusing"},{"user":{"login":"reviewer"},"path":"docs/other.md","position":42,"resolver":{"login":"reviewer"},"diff_hunk":"@@ -1,0 +42,1 @@\n+a line already dealt with","body":"already handled"},{"user":{"login":"reviewer"},"path":"docs/other.md","position":42,"resolver":null,"diff_hunk":"@@ -1,0 +42,1 @@\n+a line already dealt with","body":"a reply inside the closed thread"}]' ;;
         */reviews)
             echo '[{"id":32,"user":{"login":"reviewer"},"submitted_at":"2026-01-01T00:00:00Z","state":"COMMENTED","body":"","comments_count":1}]' ;;
         *)
@@ -913,6 +917,39 @@ cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
     # And the comment, distinguishable from the quoted code above it.
     [[ "$output" == *"--- comment ---"* ]]
     [[ "$output" == *"this bit is confusing"* ]]
+}
+
+@test "a resolved thread stays hidden, including a reply that carries no resolver" {
+    # The trap this exists for: Gitea marks only a thread's ROOT comment as
+    # resolved. A reply inside a closed thread comes back with
+    # `resolver: null`, so judging each comment on its own reports a thread
+    # you already dealt with as still needing an answer. On a real review that
+    # meant hunting for a passage that had already been rewritten.
+    run gitea_cli gitea-pr comments 1
+    [ "$status" -eq 0 ]
+
+    # The genuinely open one is there.
+    [[ "$output" == *"this bit is confusing"* ]]
+    # Neither half of the closed thread is, the reply included.
+    [[ "$output" != *"already handled"* ]]
+    [[ "$output" != *"a reply inside the closed thread"* ]]
+    # And it says what it withheld rather than silently shrinking the list.
+    [[ "$output" == *"1 resolved thread(s) hidden"* ]]
+}
+
+@test "--all includes resolved threads and marks them as resolved" {
+    run gitea_cli gitea-pr comments 1 --all
+    [ "$status" -eq 0 ]
+
+    [[ "$output" == *"this bit is confusing"* ]]
+    [[ "$output" == *"already handled"* ]]
+    [[ "$output" == *"a reply inside the closed thread"* ]]
+    # Marked, so a reader is not left to work out which are which.
+    [[ "$output" == *"docs/other.md @@42  (resolved)"* ]]
+    # The open one carries no marker.
+    [[ "$output" == *"[reviewer @ docs/thing.md @@118]"* ]]
+    # Nothing is hidden, so nothing is announced as hidden.
+    [[ "$output" != *"hidden"* ]]
 }
 
 @test "an edit sends only the fields it was given, so a title edit cannot blank a body" {
