@@ -261,42 +261,14 @@ forge/workflow and what each is for.
 
 The forge integration, the push/PR workflow, and the agent harness aren't
 hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
-`harnesses/`, selected by `[core] forge`, `[core] workflow` and
-`[core] harness` respectively. Ships today: `forges/gitea`, `forges/github`,
-`forges/none`, `workflows/worktree-pr`, `workflows/branch-push`,
-`workflows/local-only`, `harnesses/claude-code`. The defaults are
-`forges/none` and `workflows/local-only` — a fresh install commits locally
-and pushes nowhere; the rest of this document spends most of its words on
-Gitea/Forgejo and worktree-and-PR because that's the setup with the most to
-configure, not because it's what you get out of the box.
+`harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
+`[core] harness`. Ships today: `forges/gitea`, `forges/github`, `forges/none`,
+`workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only`,
+`harnesses/claude-code`. The defaults are `forges/none` and
+`workflows/local-only` — a fresh install commits locally and pushes nowhere.
 
-A provider is **data**, never sourced or executed: its manifest (`forge.conf`,
-`workflow.conf`, `harness.conf`) is parsed with the same discipline as the
-main config file — an unknown key or a bad value is a hard error, not a
-silent pass-through — and a provider's optional briefing prose is
-substituted into and handed to the agent, never interpreted as code. The one
-thing a provider ships that *does* run is a forge's `bin/`, copied into the
-image at build time as an ordinary program on `PATH`. A forge or harness also
-declares its own `[forge.<name>]`/`[harness.<name>] `config keys, with their
-own types and defaults, right in its manifest — core holds no forge-specific
-or harness-specific schema at all, which is what makes adding a provider a
-matter of adding a directory rather than editing this repo's own code.
-
-`bin/dejima` resolves the selection on the host and passes only resolved
-values into the container — the hostnames a forge needs reachable, which of
-them pushes are allowed to, which branches are protected, and the literal
-merge command to block — plus the forge's own environment variables (a
-Gitea/Forgejo API token for `gitea`, a write-capable PAT for `github`,
-nothing for `none`). The session briefing
-itself (the text `hooks/sandbox-context.sh` injects at `SessionStart`) is
-composed host-side too, from a fixed core fragment no provider can override
-plus the selected workflow's and harness's own prose, then mounted
-**read-only** — so a session can never rewrite what the next session is
-told. `dejima --print-briefing` prints exactly what a session would see,
-without launching anything.
-
-See [docs/providers.md](docs/providers.md) for the full manifest contract,
-key by key, with the shipped manifests as worked examples.
+See [docs/providers.md](docs/providers.md) for the manifest contract, key by
+key, and the shipped providers as worked examples.
 
 ## Setup
 
@@ -324,15 +296,16 @@ sandbox escape if you get it wrong.
 That is enough to run `dejima`. The starter config `install.sh` writes has
 every key commented out at its default, which means `[core] forge = none` and
 `[core] workflow = local-only`: the agent works in the sandbox and commits
-locally, and nothing is pushed anywhere. To have it push, pick one of the two
-forge sections below and set `[core] workflow` to `worktree-pr` or
-`branch-push` — a pushing workflow is refused at launch unless its forge
+locally, and nothing is pushed anywhere. To have it push, pick a forge,
+Gitea/Forgejo below or GitHub in the table below, and set `[core] workflow`
+to `worktree-pr` or `branch-push` — a pushing workflow is refused at launch unless its forge
 resolves to somewhere to push to, so the forge is not optional once you
 choose one of them.
 
 ### Gitea/Forgejo PR workflow
 
-Skip this if you use `forge = github` or `forge = none` instead (below).
+Skip this if you use `forge = github` or `forge = none` instead, covered in
+the table below.
 
 1. Set `[forge.gitea] ssh_host` (the SSH hostname) and `[forge.gitea] api`
    (`https://<gitea host>/api/v1`) in `~/.config/dejima/config`.
@@ -340,135 +313,16 @@ Skip this if you use `forge = github` or `forge = none` instead (below).
    `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
    → [Prerequisites](#prerequisites)
 
-### GitHub forge (opt-in alternative)
+### Optional, once the above works
 
-Set `[core] forge = github` instead of the above to push and open PRs
-against GitHub directly through `gh`, rather than a Gitea/Forgejo instance.
-This is a persistent, per-config choice — different from the per-launch
-`--allow-github-push` flag (see "GitHub push" in docs/security.md), and it opens
-`ssh.github.com:22` for push every time this forge is selected with a
-workflow that pushes, not just for one launch. It opens it through the same
-grant that flag uses, so the posture is the one documented there and nothing
-else about GitHub's treatment changes.
-
-1. Generate a **write-capable** PAT, separate from the read-only
-   `[github] token_file` used for read access — promoting the read-only
-   token here would defeat the point of scoping it read-only.
-2. Save it to a file and set `[forge.github] push_token_file` to that path.
-
-dejima warns at startup if both `[github] token_file` and
-`[forge.github] push_token_file` are set and non-empty: `gh` only reads one
-token variable, and the write-capable one wins for that launch.
-
-### Pushing nowhere
-
-If this sandbox should never push or open a PR — read-only work, exploring a
-codebase, anything where you'll take the diff out by hand — set
-`[core] forge = none` and `[core] workflow = local-only`. Nothing to
-configure for either; the agent commits locally and stops there, and
-`git-push-guard.sh` refuses every push regardless of what else is set.
-
-### Per-project domains and dependencies
-
-Nothing to set up in advance; do this per project, as it turns out to need
-something:
-
-```sh
-dejima-project status ~/myproject     # declared vs approved vs missing
-dejima-project approve ~/myproject    # approve the declared set
-dejima-allow --project ~/myproject crates.io
-dejima-dep add --global cargo:cargo-nextest
-```
-
-`dejima-allow` with no scope flag patches a running session; `--project` or
-`--global` instead records an approval for future sessions, and domains
-apply at their next launch. Dependencies need an image rebuild, so they
-always land on the next one.
-
-`--project` records two things: the approval in `~/.config/dejima` (which is
-what actually grants) and a declaration in the project's own
-`.dejima/allowed-domains` (which is committed, so the rest of the project gets
-it too). `--global` writes only the approval — there is no project to declare
-in.
-
-→ [Global and per-project domains and dependencies](docs/configuration.md#global-and-per-project-domains-and-dependencies),
-[Adding a domain to a running session](docs/security.md#adding-a-domain-to-a-running-session)
-
-### Log shipping
-
-1. Set `[logging] loki_url` to your Loki push endpoint.
-2. Optionally set `[logging] conversation = on` to ship transcripts as well —
-   read
-   [Conversation logging (opt-in)](docs/security.md#conversation-logging-opt-in)
-   first, since that ships what you and the model actually say.
-   → [Network request logging](docs/security.md#network-request-logging),
-   [Viewing logs in Grafana](docs/security.md#viewing-logs-in-grafana)
-
-### GitHub push (opt-in)
-
-Per launch, not a persistent setting:
-
-```sh
-dejima --allow-github-push ~/myproject
-```
-
-Pair it with a repo-scoped deploy key in `[core] ssh_key`. Read
-[GitHub push: blocked by default, optional opt-in](docs/security.md#github-push-blocked-by-default-optional-opt-in)
-before turning it on — with a forwarded personal agent this is much broader
-than it looks.
-
-### Remote access (opt-in)
-
-Entirely off until step 1 is done. **Read
-[docs/remote-access.md](docs/remote-access.md) end to end before doing any of
-this.** Step 2 is the one that carries the security of the whole feature, and
-getting it wrong still looks like it works.
-
-1. **Set `[remote-access] enabled = on`** in `~/.config/dejima/config`. This
-   is the switch — nothing here runs without it. Set `ntfy_url`, `base_url`,
-   and `ttyd_port` in the same section if you want something other than
-   7681. →
-   [`[remote-access]`](docs/remote-access.md#remote-access)
-2. **Choose the reverse proxy's bind address, on the dejima box itself.** One
-   specific address on its LAN interface. Never the wildcard, never
-   `0.0.0.0`, never a Docker bridge. →
-   [The bind address is the one thing to get right](docs/remote-access.md#the-bind-address-is-the-one-thing-to-get-right),
-   [Picking the address](docs/remote-access.md#picking-the-address)
-3. **SSH front door.** Generate a key that exists only for this, then add one
-   `restrict,pty,command="…/dejima-attach"` line to `authorized_keys` for the
-   same Unix user that runs `dejima`. →
-   [SSH front door](docs/remote-access.md#ssh-front-door)
-4. **Web front door.** Get `ttyd` 1.7.4 or newer. If it came from a distro
-   package, `systemctl disable --now ttyd.service` **and** `mask` it first —
-   the package ships an enabled service that puts a login prompt on every
-   interface, reachable from inside your sandboxes. Then install
-   `systemd/dejima-ttyd.service` as a *user* unit, and put a reverse proxy in
-   front of it adapted from `docs/nginx-dejima.conf.example` — with
-   authentication on every server block, TLS, a `default_server` that
-   refuses every other hostname, and
-   `proxy_set_header Host $http_host`. Make sure the name you pick actually
-   resolves to this box and your certificate covers it. →
-   [Web front door](docs/remote-access.md#web-front-door)
-5. **If you will read it on a phone**, there is nothing to turn on: the front
-   door serves a touch frontend by default, with gestures for scrolling,
-   selection and pane resizing, and a toolbar carrying Esc, a sticky Ctrl, the
-   arrows and tmux's window switching. Set `ttyd_tmux_prefix` in
-   `[remote-access]` if your tmux prefix is not `C-b`. →
-   [Reading it on a phone](docs/remote-access.md#reading-it-on-a-phone). Typing from one has its
-   own gotcha, which nothing here can fix. →
-   [Typing on a phone](docs/remote-access.md#typing-on-a-phone)
-6. **If another reverse proxy sits in front of this one**, it needs SNI, a
-   single literal `Host`, the upgrade headers and its own long read timeout —
-   and it changes the threat model. →
-   [Behind another reverse proxy](docs/remote-access.md#behind-another-reverse-proxy)
-7. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
-   way, then `loginctl enable-linger "$USER"` so both units survive logout. →
-   [Notifications](docs/remote-access.md#notifications)
-8. **Verify the containment from inside a running sandbox** before relying on
-   any of it. →
-   [Verifying it](docs/remote-access.md#verifying-it)
-
-[Attaching](docs/remote-access.md#attaching) then covers what you get on the other end.
+| Turn on | Where |
+| --- | --- |
+| GitHub instead of Gitea | [providers.md](docs/providers.md) |
+| No push at all | [providers.md](docs/providers.md) |
+| Per-project domains and dependencies | [configuration.md](docs/configuration.md) |
+| Log shipping to Loki | [security.md](docs/security.md) |
+| GitHub push over SSH | [security.md](docs/security.md) |
+| Remote access | [remote-access.md](docs/remote-access.md) |
 
 ## Usage
 
@@ -664,16 +518,9 @@ on a phone, running behind another reverse proxy, notifications, and attaching.
 
 ## CI: push access is code execution elsewhere
 
-If the project has CI, **granting a session push access grants it code
-execution on whatever host that CI runs on** - and nothing in the chain needs
-you. The push guard permits a feature branch, the briefing tells the agent to
-open a pull request without asking, `on: pull_request` fires, and the runner
-executes that commit. Merging is a decision you make *after* the code has
-already run, and it does not take a modified workflow file to get there: a
-workflow that runs a test suite runs every file in it.
-
-The sandbox bounds what a session can reach directly. It does not bound what
-it can arrange to have run elsewhere.
+Merging is a decision you make *after* the code has already run, and it does
+not take a modified workflow file to get there: a workflow that runs a test
+suite runs every file in it.
 
 **This holds for projects with no CI, too** - a branch can add the first
 workflow, so what matters is which runners the repository can *reach*, not
@@ -713,6 +560,18 @@ They are the reason claims here are stated flatly rather than hedged.
 
 → **[docs/development.md](docs/development.md)**: the suites, what each
 covers, and how to run them.
+
+## Docs
+
+| Doc | What is in it |
+| --- | --- |
+| [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
+| [security.md](docs/security.md) | The egress firewall, logging, identity, provider trust |
+| [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
+| [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
+| [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
+| [remote-access.md](docs/remote-access.md) | Attaching to a live session |
+| [development.md](docs/development.md) | The file map, the test suites, running them |
 
 ## License
 
