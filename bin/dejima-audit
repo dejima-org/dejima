@@ -10,6 +10,11 @@ set -uo pipefail
 
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
+# shellcheck source=dejima-color-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
+# Defined empty here so every interpolation below is safe before a surface
+# picks its stream; compare (stderr) and ack (stdout) each re-init for theirs.
+color_init 1
 config_validate || exit 1
 
 cmd="${1:-}"; ws_arg="${2:-}"; state="${3:-}"
@@ -562,6 +567,28 @@ baseline_suppresses() {
     return 1
 }
 
+# Whether `ack` has already walked this report to its end. Recorded in the
+# baseline file, alongside the approvals, as `reviewed <report-basename>`:
+# the file is already the per-workspace record of what the operator has
+# decided, already parsed line-by-line, and already tolerant of verbs it does
+# not know (baseline_suppresses skips them), so a report written by an older
+# version reads exactly as it did.
+#
+# Only findings that CANNOT be acknowledged are governed by this. An ackable
+# one is governed by its own entry, so `skip` still means "ask me again" for
+# it, which is the whole difference between skip and ignore.
+baseline_reviewed() {
+    local want="$1" bf verb rest
+    bf="$BASELINE_DIR/$(ws_slug "$ws")"
+    [ -f "$bf" ] || return 1
+    while read -r verb rest; do
+        case "$verb" in
+            reviewed) [ "$rest" = "$want" ] && return 0 ;;
+        esac
+    done < "$bf"
+    return 1
+}
+
 # git config keys whose values run a command on the next git invocation, or
 # (include.path/includeif.*.path) indirect to another config file that could
 # set one - key names are case-insensitive in git, so match on a lowercased
@@ -915,16 +942,27 @@ gitconfig_count_for_key() {
 # it cannot be mistaken for the audit's own output, and capped. Sanitizing
 # line by line rather than whole-file keeps a planted NUL or newline run from
 # collapsing separate lines into one.
+# $2 = "diff" to colour +/- lines. Colour is applied to the audit's own
+# rendering of a line, never mixed into the line's text: the content here is
+# workspace-controlled, and sanitize() has already removed the bytes that
+# could forge one of these sequences.
 show_capped() {
-    local f="$1" n=0 total line
+    local f="$1" mode="${2:-plain}" n=0 total line clean
     total="$(wc -l < "$f" 2>/dev/null)" || total=0
     while IFS= read -r line; do
         n=$((n + 1))
         [ "$n" -le "$DISPLAY_LINE_CAP" ] || break
-        printf '    %s\n' "$(sanitize "$line")"
+        clean="$(sanitize "$line")"
+        if [ "$mode" = diff ]; then
+            case "$clean" in
+                +*) printf '    %s%s%s\n' "$C_ADD" "$clean" "$C_RESET"; continue ;;
+                -*) printf '    %s%s%s\n' "$C_DEL" "$clean" "$C_RESET"; continue ;;
+            esac
+        fi
+        printf '    %s\n' "$clean"
     done < "$f"
     if [ "$total" -gt "$DISPLAY_LINE_CAP" ]; then
-        printf '    ... +%s more line(s)\n' "$(( total - DISPLAY_LINE_CAP ))"
+        printf '    %s... +%s more line(s)%s\n' "$C_DIM" "$(( total - DISPLAY_LINE_CAP ))" "$C_RESET"
     fi
 }
 
@@ -949,22 +987,27 @@ render_finding() {
     local id="$1" sc="$2" key tmp
     key="$(id_key "$id")"
 
+    # Dim on the audit's own framing, plain on the content between it: the
+    # complaint this answers is that the two ran together in one colour with
+    # nothing to say where the tool stopped speaking and the workspace
+    # started (#65).
     if [ -n "$sc" ] && [ -f "$sc/$key.diff" ]; then
-        echo "  --- what changed while the session ran ---"
-        show_capped "$sc/$key.diff"
+        printf '  %s--- what changed while the session ran ---%s\n' "$C_DIM" "$C_RESET"
+        show_capped "$sc/$key.diff" diff
         source_hint "$id"
         return 0
     fi
     if [ -n "$sc" ] && [ -f "$sc/$key.removed" ]; then
-        echo "  --- this surface was removed; its pre-session content was not retained ---"
+        printf '  %s--- this surface was removed; its pre-session content was not retained ---%s\n' "$C_DIM" "$C_RESET"
         return 0
     fi
     if [ -n "$sc" ] && [ -f "$sc/$key.withheld" ]; then
-        echo "  --- no diff retained: $(sanitize "$(head -n1 "$sc/$key.withheld" 2>/dev/null)") ---"
+        printf '  %s--- no diff retained: %s ---%s\n' "$C_DIM" \
+            "$(sanitize "$(head -n1 "$sc/$key.withheld" 2>/dev/null)")" "$C_RESET"
     elif [ -n "$sc" ] && [ -f "$sc/$key.new" ]; then
-        echo "  --- new surface; full current content ---"
+        printf '  %s--- new surface; full current content ---%s\n' "$C_DIM" "$C_RESET"
     else
-        echo "  --- no pre-session record; current content ---"
+        printf '  %s--- no pre-session record; current content ---%s\n' "$C_DIM" "$C_RESET"
     fi
 
     tmp="$(mktemp)" || return 0
@@ -1091,14 +1134,29 @@ case "$cmd" in
                           baseline_suppresses "$gid" "$gsha" && continue
                           crit+=("COMMAND-EXECUTION git alias: $body")
                           finding_ids+=("gitconfig:$key") ;;
-                    *)    warn+=("changed git config: $body") ;;
+                    *)    gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
+                          baseline_suppresses "$gid" "$gsha" && continue
+                          warn+=("changed git config: $body")
+                          finding_ids+=("gitconfig:$key") ;;
                 esac
             else
-                # No id recorded, for the same reason CROSS-PROJECT gets none:
-                # `ack` has no arm for a plain "changed git config" line, so a
-                # diff retained for one would be content at rest that nothing
-                # ever reads. The report body already carries the new value.
+                # Suppressible and id-bearing like the CRITICAL arms above.
+                # Both were previously neither, which left this the one tier
+                # of finding with no way to curate it: keys some tools
+                # rewrite on every run (branch.<name>.merge on each push,
+                # submodule.*) re-fired every session and pushed real
+                # WARNINGs out of the capped list (#45).
+                #
+                # Safe by construction rather than by care taken here:
+                # id_severity already calls an exec key or any alias CRITICAL
+                # whatever wrote the entry, and baseline_suppresses refuses a
+                # `spam` entry against a CRITICAL surface at READ time - so a
+                # key that later joins is_exec_key stops being suppressed by
+                # an existing entry, with nothing to revisit.
+                gid="gitconfig:$key"; gsha="$(hash_value "$(unquote_value "${line#*=}")")"
+                baseline_suppresses "$gid" "$gsha" && continue
                 warn+=("changed git config: $body")
+                finding_ids+=("gitconfig:$key")
             fi
         done < <(comm -13 <(sed -n '/^### gitconfig/,/^### paths/p' "$state" | grep -vE '^### |^worktree:$') \
                           <(sed -n '/^### gitconfig/,/^### paths/p' "$new"   | grep -vE '^### |^worktree:$') )
@@ -1259,12 +1317,15 @@ case "$cmd" in
         # Ascending severity: the operator reads bottom-up from their shell
         # prompt, so whatever prints LAST is what actually gets seen. INFO
         # collapses to a count - it exists to be counted, not read.
+        # stderr is this block's stream, so the palette is decided for that
+        # one: redirecting the summary to a file must not put escapes in it.
+        color_init 2
         {
             echo ""
-            echo "================================================================"
+            printf '%s================================================================%s\n' "$C_DIM" "$C_RESET"
             echo " dejima: host-persistence surfaces changed in"
-            echo " $(sanitize "$ws") while this session ran"
-            echo "----------------------------------------------------------------"
+            printf ' %s%s%s while this session ran\n' "$C_PATH" "$(sanitize "$ws")" "$C_RESET"
+            printf '%s----------------------------------------------------------------%s\n' "$C_DIM" "$C_RESET"
             # Named, never hashed. Writing to a writable mount is the entire
             # point of configuring one, so a finding per write would fire on
             # every legitimate use and train the reader to skim - the exact
@@ -1278,13 +1339,13 @@ case "$cmd" in
                 echo "  ${#info[@]} routine file change(s) - not listed"
             fi
             if [ "${#warn[@]}" -gt 0 ]; then
-                printf '  - %s\n' "${warn[@]:0:$WARN_CAP}"
+                printf "  $C_WARN-$C_RESET %s\n" "${warn[@]:0:$WARN_CAP}"
                 if [ "${#warn[@]}" -gt "$WARN_CAP" ]; then
                     echo "  + $(( ${#warn[@]} - WARN_CAP )) further change(s) not shown."
                 fi
             fi
             if [ "${#crit[@]}" -gt 0 ]; then
-                printf '  ! %s\n' "${crit[@]:0:$CRIT_CAP}"
+                printf "  $C_CRIT!$C_RESET %s\n" "${crit[@]:0:$CRIT_CAP}"
                 if [ "${#crit[@]}" -gt "$CRIT_CAP" ]; then
                     echo "  !! $(( ${#crit[@]} - CRIT_CAP )) FURTHER CRITICAL FINDINGS NOT SHOWN."
                     echo "  !! ${#crit[@]} critical findings in one session is ABNORMAL."
@@ -1294,12 +1355,14 @@ case "$cmd" in
             # room to keep evidence is a finding about the session, not a
             # note about the store.
             [ "${#budget_note[@]}" -gt 0 ] && printf '%s\n' "${budget_note[@]}"
-            echo "----------------------------------------------------------------"
+            printf '%s----------------------------------------------------------------%s\n' "$C_DIM" "$C_RESET"
             if [ "${#crit[@]}" -gt 0 ]; then
                 echo "         Review BEFORE the next 'git' or 'claude' in that repo."
-                echo " dejima: ${#crit[@]} CRITICAL - code that will run on your host."
+                printf ' dejima: %s%s CRITICAL%s - code that will run on your host.\n' \
+                    "$C_CRIT" "${#crit[@]}" "$C_RESET"
             else
-                echo " dejima: no critical findings; ${#warn[@]} change(s) to review."
+                printf ' dejima: %sno critical findings%s; %s change(s) to review.\n' \
+                    "$C_OK" "$C_RESET" "${#warn[@]}"
             fi
         } >&2
         exit 0
@@ -1317,6 +1380,7 @@ case "$cmd" in
         exit 0
         ;;
     ack)
+        color_init 1
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
         report="$(select_report "$report_dir")" \
@@ -1339,6 +1403,16 @@ case "$cmd" in
         # (or a non-path CRITICAL, which can never be "approved" - see
         # ackable below) must keep its suffix and stay eviction-protected.
         crit_seen=0; crit_acked=0
+        # Findings passed over because the baseline already covers them, or
+        # because this report has been walked before - counted so a run that
+        # displays nothing can say why instead of looking broken.
+        already=0
+        # Whether this report carries any finding that cannot be
+        # acknowledged, and whether a previous run already walked it to the
+        # end. Together they decide if a `reviewed` line gets written below.
+        unackable_shown=0
+        report_reviewed=0
+        if baseline_reviewed "$(basename "$report")"; then report_reviewed=1; fi
         # The loop below reads report lines on its own stdin (`< "$report"`),
         # so operator keystrokes are read from fd 3 - a copy of the script's
         # original stdin taken before that redirection - rather than
@@ -1399,22 +1473,51 @@ case "$cmd" in
             # to stat and hash and for id_severity to classify. Only the
             # id-bearing portion is decoded - never the namespace prefix
             # this code adds itself.
-            ackable=0; id=""; rid=""
+            #
+            # $lbl and $surface are for DISPLAY only: the fixed label this
+            # arm matched, and the workspace-named thing inside the body that
+            # the finding is about. Splitting them is what lets the surface
+            # be coloured without colouring the audit's own words around it,
+            # and they are recomputed here rather than derived from $id
+            # because a gitconfig body carries `key=value` while its id is
+            # the key alone.
+            ackable=0; id=""; rid=""; lbl=""; surface=""
             case "$body" in
                 "HOST-CODE-EXECUTION workspace file: "*)
-                    ackable=1; id="${body#HOST-CODE-EXECUTION workspace file: }"
-                    rid="$(dec_id "$id")" ;;
+                    ackable=1; lbl="HOST-CODE-EXECUTION workspace file: "
+                    id="${body#HOST-CODE-EXECUTION workspace file: }"
+                    surface="$id"; rid="$(dec_id "$id")" ;;
                 "changed workspace file: "*)
-                    ackable=1; id="${body#changed workspace file: }"
-                    rid="$(dec_id "$id")" ;;
-                "COMMAND-EXECUTION git config: "*|"COMMAND-EXECUTION git alias: "*)
-                    ackable=1; cfgline="${body#*: }"; ekey="${cfgline%%=*}"
+                    ackable=1; lbl="changed workspace file: "
+                    id="${body#changed workspace file: }"
+                    surface="$id"; rid="$(dec_id "$id")" ;;
+                "COMMAND-EXECUTION git config: "*)
+                    ackable=1; lbl="COMMAND-EXECUTION git config: "
+                    cfgline="${body#COMMAND-EXECUTION git config: }"
+                    ekey="${cfgline%%=*}"; surface="$ekey"
+                    id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
+                "COMMAND-EXECUTION git alias: "*)
+                    ackable=1; lbl="COMMAND-EXECUTION git alias: "
+                    cfgline="${body#COMMAND-EXECUTION git alias: }"
+                    ekey="${cfgline%%=*}"; surface="$ekey"
+                    id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
+                # The WARNING form of the two above. Its own arm rather than
+                # another alternative on theirs, because the label it strips
+                # differs and the strip must be of that exact label (#45).
+                "changed git config: "*)
+                    ackable=1; lbl="changed git config: "
+                    cfgline="${body#changed git config: }"
+                    ekey="${cfgline%%=*}"; surface="$ekey"
                     id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
                 "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "*)
-                    ackable=1; esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
+                    ackable=1; lbl="HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "
+                    esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
+                    surface="$esl"
                     id="statusline:$esl"; rid="statusline:$(dec_id "$esl")" ;;
                 "TCB (sandbox self) modified: "*)
-                    ackable=1; etcb="${body#TCB (sandbox self) modified: }"
+                    ackable=1; lbl="TCB (sandbox self) modified: "
+                    etcb="${body#TCB (sandbox self) modified: }"
+                    surface="$etcb"
                     id="tcb:$etcb"; rid="tcb:$(dec_id "$etcb")" ;;
                 *) ackable=0 ;;
             esac
@@ -1424,29 +1527,84 @@ case "$cmd" in
             # must only ever advance when a real, non-empty id was derived.
             [ -n "$id" ] || ackable=0
             [ -n "$rid" ] || ackable=0
+            # Already decided: the baseline holds an approval pinning this
+            # exact content, or an ignore for the surface outright. `compare`
+            # filters these out when it WRITES a report, but a report written
+            # before that entry existed still lists them - and two reports
+            # can list the same finding, so approving it in the first left
+            # the second re-presenting it on every later run, with the
+            # approval sitting in the baseline the whole time. That is what
+            # made repeated `ack` runs show the same CRITICALs forever (#65).
+            #
+            # Counted as covered rather than merely hidden: a CRITICAL whose
+            # content is already approved must let its report shed
+            # -CRITICAL.txt, or the startup warning nags about a report whose
+            # every finding has been dealt with.
+            if [ "$ackable" -eq 1 ] && baseline_suppresses "$rid" "$(current_sha_for_id "$rid")"; then
+                already=$((already + 1))
+                if [ "$tier" = CRITICAL ]; then crit_acked=$((crit_acked + 1)); fi
+                continue
+            fi
+            # An un-ackable finding in a report already walked to the end.
+            # There is nothing to record for one, so without this it would
+            # re-prompt on every run forever, gating the exit from `ack` on a
+            # keystroke that can never change anything (#65).
+            if [ "$ackable" -ne 1 ] && [ "$report_reviewed" -eq 1 ]; then
+                already=$((already + 1))
+                continue
+            fi
+            [ "$ackable" -eq 1 ] || unackable_shown=1
             echo ""
-            echo "  [$tier] $body"
-            [ "$ackable" -eq 1 ] && render_finding "$rid" "$sc"
-            if [ "$ackable" -ne 1 ]; then
-                printf '  [c] skip  [q] quit (this finding cannot be acknowledged): '
-            elif [ "$tier" = CRITICAL ]; then
-                printf '  [a] approve this exact content  [c] skip  [q] quit: '
+            # The tier carries the colour, and the surface the finding is
+            # about is picked out from the label around it - those are the
+            # two things an operator scans a wall of these for.
+            if [ -n "$surface" ]; then
+                tail_rest="${body#"$lbl$surface"}"
+                printf '  %s[%s]%s %s%s%s%s%s\n' "$(tier_color "$tier")" "$tier" "$C_RESET" \
+                    "$lbl" "$C_PATH" "$surface" "$C_RESET" "$tail_rest"
             else
-                printf '  [a] approve  [s] always ignore  [c] skip  [q] quit: '
+                printf '  %s[%s]%s %s\n' "$(tier_color "$tier")" "$tier" "$C_RESET" "$body"
+            fi
+            [ "$ackable" -eq 1 ] && render_finding "$rid" "$sc"
+            # Each option says what it does to FUTURE findings, because that
+            # is the whole difference between the two that record something
+            # and it was not visible: approve pins this exact content and
+            # re-fires on any other, ignore blankets the surface whatever it
+            # later contains. The WARNING prompt used to say a bare
+            # "approve", which read as the same thing as "always ignore".
+            #
+            # "file" is wrong for a git config key, and naming the wrong kind
+            # of thing in the sentence that offers a permanent mute is worth
+            # one case.
+            case "$rid" in
+                gitconfig:*) ign_noun="key" ;;
+                *)           ign_noun="file" ;;
+            esac
+            k_a="$C_KEY[a]$C_RESET"; k_i="$C_KEY[i]$C_RESET"
+            k_s="$C_KEY[s]$C_RESET"; k_q="$C_KEY[q]$C_RESET"
+            if [ "$ackable" -ne 1 ]; then
+                printf '  %s skip  %s quit (this finding cannot be acknowledged): ' "$k_s" "$k_q"
+            elif [ "$tier" = CRITICAL ]; then
+                printf '  %s approve this exact content  %s skip (ask again next time)  %s quit: ' \
+                    "$k_a" "$k_s" "$k_q"
+            else
+                printf '  %s approve this exact content  %s ignore this %s from now on  %s skip (ask again next time)  %s quit: ' \
+                    "$k_a" "$k_i" "$ign_noun" "$k_s" "$k_q"
             fi
             { read -r key <&3; } 2>/dev/null || { aborted=1; break; }
             case "$key" in
                 q|$'\e'|'') aborted=1; break ;;
-                s)
+                i)
                     if [ "$ackable" -ne 1 ]; then
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
                     elif [ "$tier" = CRITICAL ]; then
-                        echo "  cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."
+                        echo "  cannot ignore a CRITICAL surface from now on - approve the exact content or skip."
                     else
                         pending+=("spam $id")
                         sc_done+=("$rid")
                     fi
                     ;;
+                s) ;;
                 a)
                     if [ "$ackable" -ne 1 ]; then
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
@@ -1476,12 +1634,22 @@ case "$cmd" in
             esac
         done < "$report"
 
-        if [ "$aborted" -eq 1 ] || [ "${#pending[@]}" -eq 0 ]; then
+        # An abort discards everything, the reviewed marker included: the
+        # operator did not finish the report, so it has not been reviewed.
+        if [ "$aborted" -eq 1 ]; then
             echo ""; echo "dejima audit: nothing recorded."
             exit 0
         fi
-        mkdir -p "$BASELINE_DIR"
-        printf '%s\n' "${pending[@]}" >> "$bf"
+        # Written once the report has been walked to its end, and only when
+        # it actually showed something that cannot be acknowledged - there is
+        # nothing else to stop those from re-prompting forever.
+        if [ "$unackable_shown" -eq 1 ] && [ "$report_reviewed" -eq 0 ]; then
+            pending+=("reviewed $(basename "$report")")
+        fi
+        if [ "${#pending[@]}" -gt 0 ]; then
+            mkdir -p "$BASELINE_DIR"
+            printf '%s\n' "${pending[@]}" >> "$bf"
+        fi
         for rid in ${sc_done[@]+"${sc_done[@]}"}; do
             rm -f "$sc/$(id_key "$rid")".diff "$sc/$(id_key "$rid")".new \
                   "$sc/$(id_key "$rid")".removed "$sc/$(id_key "$rid")".withheld
@@ -1490,12 +1658,30 @@ case "$cmd" in
         # Only rename off -CRITICAL.txt (making the report evictable by
         # rotation) when every CRITICAL finding this report carried was
         # actually approved - not just when something was approved.
+        # Reached even when this run recorded nothing new: a report whose
+        # CRITICALs were all approved through some EARLIER report listing the
+        # same finding is fully dealt with, and has to stop being counted as
+        # unacknowledged or the startup warning nags about it forever.
         if [ "$crit_seen" -gt 0 ] && [ "$crit_acked" -eq "$crit_seen" ]; then
             case "$report" in
                 *-CRITICAL.txt) mv "$report" "${report%-CRITICAL.txt}.txt" ;;
             esac
         fi
-        echo ""; echo "dejima audit: recorded ${#pending[@]} acknowledgement(s) in $bf"
+        echo ""
+        # Distinguish the three ways a run can end with nothing new, because
+        # "nothing recorded" for all of them is what made an already-handled
+        # report look like a broken tool.
+        acks=0
+        for p in ${pending[@]+"${pending[@]}"}; do
+            case "$p" in reviewed\ *) ;; *) acks=$((acks + 1)) ;; esac
+        done
+        if [ "$acks" -gt 0 ]; then
+            echo "dejima audit: recorded $acks acknowledgement(s) in $bf"
+        elif [ "$already" -gt 0 ]; then
+            echo "dejima audit: nothing new - $already finding(s) already dealt with."
+        else
+            echo "dejima audit: nothing recorded."
+        fi
         exit 0
         ;;
     *)
