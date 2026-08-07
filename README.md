@@ -315,14 +315,14 @@ the table below.
 
 ### Optional, once the above works
 
-| Turn on | Where |
-| --- | --- |
-| GitHub instead of Gitea | [providers.md](docs/providers.md) |
-| No push at all | [providers.md](docs/providers.md) |
-| Per-project domains and dependencies | [configuration.md](docs/configuration.md) |
-| Log shipping to Loki | [security.md](docs/security.md) |
-| GitHub push over SSH | [security.md](docs/security.md) |
-| Remote access | [remote-access.md](docs/remote-access.md) |
+| Turn on | What it costs | Where |
+| --- | --- | --- |
+| GitHub instead of Gitea | Opens `ssh.github.com:22` for push every time this forge is selected, not just for one launch | [providers.md](docs/providers.md) |
+| No push at all | - | [providers.md](docs/providers.md) |
+| Per-project domains and dependencies | - | [configuration.md](docs/configuration.md) |
+| Log shipping to Loki | Opt-in conversation logging ships what you and the model actually say | [security.md](docs/security.md) |
+| GitHub push over SSH | Much broader than it looks with a forwarded personal agent | [security.md](docs/security.md) |
+| Remote access | One step is a full sandbox escape if you get it wrong | [remote-access.md](docs/remote-access.md) |
 
 ## Usage
 
@@ -566,11 +566,11 @@ covers, and how to run them.
 | Doc | What is in it |
 | --- | --- |
 | [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
-| [security.md](docs/security.md) | The egress firewall, logging, identity, provider trust |
+| [security.md](docs/security.md) | Provider trust, the egress firewall, identity, and logging |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
-| [remote-access.md](docs/remote-access.md) | Attaching to a live session |
+| [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
 
 ## License
