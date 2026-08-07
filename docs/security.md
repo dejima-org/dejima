@@ -249,9 +249,9 @@ hands to whichever session starts against it. See
   Skipping is the third option on purpose: a finding you have not decided
   about is asked again next session, which is the right default for anything
   you are unsure of. A WARNING-tier git config change is curatable the same
-  way; it used to be the one class of finding with no id to record a decision
-  against, so keys that some tools rewrite every run re-fired forever and
-  pushed real findings out of the capped list.
+  way, which matters for keys some tools rewrite on every run: without a
+  decision recorded against one, it re-fires every session and pushes real
+  findings out of the capped list.
 
   Severity is not negotiable by either verb: an exec-capable git config key or
   a shell alias is classified CRITICAL whatever the baseline says, and an
@@ -697,6 +697,33 @@ hands to whichever session starts against it. See
   session can still edit those files during the run, and whatever it
   changes takes effect the *next* time `dejima` itself runs,
   not the current one.
+
+### Declaration files are session-writable
+
+A project's `.dejima/` declaration files sit inside the project mount, which
+is bind-mounted read-write. A compromised session can write them, and that is
+fine by design: declaring grants nothing, and the approval store the session
+cannot reach is what a declaration has to pass through.
+
+What a session *could* try is to make the host-side write land somewhere else.
+Plant `.dejima`, or `.dejima/<kind>`, as a symlink pointing at your approval
+store or any other file you can write, then get you to run the
+`dejima-allow --project` or `dejima-dep add` that appends to it. The append
+happens on the host, as you, so it inherits your write access rather than the
+container's.
+
+Both writers refuse a symlink at either of those two leaves. The refusal is
+the `open` itself and not a check before it: `O_NOFOLLOW` on both, with the
+file opened relative to the already-opened directory, so a session still
+running while you type the command cannot swap either one out from under the
+write. Those two leaves are what a session controls. A symlink further up a
+`--project` path you supplied yourself is still resolved through, because
+that part of the path is your claim about where the project is, not the
+session's.
+
+Expect the session to be live when you run these: the agent briefing tells it
+to ask you to run them from a terminal outside the sandbox, which is exactly
+the window this closes.
 
 ## Network egress firewall
 

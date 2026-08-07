@@ -3,8 +3,8 @@
 [← dejima README](../README.md)
 
 Day-to-day configuration once dejima is installed and running: what a
-project declares versus what you approve, config parity with your host
-Claude Code setup, a different editor, writable host directories, shared
+project declares versus what you approve, config parity with your host agent
+harness setup, a different editor, writable host directories, shared
 scratch space, frontend testing, and what the sandbox knows about itself.
 
 ## Configuration reference
@@ -51,26 +51,20 @@ what a given launch will actually use.
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
-**No forge is the default** (`[core] forge = none` with
-`[core] workflow = local-only`): the sandbox commits locally and pushes
-nowhere. A fresh install has no forge credentials, so defaulting to a pushing
-pair would be claiming a setup that isn't there, and a pushing workflow whose
-forge resolves to no host is refused at launch, which would make an
-out-of-the-box `dejima` refuse to start. Pushing is something you opt into.
-
-> **Changed default (was `gitea` + `worktree-pr`).** If your
-> `~/.config/dejima/config` has no explicit `[core] forge` / `[core] workflow`
-> lines, it used to resolve to `gitea` + `worktree-pr` and now resolves to
-> `none` + `local-only`: your sandbox will stop pushing and stop opening PRs.
-> To keep the old behaviour, write both lines out under `[core]`:
-> `forge = gitea` and `workflow = worktree-pr` (and fill in `[forge.gitea]`,
-> which that pair has always required). `./install.sh` prints this notice
-> when it finds a config in that state.
+**No forge is the default**: `[core] forge = none` with
+`[core] workflow = local-only`, so the sandbox works locally and pushes
+nowhere. Every other workflow needs forge credentials, which is what you are
+opting into when you pick one.
 
 ## Global and per-project domains and dependencies
 
-Allowed domains and dependencies each stack through their own layers, least
-specific first:
+Allowed domains and dependencies each stack through their own layers. The
+layers **add** to each other, so a narrower layer can only widen what a
+broader one already permits: nothing at the project layer can withdraw a
+built-in domain, and nothing at the container layer can withdraw a project
+one. Ordering them least specific first is how they are listed below and how
+they are applied, and it means the set a session gets is the union of every
+layer that applies to it, never an override of one by another.
 
 | Config | Layers, least specific first |
 | --- | --- |
@@ -99,6 +93,20 @@ name a release archive instead:
 dejima-dep add --global tarball:go@<sha256>:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
 ```
 
+To get the digest, fetch the archive on the host and hash it. Do not take a
+digest from the same page that serves the download unless you are willing to
+trust that page for both:
+
+```sh
+curl -fLO https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+sha256sum go1.25.0.linux-amd64.tar.gz
+```
+
+Many projects publish a checksums file or sign their releases. Where they do,
+verifying against that is worth more than hashing whatever arrived, because it
+tells you the archive is the one the project published rather than the one
+your connection received.
+
 It unpacks with `--strip-components=1` into `/opt/dejima/<name>`, and
 `/opt/dejima/<name>/bin` goes on `PATH`. That one convention covers the usual
 shapes without the spec needing layout options: a Go archive has everything
@@ -112,9 +120,12 @@ change afterwards, which isn't a decision anyone can make once. With one, what
 you approved is a specific archive and nothing else can take its place. Two
 consequences worth knowing:
 
-- **A tarball dependency names one architecture**, because a digest does.
-  Unlike a package name, it can't resolve per-host, so a mixed-architecture
-  fleet needs a spec per project rather than one global one.
+- **A tarball dependency locks the project to one architecture**, because a
+  digest does. A package name resolves per-host and a digest cannot: it names
+  one archive, built for one architecture. There is no per-architecture
+  tarball spec today, so a project that declares one is a project that builds
+  on machines of that architecture and no others. Track that at
+  [#97](https://gitbox.branderson.io/branderson/dejima/issues/97).
 - **Upgrading is an approval, not a version bump.** A new release is a new
   digest, so it goes through `dejima-dep add` and `dejima-project approve`
   again - which is the point, not friction to route around.
@@ -152,15 +163,11 @@ declaration, so a project you can't write to still gets you the approval.
 The declaration those two write still grants nothing; it is the same
 untrusted file the section above describes, and writing to it does not
 promote it. That it is session-writable is exactly why both tools refuse to
-write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**:
-a compromised session can plant one and then ask you to run the command that
-follows it, which would aim a host-side append at your approval store or at
-any other file you can write. The refusal is the `open` itself rather than a
-test before it - `O_NOFOLLOW` on both, with the file opened relative to the
-already-opened directory - so a session that is still running while you type
-the command cannot swap `.dejima` or the declaration file out from under the
-write. (Those two leaves are what the session controls. A symlink further up
-a `--project` path you supply yourself is still resolved through.) Expect the
+write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
+The refusal is the `open` itself rather than a check before it, so it holds
+even against a session that is still running while you type the command. See
+[Declaration files are session-writable](security.md#declaration-files-are-session-writable)
+for what that defends against and how. Expect the
 session to be live: the agent briefing tells the agent to ask you to run
 `dejima-allow --project` from a terminal outside the sandbox. The same write
 reads the file back to skip an already-declared entry, and that read is
@@ -212,7 +219,13 @@ startup context, with the exact command to hand you. Project approvals are
 inherited by subdirectories, so a git worktree under the project gets its
 parent's; global approvals apply everywhere regardless.
 
-## Config parity with your host Claude Code setup
+## Config parity with your host agent harness setup
+
+What carries over from your host into the container, and what deliberately
+does not. The mechanism is the same whichever harness `[core] harness`
+selects; the specific paths below belong to the one harness shipped today.
+
+### Claude Code
 
 Global `CLAUDE.md`, settings, hooks, skills, and plugins all carry over
 automatically, and your existing login stays effective too - no separate
@@ -251,15 +264,29 @@ during a session reaches your real file). Falls back to an empty config if
 you don't have one.
 
 Caveat: MCP servers or hooks that shell out to host-specific binaries (a
-browser, a language runtime not installed here) may not work unless that
-tooling is also added to the `Dockerfile`.
+browser, a language runtime not installed here) will not work until that
+tooling is installed in the image. Add it with `dejima-dep` rather than by
+editing the base `Dockerfile`: a dependency added that way is declared,
+approved and layered like any other, and it survives a rebuild. Editing the
+Dockerfile directly puts it outside that record.
 
-### Headless git push without agent forwarding
+## Headless git push without agent forwarding
 
-Agent forwarding (the default) ties SSH access to whichever client is
-currently connected - it dies when that client disconnects, breaking
-git-over-ssh for anything still running headless. For sandboxes meant to run
-unattended, generate a dedicated, purpose-built keypair instead:
+**The reason to do this is identity, not uptime.** A forwarded agent
+authenticates the session **as you**: every commit and every pull request it
+produces is yours, and for as long as it runs it can reach whatever that key
+can reach. A key of its own, belonging to an account that is not you, gives
+the session an identity you can scope, revoke and read in a log separately
+from your own. See
+[To your forge, the sandbox is you](security.md#to-your-forge-the-sandbox-is-you)
+for why that matters more than it first appears.
+
+Running unattended is the second reason and the lesser one. Agent forwarding
+ties SSH access to whichever client is currently connected, so it dies when
+that client disconnects and takes git-over-ssh with it for anything still
+running headless.
+
+Either way, generate a dedicated, purpose-built keypair:
 
 ```sh
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/dejima_ed25519
@@ -360,6 +387,11 @@ being rewritten to point at `~/shared`.
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
 goes away with it.
+
+**Clear it out periodically.** It persists across sessions by design, which
+means anything you left in it is readable by every session after the one you
+left it for. A credential dropped in there to get one job done, and then
+forgotten, is a credential you have handed to every session since.
 
 ## Testing frontend changes
 
