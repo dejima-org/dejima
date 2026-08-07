@@ -476,7 +476,7 @@ if [ -n "$SANDBOX_SSH_KEY" ]; then
         echo "Recommended: chmod 600 $SANDBOX_SSH_KEY" >&2
     fi
     # SANDBOX_SSH_KEY is meant to be a dedicated, low-privilege deploy key
-    # (see README "Headless git push"), not your real identity - it stays
+    # (see docs/configuration.md "Headless git push"), not your real identity - it stays
     # loaded in an in-container agent for the whole session, unattended.
     # Nothing enforces that convention, so at least catch the common case
     # of pointing it at a default personal keyfile by mistake.
@@ -485,7 +485,7 @@ if [ -n "$SANDBOX_SSH_KEY" ]; then
             echo "Warning: $SANDBOX_SSH_KEY looks like a default personal SSH key," \
                  "not a dedicated one." >&2
             echo "It will be loaded into the sandbox for the whole unattended session -" \
-                 "see README 'Headless git push'." >&2
+                 "see docs/configuration.md." >&2
             ;;
     esac
 fi
@@ -501,7 +501,7 @@ fi
 if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
     echo "SSH_AUTH_SOCK is not set or not a valid socket, and [core] ssh_key is not set." >&2
     echo "Either start ssh-agent and run ssh-add, or set [core] ssh_key in $(config_path) to a" >&2
-    echo "dedicated key for headless use - see README 'Headless git push' section." >&2
+    echo "dedicated key for headless use - see docs/configuration.md." >&2
     exit 1
 fi
 
@@ -608,7 +608,8 @@ jq -n '{sandbox: {enabled: false}}' > "$SANDBOX_SETTINGS_FILE"
 # anything else) ever reaches the real file, since the copy is discarded,
 # not merged back, when this session ends. This also means concurrent
 # sandbox sessions never contend over the same file - each gets its own
-# copy. See README "Throwaway ~/.claude.json" for exactly what that means
+# copy. See docs/configuration.md "Config parity with your host Claude Code
+# setup" for exactly what that means
 # doesn't carry over from a sandboxed session.
 SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then

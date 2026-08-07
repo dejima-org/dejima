@@ -84,7 +84,8 @@ the sandbox at it instead of at you:
 - `[forge.gitea] token_file` — that account's token, rather than one issued
   under yours.
 - `[core] ssh_key` — a deploy key belonging to it, rather than your forwarded
-  agent. See "Headless git push without agent forwarding" in the README.
+  agent. See "Headless git push without agent forwarding" in
+  [docs/configuration.md](configuration.md).
 
 With the two identities separated, the same settings stop being decorative:
 
