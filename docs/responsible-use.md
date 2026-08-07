@@ -50,10 +50,17 @@ dejima narrows the paths code has to leave through; it doesn't close them,
 and "point it only at code you could survive losing" is the practical test
 for that gap. Ask it plainly before you start a session, not after: if this
 checkout's contents ended up somewhere they shouldn't, would that be a bad
-week or the end of the business? Code you could survive losing is worth the
-convenience of unattended agentic work at today's containment. Code you
-couldn't should wait for containment you trust more, or shouldn't go in at
-all.
+week or the end of the business? Code you could survive losing may be worth
+the convenience of unattended agentic work. Code you couldn't shouldn't go in
+at all.
+
+That second one is not a judgement about how good the containment is, and it
+does not get better with a version bump. There is no containment that fully
+prevents exfiltration: a determined attacker with code execution and any
+outbound path will find a way, and the allowlist narrows the paths rather
+than closing them. So the question is never whether you trust dejima enough.
+It is whether you can accept the risk of the contents leaving. If you cannot,
+do not hand them to an agent that could send them.
 
 ## Look at what else is in the directory.
 
@@ -65,13 +72,22 @@ local debugging and never deleted, a credential baked into a fixture file,
 an old key still sitting in the history of a branch that got checked out.
 None of that is code in any sense that matters to the agent; all of it is
 just bytes in a directory the session can read and any tool call it makes
-can touch. Auditing the code for sensitivity is the part everyone already
-does. Auditing the directory takes an extra minute and covers the part that
-doesn't show up in a code review.
+can touch.
+
+Auditing a working tree by eye is not a minute's work, and it is the kind of
+check that succeeds every time until the once it matters. **Point dejima at a
+fresh clone instead.** A clone contains what is in version control and
+nothing else, so the whole class goes away rather than being searched for. If
+a directory might have ignored files in it worth protecting, that is the
+directory not to hand over.
 
 ## An allowlist entry is a grant, not a convenience.
 
-The distinction is what happens if the call is wrong, whether wrong means a
+For every allowlist entry you give a dejima agent, consider what an attacker
+could do with it. That is the whole rule. What follows is why the answer
+varies so much between entries that look similar.
+
+The variable is what happens if the call is wrong, whether wrong means a
 prompt-injected instruction or an ordinary agent mistake.
 
 A package registry or a docs site can be wrong without being expensive. A
@@ -97,14 +113,16 @@ someone?
 ## Safe and responsible are not the same thing.
 
 "Safe" is a property of the sandbox: what a session inside it can reach.
-"Responsible" is a property of what you chose to merge. dejima can be
-working exactly as designed, containing the session perfectly, while what
-that session wrote is insecure, broken, or wrong, because containment says
-nothing about the quality of the artifact a contained process produces.
+"Responsible" is a property of what you let out of it. A session can be
+contained perfectly and still produce something that should not be merged,
+and the sandbox has no opinion either way.
 
-`main` is where those two axes meet, and it is worth being precise about
-why `main` specifically, rather than "the released version" in some vaguer
-sense. In this repository, dejima-ci-hardener resolves the CI-side egress
+This point is about the merge, not about code quality in general. What makes
+`main` (or `master`, or whatever your default branch is called) different
+from any other branch is that other things read it and believe it. It is
+worth being precise about why, rather than saying "the released version" in
+some vaguer sense. In this repository, dejima-ci-hardener resolves the
+CI-side egress
 allowlist by reading `.dejima/allowed-domains` from `origin/main`, never
 from a branch or a local checkout, and treats whatever it finds there as
 already reviewed. That trust isn't a policy statement, it's load-bearing:
@@ -179,6 +197,24 @@ code itself, decided at the moment it's written, not something a sandbox
 sitting around the process that wrote it can retrofit afterward. If what got
 built inside dejima turns out to be insecure, that isn't a containment
 failure; containment was never the control that was supposed to catch it.
+
+**It is not something a future agent can retrofit either**, and that is the
+more useful half of this. "We will do a security pass later" was already a
+weak plan before agents made it cheap to say. Early architectural decisions
+close off the fixes for whole classes of problem: where trust boundaries sit,
+what is authenticated and where, what data crosses which process, what a
+single compromised component reaches. A later pass can find a missing bounds
+check. It cannot move a boundary you built a system on top of. And insecure
+implementation decisions sit in software for years without announcing
+themselves, which is exactly why they are not found by a pass that goes
+looking once.
+
+So security has to be considered at every point in the work, not scheduled
+as a phase, and dejima will not help you do that. It makes writing a lot of
+code fast, which makes writing a lot of insecure code fast if nobody is
+holding that concern. That responsibility is yours at every step, and it is
+the one thing here no tooling in this repository is aiming at.
+
 The same practices you'd apply to code from any other source, review,
 linting, dependency scanning, tests aimed at the failure modes you care
 about, still have to happen here. dejima doesn't stand in for any of them;
