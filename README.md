@@ -148,7 +148,8 @@ allowlisted sources. Keeping that out of `main` is your job, not the
 container's.
 
 **Give it its own identity, then own what you merge.** A session should
-authenticate to your forge as itself, not as you. [docs/security.md](docs/security.md)
+authenticate to your forge as itself, not as you.
+[docs/security.md](docs/security.md#to-your-forge-the-sandbox-is-you)
 covers how, and dejima's own development uses a separate account. With that
 in place its commits and pull requests are visibly the agent's work. What
 makes them yours is merging them, and the people reading your `main` will
@@ -181,8 +182,8 @@ behind each of these, and the fork-and-review workflow in full.
     key, but it dies with your client connection, so it's fine for
     interactive use, not for unattended/headless sessions.
   - `[core] ssh_key`: a dedicated deploy key for headless/unattended use,
-    independent of any forwarded agent. See "Headless git push without
-    agent forwarding" in [docs/configuration.md](docs/configuration.md).
+    independent of any forwarded agent. See
+    [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding).
 
 Everything else is optional, depending on which workflow(s) you want. All of
 it lives in one file, `~/.config/dejima/config`; `./install.sh` writes a
@@ -317,7 +318,7 @@ the table below.
 
 | Turn on | What it costs | Where |
 | --- | --- | --- |
-| GitHub instead of Gitea | Opens `ssh.github.com:22` for push every time this forge is selected, not just for one launch | [providers.md](docs/providers.md) |
+| GitHub instead of Gitea | Opens `ssh.github.com:22` for push whenever the selected workflow actually pushes, not just for one launch | [providers.md](docs/providers.md#shipped-providers) |
 | No push at all | - | [providers.md](docs/providers.md) |
 | Per-project domains and dependencies | - | [configuration.md](docs/configuration.md) |
 | Log shipping to Loki | Opt-in conversation logging ships what you and the model actually say | [security.md](docs/security.md) |
@@ -343,12 +344,20 @@ editor setup at all.
 Typical loop: point it at a project, ask for a change, and let the session
 work. It commits to a feature branch, pushes it, and opens a pull request;
 then it stops. You review and merge that PR yourself, wherever you normally
-read them. Merging is the one step the sandbox is not allowed to take, and
-`merge-guard.sh` blocks it from the inside.
+read them.
+
+`merge-guard.sh` and `git-push-guard.sh` are fast-fail guards against an
+overeager agent, not a boundary against a hostile one: a session holds the
+forge token in its environment and could call the merge endpoint directly,
+and the merge guard itself is per-workflow, inert unless that workflow turns
+it on. Branch protection on the remote is what actually stops a merge from
+happening without you.
 
 That boundary is the shape of the loop rather than a limit on it: every
-session ends at something you read before it lands, and nothing reaches your
-default branch without you.
+session ends at something you read before it lands.
+
+**→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
+the guards in full, and why they fail open.
 
 How far the session goes is the `[core] workflow` setting: `worktree-pr`
 pushes and opens the PR described above, `branch-push` stops at the push, and
@@ -388,7 +397,11 @@ touching the actual checkout. It persists across sessions since it's a real
 directory, not a container volume - but treat it as a handoff point, not
 general-purpose storage.
 
-**→ [docs/configuration.md](docs/configuration.md)** - when to use
+`~/shared`, the project mount, and anything in `[mounts] read_write` are the
+only writable host paths in the container. Everything else a session writes
+goes away with it.
+
+**→ [docs/configuration.md](docs/configuration.md#shared-scratch-space)** - when to use
 `[mounts] read_write` instead, for anything meant to outlive the session at
 a fixed host path.
 
@@ -422,8 +435,10 @@ allowlist-only `iptables`/`ipset` firewall, and anything not explicitly
 allowed is rejected outright. The allowlist covers what the sandbox itself
 needs to function - DNS resolution, the Docker host, GitHub on port 443 for
 read access no matter which forge is selected, whatever the selected forge
-itself needs reachable, and the harness's own update and model endpoints -
-plus whatever a project has declared and had approved (see
+itself needs reachable, the harness's own update and model endpoints,
+`release-assets.githubusercontent.com` for GitHub release assets, and
+`api.anthropic.com` when the credential proxy is off - plus whatever a
+project has declared and had approved (see
 [Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies)
 below). IPv6 is blocked outright too, with no allowlist equivalent for it.
 
@@ -495,7 +510,9 @@ hook.
 
 Pass `--allow-github-push` to open port 22 for that one launch, paired with
 a repo-scoped deploy key in `[core] ssh_key` rather than a forwarded
-personal agent.
+personal agent. The one exception is `[github] token_file`: pointed at a
+write-scoped token instead of a read-only one, it enables HTTPS push over
+port 443 independently of this flag, so keep it read-only.
 
 **→ [docs/security.md](docs/security.md#github-push-blocked-by-default-optional-opt-in)**
 - what a forwarded personal agent changes, and the persistent alternative.
