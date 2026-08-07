@@ -21,6 +21,11 @@ COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 source "$SCRIPT_DIR/dejima-project-lib.sh"
 # shellcheck source=dejima-provider-lib.sh
 source "$SCRIPT_DIR/dejima-provider-lib.sh"
+# shellcheck source=dejima-color-lib.sh
+source "$SCRIPT_DIR/dejima-color-lib.sh"
+# fd 2: everything this script says for itself goes to stderr, so the
+# session's own stdout stays exactly what the container wrote.
+color_init 2
 
 # Flags come first, then the optional workspace path, then "--" and
 # everything after that reaches the container command untouched - including a
@@ -1273,16 +1278,43 @@ audit_reports="$AUDIT_DIR/$audit_slug"
 # every ordinary launch.
 pending_crit="$(find "$audit_reports" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort)" || true
 if [ -n "$pending_crit" ]; then
-    n="$(printf '%s\n' "$pending_crit" | wc -l)"
-    echo "" >&2
-    echo "  dejima: $n unacknowledged CRITICAL finding(s) in this workspace" >&2
-    printf '%s\n' "$pending_crit" | sed 's#.*/##; s#-CRITICAL\.txt$##; s#^#          from run #' >&2
-    echo "          Review with: dejima-audit ack \"$WORKSPACE_DIR\"" >&2
-    if [ -t 0 ]; then
-        printf '          [c] continue  [q] quit: ' >&2
-        read -r reply || reply=q
-        case "$reply" in q|Q) echo "aborted." >&2; exit 1 ;; esac
-    elif [ "$(config_get_bool audit strict)" = "1" ]; then
+    # Re-read after an inline `ack`, so approving everything here clears the
+    # warning instead of asking again about reports that no longer carry a
+    # CRITICAL. Looping rather than asking once: `ack` walks ONE report per
+    # run (see select_report), so a workspace with several needs several
+    # passes, and sending the operator back to their shell between each is
+    # the friction this option exists to remove (#65).
+    while [ -n "$pending_crit" ]; do
+        n="$(printf '%s\n' "$pending_crit" | wc -l)"
+        echo "" >&2
+        printf '  dejima: %s%s unacknowledged %sCRITICAL%s finding(s) in this workspace\n' \
+            "$C_CRIT" "$n" "$C_CRIT" "$C_RESET" >&2
+        printf '%s\n' "$pending_crit" \
+            | sed "s#.*/##; s#-CRITICAL\.txt\$##; s#^#          from run ${C_INFO}#; s#\$#${C_RESET}#" >&2
+        printf '          Review with: %sdejima-audit ack "%s"%s\n' \
+            "$C_KEY" "$WORKSPACE_DIR" "$C_RESET" >&2
+        if [ -t 0 ]; then
+            printf '          %s[a]%s review now  %s[c]%s continue  %s[q]%s quit: ' \
+                "$C_KEY" "$C_RESET" "$C_KEY" "$C_RESET" "$C_KEY" "$C_RESET" >&2
+            read -r reply || reply=q
+            case "$reply" in
+                q|Q) echo "aborted." >&2; exit 1 ;;
+                a|A)
+                    # Run it here rather than telling the operator to run it
+                    # in another terminal: this is the moment they are
+                    # looking at the finding, and the container has not
+                    # started, so nothing is waiting on the answer.
+                    "$SCRIPT_DIR/dejima-audit" ack "$WORKSPACE_DIR" || true
+                    pending_crit="$(find "$audit_reports" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort)" || true
+                    continue
+                    ;;
+            esac
+        fi
+        break
+    done
+fi
+if [ -n "$pending_crit" ] && [ ! -t 0 ]; then
+    if [ "$(config_get_bool audit strict)" = "1" ]; then
         echo "          audit.strict is on and stdin is not a tty - refusing to start." >&2
         exit 1
     else

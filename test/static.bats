@@ -2146,6 +2146,55 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }
 
+# Through a real pty, because the [a]/[c]/[q] prompt only exists when stdin
+# is a terminal - the same reason test/remote.bats drives its picker with
+# `script` rather than a pipe.
+startup_warning_launch_tty() {
+    local keys="$1"
+    printf '%s' "$keys" | HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+        DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
+        SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= TERM=xterm-256color \
+        script -qec "'$REPO_ROOT/bin/dejima' '$DEJIMA_T/ws'" /dev/null
+}
+
+@test "the startup warning offers to review the findings there and then" {
+    # Without this the operator is told to run a command in another terminal,
+    # at the one moment when nothing is waiting on them: the container has
+    # not started yet (#65).
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    run startup_warning_launch_tty 'a
+q
+'
+    [[ "$output" == *"[a]"* ]]
+    [[ "$output" == *"review now"* ]]
+    # 'a' ran the audit review in-process, rather than only naming it.
+    [[ "$output" == *"dejima audit:"* ]]
+}
+
+@test "the startup warning colours the tier and the keystrokes on a terminal" {
+    # The complaint is that the warning is one undifferentiated block: the
+    # word that says how bad it is, the run ids, and the keys to press all
+    # read the same (#65).
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    run startup_warning_launch_tty 'c
+'
+    [[ "$output" == *$'\033'* ]]
+}
+
+@test "the startup warning emits no colour when it is not going to a terminal" {
+    startup_warning_setup
+    mkdir -p "$DEJIMA_T/audit/$(startup_warning_slug)"
+    : > "$DEJIMA_T/audit/$(startup_warning_slug)/2020-01-01-000000-CRITICAL.txt"
+    run startup_warning_launch
+    [[ "$output" == *"unacknowledged CRITICAL"* ]]
+    [[ "$output" != *$'\033'* ]]
+}
+
 @test "audit.strict = on refuses to start over unacknowledged CRITICAL history when stdin is not a tty" {
     startup_warning_setup
     printf '[audit]\nstrict = on\n' >> "$DEJIMA_T/config/config"

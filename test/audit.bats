@@ -557,7 +557,10 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
     cmp_ >/dev/null 2>&1
-    run bash -c "ls '$AUDITDIR/$slug' | wc -l"
+    # *.txt, not every entry: a finding with retained content also leaves a
+    # <report>.d sidecar beside it, which rotation counts as part of the
+    # report it belongs to rather than as another report.
+    run bash -c "ls '$AUDITDIR/$slug'/*.txt | wc -l"
     [ "$output" -le 10 ]
 }
 
@@ -723,13 +726,123 @@ REPORT
     echo 'export X=1' > "$WS/.envrc"
     mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"
     cmp_ >/dev/null 2>&1
-    # 's' on the CRITICAL .envrc finding, then 'a' on the WARNING one that
+    # 'i' on the CRITICAL .envrc finding, then 'a' on the WARNING one that
     # follows it - so $BASEDIR/$slug is guaranteed to exist afterward and the
     # negative grep below can't pass vacuously against a missing file.
-    run bash -c "printf 's\na\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."* ]]
+    run bash -c "printf 'i\na\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot ignore a CRITICAL surface from now on"* ]]
     [ -f "$BASEDIR/$slug" ]
     ! grep -q '^spam \.envrc' "$BASEDIR/$slug"
+}
+
+@test "a finding the baseline already covers is not presented again" {
+    # #65's headline bug. The approval was always written correctly; `ack`
+    # just never consulted the baseline when deciding what to SHOW, so every
+    # later run re-presented the same CRITICAL and appended a duplicate
+    # entry. Reported as "approvals are not being recorded", which is what it
+    # looks like from the outside.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [ "$(grep -c '^safe .envrc' "$BASEDIR/$slug")" -eq 1 ]
+
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" != *".envrc"* ]]
+    [[ "$output" == *"already dealt with"* ]]
+    # And no second entry for the same decision.
+    [ "$(grep -c '^safe .envrc' "$BASEDIR/$slug")" -eq 1 ]
+}
+
+@test "a report whose CRITICALs were approved through an earlier report stops nagging" {
+    # Two reports can list the same finding. Approving it in the first left
+    # the second permanently -CRITICAL.txt, so bin/dejima warned about a
+    # report whose every finding had been dealt with, and `ack` re-presented
+    # it forever. The rename now runs on a pass that records nothing new.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    # A second report listing the same, still-unapproved finding.
+    cp "$AUDITDIR/$slug"/*-CRITICAL.txt "$AUDITDIR/$slug/2020-01-01-000000-CRITICAL.txt"
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"recorded 1 acknowledgement"* ]]
+    # The remaining report is walked with nothing left to decide, and sheds
+    # its suffix rather than staying unacknowledged forever.
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"already dealt with"* ]]
+    run bash -c "ls '$AUDITDIR/$slug'"
+    [[ "$output" != *"-CRITICAL.txt"* ]]
+}
+
+@test "a finding that cannot be acknowledged is presented once, not on every run" {
+    # There is nothing to record for one, so without a marker it re-prompted
+    # forever and `ack` could never reach a state of having nothing to ask.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$PROJDIR/-some-other-project"
+    echo x > "$PROJDIR/-some-other-project/file1"
+    snap
+    echo y > "$PROJDIR/-some-other-project/file2"
+    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"CROSS-PROJECT"* ]]
+    grep -q '^reviewed ' "$BASEDIR/$slug"
+
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" != *"CROSS-PROJECT"* ]]
+}
+
+@test "quitting a report does not mark it reviewed" {
+    # The marker means "walked to the end". An abort discards everything
+    # else, and must discard this too or one q would silence the report.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$PROJDIR/-some-other-project"
+    echo x > "$PROJDIR/-some-other-project/file1"
+    snap
+    echo y > "$PROJDIR/-some-other-project/file2"
+    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
+    ! grep -q '^reviewed ' "$BASEDIR/$slug" 2>/dev/null
+
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"CROSS-PROJECT"* ]]
+}
+
+@test "a WARNING git config finding can be acknowledged, both ways (#45)" {
+    # Neither `ack` nor `compare` handled this tier: no arm derived an id for
+    # it, and the two branches that emit it never consulted the baseline. It
+    # was the one class of finding with no way to curate it at all.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; git -C "$WS" config user.name changed-in-session; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'i\n' | '$AUDIT' ack '$WS'"
+    grep -q '^spam gitconfig:user.name' "$BASEDIR/$slug"
+    # ...and the surface stays quiet whatever it changes to next, which is
+    # the point for a key some tool rewrites on every run.
+    snap; git -C "$WS" config user.name changed-again
+    run cmp_
+    [[ "$output" != *"user.name"* ]]
+}
+
+@test "an approved WARNING git config value re-fires when the value changes" {
+    # The other verb: `safe` pins the exact value, so a different one is a
+    # new decision rather than covered by the old one.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; git -C "$WS" config user.name first; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    grep -q '^safe gitconfig:user.name ' "$BASEDIR/$slug"
+    snap; git -C "$WS" config user.name second
+    run cmp_
+    [[ "$output" == *"changed git config: user.name=second"* ]]
+}
+
+@test "ack emits no colour when its output is not a terminal" {
+    # Reports and piped output are read back by machines - the audit's own
+    # next run, and every test here. An escape sequence in either is a bug,
+    # so the palette is decided from the stream rather than from a flag.
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" != *$'\033'* ]]
+    run cmp_
+    [[ "$output" != *$'\033'* ]]
 }
 
 @test "ack records a safe entry and clears the CRITICAL report marker" {
@@ -741,12 +854,22 @@ REPORT
     [[ "$output" != *"-CRITICAL.txt"* ]]
 }
 
-@test "ack does not write an unmatchable entry for a non-path finding" {
+@test "ack does not write an unmatchable entry for a finding with no id" {
+    # Was written against a changed git config, which #45 made ackable. The
+    # invariant is about findings that have no id to record at all, so it now
+    # uses the one class that still has none: a cross-project write, whose
+    # subject is another project's slug rather than anything this audit can
+    # hash and pin.
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    snap; git -C "$WS" config user.name changed; cmp_ >/dev/null 2>&1
+    mkdir -p "$PROJDIR/-some-other-project"
+    echo x > "$PROJDIR/-some-other-project/file1"
+    snap
+    echo y > "$PROJDIR/-some-other-project/file2"
+    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
+    cmp_ >/dev/null 2>&1
     run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
     [[ "$output" == *"cannot"* ]]
-    [ ! -f "$BASEDIR/$slug" ]
+    ! grep -qE '^(safe|spam) ' "$BASEDIR/$slug" 2>/dev/null
 }
 
 @test "an ack-approved finding is suppressed on the next compare (id round-trips through the baseline)" {
@@ -978,11 +1101,11 @@ REPORT
     git -C "$WS" config core.hooksPath /tmp/evil
     mkdir -p "$WS/.vscode"; echo '{}' > "$WS/.vscode/settings.json"
     cmp_ >/dev/null 2>&1
-    # 's' on the CRITICAL gitconfig finding, then 'a' on the WARNING one that
+    # 'i' on the CRITICAL gitconfig finding, then 'a' on the WARNING one that
     # follows it - so $BASEDIR/$slug is guaranteed to exist afterward and the
     # negative grep below can't pass vacuously against a missing file.
-    run bash -c "printf 's\na\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"cannot 'always ignore' a CRITICAL surface - approve the exact content or skip."* ]]
+    run bash -c "printf 'i\na\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *"cannot ignore a CRITICAL surface from now on"* ]]
     [ -f "$BASEDIR/$slug" ]
     ! grep -q '^spam gitconfig:core.hooksPath' "$BASEDIR/$slug"
 }
