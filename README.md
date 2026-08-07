@@ -566,11 +566,12 @@ and everything the session briefing covers.
 Outbound network access is default-deny: on start, the container builds an
 allowlist-only `iptables`/`ipset` firewall, and anything not explicitly
 allowed is rejected outright. The allowlist covers what the sandbox itself
-needs to function - DNS resolution, the Docker host, the selected forge, and
-the harness's own update and model endpoints - plus whatever a project has
-declared and had approved (see "Global and per-project domains and
-dependencies" above). IPv6 is blocked outright too, with no allowlist
-equivalent for it.
+needs to function - DNS resolution, the Docker host, GitHub on port 443 for
+read access no matter which forge is selected, whatever the selected forge
+itself needs reachable, and the harness's own update and model endpoints -
+plus whatever a project has declared and had approved (see
+[Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies)
+below). IPv6 is blocked outright too, with no allowlist equivalent for it.
 
 DNS is allowlisted as well as IPs: a local resolver only forwards lookups
 for names already on that same allowlist, so a domain that isn't approved
