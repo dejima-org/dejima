@@ -7,19 +7,19 @@ CI runs.** That is the whole of it, and everything below is either why it
 cannot be gated or what to do about it instead.
 
 > **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
-> is a self-contained tool that does it — installed on the CI box, never on a
+> is a self-contained tool that does it, installed on the CI box, never on a
 > dejima host, and it does not assume you have read this.
 
 The chain needs no operator action at any step. A session writes code; the
 push guard permits a feature branch, which is what it exists to allow; the
 session opens a pull request, which its briefing tells it to do without asking
 first; `on: pull_request` fires and the runner checks out that commit and runs
-it. The code does not have to be a modified workflow file to be executed — a
+it. The code does not have to be a modified workflow file to be executed: a
 workflow that runs a test suite is already running every file in it, and a
 plausible-looking helper in a test file is a much quieter carrier than an
 edited workflow, which shows up in a diff.
 
-The gate this sandbox otherwise relies on — you merge, the agent does not —
+The gate this sandbox otherwise relies on (you merge, the agent does not)
 sits strictly downstream of that. By the time anyone reads the diff, the code
 has run.
 
@@ -30,7 +30,7 @@ elsewhere.
 
 **And it applies to projects with no CI at all.** A branch can add the first
 workflow, so what matters is not what a repository's workflows do today but
-which runners its branches can reach — which is a property of the forge, not
+which runners its branches can reach, which is a property of the forge, not
 of the project. If you read one section of this document before pointing a
 sandbox at something, make it
 [what a repository can reach](#closing-the-rest-what-a-repository-can-reach);
@@ -43,11 +43,11 @@ The code CI executes is code the session already had. Relative to the sandbox,
 a run adds three things, and every control in this document maps onto one of
 them:
 
-1. **Execution on a host you own** — outside the container, outside the
+1. **Execution on a host you own**: outside the container, outside the
    allowlist, with whatever that host can reach.
-2. **Egress from a network position you own** — no dejima firewall, no DNS
+2. **Egress from a network position you own**: no dejima firewall, no DNS
    proxy, ordinary networking.
-3. **Credentials the run is handed** — the secrets you configured, plus the
+3. **Credentials the run is handed**: the secrets you configured, plus the
    token the forge injects into every job whether the workflow asks for one or
    not.
 
@@ -61,7 +61,7 @@ The obvious answer is to require a human to approve a run. Each version of
 that turns out to be reachable from the branch, from a credential the session
 already holds, or to be no gate at all:
 
-- **Changing the trigger** — `workflow_dispatch` only, or `push` to `main`
+- **Changing the trigger**: `workflow_dispatch` only, or `push` to `main`
   only. The workflow file lives in the tree the session controls, and on a
   `pull_request` run it is read from the head of the pull request.
 - **Triggering by hand.** A forge token that can open a pull request generally
@@ -84,7 +84,7 @@ the run. Everything here bounds what the run can do.
 
 ## Before anything else: protect the branch
 
-Every control below that is worth anything roots its trust in `main` — most
+Every control below that is worth anything roots its trust in `main`: most
 directly the egress allowlist, which is read from there. A job token with
 write access to the repository can push to an unprotected branch, so without
 this the untrusted party can edit the thing that is supposed to constrain it.
@@ -100,7 +100,7 @@ This costs nothing and it is the single highest-value item in this document.
 
 **Branch protection needs a second identity to protect anything.** By default
 a session authenticates as you, so a merge whitelist, a push whitelist and an
-approval requirement all admit the sandbox exactly as they admit you — and
+approval requirement all admit the sandbox exactly as they admit you, and
 required approvals are unusable outright, since a forge will not let a pull
 request's author approve it and the session opens them as you. Giving the
 sandbox its own forge account is what turns those settings from decoration
@@ -130,13 +130,13 @@ that is what it does on every pull request.
   an unrelated repository cannot schedule work onto a runner you hardened for
   this one, *and* this repository cannot schedule work onto a runner nobody
   hardened. An instance-level runner is reachable from every repository on the
-  instance — see "A label is not a boundary" below. Gitea's own FAQ describes
+  instance; see "A label is not a boundary" below. Gitea's own FAQ describes
   gitea.com doing this for its public runners.
 
 Two runners on one VM give you label tiering, not host separation: a job that
 cannot get the Docker socket still shares a kernel and a network with a runner
 that can. If you only have one machine, that is a real reduction and worth
-doing — just do not read it as isolation between the tiers.
+doing; just do not read it as isolation between the tiers.
 
 ## Job containers
 
@@ -149,7 +149,7 @@ configuration says so:
 > but the docker host won't be mounted to the job containers and service
 > containers.
 
-Access to that socket is root-equivalent on the runner host — `docker run
+Access to that socket is root-equivalent on the runner host: `docker run
 -v /:/host` ends the argument. Nothing in a job's log mentions the socket
 being there, so this is not something a passing look at a green run will
 surface. Check it directly, per runner:
@@ -176,7 +176,7 @@ dejima-ci-hardener ships both configs, with the reasoning inline.
 **Prefer a new runner over reconfiguring an existing one.** A general-purpose
 runner often exists precisely to build images, and taking its socket away
 breaks it. Register a second runner with a label of its own, and name that
-label in the workflow — and if no runner carries the label yet, the job queues
+label in the workflow, and if no runner carries the label yet, the job queues
 rather than running somewhere unprepared, which is a better failure than a
 green run on the wrong host.
 
@@ -190,8 +190,8 @@ A branch can name any label it likes. So a dedicated label keeps *honest* jobs
 on the runner you prepared; it does nothing against a branch that would rather
 run somewhere else. A session that changes `runs-on: dejima-ci` to
 `runs-on: ubuntu-latest`, pushes, and opens a pull request has stepped outside
-every control on this page — no allowlist, no socket restriction, no firewall
-— provided some runner answering `ubuntu-latest` will take the job.
+every control on this page (no allowlist, no socket restriction, no firewall),
+provided some runner answering `ubuntu-latest` will take the job.
 
 Whether one will is a property of **where your runners are registered**, which
 is the actual boundary:
@@ -202,7 +202,7 @@ is the actual boundary:
 | Organization | that organization's repositories |
 | Repository | that repository |
 
-Gitea has no per-repository runner ACL — its FAQ says so directly, and points
+Gitea has no per-repository runner ACL; its FAQ says so directly, and points
 at registration scope as the control instead: gitea.com registers its runners
 for one organization "so our runners will not execute jobs from other
 repositories."
@@ -221,23 +221,23 @@ Under `on: pull_request` the workflow is read from the head of the pull
 request, so the branch decides what runs and where. Under
 `on: pull_request_target` Gitea reads it from the **base branch**, and
 explicitly discards any `pull_request_target` workflow found on the head
-commit — a branch can neither edit the base copy nor introduce its own. What
+commit: a branch can neither edit the base copy nor introduce its own. What
 runs, and on which runner, is whatever `main` says.
 
 **Adopting it takes two merges, not one.** The trigger only takes effect once
-it is on the base branch, because that is where it is read from — and a
+it is on the base branch, because that is where it is read from, and a
 `pull_request_target` workflow on a pull request's head is explicitly ignored.
 So the change that introduces it cannot be tested by it: with only
 `pull_request_target` on the branch and only `pull_request` on `main`, the
 head's copy is skipped, the base has nothing to contribute, and **no checks
-run at all** — which looks like a broken workflow rather than a bootstrap
+run at all**, which looks like a broken workflow rather than a bootstrap
 problem.
 
 Carry both triggers through the first merge, then remove `pull_request` in a
 follow-up. The first change is tested by its own copy from the head, as
 today; the follow-up is tested by the copy now on `main`. In between, pull
 requests get both an untrusted run from the head and a trusted one from the
-base — noisy, and for the untrusted half no worse than the status quo, so
+base, noisy, and for the untrusted half no worse than the status quo, so
 keep the window short.
 
 Two more consequences to handle rather than discover:
@@ -258,7 +258,7 @@ This does not make the repository safe on its own. A branch can still add a
 workflow of its own with `on: pull_request`, which runs from the head with
 whatever `runs-on` it likes. What it buys is that the *intended* CI is
 trustworthy, and that escaping it means adding a file rather than editing
-one — a much louder diff.
+one: a much louder diff.
 
 ### Closing the rest: what a repository can reach
 
@@ -270,14 +270,14 @@ The rule underneath everything here:
 Note what that does *not* say. It says nothing about what the repository's
 workflows currently do, because a branch can add the first one. **A project
 with no CI at all is still exposed**, on a forge where its branches can reach
-a runner — and that is the case people do not expect, because there is nothing
+a runner, and that is the case people do not expect, because there is nothing
 in the repository to look at.
 
 So before pointing a sandbox at a project, ask one question: *what runners can
 this repository's branches reach?*
 
-**If the answer is "hosted runners only"** — GitHub-hosted and nothing
-self-hosted attached — this is the mildest case, and it is worth saying so
+**If the answer is "hosted runners only"** (GitHub-hosted and nothing
+self-hosted attached), this is the mildest case, and it is worth saying so
 rather than alarming people. The runner is disposable and is not your machine,
 so "execution on a host you own" largely evaporates: there is no LAN behind
 it and nothing of yours on it. What remains is the third item, credentials:
@@ -286,14 +286,14 @@ give pull-request runs no secrets they do not need and a read-only token
 that repository.
 
 **If self-hosted runners are reachable**, that is the sharp case, and there are
-three ways to hold the rule — none of which require moving or renaming
+three ways to hold the rule, none of which require moving or renaming
 anything.
 
 **1. Turn CI off for that repository, if it does not use CI.** Disabling the
 Actions unit means no workflow runs for that repository at all, so no runner is
 reachable and a branch cannot add the first workflow. Changing it back needs
-*admin* on the repository — Gitea's API puts repository settings behind
-`reqAdmin()` — so a bot account with Write cannot undo it. For a project that
+*admin* on the repository (Gitea's API puts repository settings behind
+`reqAdmin()`), so a bot account with Write cannot undo it. For a project that
 was not using CI anyway this costs nothing and closes the vector outright. It
 is the first thing to reach for and the most commonly overlooked.
 
@@ -302,15 +302,15 @@ The instinct is to move agent-developed repositories somewhere with only
 hardened runners. For a public project that means breaking its name, its
 links and its ownership, which nobody should be asked to do.
 
-Invert it. A runner can belong to an **owner** — a user as well as an
-organization — and then serves that owner's repositories; Gitea's runner model
+Invert it. A runner can belong to an **owner** (a user as well as an
+organization) and then serves that owner's repositories; Gitea's runner model
 names the three cases: global (`OwnerID` and `RepoID` both zero), org/user
 level (`OwnerID` set), repository level (`RepoID` set). So:
 
 - Make the *hardened* runner the owner-level default, so every repository gets
   it.
-- Register the *permissive* runner — the one with the Docker socket, or with
-  unrestricted egress — at **repository** scope, for only the repositories
+- Register the *permissive* runner (the one with the Docker socket, or with
+  unrestricted egress) at **repository** scope, for only the repositories
   that genuinely need it.
 
 Most repositories need a runner that can run tests, not one that can build
@@ -321,7 +321,7 @@ handful of registrations, and nothing moves or is renamed.
 `[core] workflow = local-only`. The session commits locally and stops; you
 review the diff and push it yourself. No branch, no workflow, no runner, and
 the vector is closed completely rather than bounded. The cost is one push
-after the review you were going to do anyway — and it is the only option here
+after the review you were going to do anyway, and it is the only option here
 that does not depend on getting a forge's configuration right.
 
 If none of the three is available for a given project, that is worth knowing
@@ -330,9 +330,9 @@ can run code on whatever that repository can reach.
 
 ## Egress
 
-The goal is that a job cannot reach somewhere new — cannot fetch a next stage,
-cannot post a repository to a paste service, cannot probe an internal address
-— without a human having agreed to that destination first.
+The goal is that a job cannot reach somewhere new (cannot fetch a next stage,
+cannot post a repository to a paste service, cannot probe an internal address)
+without a human having agreed to that destination first.
 
 ### Four network positions, only one of which is the job
 
@@ -348,7 +348,7 @@ protects nothing:
 
 **Filtering only `DOCKER-USER` leaves the DNS allowlist decorative.** Traffic
 to a resolver on the bridge gateway is addressed to the host, so it is an
-`INPUT` packet and never passes through `DOCKER-USER` at all — and a job that
+`INPUT` packet and never passes through `DOCKER-USER` at all, and a job that
 can reach any resolver it likes can resolve anything it likes. `INPUT` needs
 its own pair of rules: accept port 53 from the bridge, drop the rest.
 
@@ -376,7 +376,7 @@ layer out: allowlist the *names* and let the answers populate the set of
 allowed *addresses*.
 
 `dnsmasq` binds the bridge gateway. With `no-resolv` and one `server=` line
-per allowed name, every other name gets `REFUSED` — not resolved-then-blocked,
+per allowed name, every other name gets `REFUSED`, not resolved-then-blocked,
 refused, which closes off encoding data into query names to a domain you never
 allowed. `ipset=/#/ci-allow` adds every answer it serves to the firewall's
 set, so a destination that rotates its edge addresses stays reachable without
@@ -390,7 +390,7 @@ own and no route to it. Then two chains filter: `DOCKER-USER` for everything
 the job forwards off the bridge, and `INPUT` for the resolver itself, because
 the gateway address belongs to the host.
 
-Block IPv6 outright unless you have built the same allowlist for it — an
+Block IPv6 outright unless you have built the same allowlist for it: an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
@@ -402,7 +402,7 @@ the one with the ordering constraints and the substitution notes attached.
 ## The allowlist comes from `main`, not from the checkout
 
 A dejima project already carries a version-controlled statement of where it is
-allowed to reach: `.dejima/allowed-domains`. Use it — read from
+allowed to reach: `.dejima/allowed-domains`. Use it: read from
 **`origin/main`**, over the forge's API, by the runner host.
 
 Never from the checkout. The checkout is the branch's, and a branch that can
@@ -422,7 +422,7 @@ has to get that destination past you in a pull request first.
 
 Refresh on a timer, render the `server=` lines, reload `dnsmasq`. Fail closed:
 a fetch that errors should leave the previous allowlist in place, never fall
-back to allowing everything — an allowlist builder is exactly the kind of
+back to allowing everything: an allowlist builder is exactly the kind of
 script whose failure mode is easy to get backwards, because the broken version
 looks like a working one right up until it matters.
 dejima-ci-hardener's `dejima-ci-allowlist` is that, including the distinction
@@ -453,7 +453,7 @@ later you can set the repository's default to restricted mode (Repository →
 Settings → Actions → General): read-only on `code`, `releases` and
 `packages`, nothing else. The property that makes it worth having is that
 workflow-level `permissions:` is *clamped* by that maximum, so a branch
-raising its own cannot exceed it — it is one of the very few controls here
+raising its own cannot exceed it: it is one of the very few controls here
 that the branch genuinely cannot touch.
 
 Before 1.27, `permissions:` is ignored and the token is permissive. There is
@@ -463,7 +463,7 @@ upgrade.
 
 **Secrets.** A secret exposed to a pull-request-triggered run is a secret
 exposed to whatever that branch contains. Give a run only what it needs, and
-prefer credentials that cannot do anything else — a token that raises an
+prefer credentials that cannot do anything else: a token that raises an
 anonymous API rate limit should be a fine-grained token with no permissions
 and no repository access, not a general-purpose one.
 
@@ -474,7 +474,7 @@ earning its place.
 
 ## CI you do not administer
 
-On hosted CI — GitHub Actions, a shared pool, someone else's infrastructure —
+On hosted CI (GitHub Actions, a shared pool, someone else's infrastructure),
 **there is no reliable pre-execution gate for a same-repository branch**, and
 the egress section above is unavailable to you: every candidate gate lives in
 a file the branch can edit, and the network the job runs on is not yours to
@@ -485,8 +485,8 @@ What still applies:
 
 - **A hosted runner gives you the runner-host section for free.** It is
   disposable and it is already off your network. The dangerous case is a
-  *self-hosted shared pool*, where a job can land on a machine nobody hardened
-  — and where the socket-mounting default above is nobody's decision, just the
+  *self-hosted shared pool*, where a job can land on a machine nobody hardened,
+  and where the socket-mounting default above is nobody's decision, just the
   default.
 - **The credentials section applies everywhere.** `permissions: contents:
   read` where it is honoured, no secrets on pull-request runs, and no tunnel
@@ -501,7 +501,7 @@ What still applies:
 Gitea 1.27's **scoped workflows** are worth knowing about here: a workflow
 maintained in a central repository the sandbox cannot push to, registerable
 instance-wide, so the workflow file itself sits outside any agent branch's
-reach. Use it — but it is not a gate. Scoped workflows run *alongside* a
+reach. Use it, but it is not a gate. Scoped workflows run *alongside* a
 consuming repository's own workflows rather than replacing them, so a branch
 can still add a workflow of its own.
 
@@ -515,7 +515,7 @@ can still add a workflow of its own.
   not from what it currently runs. Disabling the Actions unit is what makes
   "this project has no CI" into a property rather than a coincidence.
 - **An allowed destination is still an exfiltration channel** through its own
-  request surface — a query string, a lookup, an issue body. Domain
+  request surface: a query string, a lookup, an issue body. Domain
   allowlisting closes off reaching somewhere *new*; it cannot inspect what is
   sent somewhere already trusted. That is a structural property of
   allowlist-only filtering, and it is the same caveat

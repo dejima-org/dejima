@@ -19,7 +19,7 @@ whatever host that CI runs on.** No operator action is needed anywhere in the
 chain: the push guard permits a feature branch, the briefing tells the agent
 to open a pull request without asking, `on: pull_request` fires, and the
 runner checks out that commit and executes it. The you-merge-not-the-agent
-gate sits strictly downstream — by the time anyone reads the diff, it has
+gate sits strictly downstream: by the time anyone reads the diff, it has
 already run.
 
 Nor does the code have to be a modified workflow file. A workflow that runs a
@@ -34,14 +34,14 @@ and **whatever credentials the run is handed**, including the token the forge
 injects into every job whether the workflow asks for one or not.
 
 There is deliberately no approval gate offered for this. Every version of one
-— changing the trigger, dispatching by hand, leaving the runner stopped, the
-forge's own fork-PR approvals, filtering egress from inside the workflow — is
+(changing the trigger, dispatching by hand, leaving the runner stopped, the
+forge's own fork-PR approvals, filtering egress from inside the workflow) is
 reachable from the branch, covered by a credential the session already holds,
 or not a gate at all. The mitigations are environmental instead: a runner host
 you are willing to lose, job containers with no Docker socket, deny-by-default
 egress whose allowlist is read from `main` rather than from the branch, and no
 secret a run does not need. And where none of that is available, declining the
-push grant declines the code execution with it — `[core] forge = none` with
+push grant declines the code execution with it: `[core] forge = none` with
 `[core] workflow = local-only`.
 
 This applies to any project developed in a dejima sandbox, not only to this
@@ -52,7 +52,7 @@ repository. **→ [docs/ci.md](ci.md)** for the reasoning and the setup.
 By default a session authenticates with your credentials: your SSH key through
 the forwarded agent, and a token generated under your account. A push, a pull
 request, a comment or a merge made from inside the sandbox is therefore
-**indistinguishable at the forge from one you made yourself** — not similar to
+**indistinguishable at the forge from one you made yourself**, not similar to
 it, identical.
 
 The consequence is worth stating flatly, because it is easy to configure
@@ -66,7 +66,7 @@ Three specific consequences:
 
 - **Required approvals are not merely weak here, they are unusable.** A forge
   will not let a pull request's author approve it, and the sandbox opens pull
-  requests as you — so requiring one approval means nobody can give it.
+  requests as you, so requiring one approval means nobody can give it.
 - **The forge's audit trail cannot attribute.** "You pushed this" and "a
   session pushed this" are the same recorded event. This is the same shape as
   the exit-time audit's time-window caveat above: a record of what happened,
@@ -81,9 +81,9 @@ This is configuration, not a missing feature. Create a dedicated forge account
 with **write** access to the repositories a session should work on, and point
 the sandbox at it instead of at you:
 
-- `[forge.gitea] token_file` — that account's token, rather than one issued
+- `[forge.gitea] token_file`: that account's token, rather than one issued
   under yours.
-- `[core] ssh_key` — a deploy key belonging to it, rather than your forwarded
+- `[core] ssh_key`: a deploy key belonging to it, rather than your forwarded
   agent. See "Headless git push without agent forwarding" in
   [docs/configuration.md](configuration.md).
 
@@ -93,7 +93,7 @@ With the two identities separated, the same settings stop being decorative:
 | --- | --- |
 | Merge whitelist: you | The session genuinely cannot merge |
 | Push whitelist on `main`: you, or nobody | The session pushes feature branches and nothing else |
-| Require approvals ≥ 1 | Usable — the session authors, you approve |
+| Require approvals ≥ 1 | Usable: the session authors, you approve |
 
 That last row is the one that turns "the operator merges, the agent does not"
 from a convention into something the forge enforces.
@@ -133,7 +133,7 @@ Two things a separate identity does **not** do:
   or to the mounted project. It changes what that session can do *to your
   forge*, and who the forge thinks did it.
 - It does not touch CI. A write-capable account can still push a feature
-  branch, and pushing a branch is what makes CI execute code — see the
+  branch, and pushing a branch is what makes CI execute code; see the
   section above. It also has no bearing on the token the forge injects into a
   CI job, which is a third principal again, subject to none of the settings in
   that table. **→ [docs/ci.md](ci.md)**
@@ -632,7 +632,7 @@ hands to whichever session starts against it. See
   SSH-agent/token story documented above. Keep credentials out of your
   global gitconfig, or expect them to be reachable from inside the
   sandbox.
-- The sandbox's own user (matching your host user — see "Config parity" in
+- The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
   that user via `gosu` before execing the configured command (`[core] command`,
@@ -652,8 +652,8 @@ hands to whichever session starts against it. See
   `bin/dejima-project-lib.sh`), never sourced or executed, and are
   written only by the CLIs (`dejima-allow`, `dejima-dep`,
   `dejima-project`) a human runs on the host. `dejima`
-  warns at launch whenever the resolved store path — default or overridden
-  via `DEJIMA_CONFIG_DIR` — lands under the mounted workspace,
+  warns at launch whenever the resolved store path (default or overridden
+  via `DEJIMA_CONFIG_DIR`) lands under the mounted workspace,
   rather than silently trusting it.
 - When the mounted workspace *is* this repo itself, `dejima`
   warns at launch that the repo's own trusted computing base - `bin/`,
@@ -683,21 +683,21 @@ default:
 
   That is the whole built-in list, and it is meant to stay that way: it covers
   what the sandbox itself cannot run without, not what a project might want.
-  Language package hosts are approved rather than assumed — `pypi.org`,
+  Language package hosts are approved rather than assumed: `pypi.org`,
   `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
   or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
   built-in list short is that everything on it is reachable from every sandbox
   on the host whether or not a project has any use for it, and a name granted
   by being built in is a name nobody ever reviewed
 - whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
-  by default) — not port-restricted, so git-over-ssh to the forge works
+  by default): not port-restricted, so git-over-ssh to the forge works
   without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
   protection because a self-hosted forge host legitimately resolves to an
   internal address. `[core] forge = github` is deliberately *not* added here:
   its three hostnames are public names already covered by the GitHub entry
-  above, so they stay on that entry — 443 by default, plus port 22 when the
+  above, so they stay on that entry: 443 by default, plus port 22 when the
   selected workflow pushes, exactly as `--allow-github-push` opens it per
-  launch — rather than picking up all-port egress and losing rebind
+  launch, rather than picking up all-port egress and losing rebind
   protection on the way
 
 Everything else is rejected. Run `dejima-allow --global <domain>`
@@ -706,12 +706,12 @@ Everything else is rejected. Run `dejima-allow --global <domain>`
 firewall entirely for one launch (debugging only).
 
 IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
-strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
+strips AAAA answers): there's no IPv6 equivalent of the allowlist above, so
 leaving it open would bypass the whole firewall on any host with IPv6
 egress.
 
 If your Gitea host only resolves via a LAN-local DNS server, make sure the
-Docker host itself can resolve it — containers inherit the host's resolver.
+Docker host itself can resolve it: containers inherit the host's resolver.
 
 ### DNS is allowlisted too
 
@@ -719,7 +719,7 @@ Resolution itself is restricted, not just the IP connections made
 afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
 and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
 above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
-since GitHub itself is allowlisted by IP range — see `fixed-domains.sh`) get
+since GitHub itself is allowlisted by IP range; see `fixed-domains.sh`) get
 forwarded to Docker's real resolver; anything else gets no upstream
 configured at all and is refused outright. Without this, a compromised
 session could exfiltrate data by encoding it into query names to an
@@ -729,7 +729,7 @@ attacker-controlled domain, even with no direct connection ever possible.
 
 Approved domains only take effect at container start. For a domain a
 *running* session needs right now, run from the host (not inside the
-sandbox — it has no privilege to do this itself):
+sandbox: it has no privilege to do this itself):
 
 ```sh
 dejima-allow crates.io                    # this running session only
@@ -741,8 +741,8 @@ It first adds the domain to the running dnsmasq's allowlist (appends a
 file - no restart), then resolves it through the now-unblocked container
 resolver and adds the IP(s) to the running firewall's `ipset`, all via
 `docker exec -u root`. It finishes by checking the domain is actually
-reachable from inside that same container and prints a definitive verdict
-— exit code 2 if it isn't.
+reachable from inside that same container and prints a definitive verdict:
+exit code 2 if it isn't.
 
 `--global` and `--project` are the opposite of this: they record an approval
 for *future* sessions and deliberately do not touch a running container, even
@@ -860,18 +860,18 @@ changing that selection. It adds a destination; it does not stand in for a
 forge, so the launch-time rules for the selected forge/workflow pair still
 apply exactly as they would without it. If you
 want GitHub push and PRs as a standing choice instead, set
-`[core] forge = github` — see "GitHub forge (opt-in alternative)" in the
+`[core] forge = github`; see "GitHub forge (opt-in alternative)" in the
 README; it
 also opens `ssh.github.com:22`, but persistently rather than per launch, and
 uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
 
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
-**default** it can never push there — enforced at the network layer, not
+**default** it can never push there; enforced at the network layer, not
 just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
 443. Port 22 is unreachable, so SSH-based push has no transport at all,
 regardless of what any hook does or doesn't catch.
 
-**Opt-in, not hardcoded** — pass `--allow-github-push` to open port 22 to
+**Opt-in, not hardcoded**: pass `--allow-github-push` to open port 22 to
 GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
 push destination (the no-direct-to-main rule still applies):
 
@@ -882,13 +882,13 @@ dejima --allow-github-push ~/repos/some-project
 **Read this before turning it on.** Whether a push actually succeeds depends
 entirely on what SSH key is loaded into the agent. A forwarded personal
 agent with your normal GitHub key would let a compromised session push to
-**any** repo that key can write to, not just the one you intended — agent
+**any** repo that key can write to, not just the one you intended: agent
 forwarding doesn't distinguish push from pull. Use a dedicated,
 **repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
-`--allow-github-push` is set — that's what actually limits the blast radius.
+`--allow-github-push` is set: that's what actually limits the blast radius.
 `--allow-github-push` only changes the firewall/hook's *host* check; it adds
 no credential-loading path of its own. The flag itself has no config-file
-equivalent — an exported or saved value must not silently grant a push path,
+equivalent: an exported or saved value must not silently grant a push path,
 so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
 github` (see "GitHub forge (opt-in alternative)" in the README) is a
 config-file path that opens the same port, but not
@@ -901,6 +901,6 @@ the firewall's own startup self-check.
 `[github] token_file` must point at a **read-only** fine-grained PAT
 regardless of this setting. `gh auth setup-git` (run at container start if
 that file exists) points git's github.com HTTPS credential helper at `gh`,
-which only ever holds whatever token that file provides — a write-scoped
+which only ever holds whatever token that file provides: a write-scoped
 token there would make HTTPS push possible independent of
 `--allow-github-push`, so don't use one.

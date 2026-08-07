@@ -7,8 +7,8 @@ occasionally do something you would not have allowed. dejima is for making
 the first worth having and the second survivable, without handing over your
 machine, your network, your credentials, or the last word on what ships.
 
-Runs a coding agent — Claude Code by default, or whatever command you point
-it at — inside a firewalled Docker container with
+Runs a coding agent (Claude Code by default, or whatever command you point
+it at) inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
 auto-accepted), against a project bind-mounted from the host. The agent gets
 to work without stopping to ask; the container is what makes that a
@@ -19,7 +19,7 @@ Around that core is most of what running an agent unattended actually takes:
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
   list does not connect, and the agent is told so rather than left to guess.
 - **Credentials that stay on the host.** Your Anthropic OAuth credential
-  never enters the container — a host-side proxy holds it and the container
+  never enters the container: a host-side proxy holds it and the container
   gets a placeholder. Your SSH key doesn't either; the container sees an
   agent socket, never the key.
 - **Per-project declaration and approval.** A project declares the domains
@@ -37,15 +37,15 @@ Around that core is most of what running an agent unattended actually takes:
   work on the runner: [docs/ci.md](docs/ci.md) for what it takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
   for a tool that does it.
-- **Logging.** Every DNS lookup and rejected connection, shipped to Loki —
-  and, opt-in, the session transcript alongside them.
+- **Logging.** Every DNS lookup and rejected connection is shipped to Loki,
+  along with the session transcript if you opt in.
 - **Remote access, opt-in and off by default.** Attach to a live session
   from a terminal or a browser, with a push notification when it wants you.
 - **Guard rails inside the session.** Hooks refuse obviously destructive
   commands, pushes to anywhere but the allowed remote, and merging a PR from
   inside the sandbox. These are
   fast-fail guards against an overeager agent, not a boundary against a
-  hostile one — the container is the boundary.
+  hostile one: the container is the boundary.
 - **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins
   and git identity carry over; uid, home directory and project path match on
   both sides, so a session's transcript is readable from the host afterward.
@@ -57,7 +57,7 @@ Originally inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
 reworked to run via `docker compose` directly and grown well past it since.
 
-This repo only holds the tooling — it's not where any project lives. Point
+This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
 
@@ -173,19 +173,19 @@ behind each of these, and the fork-and-review workflow in full.
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
-- `python3` (stdlib only — no packages) — runs the host-side credential proxy
+- `python3` (stdlib only, no packages): runs the host-side credential proxy
   (see [security notes](docs/security.md)).
-- A git push credential — **at least one** is required:
+- A git push credential (**at least one** is required):
   - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
     container only ever sees a forwarded agent socket, never your private
-    key — but it dies with your client connection, so it's fine for
+    key, but it dies with your client connection, so it's fine for
     interactive use, not for unattended/headless sessions.
-  - `[core] ssh_key` — a dedicated deploy key for headless/unattended use,
+  - `[core] ssh_key`: a dedicated deploy key for headless/unattended use,
     independent of any forwarded agent. See "Headless git push without
     agent forwarding" in [docs/configuration.md](docs/configuration.md).
 
 Everything else is optional, depending on which workflow(s) you want. All of
-it lives in one file, `~/.config/dejima/config` — `./install.sh` writes a
+it lives in one file, `~/.config/dejima/config`; `./install.sh` writes a
 starter copy with every key present, commented out at its default; uncomment
 and edit whichever ones you need. Run `dejima --print-config` at any time to
 see the whole resolved schema, real values included.
@@ -193,49 +193,49 @@ see the whole resolved schema, real values included.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `[core] harness` | `claude-code` | agent harness the container runs |
-| `[core] forge` | `none` | forge integration — `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
-| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow — `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
-| `[core] command` | `claude` | container's main process (e.g. `nvim`) — also settable per launch with `--cmd` |
-| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only) — also settable per launch with `--no-firewall` |
+| `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
+| `[core] command` | `claude` | container's main process (e.g. `nvim`); also settable per launch with `--cmd` |
+| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only); also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname — skip if you only push to GitHub |
-| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1` — skip if you only push to GitHub |
+| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
+| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
-| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github` — deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`; deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
 | `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
+| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
-| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
+| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`) — see "Conversation logging (opt-in)" in docs/security.md |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md |
 | `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
 | `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
 | `[audit] keep` | `10` | how many past findings/baselines to retain |
 | `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
-| `[remote-access] enabled` | `off` | the switch — nothing in "Remote access" below runs until this is `on` |
+| `[remote-access] enabled` | `off` | the switch: nothing in "Remote access" below runs until this is `on` |
 | `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
 | `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
 | `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
-**No forge is the default** — `[core] forge = none` with
-`[core] workflow = local-only`: the sandbox commits locally and pushes
+**No forge is the default** (`[core] forge = none` with
+`[core] workflow = local-only`): the sandbox commits locally and pushes
 nowhere. A fresh install has no forge credentials, so defaulting to a pushing
-pair would be claiming a setup that isn't there — and a pushing workflow whose
+pair would be claiming a setup that isn't there, and a pushing workflow whose
 forge resolves to no host is refused at launch, which would make an
 out-of-the-box `dejima` refuse to start. Pushing is something you opt into.
 
 > **Changed default (was `gitea` + `worktree-pr`).** If your
 > `~/.config/dejima/config` has no explicit `[core] forge` / `[core] workflow`
 > lines, it used to resolve to `gitea` + `worktree-pr` and now resolves to
-> `none` + `local-only` — your sandbox will stop pushing and stop opening PRs.
+> `none` + `local-only`: your sandbox will stop pushing and stop opening PRs.
 > To keep the old behaviour, write both lines out under `[core]`:
 > `forge = gitea` and `workflow = worktree-pr` (and fill in `[forge.gitea]`,
 > which that pair has always required). `./install.sh` prints this notice
@@ -260,12 +260,12 @@ forge/workflow and what each is for.
 ## Provider axes: forge, workflow, harness
 
 The forge integration, the push/PR workflow, and the agent harness aren't
-hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
+hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
 `[core] harness`. Ships today: `forges/gitea`, `forges/github`, `forges/none`,
 `workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only`,
 `harnesses/claude-code`. The defaults are `forges/none` and
-`workflows/local-only` — a fresh install commits locally and pushes nowhere.
+`workflows/local-only`: a fresh install commits locally and pushes nowhere.
 
 See [docs/providers.md](docs/providers.md) for the manifest contract, key by
 key, and the shipped providers as worked examples.
@@ -282,12 +282,12 @@ sandbox escape if you get it wrong.
 
 ### Core (required)
 
-1. `./install.sh` — symlinks the CLIs into `~/.local/bin` and the hooks into
+1. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
    `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
    exists yet. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
 2. Put `~/.local/bin` on your `PATH` if it isn't already.
-3. Give it a git push credential — `ssh-add` your key for interactive use,
+3. Give it a git push credential: `ssh-add` your key for interactive use,
    or set `[core] ssh_key` in the config to a dedicated deploy key for
    unattended runs.
    → [Prerequisites](#prerequisites),
@@ -298,7 +298,7 @@ every key commented out at its default, which means `[core] forge = none` and
 `[core] workflow = local-only`: the agent works in the sandbox and commits
 locally, and nothing is pushed anywhere. To have it push, pick a forge,
 Gitea/Forgejo below or GitHub in the table below, and set `[core] workflow`
-to `worktree-pr` or `branch-push` — a pushing workflow is refused at launch unless its forge
+to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch unless its forge
 resolves to somewhere to push to, so the forge is not optional once you
 choose one of them.
 
@@ -309,8 +309,8 @@ the table below.
 
 1. Set `[forge.gitea] ssh_host` (the SSH hostname) and `[forge.gitea] api`
    (`https://<gitea host>/api/v1`) in `~/.config/dejima/config`.
-2. Generate a token — Settings → Applications, scopes `write:repository` and
-   `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
+2. Generate a token (Settings → Applications, scopes `write:repository` and
+   `write:issue`) and save it to `~/.config/gitea/token`, `chmod 600`.
    → [Prerequisites](#prerequisites)
 
 ### Optional, once the above works
@@ -326,7 +326,7 @@ the table below.
 
 ## Usage
 
-Run `./install.sh` first — it symlinks the CLIs into `~/.local/bin` and the
+Run `./install.sh` first; it symlinks the CLIs into `~/.local/bin` and the
 hooks into `~/.claude/hooks`, and everything below assumes those are on your
 `PATH`. See [Setup](#setup) for the rest of the first-run steps.
 
@@ -336,12 +336,12 @@ dejima ~/repos/some-project
 ```
 
 By default the container's entry point is bare `claude` (always running with
-`--dangerously-skip-permissions`, regardless of how it's invoked — see
+`--dangerously-skip-permissions`, regardless of how it's invoked; see
 `docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
 Typical loop: point it at a project, ask for a change, and let the session
-work. It commits to a feature branch, pushes it, and opens a pull request —
+work. It commits to a feature branch, pushes it, and opens a pull request;
 then it stops. You review and merge that PR yourself, wherever you normally
 read them. Merging is the one step the sandbox is not allowed to take, and
 `merge-guard.sh` blocks it from the inside.
@@ -350,7 +350,7 @@ That boundary is the shape of the loop rather than a limit on it: every
 session ends at something you read before it lands, and nothing reaches your
 default branch without you.
 
-How far the session goes is the `[core] workflow` setting — `worktree-pr`
+How far the session goes is the `[core] workflow` setting: `worktree-pr`
 pushes and opens the PR described above, `branch-push` stops at the push, and
 `local-only` commits and pushes nowhere. See
 [Provider axes](#provider-axes-forge-workflow-harness).
@@ -576,6 +576,6 @@ covers, and how to run them.
 ## License
 
 This project is licensed under the GNU General Public License v3.0 or later
-(GPL-3.0-or-later) — see [LICENSE](LICENSE) for the full text.
+(GPL-3.0-or-later); see [LICENSE](LICENSE) for the full text.
 
 Copyright (C) 2026 Brad Anderson
