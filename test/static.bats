@@ -857,7 +857,20 @@ cat >/dev/null
 if [ -n "$payload" ]; then
     echo '{"html_url": "https://forge.invalid/x/y/pulls/1"}'
 else
-    echo '[]'
+    # Reads answer `[]` unless the URL is one a test needs shaped data from.
+    # `comments` walks reviews and then each review's own comments, so an
+    # empty list at the first hop means the second never runs and the
+    # rendering under test is never reached.
+    url=""
+    for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+    case "$url" in
+        */reviews/*/comments)
+            echo '[{"user":{"login":"reviewer"},"path":"docs/thing.md","position":118,"diff_hunk":"@@ -105,0 +115,2 @@\n+a line the reviewer is looking at","body":"this bit is confusing"}]' ;;
+        */reviews)
+            echo '[{"id":32,"user":{"login":"reviewer"},"submitted_at":"2026-01-01T00:00:00Z","state":"COMMENTED","body":"","comments_count":1}]' ;;
+        *)
+            echo '[]' ;;
+    esac
 fi
 echo 200
 STUB
@@ -881,6 +894,26 @@ STUB
 
 # What was in the -d of the last gitea_cli call.
 cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
+
+@test "an inline review comment arrives with the diff it was left against" {
+    # Gitea's review-comment objects have no `line` field, so the old
+    # `\(.line // "?")` rendered every comment as `path:?`. A reviewer who
+    # writes "this is confusing" about a passage is pointing at something they
+    # can see and the reader cannot, and the reader then has to guess which
+    # passage. `diff_hunk` is what removes the guess.
+    run gitea_cli gitea-pr comments 1
+    [ "$status" -eq 0 ]
+
+    # The hunk itself, not merely the file it came from.
+    [[ "$output" == *"a line the reviewer is looking at"* ]]
+    [[ "$output" == *"@@ -105,0 +115,2 @@"* ]]
+    # Attributed and located, with the diff offset rather than a bare `?`.
+    [[ "$output" == *"[reviewer @ docs/thing.md @@118]"* ]]
+    [[ "$output" != *":?]"* ]]
+    # And the comment, distinguishable from the quoted code above it.
+    [[ "$output" == *"--- comment ---"* ]]
+    [[ "$output" == *"this bit is confusing"* ]]
+}
 
 @test "an edit sends only the fields it was given, so a title edit cannot blank a body" {
     # The half of #79 that was silent: an agent that said it had updated a

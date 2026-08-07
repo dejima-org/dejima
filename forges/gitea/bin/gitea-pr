@@ -259,7 +259,15 @@ $body" '. + {body: $b}')
         for review_id in $review_ids; do
             api_or_die "fetch comments for review ${review_id}" \
                 "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews/${review_id}/comments"
-            echo "$json" | jq -r '.[] | "[\(.user.login) @ \(.path):\(.line // "?")]\n\(.body)\n"'
+            # The hunk, not just the path. Gitea's review-comment objects carry
+            # no `line` field at all - the old `.line // "?"` could only ever
+            # print `?` - but they do carry `diff_hunk`, which is the exact
+            # text the comment was left against. Without it a reviewer's
+            # "this is confusing" arrives with nothing to attach it to, and
+            # whoever acts on the review has to guess which passage was meant.
+            # `position` is the index into the diff rather than a file line, so
+            # it is printed as a diff offset and not as something to jump to.
+            echo "$json" | jq -r '.[] | "[\(.user.login) @ \(.path) @@\(.position // "?")]\n\(.diff_hunk // "(no hunk recorded)")\n--- comment ---\n\(.body)\n"'
         done
         ;;
     merge)
