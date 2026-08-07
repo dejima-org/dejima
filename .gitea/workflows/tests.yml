@@ -8,9 +8,10 @@
 # and boots real containers, so it needs a Docker daemon the sandbox
 # deliberately does not have. That constraint is what a contributor has to
 # reason about when deciding what they can run before pushing, so the jobs are
-# named for it.
+# named for the runner tier they need: `confined` for the ones a shell can
+# run anywhere, `privileged` for the one that needs a daemon.
 #
-# The sandbox half is a matrix over its files rather than one invocation. The
+# The confined half is a matrix over its files rather than one invocation. The
 # files are independent, so running them together only serialised them: wall
 # clock was their sum rather than the slowest one. It also means a failure
 # names the suite that failed in the job list, instead of one red check
@@ -54,7 +55,7 @@ on:
 # supersede, and cancel the stale run by hand if it is in the way.
 
 jobs:
-  sandbox:
+  confined:
     # A label carried only by a runner configured for this - see ci/ and
     # docs/ci.md. Not a generic one, even though these suites genuinely do run
     # anywhere a shell does, because "runs anywhere" is a statement about what
@@ -69,7 +70,7 @@ jobs:
     # If no runner carries this label, these jobs queue. That is the intended
     # failure: it is a better one than a green run on a host that grants
     # everything.
-    runs-on: dejima-ci
+    runs-on: dejima-confined
     strategy:
       # One suite per job. fail-fast off because these cover unrelated areas -
       # cancelling the other six on the first failure would hide whether a
@@ -85,7 +86,7 @@ jobs:
           - proxy
           - config
           - providers
-    name: sandbox (${{ matrix.suite }})
+    name: confined (${{ matrix.suite }})
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
       # needs to run at all, and apt-get is what everything below needs.
@@ -165,7 +166,7 @@ jobs:
           chown -R node:node .
           su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
 
-  host-docker:
+  privileged:
     # A different label from the job above, and the only one in this file that
     # asks for anything privileged. This job needs the host network namespace,
     # the Docker socket and the shared volume below, none of which a workflow
@@ -180,7 +181,7 @@ jobs:
     # The runner behind this label can be taken by anything it runs (see
     # ci/act-runner-runtime.example.yaml), so it belongs on a host that exists
     # for that and holds nothing else.
-    runs-on: dejima-runtime
+    runs-on: dejima-privileged
     container:
       image: node:20-bookworm
       # One volume, and it is load-bearing - see TMPDIR on the bats step for
@@ -447,9 +448,9 @@ jobs:
   # These fail on how the RUNNER is configured, not on anything in a pull
   # request. A red check here means the machine needs attention; it does not
   # mean the branch does.
-  runner-env-sandbox:
-    runs-on: dejima-ci
-    name: runner-env (sandbox)
+  runner-env-confined:
+    runs-on: dejima-confined
+    name: runner-env (confined)
     container:
       image: node:20-bookworm
     steps:
@@ -516,11 +517,11 @@ jobs:
         env:
           # Declared, not detected: landing on the wrong runner should fail
           # rather than quietly select a different set of assertions.
-          DEJIMA_CI_TIER: sandbox
+          DEJIMA_CI_TIER: confined
 
-  runner-env-host-docker:
-    runs-on: dejima-runtime
-    name: runner-env (host-docker)
+  runner-env-privileged:
+    runs-on: dejima-privileged
+    name: runner-env (privileged)
     container:
       image: node:20-bookworm
     steps:
@@ -581,4 +582,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: bats test/ci-runner.bats
         env:
-          DEJIMA_CI_TIER: host-docker
+          DEJIMA_CI_TIER: privileged

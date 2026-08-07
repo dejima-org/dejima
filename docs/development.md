@@ -106,7 +106,7 @@ likely to collide with a real container you have running.
 
 `ci-runner.bats` is different in kind from the others: it doesn't test
 this repository at all, it asserts on the CI runner executing it (the Docker
-socket withheld from the sandbox job, granted to the host-docker job, and
+socket withheld from the confined job, granted to the privileged job, and
 the egress each is allowed) - see [docs/ci.md](ci.md). It skips outright
 unless `DEJIMA_CI_TIER` is set, so it has nothing to say when run locally.
 

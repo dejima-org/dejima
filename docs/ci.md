@@ -188,7 +188,7 @@ matters enough to state on its own.
 **`runs-on:` is in the workflow file, and the workflow file is in the branch.**
 A branch can name any label it likes. So a dedicated label keeps *honest* jobs
 on the runner you prepared; it does nothing against a branch that would rather
-run somewhere else. A session that changes `runs-on: dejima-ci` to
+run somewhere else. A session that changes `runs-on: dejima-confined` to
 `runs-on: ubuntu-latest`, pushes, and opens a pull request has stepped outside
 every control on this page (no allowlist, no socket restriction, no firewall),
 provided some runner answering `ubuntu-latest` will take the job.
