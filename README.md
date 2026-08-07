@@ -353,8 +353,10 @@ and the merge guard itself is per-workflow, inert unless that workflow turns
 it on. Branch protection on the remote is what actually stops a merge from
 happening without you.
 
-That boundary is the shape of the loop rather than a limit on it: every
-session ends at something you read before it lands.
+What holds regardless is the shape of the loop: it is arranged so that every
+session ends at something you read before it lands, a property of how the
+workflow is put together rather than something enforced against a hostile
+session.
 
 **→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
 the guards in full, and why they fail open.
