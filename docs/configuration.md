@@ -7,6 +7,66 @@ project declares versus what you approve, config parity with your host
 Claude Code setup, a different editor, writable host directories, shared
 scratch space, frontend testing, and what the sandbox knows about itself.
 
+## Configuration reference
+
+Every key dejima reads, its default, and what it is for. All of it lives in
+one file, `~/.config/dejima/config`. `./install.sh` writes a starter copy with
+every key present and commented out at its default, so nothing here has to be
+set to get a working sandbox: uncomment what you need. `dejima --print-config`
+prints the resolved schema with real values, which is the fastest way to see
+what a given launch will actually use.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `[core] harness` | `claude-code` | agent harness the container runs |
+| `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
+| `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
+| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
+| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
+| `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
+| `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
+| `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
+| `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
+| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
+| `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
+| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
+| `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
+| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
+| `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
+| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
+| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
+| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md |
+| `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
+| `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
+| `[audit] keep` | `10` | how many past findings/baselines to retain |
+| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
+| `[remote-access] enabled` | `off` | the switch: nothing in "Remote access" below runs until this is `on` |
+| `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
+| `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
+| `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
+| `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
+| `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
+
+**No forge is the default** (`[core] forge = none` with
+`[core] workflow = local-only`): the sandbox commits locally and pushes
+nowhere. A fresh install has no forge credentials, so defaulting to a pushing
+pair would be claiming a setup that isn't there, and a pushing workflow whose
+forge resolves to no host is refused at launch, which would make an
+out-of-the-box `dejima` refuse to start. Pushing is something you opt into.
+
+> **Changed default (was `gitea` + `worktree-pr`).** If your
+> `~/.config/dejima/config` has no explicit `[core] forge` / `[core] workflow`
+> lines, it used to resolve to `gitea` + `worktree-pr` and now resolves to
+> `none` + `local-only`: your sandbox will stop pushing and stop opening PRs.
+> To keep the old behaviour, write both lines out under `[core]`:
+> `forge = gitea` and `workflow = worktree-pr` (and fill in `[forge.gitea]`,
+> which that pair has always required). `./install.sh` prints this notice
+> when it finds a config in that state.
+
 ## Global and per-project domains and dependencies
 
 Allowed domains and dependencies each stack through their own layers, least
