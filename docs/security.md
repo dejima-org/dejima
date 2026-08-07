@@ -220,8 +220,9 @@ hands to whichever session starts against it. See
   or hook file is something to read and clean up *before* the next `git`
   or `claude` in that repo, not something that was blocked. It's silent when nothing
   changed, and never affects the session's own exit code even if it can't
-  complete. It doesn't cover `[core] share_dir` (see "Shared scratch
-  space") - that hand-off path stays unaudited - and its coverage is a
+  complete. It doesn't cover `[core] share_dir` (see
+  [Shared scratch space](configuration.md#shared-scratch-space)) - that
+  hand-off path stays unaudited - and its coverage is a
   fixed list of known Claude Code config surfaces, not a general integrity
   check, so a future config surface this list hasn't been taught about yet
   would go unreported. **Its diff is time-windowed, not session-attributed:**
@@ -609,8 +610,9 @@ hands to whichever session starts against it. See
   pushes (which opens the same grant), so the forwarded agent otherwise has
   no transport to use for it at all (see "GitHub push: blocked by default,
   optional opt-in" below).
-- `[core] ssh_key` (see "Headless git push without agent forwarding") is a
-  second, independent credential-loading path with the same "signs for any
+- `[core] ssh_key` (see [Headless git push without agent
+  forwarding](configuration.md#headless-git-push-without-agent-forwarding))
+  is a second, independent credential-loading path with the same "signs for any
   Gitea repo it has access to" shape as the forwarded agent above - the
   mitigation is that it's meant to be a dedicated deploy key scoped to only
   the repos that actually need push access, not your personal identity.
@@ -642,7 +644,9 @@ hands to whichever session starts against it. See
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
-  see "Global and per-project domains and dependencies" above) lives outside
+  see
+  [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)
+  in the README) lives outside
   this repo, and outside every project mount, by default - unlike a
   project's own `.dejima/` declaration files, it's never
   bind-mounted into the container, so a compromised
@@ -860,10 +864,10 @@ changing that selection. It adds a destination; it does not stand in for a
 forge, so the launch-time rules for the selected forge/workflow pair still
 apply exactly as they would without it. If you
 want GitHub push and PRs as a standing choice instead, set
-`[core] forge = github`; see "GitHub forge (opt-in alternative)" in the
-README; it
-also opens `ssh.github.com:22`, but persistently rather than per launch, and
-uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
+`[core] forge = github` (see
+[Shipped providers](providers.md#shipped-providers)): it also opens
+`ssh.github.com:22`, but persistently rather than per launch, and uses its
+own `[forge.github] push_token_file` rather than a loaded SSH key.
 
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
 **default** it can never push there: enforced at the network layer, not
