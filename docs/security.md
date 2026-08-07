@@ -884,12 +884,13 @@ sources → Loki, if one isn't already configured against that instance) -
 `log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
 scrape target or exporter involved.
 
-In Grafana's Explore view (or a dashboard panel with a Loki query), both
-streams are selectable by their `job` label:
+In Grafana's Explore view (or a dashboard panel with a Loki query), each
+stream is selectable by its `job` label:
 
 ```logql
 {job="dejima-dns"}                          # every DNS query + verdict
 {job="dejima-net"}                          # every connection attempt, as JSON
+{job="dejima-conversation"}                 # the session itself, if opted in
 ```
 
 Useful filters on top of those:
@@ -901,9 +902,40 @@ Useful filters on top of those:
 # Rejected connections only (parses ulogd2's JSON, filters on its action field)
 {job="dejima-net"} | json | action="blocked"
 
-# Both streams together, e.g. to watch a live session across sources
+# All three together, e.g. to watch a live session across sources
 {source="dejima"}
 ```
+
+The conversation stream, when `[logging] conversation` is on, is one JSON
+object per line carrying `session`, `role`, and either `text` or a `tool` name
+with its `input`:
+
+```logql
+# Just what you asked for, without the replies
+{job="dejima-conversation"} | json | role="user"
+
+# Every shell command a session ran, and with what arguments
+{job="dejima-conversation"} | json | tool="Bash"
+
+# One session end to end, id taken from a line you already found
+{job="dejima-conversation"} | json | session="0198e2c1-..."
+
+# Anything a session said about a subject, across every session
+{job="dejima-conversation"} |= "allowed-domains"
+```
+
+`session` is deliberately a field inside the line rather than a Loki label:
+one label per session would multiply the stream cardinality by the number of
+sessions you have ever run, which is how a Loki instance stops being usable.
+Filter on it with `| json | session=` as above rather than expecting a
+selector.
+
+Two things are absent by design and worth knowing before you go looking for
+them. **Tool results are never shipped**, only invocations, so a query will
+show you that a session ran `Bash` with certain arguments and never what came
+back. **Thinking blocks are never shipped either.** Both dominate the volume
+and neither was what opting in asked for. Long values are clipped, so a very
+large prompt or tool input ends in `...[truncated]` rather than being dropped.
 
 `{job="dejima-net"}` lines are one full ulogd2 JSON object per
 connection attempt (`| json` in a query unpacks fields like `dest_ip`,

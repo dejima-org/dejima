@@ -179,19 +179,6 @@ behind each of these, and the fork-and-review workflow in full.
 - Docker with the `docker compose` v2 plugin.
 - `python3` (stdlib only, no packages): runs the host-side credential proxy
   (see [security notes](docs/security.md)).
-- A git push credential (**at least one** is required):
-  - `[core] ssh_key`, a key of the session's own, belonging to an account
-    that is not you. This is the one to set up. It gives the sandbox an
-    identity separable from yours, so what it pushes is visibly its work and
-    the permissions you grant it are its permissions rather than all of
-    yours. It also works unattended, which a forwarded agent does not. See
-    [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding).
-  - `ssh-agent` with your own key added (`ssh-add -l` lists it), as the
-    fallback. The container sees a forwarded socket and never the private
-    key, and the socket dies with your client connection. But the session is
-    then authenticating **as you**: everything it pushes is yours, and it
-    holds whatever that key can reach for as long as it runs. See
-    [To your forge, the sandbox is you](docs/security.md#to-your-forge-the-sandbox-is-you).
 
 Everything else is optional. It all lives in one file,
 `~/.config/dejima/config`: `./install.sh` writes a starter copy with every key
@@ -232,20 +219,31 @@ sandbox escape if you get it wrong.
    exists yet. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
 2. Put `~/.local/bin` on your `PATH` if it isn't already.
-3. Give it a git push credential: `ssh-add` your key for interactive use,
-   or set `[core] ssh_key` in the config to a dedicated deploy key for
-   unattended runs.
-   → [Prerequisites](#prerequisites),
-   [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding)
-
-That is enough to run `dejima`. The starter config `install.sh` writes has
+That is enough to run `dejima`. No push credential is needed to get this far,
+because the default workflow does not push. The starter config `install.sh` writes has
 every key commented out at its default, which means `[core] forge = none` and
 `[core] workflow = local-only`: the agent works in the sandbox and commits
 locally, and nothing is pushed anywhere. To have it push, pick a forge,
 Gitea/Forgejo below or GitHub in the table below, and set `[core] workflow`
-to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch unless its forge
-resolves to somewhere to push to, so the forge is not optional once you
-choose one of them.
+to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch
+unless its forge resolves to somewhere to push to, so the forge is not
+optional once you choose one of them.
+
+A pushing workflow also needs a git push credential, and which one you give it
+is a decision worth making deliberately rather than by default:
+
+- **`[core] ssh_key`, a key of the session's own**, belonging to an account
+  that is not you. This is the one to set up. It gives the sandbox an
+  identity separable from yours, so what it pushes is visibly its work and
+  the permissions you grant it are its permissions rather than all of yours.
+  It also works unattended, which a forwarded agent does not.
+  → [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding)
+- **`ssh-agent` with your own key added** (`ssh-add -l` lists it), as the
+  fallback. The container sees a forwarded socket and never the private key,
+  and the socket dies with your client connection. But the session is then
+  authenticating **as you**: everything it pushes is yours, and it holds
+  whatever that key can reach for as long as it runs.
+  → [To your forge, the sandbox is you](docs/security.md#to-your-forge-the-sandbox-is-you)
 
 ### Gitea/Forgejo PR workflow
 
@@ -292,6 +290,10 @@ configured. The default, `local-only`, commits and pushes nowhere. Configure
 stops, and you review and merge it yourself wherever you normally read them.
 `branch-push` stops at the push. That choice is `[core] workflow`, one of the
 three axes: see [Provider axes](#provider-axes-forge-workflow-harness).
+
+dejima itself is developed under `worktree-pr`, so this repository is that
+workflow in use: its branches and pull requests were opened by sessions
+running in it, and merged by a human afterwards.
 
 On a pushing workflow, `merge-guard.sh` and `git-push-guard.sh` are fast-fail
 guards against an overeager agent, not a boundary against a hostile one. If

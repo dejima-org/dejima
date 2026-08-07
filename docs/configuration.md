@@ -167,9 +167,7 @@ write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
 The refusal is the `open` itself rather than a check before it, so it holds
 even against a session that is still running while you type the command. See
 [Declaration files are session-writable](security.md#declaration-files-are-session-writable)
-for what that defends against and how. Expect the
-session to be live: the agent briefing tells the agent to ask you to run
-`dejima-allow --project` from a terminal outside the sandbox. The same write
+for what that defends against and how. The same write
 reads the file back to skip an already-declared entry, and that read is
 capped - a session can make its own `.dejima/<kind>` arbitrarily large for
 free, and an oversized one is refused rather than loaded into your memory.
