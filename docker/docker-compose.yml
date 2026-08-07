@@ -82,7 +82,7 @@ services:
       # Opt-in (default off): also ship session prompts, assistant
       # responses, and tool invocations to Loki as the
       # dejima-conversation job. Content only leaves the container
-      # if LOKI_URL is also set. See README "Network request logging".
+      # if LOKI_URL is also set. See docs/security.md "Network request logging".
       SANDBOX_LOG_CONVERSATION: ${SANDBOX_LOG_CONVERSATION:-0}
       SSH_AUTH_SOCK: /ssh-agent
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-1}

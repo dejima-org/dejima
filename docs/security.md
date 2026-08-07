@@ -19,7 +19,7 @@ whatever host that CI runs on.** No operator action is needed anywhere in the
 chain: the push guard permits a feature branch, the briefing tells the agent
 to open a pull request without asking, `on: pull_request` fires, and the
 runner checks out that commit and executes it. The you-merge-not-the-agent
-gate sits strictly downstream — by the time anyone reads the diff, it has
+gate sits strictly downstream: by the time anyone reads the diff, it has
 already run.
 
 Nor does the code have to be a modified workflow file. A workflow that runs a
@@ -34,14 +34,14 @@ and **whatever credentials the run is handed**, including the token the forge
 injects into every job whether the workflow asks for one or not.
 
 There is deliberately no approval gate offered for this. Every version of one
-— changing the trigger, dispatching by hand, leaving the runner stopped, the
-forge's own fork-PR approvals, filtering egress from inside the workflow — is
+(changing the trigger, dispatching by hand, leaving the runner stopped, the
+forge's own fork-PR approvals, filtering egress from inside the workflow) is
 reachable from the branch, covered by a credential the session already holds,
 or not a gate at all. The mitigations are environmental instead: a runner host
 you are willing to lose, job containers with no Docker socket, deny-by-default
 egress whose allowlist is read from `main` rather than from the branch, and no
 secret a run does not need. And where none of that is available, declining the
-push grant declines the code execution with it — `[core] forge = none` with
+push grant declines the code execution with it: `[core] forge = none` with
 `[core] workflow = local-only`.
 
 This applies to any project developed in a dejima sandbox, not only to this
@@ -52,7 +52,7 @@ repository. **→ [docs/ci.md](ci.md)** for the reasoning and the setup.
 By default a session authenticates with your credentials: your SSH key through
 the forwarded agent, and a token generated under your account. A push, a pull
 request, a comment or a merge made from inside the sandbox is therefore
-**indistinguishable at the forge from one you made yourself** — not similar to
+**indistinguishable at the forge from one you made yourself**, not similar to
 it, identical.
 
 The consequence is worth stating flatly, because it is easy to configure
@@ -66,7 +66,7 @@ Three specific consequences:
 
 - **Required approvals are not merely weak here, they are unusable.** A forge
   will not let a pull request's author approve it, and the sandbox opens pull
-  requests as you — so requiring one approval means nobody can give it.
+  requests as you, so requiring one approval means nobody can give it.
 - **The forge's audit trail cannot attribute.** "You pushed this" and "a
   session pushed this" are the same recorded event. This is the same shape as
   the exit-time audit's time-window caveat above: a record of what happened,
@@ -81,10 +81,11 @@ This is configuration, not a missing feature. Create a dedicated forge account
 with **write** access to the repositories a session should work on, and point
 the sandbox at it instead of at you:
 
-- `[forge.gitea] token_file` — that account's token, rather than one issued
+- `[forge.gitea] token_file`: that account's token, rather than one issued
   under yours.
-- `[core] ssh_key` — a deploy key belonging to it, rather than your forwarded
-  agent. See "Headless git push without agent forwarding" in the README.
+- `[core] ssh_key`: a deploy key belonging to it, rather than your forwarded
+  agent. See "Headless git push without agent forwarding" in
+  [docs/configuration.md](configuration.md).
 
 With the two identities separated, the same settings stop being decorative:
 
@@ -92,7 +93,7 @@ With the two identities separated, the same settings stop being decorative:
 | --- | --- |
 | Merge whitelist: you | The session genuinely cannot merge |
 | Push whitelist on `main`: you, or nobody | The session pushes feature branches and nothing else |
-| Require approvals ≥ 1 | Usable — the session authors, you approve |
+| Require approvals ≥ 1 | Usable: the session authors, you approve |
 
 That last row is the one that turns "the operator merges, the agent does not"
 from a convention into something the forge enforces.
@@ -106,7 +107,7 @@ it to, rather than assuming.
 
 **Write access, and specifically not ownership.** Add the account as a
 collaborator on the repositories it works on. Write is the ceiling here, not
-a floor: an account that owns a repository — or holds admin on it — can merge
+a floor: an account that owns a repository, or holds admin on it, can merge
 its own work and edit the settings in the table above, so every row of that
 table goes back to being decorative. `write:repository` and `write:issue` are
 the scopes its token needs (README, "Gitea/Forgejo PR workflow"), and nothing
@@ -117,9 +118,9 @@ misconfiguration and the obvious fix is the wrong one. Parts of Gitea's API
 are gated on *ownership* rather than on permission: `GET
 /repos/{owner}/{repo}/actions/runs` answers a non-owner with `"user should be
 the owner of the repo"` no matter which scopes the token carries. Read that
-way it looks like a scope error, and the reflex is to widen the token — which
-cannot work, since no scope grants ownership, and whose only real remedy is
-handing the sandbox your own token. That would undo this whole section.
+way it looks like a scope error, and the reflex is to widen the token. That
+cannot work, since no scope grants ownership, and its only real remedy is
+handing the sandbox your own token, which would undo this whole section.
 
 `gitea-actions` therefore reads CI through `actions/tasks`, the commit's
 statuses and the run view's log route, none of which are owner-gated. If some
@@ -132,7 +133,7 @@ Two things a separate identity does **not** do:
   or to the mounted project. It changes what that session can do *to your
   forge*, and who the forge thinks did it.
 - It does not touch CI. A write-capable account can still push a feature
-  branch, and pushing a branch is what makes CI execute code — see the
+  branch, and pushing a branch is what makes CI execute code; see the
   section above. It also has no bearing on the token the forge injects into a
   CI job, which is a third principal again, subject to none of the settings in
   that table. **→ [docs/ci.md](ci.md)**
@@ -197,6 +198,8 @@ hands to whichever session starts against it. See
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
+### The exit-time audit
+
 - `bin/dejima-audit` snapshots host-persistence surfaces before each
   run and diffs them after the container exits: `.git/config` (and worktree
   `config.worktree`) keys that run a command on the next `git` -
@@ -219,8 +222,9 @@ hands to whichever session starts against it. See
   or hook file is something to read and clean up *before* the next `git`
   or `claude` in that repo, not something that was blocked. It's silent when nothing
   changed, and never affects the session's own exit code even if it can't
-  complete. It doesn't cover `[core] share_dir` (see "Shared scratch
-  space") - that hand-off path stays unaudited - and its coverage is a
+  complete. It doesn't cover `[core] share_dir` (see
+  [Shared scratch space](configuration.md#shared-scratch-space)) - that
+  hand-off path stays unaudited - and its coverage is a
   fixed list of known Claude Code config surfaces, not a general integrity
   check, so a future config surface this list hasn't been taught about yet
   would go unreported. **Its diff is time-windowed, not session-attributed:**
@@ -229,6 +233,32 @@ hands to whichever session starts against it. See
   session, another host process, or you editing the same files by hand
   during the run all land in the same diff and get reported identically -
   the tool has no way to tell them apart.
+- **Approving and ignoring are different decisions, and the difference is
+  what you are promising about next time.** Approving records the exact
+  content: `safe <id> <sha>`, so this file with these bytes is fine and any
+  other content re-fires. Ignoring records the surface: `spam <id>`, so this
+  path or key is fine whatever it later contains. Approve a hook you have
+  read; ignore a key some tool rewrites on every run and which you have
+  decided you will never care about. The review offers both, and says which
+  is which rather than leaving you to infer it:
+
+  ```
+  [a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
+  ```
+
+  Skipping is the third option on purpose: a finding you have not decided
+  about is asked again next session, which is the right default for anything
+  you are unsure of. A WARNING-tier git config change is curatable the same
+  way, which matters for keys some tools rewrite on every run: without a
+  decision recorded against one, it re-fires every session and pushes real
+  findings out of the capped list.
+
+  Severity is not negotiable by either verb: an exec-capable git config key or
+  a shell alias is classified CRITICAL whatever the baseline says, and an
+  `ignore` entry is refused against a CRITICAL surface when the baseline is
+  read, not just when it is written. So neither decision can quietly downgrade
+  something that matters.
+
 - `dejima-audit ack` shows what it is asking you to approve. For a surface
   that changed during the session it prints a unified diff of the
   pre-session content against the current content; for one created during
@@ -591,8 +621,7 @@ hands to whichever session starts against it. See
     sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
     re-checking if a future Claude Code version starts relying on that for
     normal operation.
-- DNS resolution itself is allowlisted (see "DNS is allowlisted too" in the
-  README),
+- DNS resolution itself is allowlisted (see "DNS is allowlisted too" below),
   not just the IP connections made afterward, closing off exfiltration via
   encoding data into query names to an attacker-controlled domain - verified
   a non-allowlisted domain gets refused outright (`status: REFUSED`) rather
@@ -608,9 +637,10 @@ hands to whichever session starts against it. See
   is given, or `[core] forge = github` is selected with a workflow that
   pushes (which opens the same grant), so the forwarded agent otherwise has
   no transport to use for it at all (see "GitHub push: blocked by default,
-  optional opt-in" above).
-- `[core] ssh_key` (see "Headless git push without agent forwarding") is a
-  second, independent credential-loading path with the same "signs for any
+  optional opt-in" below).
+- `[core] ssh_key` (see [Headless git push without agent
+  forwarding](configuration.md#headless-git-push-without-agent-forwarding))
+  is a second, independent credential-loading path with the same "signs for any
   Gitea repo it has access to" shape as the forwarded agent above - the
   mitigation is that it's meant to be a dedicated deploy key scoped to only
   the repos that actually need push access, not your personal identity.
@@ -632,7 +662,7 @@ hands to whichever session starts against it. See
   SSH-agent/token story documented above. Keep credentials out of your
   global gitconfig, or expect them to be reachable from inside the
   sandbox.
-- The sandbox's own user (matching your host user — see "Config parity" in
+- The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
   that user via `gosu` before execing the configured command (`[core] command`,
@@ -642,7 +672,9 @@ hands to whichever session starts against it. See
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
-  see "Global and per-project domains and dependencies" above) lives outside
+  see
+  [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)
+  in the README) lives outside
   this repo, and outside every project mount, by default - unlike a
   project's own `.dejima/` declaration files, it's never
   bind-mounted into the container, so a compromised
@@ -652,8 +684,8 @@ hands to whichever session starts against it. See
   `bin/dejima-project-lib.sh`), never sourced or executed, and are
   written only by the CLIs (`dejima-allow`, `dejima-dep`,
   `dejima-project`) a human runs on the host. `dejima`
-  warns at launch whenever the resolved store path — default or overridden
-  via `DEJIMA_CONFIG_DIR` — lands under the mounted workspace,
+  warns at launch whenever the resolved store path (default or overridden
+  via `DEJIMA_CONFIG_DIR`) lands under the mounted workspace,
   rather than silently trusting it.
 - When the mounted workspace *is* this repo itself, `dejima`
   warns at launch that the repo's own trusted computing base - `bin/`,
@@ -665,3 +697,307 @@ hands to whichever session starts against it. See
   session can still edit those files during the run, and whatever it
   changes takes effect the *next* time `dejima` itself runs,
   not the current one.
+
+### Declaration files are session-writable
+
+A project's `.dejima/` declaration files sit inside the project mount, which
+is bind-mounted read-write. A compromised session can write them, and that is
+fine by design: declaring grants nothing, and the approval store the session
+cannot reach is what a declaration has to pass through.
+
+What a session *could* try is to make the host-side write land somewhere else.
+Plant `.dejima`, or `.dejima/<kind>`, as a symlink pointing at your approval
+store or any other file you can write, then get you to run the
+`dejima-allow --project` or `dejima-dep add` that appends to it. The append
+happens on the host, as you, so it inherits your write access rather than the
+container's.
+
+Both writers refuse a symlink at either of those two leaves. The refusal is
+the `open` itself and not a check before it: `O_NOFOLLOW` on both, with the
+file opened relative to the already-opened directory, so a session still
+running while you type the command cannot swap either one out from under the
+write. Those two leaves are what a session controls. A symlink further up a
+`--project` path you supplied yourself is still resolved through, because
+that part of the path is your claim about where the project is, not the
+session's.
+
+Expect the session to be live when you run these: the agent briefing tells it
+to ask you to run them from a terminal outside the sandbox, which is exactly
+the window this closes.
+
+## Network egress firewall
+
+On start, the container runs an allowlist-only `iptables`/`ipset` firewall
+(`init-firewall.sh`), matching the reference dev container. Allowed by
+default:
+
+- DNS resolution via a local proxy (see "DNS is allowlisted too")
+- the Docker host itself (not its whole subnet)
+- GitHub's published IP ranges, port 443 only (see "GitHub push" below)
+- `registry.npmjs.org` and `platform.claude.com` (the harness and its
+  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
+  separate CDN from github.com's own IPs, and where a good deal of tooling
+  fetches its binaries); `api.anthropic.com` when the credential proxy is off
+  (kill switch or API-key auth)
+
+  That is the whole built-in list, and it is meant to stay that way: it covers
+  what the sandbox itself cannot run without, not what a project might want.
+  Language package hosts are approved rather than assumed: `pypi.org`,
+  `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
+  or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
+  built-in list short is that everything on it is reachable from every sandbox
+  on the host whether or not a project has any use for it, and a name granted
+  by being built in is a name nobody ever reviewed
+- whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
+  by default): not port-restricted, so git-over-ssh to the forge works
+  without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
+  protection because a self-hosted forge host legitimately resolves to an
+  internal address. `[core] forge = github` is deliberately *not* added here:
+  its three hostnames are public names already covered by the GitHub entry
+  above, so they stay on that entry: 443 by default, plus port 22 when the
+  selected workflow pushes, exactly as `--allow-github-push` opens it per
+  launch, rather than picking up all-port egress and losing rebind
+  protection on the way
+
+Everything else is rejected. Run `dejima-allow --global <domain>`
+(or `--project <path>` for one project) to allow more permanently (e.g.
+`crates.io` for a Rust project), or `dejima --no-firewall` to disable the
+firewall entirely for one launch (debugging only).
+
+IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
+strips AAAA answers): there's no IPv6 equivalent of the allowlist above, so
+leaving it open would bypass the whole firewall on any host with IPv6
+egress.
+
+If your Gitea host only resolves via a LAN-local DNS server, make sure the
+Docker host itself can resolve it: containers inherit the host's resolver.
+
+### DNS is allowlisted too
+
+Resolution itself is restricted, not just the IP connections made
+afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
+and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
+above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
+since GitHub itself is allowlisted by IP range; see `fixed-domains.sh`) get
+forwarded to Docker's real resolver; anything else gets no upstream
+configured at all and is refused outright. Without this, a compromised
+session could exfiltrate data by encoding it into query names to an
+attacker-controlled domain, even with no direct connection ever possible.
+
+### Adding a domain to a running session
+
+Approved domains only take effect at container start. For a domain a
+*running* session needs right now, run from the host (not inside the
+sandbox: it has no privilege to do this itself):
+
+```sh
+dejima-allow crates.io                    # this running session only
+dejima-allow --container <id> crates.io   # a specific session, if more than one is running
+```
+
+It first adds the domain to the running dnsmasq's allowlist (appends a
+`server=` line to its servers-file and sends `SIGHUP` to reload just that
+file - no restart), then resolves it through the now-unblocked container
+resolver and adds the IP(s) to the running firewall's `ipset`, all via
+`docker exec -u root`. It finishes by checking the domain is actually
+reachable from inside that same container and prints a definitive verdict:
+exit code 2 if it isn't.
+
+`--global` and `--project` are the opposite of this: they record an approval
+for *future* sessions and deliberately do not touch a running container, even
+together - see
+[Global and per-project domains and dependencies](configuration.md#global-and-per-project-domains-and-dependencies)
+in docs/configuration.md, since the domain being approved may legitimately
+not answer on 443 (an
+internal service, an SSH-only host) and the natural moment to add an approval
+is precisely when nothing is running to probe in the first place. Pass
+`--container <id>` alongside a scope flag to do both in one call:
+`dejima-allow --global --container <id> crates.io` records the approval and
+patches that session immediately, in that order, so the approval is never
+lost to a live-session failure. If more than one dejima container is
+running, the bare form above refuses and asks you to disambiguate with
+`--container <name>` - `docker ps` finds it, or use the
+container's own ID, which `sandbox-context.sh` already hands the agent in
+its startup context (and which is always available inside the sandbox as
+`cat /etc/hostname`), so there's no need for it to guess one and risk
+"successfully" updating someone else's session instead.
+
+A domain allowed this way stays allowed for the rest of the session even
+if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
+`ipset` from every DNS answer it serves, not just the one resolved at
+allow-time, since only allowlisted names get an upstream to answer from in
+the first place. GitHub's own domains sit outside this - their existing
+port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
+so that restriction is unaffected.
+
+One gap remains: allowing an *internal* hostname (one that resolves to an
+RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
+rejects private answers for any domain not exempted at startup, and that
+exemption list can only be extended by restarting dnsmasq. Internal hosts
+named before the container starts (`[forge.gitea] ssh_host`, `api`,
+`[logging] loki_url`, and any globally or per-project approved domain) are
+already exempted and unaffected by this.
+
+The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
+by name when a task is blocked on a single missing domain, rather than
+stopping the whole session over it.
+
+## Network request logging
+
+If `[logging] loki_url` is set (see Prerequisites in the README), every DNS query and every new
+outbound connection attempt - allowed or rejected - is shipped to that Loki
+endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
+
+- `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
+  (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
+- `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
+  (group 1 for allowed, group 2 for rejected), which `ulogd2`
+  (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
+  `action` field - labeled `job=dejima-net`. Only new connection
+  attempts are logged, not every packet: the firewall's existing
+  ESTABLISHED,RELATED rule short-circuits the rest of a connection before it
+  ever reaches the tagged rules.
+
+This is visibility on top of the firewall/DNS-proxy enforcement above, not a
+substitute for it - nothing about logging changes what's actually allowed to
+resolve or connect.
+
+### Conversation logging (opt-in)
+
+Set `[logging] conversation = on` (with `loki_url` configured) to also ship
+session content to Loki as the `dejima-conversation` job: your
+prompts, the agent's text responses, and tool invocations (tool name +
+input - never tool outputs). Lines are JSON with the session ID inside
+(`{session, role, text}` / `{session, role: "tool", tool, input}`).
+
+Off by default - conversation content is a different sensitivity class
+than DNS names and firewall verdicts, so it never leaves the container
+unless you opt in. Transcripts of every session under the mounted
+workspace (including worktrees and subagent sessions) are shipped while
+the sandbox runs.
+
+### Viewing logs in Grafana
+
+Nothing sandbox-specific needed on the Grafana side beyond a Loki data
+source pointed at wherever `[logging] loki_url` resolves to (Connections → Data
+sources → Loki, if one isn't already configured against that instance) -
+`log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
+scrape target or exporter involved.
+
+In Grafana's Explore view (or a dashboard panel with a Loki query), each
+stream is selectable by its `job` label:
+
+```logql
+{job="dejima-dns"}                          # every DNS query + verdict
+{job="dejima-net"}                          # every connection attempt, as JSON
+{job="dejima-conversation"}                 # the session itself, if opted in
+```
+
+Useful filters on top of those:
+
+```logql
+# DNS lookups that got refused (not on the allowlist)
+{job="dejima-dns"} |= "REFUSED"
+
+# Rejected connections only (parses ulogd2's JSON, filters on its action field)
+{job="dejima-net"} | json | action="blocked"
+
+# All three together, e.g. to watch a live session across sources
+{source="dejima"}
+```
+
+The conversation stream, when `[logging] conversation` is on, is one JSON
+object per line carrying `session`, `role`, and either `text` or a `tool` name
+with its `input`:
+
+```logql
+# Just what you asked for, without the replies
+{job="dejima-conversation"} | json | role="user"
+
+# Every shell command a session ran, and with what arguments
+{job="dejima-conversation"} | json | tool="Bash"
+
+# One session end to end, id taken from a line you already found
+{job="dejima-conversation"} | json | session="0198e2c1-..."
+
+# Anything a session said about a subject, across every session
+{job="dejima-conversation"} |= "allowed-domains"
+```
+
+`session` is deliberately a field inside the line rather than a Loki label:
+one label per session would multiply the stream cardinality by the number of
+sessions you have ever run, which is how a Loki instance stops being usable.
+Filter on it with `| json | session=` as above rather than expecting a
+selector.
+
+Two things are absent by design and worth knowing before you go looking for
+them. **Tool results are never shipped**, only invocations, so a query will
+show you that a session ran `Bash` with certain arguments and never what came
+back. **Thinking blocks are never shipped either.** Both dominate the volume
+and neither was what opting in asked for. Long values are clipped, so a very
+large prompt or tool input ends in `...[truncated]` rather than being dropped.
+
+`{job="dejima-net"}` lines are one full ulogd2 JSON object per
+connection attempt (`| json` in a query unpacks fields like `dest_ip`,
+`dest_port`, `action`) - Loki's Explore view shows these expandable/
+pretty-printed by default, no extra parsing setup needed.
+
+
+## GitHub push: blocked by default, optional opt-in
+
+`dejima --allow-github-push` is a per-launch *addition* to whichever forge is
+selected, not a substitute for selecting one. A pushing workflow is still
+refused at launch unless its forge resolves to a host with its required keys
+filled in, so the flag alone will not get an unconfigured `[forge.gitea]` past
+validation.
+
+This section is about `--allow-github-push`, a per-launch flag that adds
+GitHub as a push destination on top of whichever forge is selected, without
+changing that selection. It adds a destination; it does not stand in for a
+forge, so the launch-time rules for the selected forge/workflow pair still
+apply exactly as they would without it. If you
+want GitHub push and PRs as a standing choice instead, set
+`[core] forge = github` (see
+[Shipped providers](providers.md#shipped-providers)): it also opens
+`ssh.github.com:22`, but persistently rather than per launch, and uses its
+own `[forge.github] push_token_file` rather than a loaded SSH key.
+
+The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
+**default** it can never push there: enforced at the network layer, not
+just by `git-push-guard.sh`. GitHub's IP ranges are only allowlisted on port
+443. Port 22 is unreachable, so SSH-based push has no transport at all,
+regardless of what any hook does or doesn't catch.
+
+**Opt-in, not hardcoded**: pass `--allow-github-push` to open port 22 to
+GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
+push destination (the no-direct-to-main rule still applies):
+
+```sh
+dejima --allow-github-push ~/repos/some-project
+```
+
+**Read this before turning it on.** Whether a push actually succeeds depends
+entirely on what SSH key is loaded into the agent. A forwarded personal
+agent with your normal GitHub key would let a compromised session push to
+**any** repo that key can write to, not just the one you intended: agent
+forwarding doesn't distinguish push from pull. Use a dedicated,
+**repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
+`--allow-github-push` is set: that's what actually limits the blast radius.
+`--allow-github-push` only changes the firewall/hook's *host* check; it adds
+no credential-loading path of its own. The flag itself has no config-file
+equivalent: an exported or saved value must not silently grant a push path,
+so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
+github` (see [Shipped providers](providers.md#shipped-providers)) is a
+config-file path that opens the same port, but not
+silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
+manifest, and only when the selected workflow actually pushes. What it opens
+is the same GitHub ranges the read-only path already allows on port 443, now
+also on port 22, logged like every other allowed connection and verified by
+the firewall's own startup self-check.
+
+`[github] token_file` must point at a **read-only** fine-grained PAT
+regardless of this setting. `gh auth setup-git` (run at container start if
+that file exists) points git's github.com HTTPS credential helper at `gh`,
+which only ever holds whatever token that file provides: a write-scoped
+token there would make HTTPS push possible independent of
+`--allow-github-push`, so don't use one.

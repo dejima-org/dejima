@@ -69,7 +69,7 @@ approvals):
 scheme; a value without one is refused rather than guessed at, because
 `curl` reads a leading `-K/path` as an *option* that takes the request's URL
 from that file instead. Values are restricted to
-`A-Za-z0-9:/._~?=%@+-` — no whitespace and nothing shell-active, since these
+`A-Za-z0-9:/._~?=%@+-`: no whitespace and nothing shell-active, since these
 end up in an HTTP header and in a URL handed to a phone.
 
 **A malformed config is a hard failure, not a warning.** The whole file is
@@ -442,7 +442,7 @@ and forgotten. What matters in it:
   the one you have - just make sure it doesn't fall through to this vhost.
 - **TLS.** HTTP Basic sends the password on every request, and the terminal
   itself carries whatever the session is working on.
-- **`proxy_set_header Host $http_host;`** — `$http_host`, not `$host`.
+- **`proxy_set_header Host $http_host;`**: `$http_host`, not `$host`.
   `--check-origin` compares the client's `Origin` against the `Host` header,
   and nginx's `$host` has the port stripped while `ttyd` keeps the port in
   what it compares unless it is 80 or 443. On a vhost listening anywhere

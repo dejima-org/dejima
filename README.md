@@ -1,7 +1,16 @@
 # dejima
 
-Runs a coding agent — Claude Code by default, or whatever command you point
-it at — inside a firewalled Docker container with
+**Agents work best unsupervised. Bound the blast radius instead, and assume
+the agent is hostile.**
+
+An agent with permission prompts turned off gets a lot done. It can also be
+turned against you mid-session, by a prompt injection or a poisoned
+dependency, and it will not announce that it has been. dejima is built for
+that case: the agent works without asking, and what it can reach, take and
+break was decided before it started.
+
+Runs a coding agent (Claude Code by default, or whatever command you point
+it at) inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
 auto-accepted), against a project bind-mounted from the host. The agent gets
 to work without stopping to ask; the container is what makes that a
@@ -12,7 +21,7 @@ Around that core is most of what running an agent unattended actually takes:
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
   list does not connect, and the agent is told so rather than left to guess.
 - **Credentials that stay on the host.** Your Anthropic OAuth credential
-  never enters the container — a host-side proxy holds it and the container
+  never enters the container: a host-side proxy holds it and the container
   gets a placeholder. Your SSH key doesn't either; the container sees an
   agent socket, never the key.
 - **Per-project declaration and approval.** A project declares the domains
@@ -23,23 +32,22 @@ Around that core is most of what running an agent unattended actually takes:
   open pull requests and issues against Gitea or Forgejo and pull review
   feedback back in, on a token scoped for exactly that. Merging stays a
   human decision, made outside the sandbox.
-- **The CI exposure, stated up front.** Push access is code execution on
-  whatever host your CI runs on: a session opens a pull request, the workflow
-  fires, and the runner executes that commit before you have read a line of
-  it. The container bounds what a session reaches directly — not what it can
-  arrange to have run elsewhere. That work happens on the runner:
-  [docs/ci.md](docs/ci.md) for what it takes, and
+- **CI hardening, because push access is code execution.** A session opens a
+  pull request, the workflow fires, and your runner executes that commit
+  before you've read a line of it. The container bounds what a session reaches
+  directly, not what it can arrange to have run elsewhere. So this one is
+  work on the runner: [docs/ci.md](docs/ci.md) for what it takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
   for a tool that does it.
-- **Logging.** Every DNS lookup and rejected connection, shipped to Loki —
-  and, opt-in, the session transcript alongside them.
+- **Logging.** Every DNS lookup and rejected connection is shipped to Loki,
+  along with the session transcript if you opt in.
 - **Remote access, opt-in and off by default.** Attach to a live session
   from a terminal or a browser, with a push notification when it wants you.
 - **Guard rails inside the session.** Hooks refuse obviously destructive
   commands, pushes to anywhere but the allowed remote, and merging a PR from
   inside the sandbox. These are
   fast-fail guards against an overeager agent, not a boundary against a
-  hostile one — the container is the boundary.
+  hostile one: the container is the boundary.
 - **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins
   and git identity carry over; uid, home directory and project path match on
   both sides, so a session's transcript is readable from the host afterward.
@@ -51,7 +59,7 @@ Originally inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
 reworked to run via `docker compose` directly and grown well past it since.
 
-This repo only holds the tooling — it's not where any project lives. Point
+This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
 
@@ -102,133 +110,97 @@ each action before it lands, and a bad `rm` in the mounted project is just a
 bad `rm`. That produces more care, not less, the way you drive differently on a
 road with no barrier.
 
+## Using this responsibly
+
+dejima bounds what a session can reach. It has nothing to say about whether
+what that session wrote should exist. That part is yours.
+
+**Check whether the project wants it first.** A growing number of projects
+state that they do not accept AI-assisted contributions. Fork-and-review is
+the right workflow when a project is open to the work; it is not a way around
+one that has said no. Read its CONTRIBUTING before you start, not after.
+dejima has [its own](CONTRIBUTING.md).
+
+**Don't point it at repositories you don't own.** With an auto-push workflow a
+session opens branches and pull requests on its own. Maintainers are already
+drowning in low-effort AI pull requests. Fork the project, point dejima at
+your fork, review and merge there, and open the upstream PR yourself, once
+you would have been happy to have written it by hand.
+
+**Don't point it at proprietary code.** dejima works to keep your code out of
+an attacker's hands, and will sometimes fail. Point it only at code you could
+survive losing.
+
+**Look at what else is in the directory.** The project is bind-mounted
+read-write, so a stray `.env`, a database dump or a key someone left in the
+tree is in there with the agent, reachable by anything the session runs.
+Whether your *code* is sensitive is the easy half of the question.
+
+**An allowlist entry is a grant, not a convenience.** Adding a domain is one
+command. Adding your production API, a deploy webhook or a payment provider
+gives an unattended agent the ability to act on the world. Unlike code, that
+never passes through a diff on its way out. Allowlist things that can be
+wrong without being expensive.
+
+**Safe and responsible are not the same thing.** What you merge to `main`
+becomes the baseline for everything after it: for your users, and for
+dejima's own CI hardening, which reads `main` as trusted. Agents write
+insecure and broken code. Prompt injection is not solved, and no firewall
+short of an air gap prevents it. Supply-chain malware arrives through
+allowlisted sources. Keeping that out of `main` is your job, not the
+container's.
+
+**Give it its own identity, then own what you merge.** A session should
+authenticate to your forge as itself, not as you.
+[docs/security.md](docs/security.md#to-your-forge-the-sandbox-is-you)
+covers how, and dejima's own development uses a separate account. With that
+in place its commits and pull requests are visibly the agent's work. What
+makes them yours is merging them, and the people reading your `main` will
+hold you to that no matter whose name is on the commit.
+
+**Understand what you ship.** dejima makes development fast enough that not
+reading the diff gets tempting. A good model is not a substitute for
+engineering judgement or human review, and nothing here changes that.
+
+**This is not a blastproof box.** It's an improvement over running an agent
+directly on your machine. A determined attacker, or one with a container
+escape, defeats all of it. Use it at your own risk.
+
+**dejima's security says nothing about your software's.** Security isn't
+retrofittable: it's a property of how something was built, at every step. If
+what you build inside dejima turns out to be insecure, that isn't something a
+sandbox could have prevented.
+
+→ **[docs/responsible-use.md](docs/responsible-use.md)** for the reasoning
+behind each of these, and the fork-and-review workflow in full.
+
 ## Prerequisites
 
 - Docker with the `docker compose` v2 plugin.
-- `python3` (stdlib only — no packages) — runs the host-side credential proxy
+- `python3` (stdlib only, no packages): runs the host-side credential proxy
   (see [security notes](docs/security.md)).
-- A git push credential — **at least one** is required:
-  - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
-    container only ever sees a forwarded agent socket, never your private
-    key — but it dies with your client connection, so it's fine for
-    interactive use, not for unattended/headless sessions.
-  - `[core] ssh_key` — a dedicated deploy key for headless/unattended use,
-    independent of any forwarded agent. See "Headless git push without
-    agent forwarding" below.
 
-Everything else is optional, depending on which workflow(s) you want. All of
-it lives in one file, `~/.config/dejima/config` — `./install.sh` writes a
-starter copy with every key present, commented out at its default; uncomment
-and edit whichever ones you need. Run `dejima --print-config` at any time to
-see the whole resolved schema, real values included.
+Everything else is optional. It all lives in one file,
+`~/.config/dejima/config`: `./install.sh` writes a starter copy with every key
+present and commented out at its default, so you uncomment the ones you need.
+`dejima --print-config` prints the whole resolved schema at any time, real
+values included.
 
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `[core] harness` | `claude-code` | agent harness the container runs |
-| `[core] forge` | `none` | forge integration — `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
-| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow — `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
-| `[core] command` | `claude` | container's main process (e.g. `nvim`) — also settable per launch with `--cmd` |
-| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only) — also settable per launch with `--no-firewall` |
-| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
-| `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
-| `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
-| `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
-| `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname — skip if you only push to GitHub |
-| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1` — skip if you only push to GitHub |
-| `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
-| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github` — deliberately separate from `[github] token_file` below; see "GitHub push" |
-| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
-| `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
-| `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
-| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
-| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
-| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`) — see "Conversation logging (opt-in)" below |
-| `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
-| `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
-| `[audit] keep` | `10` | how many past findings/baselines to retain |
-| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
-| `[remote-access] enabled` | `off` | the switch — nothing in "Remote access" below runs until this is `on` |
-| `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
-| `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
-| `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
-| `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
-| `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
-
-**No forge is the default** — `[core] forge = none` with
-`[core] workflow = local-only`: the sandbox commits locally and pushes
-nowhere. A fresh install has no forge credentials, so defaulting to a pushing
-pair would be claiming a setup that isn't there — and a pushing workflow whose
-forge resolves to no host is refused at launch, which would make an
-out-of-the-box `dejima` refuse to start. Pushing is something you opt into.
-
-> **Changed default (was `gitea` + `worktree-pr`).** If your
-> `~/.config/dejima/config` has no explicit `[core] forge` / `[core] workflow`
-> lines, it used to resolve to `gitea` + `worktree-pr` and now resolves to
-> `none` + `local-only` — your sandbox will stop pushing and stop opening PRs.
-> To keep the old behaviour, write both lines out under `[core]`:
-> `forge = gitea` and `workflow = worktree-pr` (and fill in `[forge.gitea]`,
-> which that pair has always required). `./install.sh` prints this notice
-> when it finds a config in that state.
-
-To push, set `[core] workflow` to `worktree-pr` (push + open a PR) or
-`branch-push` (push, stop at the branch), and pick the forge to push to:
-`[core] forge = gitea` for a Gitea/Forgejo instance (fill in `[forge.gitea]`
-per "Gitea/Forgejo PR workflow" below), or `[core] forge = github` to push and
-open PRs through `gh` (see "GitHub push" below for the posture change that
-opens, and why its `push_token_file` is a separate credential from the
-read-only `[github] token_file`). `dejima --allow-github-push` is a
-per-launch *addition* to whichever forge is selected, not a substitute for
-selecting one: a pushing workflow is still refused at launch unless its forge
-resolves to a host and its required keys are filled in, so the flag alone
-will not get an unconfigured `[forge.gitea]` past validation. [Forgejo](https://forgejo.org/) works unmodified: it's a Gitea
-fork exposing a compatible `/api/v1` surface, so pointing `[forge.gitea] api`
-at a Forgejo instance just works. See
-[docs/providers.md](docs/providers.md#shipped-providers) for every shipped
-forge/workflow and what each is for.
+**→ [docs/configuration.md](docs/configuration.md#configuration-reference)** -
+every key, its default, and what it is for.
 
 ## Provider axes: forge, workflow, harness
 
 The forge integration, the push/PR workflow, and the agent harness aren't
-hardcoded into dejima — each is a directory under `forges/`, `workflows/` or
-`harnesses/`, selected by `[core] forge`, `[core] workflow` and
-`[core] harness` respectively. Ships today: `forges/gitea`, `forges/github`,
-`forges/none`, `workflows/worktree-pr`, `workflows/branch-push`,
-`workflows/local-only`, `harnesses/claude-code`. The defaults are
-`forges/none` and `workflows/local-only` — a fresh install commits locally
-and pushes nowhere; the rest of this document spends most of its words on
-Gitea/Forgejo and worktree-and-PR because that's the setup with the most to
-configure, not because it's what you get out of the box.
+hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
+`harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
+`[core] harness`. Ships today: `forges/gitea`, `forges/github`, `forges/none`,
+`workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only`,
+`harnesses/claude-code`. The defaults are `forges/none` and
+`workflows/local-only`: a fresh install commits locally and pushes nowhere.
 
-A provider is **data**, never sourced or executed: its manifest (`forge.conf`,
-`workflow.conf`, `harness.conf`) is parsed with the same discipline as the
-main config file — an unknown key or a bad value is a hard error, not a
-silent pass-through — and a provider's optional briefing prose is
-substituted into and handed to the agent, never interpreted as code. The one
-thing a provider ships that *does* run is a forge's `bin/`, copied into the
-image at build time as an ordinary program on `PATH`. A forge or harness also
-declares its own `[forge.<name>]`/`[harness.<name>] `config keys, with their
-own types and defaults, right in its manifest — core holds no forge-specific
-or harness-specific schema at all, which is what makes adding a provider a
-matter of adding a directory rather than editing this repo's own code.
-
-`bin/dejima` resolves the selection on the host and passes only resolved
-values into the container — the hostnames a forge needs reachable, which of
-them pushes are allowed to, which branches are protected, and the literal
-merge command to block — plus the forge's own environment variables (a
-Gitea/Forgejo API token for `gitea`, a write-capable PAT for `github`,
-nothing for `none`). The session briefing
-itself (the text `hooks/sandbox-context.sh` injects at `SessionStart`) is
-composed host-side too, from a fixed core fragment no provider can override
-plus the selected workflow's and harness's own prose, then mounted
-**read-only** — so a session can never rewrite what the next session is
-told. `dejima --print-briefing` prints exactly what a session would see,
-without launching anything.
-
-See [docs/providers.md](docs/providers.md) for the full manifest contract,
-key by key, with the shipped manifests as worked examples.
+See [docs/providers.md](docs/providers.md) for the manifest contract, key by
+key, and the shipped providers as worked examples.
 
 ## Setup
 
@@ -242,169 +214,62 @@ sandbox escape if you get it wrong.
 
 ### Core (required)
 
-1. `./install.sh` — symlinks the CLIs into `~/.local/bin` and the hooks into
+1. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
    `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
    exists yet. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
 2. Put `~/.local/bin` on your `PATH` if it isn't already.
-3. Give it a git push credential — `ssh-add` your key for interactive use,
-   or set `[core] ssh_key` in the config to a dedicated deploy key for
-   unattended runs.
-   → [Prerequisites](#prerequisites),
-   [Headless git push without agent forwarding](#headless-git-push-without-agent-forwarding)
-
-That is enough to run `dejima`. The starter config `install.sh` writes has
+That is enough to run `dejima`. No push credential is needed to get this far,
+because the default workflow does not push. The starter config `install.sh` writes has
 every key commented out at its default, which means `[core] forge = none` and
 `[core] workflow = local-only`: the agent works in the sandbox and commits
-locally, and nothing is pushed anywhere. To have it push, pick one of the two
-forge sections below and set `[core] workflow` to `worktree-pr` or
-`branch-push` — a pushing workflow is refused at launch unless its forge
-resolves to somewhere to push to, so the forge is not optional once you
-choose one of them.
+locally, and nothing is pushed anywhere. To have it push, pick a forge,
+Gitea/Forgejo below or GitHub in the table below, and set `[core] workflow`
+to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch
+unless its forge resolves to somewhere to push to, so the forge is not
+optional once you choose one of them.
+
+A pushing workflow also needs a git push credential, and which one you give it
+is a decision worth making deliberately rather than by default:
+
+- **`[core] ssh_key`, a key of the session's own**, belonging to an account
+  that is not you. This is the one to set up. It gives the sandbox an
+  identity separable from yours, so what it pushes is visibly its work and
+  the permissions you grant it are its permissions rather than all of yours.
+  It also works unattended, which a forwarded agent does not.
+  → [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding)
+- **`ssh-agent` with your own key added** (`ssh-add -l` lists it), as the
+  fallback. The container sees a forwarded socket and never the private key,
+  and the socket dies with your client connection. But the session is then
+  authenticating **as you**: everything it pushes is yours, and it holds
+  whatever that key can reach for as long as it runs.
+  → [To your forge, the sandbox is you](docs/security.md#to-your-forge-the-sandbox-is-you)
 
 ### Gitea/Forgejo PR workflow
 
-Skip this if you use `forge = github` or `forge = none` instead (below).
+Skip this if you use `forge = github` or `forge = none` instead, covered in
+the table below.
 
 1. Set `[forge.gitea] ssh_host` (the SSH hostname) and `[forge.gitea] api`
    (`https://<gitea host>/api/v1`) in `~/.config/dejima/config`.
-2. Generate a token — Settings → Applications, scopes `write:repository` and
-   `write:issue` — and save it to `~/.config/gitea/token`, `chmod 600`.
+2. Generate a token (Settings → Applications, scopes `write:repository` and
+   `write:issue`) and save it to `~/.config/gitea/token`, `chmod 600`.
    → [Prerequisites](#prerequisites)
 
-### GitHub forge (opt-in alternative)
+### Optional, once the above works
 
-Set `[core] forge = github` instead of the above to push and open PRs
-against GitHub directly through `gh`, rather than a Gitea/Forgejo instance.
-This is a persistent, per-config choice — different from the per-launch
-`--allow-github-push` flag (see "GitHub push" below), and it opens
-`ssh.github.com:22` for push every time this forge is selected with a
-workflow that pushes, not just for one launch. It opens it through the same
-grant that flag uses, so the posture is the one documented there and nothing
-else about GitHub's treatment changes.
-
-1. Generate a **write-capable** PAT, separate from the read-only
-   `[github] token_file` used for read access — promoting the read-only
-   token here would defeat the point of scoping it read-only.
-2. Save it to a file and set `[forge.github] push_token_file` to that path.
-
-dejima warns at startup if both `[github] token_file` and
-`[forge.github] push_token_file` are set and non-empty: `gh` only reads one
-token variable, and the write-capable one wins for that launch.
-
-### Pushing nowhere
-
-If this sandbox should never push or open a PR — read-only work, exploring a
-codebase, anything where you'll take the diff out by hand — set
-`[core] forge = none` and `[core] workflow = local-only`. Nothing to
-configure for either; the agent commits locally and stops there, and
-`git-push-guard.sh` refuses every push regardless of what else is set.
-
-### Per-project domains and dependencies
-
-Nothing to set up in advance; do this per project, as it turns out to need
-something:
-
-```sh
-dejima-project status ~/myproject     # declared vs approved vs missing
-dejima-project approve ~/myproject    # approve the declared set
-dejima-allow --project ~/myproject crates.io
-dejima-dep add --global cargo:cargo-nextest
-```
-
-`dejima-allow` with no scope flag patches a running session; `--project` or
-`--global` instead records an approval for future sessions, and domains
-apply at their next launch. Dependencies need an image rebuild, so they
-always land on the next one.
-
-`--project` records two things: the approval in `~/.config/dejima` (which is
-what actually grants) and a declaration in the project's own
-`.dejima/allowed-domains` (which is committed, so the rest of the project gets
-it too). `--global` writes only the approval — there is no project to declare
-in.
-
-→ [Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies),
-[Adding a domain to a running session](#adding-a-domain-to-a-running-session)
-
-### Log shipping
-
-1. Set `[logging] loki_url` to your Loki push endpoint.
-2. Optionally set `[logging] conversation = on` to ship transcripts as well —
-   read
-   [Conversation logging (opt-in)](#conversation-logging-opt-in) first, since
-   that ships what you and the model actually say.
-   → [Network request logging](#network-request-logging),
-   [Viewing logs in Grafana](#viewing-logs-in-grafana)
-
-### GitHub push (opt-in)
-
-Per launch, not a persistent setting:
-
-```sh
-dejima --allow-github-push ~/myproject
-```
-
-Pair it with a repo-scoped deploy key in `[core] ssh_key`. Read
-[GitHub push: blocked by default, optional opt-in](#github-push-blocked-by-default-optional-opt-in)
-before turning it on — with a forwarded personal agent this is much broader
-than it looks.
-
-### Remote access (opt-in)
-
-Entirely off until step 1 is done. **Read
-[docs/remote-access.md](docs/remote-access.md) end to end before doing any of
-this.** Step 2 is the one that carries the security of the whole feature, and
-getting it wrong still looks like it works.
-
-1. **Set `[remote-access] enabled = on`** in `~/.config/dejima/config`. This
-   is the switch — nothing here runs without it. Set `ntfy_url`, `base_url`,
-   and `ttyd_port` in the same section if you want something other than
-   7681. →
-   [`[remote-access]`](docs/remote-access.md#remote-access)
-2. **Choose the reverse proxy's bind address, on the dejima box itself.** One
-   specific address on its LAN interface. Never the wildcard, never
-   `0.0.0.0`, never a Docker bridge. →
-   [The bind address is the one thing to get right](docs/remote-access.md#the-bind-address-is-the-one-thing-to-get-right),
-   [Picking the address](docs/remote-access.md#picking-the-address)
-3. **SSH front door.** Generate a key that exists only for this, then add one
-   `restrict,pty,command="…/dejima-attach"` line to `authorized_keys` for the
-   same Unix user that runs `dejima`. →
-   [SSH front door](docs/remote-access.md#ssh-front-door)
-4. **Web front door.** Get `ttyd` 1.7.4 or newer. If it came from a distro
-   package, `systemctl disable --now ttyd.service` **and** `mask` it first —
-   the package ships an enabled service that puts a login prompt on every
-   interface, reachable from inside your sandboxes. Then install
-   `systemd/dejima-ttyd.service` as a *user* unit, and put a reverse proxy in
-   front of it adapted from `docs/nginx-dejima.conf.example` — with
-   authentication on every server block, TLS, a `default_server` that
-   refuses every other hostname, and
-   `proxy_set_header Host $http_host`. Make sure the name you pick actually
-   resolves to this box and your certificate covers it. →
-   [Web front door](docs/remote-access.md#web-front-door)
-5. **If you will read it on a phone**, there is nothing to turn on: the front
-   door serves a touch frontend by default, with gestures for scrolling,
-   selection and pane resizing, and a toolbar carrying Esc, a sticky Ctrl, the
-   arrows and tmux's window switching. Set `ttyd_tmux_prefix` in
-   `[remote-access]` if your tmux prefix is not `C-b`. →
-   [Reading it on a phone](docs/remote-access.md#reading-it-on-a-phone). Typing from one has its
-   own gotcha, which nothing here can fix. →
-   [Typing on a phone](docs/remote-access.md#typing-on-a-phone)
-6. **If another reverse proxy sits in front of this one**, it needs SNI, a
-   single literal `Host`, the upgrade headers and its own long read timeout —
-   and it changes the threat model. →
-   [Behind another reverse proxy](docs/remote-access.md#behind-another-reverse-proxy)
-7. **Notifications.** Install `systemd/dejima-notify-watch.service` the same
-   way, then `loginctl enable-linger "$USER"` so both units survive logout. →
-   [Notifications](docs/remote-access.md#notifications)
-8. **Verify the containment from inside a running sandbox** before relying on
-   any of it. →
-   [Verifying it](docs/remote-access.md#verifying-it)
-
-[Attaching](docs/remote-access.md#attaching) then covers what you get on the other end.
+| Turn on | What it costs | Where |
+| --- | --- | --- |
+| GitHub instead of Gitea | Opens `ssh.github.com:22` for push whenever the selected workflow actually pushes, not just for one launch | [providers.md](docs/providers.md#shipped-providers) |
+| No push at all | - | [providers.md](docs/providers.md) |
+| Per-project domains and dependencies | - | [configuration.md](docs/configuration.md) |
+| Log shipping to Loki | Opt-in conversation logging ships what you and the model actually say | [security.md](docs/security.md) |
+| GitHub push over SSH | Much broader than it looks with a forwarded personal agent | [security.md](docs/security.md) |
+| Remote access | One step is a full sandbox escape if you get it wrong | [remote-access.md](docs/remote-access.md) |
 
 ## Usage
 
-Run `./install.sh` first — it symlinks the CLIs into `~/.local/bin` and the
+Run `./install.sh` first; it symlinks the CLIs into `~/.local/bin` and the
 hooks into `~/.claude/hooks`, and everything below assumes those are on your
 `PATH`. See [Setup](#setup) for the rest of the first-run steps.
 
@@ -414,638 +279,196 @@ dejima ~/repos/some-project
 ```
 
 By default the container's entry point is bare `claude` (always running with
-`--dangerously-skip-permissions`, regardless of how it's invoked — see
+`--dangerously-skip-permissions`, regardless of how it's invoked; see
 `docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
-Typical loop: point it at a project, ask for a change, and let the session
-work. It commits to a feature branch, pushes it, and opens a pull request —
-then it stops. You review and merge that PR yourself, wherever you normally
-read them. Merging is the one step the sandbox is not allowed to take, and
-`merge-guard.sh` blocks it from the inside.
+The loop, in the part every workflow shares: point it at a project, ask for a
+change, and let the session work. What happens after that is the workflow you
+configured. The default, `local-only`, commits and pushes nowhere. Configure
+`worktree-pr` and the session pushes a branch and opens a pull request, then
+stops, and you review and merge it yourself wherever you normally read them.
+`branch-push` stops at the push. That choice is `[core] workflow`, one of the
+three axes: see [Provider axes](#provider-axes-forge-workflow-harness).
 
-That boundary is the shape of the loop rather than a limit on it: every
-session ends at something you read before it lands, and nothing reaches your
-default branch without you.
+dejima itself is developed under `worktree-pr`, so this repository is that
+workflow in use: its branches and pull requests were opened by sessions
+running in it, and merged by a human afterwards.
 
-How far the session goes is the `[core] workflow` setting — `worktree-pr`
-pushes and opens the PR described above, `branch-push` stops at the push, and
-`local-only` commits and pushes nowhere. See
-[Provider axes](#provider-axes-forge-workflow-harness).
+On a pushing workflow, `merge-guard.sh` and `git-push-guard.sh` are fast-fail
+guards against an overeager agent, not a boundary against a hostile one. If
+you hand a session a forge token that can merge, that token is in its
+environment and it can call the merge endpoint directly; the hooks will not
+stop it. The merge guard is also per-workflow and inert unless that workflow
+turns it on. Branch protection on the remote, and a token scoped to less than
+merge, are what actually stop a merge from happening without you.
 
-### Using a different editor/application
+What holds across all three is where they stop: none of them puts work on
+your default branch. `local-only` never leaves the machine, and the pushing
+workflows stop at a branch or at a pull request. The last step is yours in
+every case, which is a property of how the workflows are arranged rather than
+something enforced against a session that does not want to cooperate.
 
-```sh
-dejima --cmd nvim ~/repos/some-project
-```
+**→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
+the guards in full, and why they fail open.
 
-Runs unconfigured unless you also set `[mounts] nvim_config` in the config to
-a real config directory on the host (bind-mounted read-only at
-`~/.config/nvim` — lazy.nvim's lockfile is the one exception, layered
-read-write on top so plugin syncs don't fail on a read-only filesystem;
-nothing else in the config is writable):
+### Configuring the session
 
-```
-[core]
-command = nvim
+Running a different editor or application than the default (`--cmd`,
+`[core] command`, `[mounts] nvim_config`), and mounting extra writable host
+directories a session should have access to (`[mounts] read_write`), are
+both config-file changes rather than anything you set up per launch.
 
-[mounts]
-nvim_config = ~/.config/nvim
-```
-
-Set both in `~/.config/dejima/config` if you use this mode regularly, or pass
-`--cmd nvim` per launch once `nvim_config` is set.
-
-If your config references something outside that directory by absolute host
-path (a helper script in a dotfiles `bin/`, say), bring it in with
-`[mounts] readonly` (colon-separated, mounted read-only at the same path):
-
-```
-[mounts]
-readonly = ~/dotfiles/bin
-```
-
-### Writable host directories
-
-`[mounts] read_write` is the same thing without `:ro` — for a directory a
-session is meant to write to and whose contents should outlive the container:
-
-```
-[mounts]
-read_write = ~/specs
-```
-
-Both lists mount at the host path they name, which is the point: a convention
-that says "specs live in `~/specs`" keeps working inside the container without
-being rewritten. That is the difference from `[core] share_dir`, which is
-mounted at `~/shared` regardless of where it lives on the host because its job
-is to be a well-known handoff point.
-
-An entry is **refused, not warned about**, if it overlaps anything dejima
-relies on being out of a session's reach: the approval store, either audit
-store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
-(already read-write, so listing it again is a mistake worth surfacing). A
-writable mount over any of those would let a session approve its own domains,
-delete the audit findings naming it, or plant code that runs unsandboxed on the
-host next time you start an agent. Overlap is checked in both directions after
-resolving symlinks, so `read_write = ~` is caught too.
-
-Sessions are told which directories these are, so "everything else is
-disposable" stays true in the briefing rather than becoming a trap.
+**→ [docs/configuration.md](docs/configuration.md)** - both, including which
+host paths a writable mount is refused over and why.
 
 ## Config parity with your host Claude Code setup
 
-Global `CLAUDE.md`, settings, hooks, skills, and plugins all carry over
-automatically, and your existing login stays effective too — no separate
-first-run login, though the credential itself never enters the container
-(see [security notes](docs/security.md) for the host-side proxy that makes
-that work).
+Global `CLAUDE.md`, settings, hooks, skills, plugins and git identity all
+carry over, and your existing login stays effective too, with the credential
+itself never entering the container. `~/.claude` is not shared as a whole -
+only an enumerated subset carries over, so a session transcript is readable
+from the host afterward but a credential or cache isn't. The container's own
+user matches yours exactly, so `$HOME`-relative paths resolve the same on
+both sides.
 
-`~/.claude` itself is *not* shared as a whole: its contents are enumerated
-in `docker-compose.yml`, config files are copied in rather than mounted,
-and anything not listed is container-local — writable during the session,
-gone with the container. Session transcripts, plans, and the edit-undo
-record are on the list, so `claude --resume` on the host still works; a
-credential, cache, or newly-added config file is not. The
-[security notes](docs/security.md) explain the split and why single-file
-mounts couldn't be trusted here. (`~/.claude.json` is handled differently
-again — a throwaway per-session copy, not the real file.)
-
-The project directory is mounted at the *same absolute path* inside the
-container as on the host, so Claude Code's session-history keying lines up
-between host and container: a session's transcript is visible on the host
-afterward, and `claude --resume <session-id>` should find it there. (Whether
-a bare `claude --resume` with no ID picks it as the "most recent" session
-depends on `~/.claude.json`'s own bookkeeping, which — per the throwaway-copy
-design above — doesn't carry over from a sandboxed session.)
-
-The container's own user matches yours exactly — username, uid, gid, and
-home directory (see `Dockerfile`) — so `$HOME`-relative paths (dotfiles,
-Claude Code's plugin bookkeeping) resolve the same on both sides. Defaults to
-`node`/1000/1000/`/home/node` if you build the image directly instead of via
-`dejima`. Images are tagged per-user (`dejima:<username>`)
-so concurrent builds on a shared machine don't clobber each other.
-
-Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
-made inside the sandbox get the right identity, but nothing written to it
-during a session reaches your real file). Falls back to an empty config if
-you don't have one.
-
-Caveat: MCP servers or hooks that shell out to host-specific binaries (a
-browser, a language runtime not installed here) may not work unless that
-tooling is also added to the `Dockerfile`.
-
-### Headless git push without agent forwarding
-
-Agent forwarding (the default) ties SSH access to whichever client is
-currently connected — it dies when that client disconnects, breaking
-git-over-ssh for anything still running headless. For sandboxes meant to run
-unattended, generate a dedicated, purpose-built keypair instead:
-
-```sh
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/dejima_ed25519
-```
-
-Passphrase-less is deliberate — this is meant to be a low-privilege
-credential living only inside the container, not your personal identity. Add
-the public half as a Gitea deploy key scoped to just the repos that need
-push access, then set it in the config:
-
-```
-[core]
-ssh_key = ~/.ssh/dejima_ed25519
-```
-
-`entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
-deletes the plaintext copy immediately after — the sandbox user itself never
-has a path to the raw key, only the agent socket (see
-[security notes](docs/security.md) for the full mount rationale). Setting
-`[core] ssh_key` means a live forwarded agent is no longer required at all.
+**→ [docs/configuration.md](docs/configuration.md)** - exactly what carries
+over and what doesn't, why single-file mounts couldn't be trusted here, and
+generating a dedicated deploy key for headless git push without agent
+forwarding.
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `[core] share_dir` (default
-`~/.local/share/dejima/shared`, created automatically) — separate
-from the project mount, for passing files (screenshots, temp scripts) in and
-out of a session without touching the actual checkout. Persists across
-sessions since it's a real directory, not a container volume.
-
-Treat it as a handoff point, not as general-purpose storage. If your own
-project instructions tell agents to write somewhere at a fixed host path —
-design docs, scratch notes, anything meant to outlive the session but stay out
-of the project checkout — mount that directory instead, with
-`[mounts] read_write`. It arrives at its own absolute path, so a convention
-that says "put specs in `~/specs`" keeps working inside the container without
-being rewritten to point at `~/shared`.
+`~/shared` is a read-write bind mount of `[core] share_dir`, separate from
+the project mount, for passing files in and out of a session without
+touching the actual checkout. It persists across sessions since it's a real
+directory, not a container volume - but treat it as a handoff point, not
+general-purpose storage. **Clear it out between sessions.** Anything left
+there is readable by the next session, and by every session after that, which
+turns a file you forgot into something you handed over.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
 goes away with it.
 
+**→ [docs/configuration.md](docs/configuration.md#shared-scratch-space)** - when to use
+`[mounts] read_write` instead, for anything meant to outlive the session at
+a fixed host path.
+
 ## Testing frontend changes
 
-Playwright (Chromium) is pre-installed at image build time, browser
-included — `require("playwright")` works from any script, no network access
-or per-project `npm install playwright` needed.
+Playwright (Chromium) is pre-installed at image build time, no network
+access or per-project `npm install playwright` needed. `localhost`/loopback
+traffic never goes through the egress firewall, so a project's own dev
+server needs no firewall changes; a real external site still needs to be on
+the allowlist like any other network use.
 
-`localhost`/loopback traffic never goes through the egress firewall, so a
-project's own dev server needs no firewall changes. A real external site
-needs to be on the allowlist like any other network use
-(`dejima-allow <domain>` for a running session, add
-`--global`/`--project <path>` to persist it) — the firewall applies to the
-browser's traffic exactly like `curl`/`git`.
-
-If a project pins its own `playwright`/`@playwright/test` version, its
-`npm install` may try to download a different Chromium build from
-Playwright's CDN, which isn't allowlisted by default — allow it the same way
-as any other one-off domain need.
-
-Chromium's own process sandbox isn't actually active in this image (its
-setuid helper isn't setuid here) — not a concern, since the container itself
-is already the boundary that matters, and a compromised session already has
-full shell access as the container's own user regardless.
+**→ [docs/configuration.md](docs/configuration.md)** - Playwright's own CDN
+download, and why Chromium's process sandbox isn't active in this image.
 
 ## Sandbox self-awareness
 
-### Project instructions: `.dejima.md`
+`.dejima.md` at a project's root is that project's agent-instruction file -
+the harness-agnostic equivalent of `CLAUDE.md` - loaded into the session's
+context with no authority over the sandbox itself. A `SessionStart` hook
+also briefs the session on where it is running, a disposable and firewalled
+container, and on the instructions belonging to whichever workflow you
+selected. What those instructions say is the workflow's to define, so a
+session under `local-only` is told something different from one under
+`worktree-pr`.
 
-`.dejima.md` at a project's root is that project's agent-instruction file —
-the same role `CLAUDE.md` plays for Claude Code — under a name that doesn't
-name a harness. dejima loads it into the session's opening context the way the
-harness would load its own, so a project's instructions apply whichever agent
-is running.
-
-The reason for a second name: Claude Code finds a `CLAUDE.md` by itself, and
-nothing else does. As dejima grows the ability to run agents that aren't Claude
-Code, a project that wants to say "here is how to work on me" needs one file
-that reaches all of them — so dejima delivers it rather than leaving each
-harness to go looking for its own.
-
-Loaded verbatim, capped at 16 KB with any truncation noted in the text. It
-carries no authority over the sandbox itself: the file sits on the read-write
-workspace mount, so nothing in it widens the firewall, relaxes a guard, or
-authorises a push, and the text delivered around it says so.
-
-This repo ships one, describing which half of its own test suite a sandboxed
-session can run.
-
-### The session briefing
-
-A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
-reminder when `DEJIMA` is set: the session is running in a
-disposable, firewalled container and should stay within the task at hand —
-if something genuinely needs to break out (broader network, host changes,
-GUI/hardware), stop and ask rather than trying to work around the firewall,
-since the same session can be resumed unrestricted on the host via
-`claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
-(`PreToolUse`) also applies here, since `~/.claude/hooks` is mounted in.
-
-`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
-any `git push` whose resolved remote isn't the Gitea host, and any push to
-`main`/`master` even there. Like the other hooks, this is a fast-fail guard
-against an overeager agent, not a hard security boundary — a session has full
-shell access and could in principle edit `.git/config` to route around it.
-GitHub push is blocked by default too (see "GitHub push" below) unless
-`--allow-github-push` is given. For a real guarantee against pushes to
-main/master, use branch protection on the remote itself.
-
-`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
-`gitea-pr merge` inside the sandbox. It's the API-side counterpart to the rule
-above: a merge puts a branch on `main` without ever performing a push, so
-`git-push-guard.sh` never sees it. A hook is handed a command rather than a
-conversation, so it can't tell an instructed merge from an unprompted one —
-which is why it's scoped to the sandbox rather than applied everywhere. On the
-host it does nothing, and you can still ask an agent to merge. The same
-fast-fail caveat applies with more force than usual here: the session has the
-Gitea token in its environment and could call the merge endpoint with `curl`
-directly. Branch protection on the remote is the real guarantee.
-
-`sandbox-context.sh` also tells the agent the actual workflow to follow: do
-new work in a `git worktree` under the mounted project (e.g.
-`.worktrees/<branch>`, never `../<branch>` or elsewhere under `$HOME` — only
-the bind-mounted path is backed by real host storage, so a worktree created
-outside it silently vanishes with the container), then push the feature
-branch and run `gitea-pr create`.
+**→ [docs/configuration.md](docs/configuration.md)** - `.dejima.md` in full,
+and everything the session briefing covers.
 
 ## Network egress firewall
 
-On start, the container runs an allowlist-only `iptables`/`ipset` firewall
-(`init-firewall.sh`), matching the reference dev container. Allowed by
-default:
-
-- DNS resolution via a local proxy (see "DNS is allowlisted too")
-- the Docker host itself (not its whole subnet)
-- GitHub's published IP ranges, port 443 only (see "GitHub push" below)
-- `registry.npmjs.org` and `platform.claude.com` (the harness and its
-  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
-  separate CDN from github.com's own IPs, and where a good deal of tooling
-  fetches its binaries); `api.anthropic.com` when the credential proxy is off
-  (kill switch or API-key auth)
-
-  That is the whole built-in list, and it is meant to stay that way: it covers
-  what the sandbox itself cannot run without, not what a project might want.
-  Language package hosts are approved rather than assumed — `pypi.org`,
-  `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
-  or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
-  built-in list short is that everything on it is reachable from every sandbox
-  on the host whether or not a project has any use for it, and a name granted
-  by being built in is a name nobody ever reviewed
-- whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
-  by default) — not port-restricted, so git-over-ssh to the forge works
-  without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
-  protection because a self-hosted forge host legitimately resolves to an
-  internal address. `[core] forge = github` is deliberately *not* added here:
-  its three hostnames are public names already covered by the GitHub entry
-  above, so they stay on that entry — 443 by default, plus port 22 when the
-  selected workflow pushes, exactly as `--allow-github-push` opens it per
-  launch — rather than picking up all-port egress and losing rebind
-  protection on the way
-
-Everything else is rejected. Run `dejima-allow --global <domain>`
-(or `--project <path>` for one project) to allow more permanently (e.g.
-`crates.io` for a Rust project), or `dejima --no-firewall` to disable the
-firewall entirely for one launch (debugging only).
-
-IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
-strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
-leaving it open would bypass the whole firewall on any host with IPv6
-egress.
-
-If your Gitea host only resolves via a LAN-local DNS server, make sure the
-Docker host itself can resolve it — containers inherit the host's resolver.
-
-### DNS is allowlisted too
-
-Resolution itself is restricted, not just the IP connections made
-afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
-and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
-above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
-since GitHub itself is allowlisted by IP range — see `fixed-domains.sh`) get
-forwarded to Docker's real resolver; anything else gets no upstream
-configured at all and is refused outright. Without this, a compromised
-session could exfiltrate data by encoding it into query names to an
-attacker-controlled domain, even with no direct connection ever possible.
-
-### Adding a domain to a running session
-
-Approved domains only take effect at container start. For a domain a
-*running* session needs right now, run from the host (not inside the
-sandbox — it has no privilege to do this itself):
-
-```sh
-dejima-allow crates.io                    # this running session only
-dejima-allow --container <id> crates.io   # a specific session, if more than one is running
-```
-
-It first adds the domain to the running dnsmasq's allowlist (appends a
-`server=` line to its servers-file and sends `SIGHUP` to reload just that
-file - no restart), then resolves it through the now-unblocked container
-resolver and adds the IP(s) to the running firewall's `ipset`, all via
-`docker exec -u root`. It finishes by checking the domain is actually
-reachable from inside that same container and prints a definitive verdict
-— exit code 2 if it isn't.
-
-`--global` and `--project` are the opposite of this: they record an approval
-for *future* sessions and deliberately do not touch a running container, even
-together - see
+Outbound network access is default-deny: on start, the container builds an
+allowlist-only `iptables`/`ipset` firewall, and anything not explicitly
+allowed is rejected outright. The allowlist covers what the sandbox itself
+needs to function - DNS resolution, the Docker host, GitHub on port 443 for
+read access no matter which forge is selected, whatever the selected forge
+itself needs reachable, the harness's own update and model endpoints,
+`release-assets.githubusercontent.com` for GitHub release assets, and
+`api.anthropic.com` when the credential proxy is off - plus whatever a
+project has declared and had approved (see
 [Global and per-project domains and dependencies](#global-and-per-project-domains-and-dependencies)
-below, since the domain being approved may legitimately not answer on 443 (an
-internal service, an SSH-only host) and the natural moment to add an approval
-is precisely when nothing is running to probe in the first place. Pass
-`--container <id>` alongside a scope flag to do both in one call:
-`dejima-allow --global --container <id> crates.io` records the approval and
-patches that session immediately, in that order, so the approval is never
-lost to a live-session failure. If more than one dejima container is
-running, the bare form above refuses and asks you to disambiguate with
-`--container <name>` - `docker ps` finds it, or use the
-container's own ID, which `sandbox-context.sh` already hands the agent in
-its startup context (and which is always available inside the sandbox as
-`cat /etc/hostname`), so there's no need for it to guess one and risk
-"successfully" updating someone else's session instead.
+below). IPv6 is blocked outright too, with no allowlist equivalent for it.
 
-A domain allowed this way stays allowed for the rest of the session even
-if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
-`ipset` from every DNS answer it serves, not just the one resolved at
-allow-time, since only allowlisted names get an upstream to answer from in
-the first place. GitHub's own domains sit outside this - their existing
-port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
-so that restriction is unaffected.
+DNS is allowlisted as well as IPs: a local resolver only forwards lookups
+for names already on that same allowlist, so a domain that isn't approved
+does not resolve at all, closing off exfiltration through query names and
+not just through a direct connection. A blocked connection is refused
+immediately rather than left to time out, so a session is told when
+something doesn't connect instead of being left to guess.
 
-One gap remains: allowing an *internal* hostname (one that resolves to an
-RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
-rejects private answers for any domain not exempted at startup, and that
-exemption list can only be extended by restarting dnsmasq. Internal hosts
-named before the container starts (`[forge.gitea] ssh_host`, `api`,
-`[logging] loki_url`, and any globally or per-project approved domain) are
-already exempted and unaffected by this.
+Run `dejima-allow --global <domain>` (or `--project <path>`) to approve a
+domain for future sessions - these deliberately do not touch a running container.
+`dejima-allow <domain>` with no scope flag patches a domain into a session
+that's already running instead. `dejima --no-firewall` disables the
+firewall for one launch (debugging only).
 
-The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
-by name when a task is blocked on a single missing domain, rather than
-stopping the whole session over it.
+**→ [docs/security.md](docs/security.md#network-egress-firewall)** - how the
+ipsets are built, how `dnsmasq` is configured, and the NFLOG groups behind
+the request log below.
 
 ## Global and per-project domains and dependencies
 
-Allowed domains and dependencies each stack through their own layers, least
-specific first:
-
-| Config | Layers, least specific first |
-| --- | --- |
-| Allowed domains | built-in → global → project → container (one session) |
-| Dependencies | base image → global → project |
-
-Dependencies have no container-only scope: installing one always needs an
-image rebuild, so there's no `dejima-allow`-style live-session patch
-for them.
-
-A project can declare what it needs in two committed files:
-
-```
-.dejima/allowed-domains    # one domain per line
-.dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line, or a
-                           # tarball:<name>@<sha256>:<url> release archive
-```
-
-### Tarball dependencies
-
-For a toolchain no package ecosystem ships in a version you can use — a
-current Go, say, where Debian's is several releases behind — a dependency can
-name a release archive instead:
-
-```sh
-dejima-dep add --global tarball:go@<sha256>:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-```
-
-It unpacks with `--strip-components=1` into `/opt/dejima/<name>`, and
-`/opt/dejima/<name>/bin` goes on `PATH`. That one convention covers the usual
-shapes without the spec needing layout options: a Go archive has everything
-under `go/`, an nvim release under `nvim-linux-<arch>/`, and stripping one
-level puts `bin/` in the same place for both. Compression is detected from the
-archive, so `.tar.gz`, `.tar.xz` and `.tar.zst` all work.
-
-**The digest is mandatory**, and it is checked before anything is unpacked.
-Without one you would be approving a *name* whose contents the far end can
-change afterwards, which isn't a decision anyone can make once. With one, what
-you approved is a specific archive and nothing else can take its place. Two
-consequences worth knowing:
-
-- **A tarball dependency names one architecture**, because a digest does.
-  Unlike a package name, it can't resolve per-host, so a mixed-architecture
-  fleet needs a spec per project rather than one global one.
-- **Upgrading is an approval, not a version bump.** A new release is a new
-  digest, so it goes through `dejima-dep add` and `dejima-project approve`
-  again — which is the point, not friction to route around.
-
-The URL's character set is deliberately narrower than URLs allow: the spec is
-interpolated into a `RUN` line that runs as root at build time, so anything
-shell-active is refused outright rather than quoted around, and only `https`
-is accepted.
+A project declares the domains and dependencies it needs in two committed
+files, `.dejima/allowed-domains` and `.dejima/dependencies`, stacked through
+a global layer and, for domains, a container-only layer for one running
+session.
 
 **Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a compromised session could write these files - they are read
-only to compare against reality and suggest a command. Approvals live
-outside the container, under `~/.config/dejima/` by default
-(`$DEJIMA_CONFIG_DIR` relocates the whole tree) - global at its
-root, per project under `projects/<slug>/` - and are written only by tools
-you run on the host:
+read-write, so a compromised session could write these files itself; they
+are read only to compare against reality and suggest a command. Approval is a
+separate act you do yourself on the host, by hand, and approvals are stored
+outside the reach of the session:
 
 ```sh
-dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # review and approve the declared set
-dejima-allow --project ~/myproject crates.io
 dejima-allow --global crates.io       # applies to every project
-dejima-dep add --project ~/myproject cargo:cargo-nextest
 dejima-dep add --global cargo:cargo-nextest
 ```
 
-Two of those tools also write the declaration, so an approval you make by
-hand does not stay invisible to everyone else on the project:
-`dejima-allow --project` appends to `.dejima/allowed-domains`, and
-`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
-approval first — that is the part that grants — and report separately on the
-declaration, so a project you can't write to still gets you the approval.
-`--global` writes no declaration at all: there is no project to declare in.
-
-The declaration those two write still grants nothing; it is the same
-untrusted file the section above describes, and writing to it does not
-promote it. That it is session-writable is exactly why both tools refuse to
-write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**:
-a compromised session can plant one and then ask you to run the command that
-follows it, which would aim a host-side append at your approval store or at
-any other file you can write. The refusal is the `open` itself rather than a
-test before it — `O_NOFOLLOW` on both, with the file opened relative to the
-already-opened directory — so a session that is still running while you type
-the command cannot swap `.dejima` or the declaration file out from under the
-write. (Those two leaves are what the session controls. A symlink further up
-a `--project` path you supply yourself is still resolved through.) Expect the
-session to be live: the agent briefing tells the agent to ask you to run
-`dejima-allow --project` from a terminal outside the sandbox. The same write
-reads the file back to skip an already-declared entry, and that read is
-capped — a session can make its own `.dejima/<kind>` arbitrarily large for
-free, and an oversized one is refused rather than loaded into your memory.
-
-Neither writer has an inverse for the declaration. `dejima-dep remove
---project` withdraws the approval and deliberately leaves the declaration
-alone (it says so, since `dejima-project approve` will otherwise offer the
-entry again); `dejima-allow --project` has no `remove` at all. Taking
-something back from the project itself means editing `.dejima/` and
-committing that.
-
-`dejima-project status`/`approve` classify a declared entry against
-the union of global and project approvals, so something already approved
-globally shows as approved, not pending. Unlike `dejima-allow`,
-`dejima-dep`'s `--global` and `--project` are mutually exclusive -
-an entry belongs to exactly one scope. `dejima-dep` has no `--container`
-scope either, and refuses the flag rather than ignoring it: a dependency
-needs an image rebuild, so there is nothing to patch in a live session.
-
-Approved domains join the allowlist at the next launch. `dejima-allow` can
-also patch a running session immediately, but only when it is run bare or
-with `--container` - approving here (`--project`/`--global`, with no
-`--container`) never touches one; see
-[Adding a domain to a running session](#adding-a-domain-to-a-running-session).
-Approved dependencies are baked into a derived image built `FROM` the shared
-base - first `dejima:<username>-global`, if the global store has any
-dependency approved, then `dejima:<username>-<slug>` on top of that,
-if the project store does - so they need an image rebuild: they take effect
-on the **next** launch.
-
-Because of that rebuild, the usual moment to approve is *after* leaving the
-sandbox — so persistence (`--global` or `--project`) never requires a running
-container.
-
-`dejima-project approve` never attempts to patch a running session: it only
-ever calls `dejima-allow` without `--container`, so recording the approval
-is the only thing it does. If an individual approval can't be recorded — an
-unwritable store, a slug collision, a corrupt approval list — it reports
-that entry as not approved and keeps going, rather than stopping at the
-first failure; that holds for dependencies and domains alike, so one bad
-entry can't cost you the rest of the set. It then exits non-zero if anything
-failed, so `dejima-project approve ~/myproject && dejima` won't launch a
-session missing the approvals you just confirmed.
+The approval store lives under `~/.config/dejima/` by default and is never
+mounted where a session could reach it, so nothing written to `.dejima/`
+from inside the sandbox can approve itself. `dejima-project approve`
+never attempts to patch a running session - it only records approvals, which
+take effect at the next launch.
 
 A session whose project declares something it doesn't have is told so in its
-startup context, with the exact command to hand you. Project approvals are
-inherited by subdirectories, so a git worktree under the project gets its
-parent's; global approvals apply everywhere regardless.
+startup context, with the exact command to hand you.
+
+**→ [docs/configuration.md](docs/configuration.md)** - the full layering,
+tarball dependencies, the symlink refusal that protects the approval store,
+and the complete `dejima-allow`/`dejima-dep`/`dejima-project` reference.
 
 ## Network request logging
 
-If `[logging] loki_url` is set (see Prerequisites), every DNS query and every new
-outbound connection attempt - allowed or rejected - is shipped to that Loki
-endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
+If `[logging] loki_url` is set (see Prerequisites), every DNS query and
+every new outbound connection attempt - allowed or rejected - is shipped
+there, and, opt-in, the session transcript alongside them. This is
+visibility on top of the firewall/DNS-proxy enforcement above, not a
+substitute for it.
 
-- `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
-  (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
-- `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
-  (group 1 for allowed, group 2 for rejected), which `ulogd2`
-  (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
-  `action` field - labeled `job=dejima-net`. Only new connection
-  attempts are logged, not every packet: the firewall's existing
-  ESTABLISHED,RELATED rule short-circuits the rest of a connection before it
-  ever reaches the tagged rules.
-
-This is visibility on top of the firewall/DNS-proxy enforcement above, not a
-substitute for it - nothing about logging changes what's actually allowed to
-resolve or connect.
-
-### Conversation logging (opt-in)
-
-Set `[logging] conversation = on` (with `loki_url` configured) to also ship
-session content to Loki as the `dejima-conversation` job: your
-prompts, the agent's text responses, and tool invocations (tool name +
-input - never tool outputs). Lines are JSON with the session ID inside
-(`{session, role, text}` / `{session, role: "tool", tool, input}`).
-
-Off by default - conversation content is a different sensitivity class
-than DNS names and firewall verdicts, so it never leaves the container
-unless you opt in. Transcripts of every session under the mounted
-workspace (including worktrees and subagent sessions) are shipped while
-the sandbox runs.
-
-### Viewing logs in Grafana
-
-Nothing sandbox-specific needed on the Grafana side beyond a Loki data
-source pointed at wherever `[logging] loki_url` resolves to (Connections → Data
-sources → Loki, if one isn't already configured against that instance) -
-`log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
-scrape target or exporter involved.
-
-In Grafana's Explore view (or a dashboard panel with a Loki query), both
-streams are selectable by their `job` label:
-
-```logql
-{job="dejima-dns"}                          # every DNS query + verdict
-{job="dejima-net"}                          # every connection attempt, as JSON
-```
-
-Useful filters on top of those:
-
-```logql
-# DNS lookups that got refused (not on the allowlist)
-{job="dejima-dns"} |= "REFUSED"
-
-# Rejected connections only (parses ulogd2's JSON, filters on its action field)
-{job="dejima-net"} | json | action="blocked"
-
-# Both streams together, e.g. to watch a live session across sources
-{source="dejima"}
-```
-
-`{job="dejima-net"}` lines are one full ulogd2 JSON object per
-connection attempt (`| json` in a query unpacks fields like `dest_ip`,
-`dest_port`, `action`) - Loki's Explore view shows these expandable/
-pretty-printed by default, no extra parsing setup needed.
+**→ [docs/security.md](docs/security.md#network-request-logging)** - the log
+sources, opt-in conversation logging, and viewing both in Grafana.
 
 ## GitHub push: blocked by default, optional opt-in
 
-This section is about `--allow-github-push`, a per-launch flag that adds
-GitHub as a push destination on top of whichever forge is selected, without
-changing that selection. It adds a destination; it does not stand in for a
-forge, so the launch-time rules for the selected forge/workflow pair still
-apply exactly as they would without it. If you
-want GitHub push and PRs as a standing choice instead, set
-`[core] forge = github` — see "GitHub forge (opt-in alternative)" above; it
-also opens `ssh.github.com:22`, but persistently rather than per launch, and
-uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
+The sandbox can always read from GitHub - clone, fetch, `gh` API calls. By
+default it can never push there: GitHub's IP ranges are only allowlisted on
+port 443, so port 22 is physically unreachable, not merely discouraged by a
+hook.
 
-The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
-**default** it can never push there — enforced at the network layer, not
-just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
-443. Port 22 is unreachable, so SSH-based push has no transport at all,
-regardless of what any hook does or doesn't catch.
+Pass `--allow-github-push` to open port 22 for that one launch, paired with
+a repo-scoped deploy key in `[core] ssh_key` rather than a forwarded
+personal agent. The one exception is `[github] token_file`: pointed at a
+write-scoped token instead of a read-only one, it enables HTTPS push over
+port 443 independently of this flag, so keep it read-only.
 
-**Opt-in, not hardcoded** — pass `--allow-github-push` to open port 22 to
-GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
-push destination (the no-direct-to-main rule still applies):
-
-```sh
-dejima --allow-github-push ~/repos/some-project
-```
-
-**Read this before turning it on.** Whether a push actually succeeds depends
-entirely on what SSH key is loaded into the agent. A forwarded personal
-agent with your normal GitHub key would let a compromised session push to
-**any** repo that key can write to, not just the one you intended — agent
-forwarding doesn't distinguish push from pull. Use a dedicated,
-**repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
-`--allow-github-push` is set — that's what actually limits the blast radius.
-`--allow-github-push` only changes the firewall/hook's *host* check; it adds
-no credential-loading path of its own. The flag itself has no config-file
-equivalent — an exported or saved value must not silently grant a push path,
-so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
-github` (see above) is a config-file path that opens the same port, but not
-silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
-manifest, and only when the selected workflow actually pushes. What it opens
-is the same GitHub ranges the read-only path already allows on port 443, now
-also on port 22, logged like every other allowed connection and verified by
-the firewall's own startup self-check.
-
-`[github] token_file` must point at a **read-only** fine-grained PAT
-regardless of this setting. `gh auth setup-git` (run at container start if
-that file exists) points git's github.com HTTPS credential helper at `gh`,
-which only ever holds whatever token that file provides — a write-scoped
-token there would make HTTPS push possible independent of
-`--allow-github-push`, so don't use one.
+**→ [docs/security.md](docs/security.md#github-push-blocked-by-default-optional-opt-in)**
+- what a forwarded personal agent changes, and the persistent alternative.
 
 ## Remote access
 
@@ -1065,16 +488,9 @@ on a phone, running behind another reverse proxy, notifications, and attaching.
 
 ## CI: push access is code execution elsewhere
 
-If the project has CI, **granting a session push access grants it code
-execution on whatever host that CI runs on** - and nothing in the chain needs
-you. The push guard permits a feature branch, the briefing tells the agent to
-open a pull request without asking, `on: pull_request` fires, and the runner
-executes that commit. Merging is a decision you make *after* the code has
-already run, and it does not take a modified workflow file to get there: a
-workflow that runs a test suite runs every file in it.
-
-The sandbox bounds what a session can reach directly. It does not bound what
-it can arrange to have run elsewhere.
+Merging is a decision you make *after* the code has already run, and it does
+not take a modified workflow file to get there: a workflow that runs a test
+suite runs every file in it.
 
 **This holds for projects with no CI, too** - a branch can add the first
 workflow, so what matters is which runners the repository can *reach*, not
@@ -1093,6 +509,31 @@ version-controlled artifact read from `main`.
 hardens a CI runner, installed on the CI box and nowhere near a dejima host.
 Nothing in this repository needs to be copied onto a runner.
 
+## Exit-time audit
+
+Before each run, dejima snapshots the host surfaces a session could write to
+and persist through: `.git/config` keys that run a command on the next `git`,
+`.git/hooks/`, the workspace's `.claude/`, `.mcp.json`, `.envrc`, and writes
+under `~/.claude/projects`. After the container exits it diffs them and tells
+you what changed.
+
+It is **advisory, not a block**. It fires after the session has ended, so a
+finding is something to read and clean up before your next `git` or `claude`
+in that repo, not something that was prevented. And its diff is time-windowed
+rather than session-attributed: it reports that a path changed while the
+session was running, not that the session changed it.
+
+`dejima-audit ack` walks the findings and shows you each one before asking.
+Approving records the exact content, so any later change re-fires; ignoring
+records the surface, so that path is fine whatever it later contains; and
+skipping decides nothing, which means you are asked again next session.
+`[audit] strict` refuses a headless launch while CRITICAL findings are
+unacknowledged, which is the setting that turns the audit from a report into a
+gate for unattended runs.
+
+**→ [docs/security.md](docs/security.md#the-exit-time-audit)** - every
+surface it watches, what it cannot see, and how the baseline works.
+
 ## Security notes
 
 What this sandbox does and does not protect you from - the containment
@@ -1104,108 +545,32 @@ audit's findings are a time window, not a verdict on who caused them.
 
 ## Tests
 
-`test/` has a [bats](https://github.com/bats-core/bats-core) suite covering
-the security invariants above - not a substitute for reading this document,
-but a way to actually catch a future change silently breaking one of them
-instead of finding out the hard way:
+Every behaviour this README asserts is enforced by a test that fails when it
+stops being true: that the firewall blocks what it says it blocks, that
+credentials never enter the container, that a push to anywhere but the
+allowed remote is refused. Hundreds of tests across suites covering
+static analysis, host-side behaviour, and containers started for real.
 
-```sh
-bats test/               # everything
-bats test/audit.bats     # one area - the suites are independent, see .dejima.md
-SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the current image
-```
+They are the reason claims here are stated flatly rather than hedged.
 
-`.gitea/workflows/tests.yml` runs all of it on every pull request and on every
-push to one, `runtime.bats` included. That job needs two things from the
-runner that an ordinary one doesn't — the host's Docker socket and the host
-network namespace — and it checks for both up front rather than failing
-obscurely partway through; the file says why each is needed.
+→ **[docs/development.md](docs/development.md)**: the suites, what each
+covers, and how to run them.
 
-`static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
-`ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
-`~/.claude` mount inventory is exactly what it should be, `dejima-allow`
-rejects a malicious domain argument. `runtime.bats` builds the image, boots
-a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
-env var makes it stop just short of execing `$SANDBOX_CMD`, so the suite can attach
-to a fully-initialized container instead of reimplementing its own copy of
-the setup sequence), and asserts against it: IPv6 blocked, DNS/IP allowlist
-enforcement in both directions, GitHub read-only, no working `sudo`/
-`iptables`/`init-firewall.sh` as `node`, capabilities actually stripped
-(not just absent from a `docker exec` that doesn't have them to begin
-with), `ulogd2` unprivileged, and the dynamic-ipset CDN-rotation fix.
+## Docs
 
-The other three need no Docker either. `project.bats` covers the
-declaration/approval split - what `.dejima/` may ask for, what only the host
-can grant, and that the approval store is never mounted. `remote.bats`
-covers everything in [docs/remote-access.md](docs/remote-access.md):
-the `[remote-access]` config section, the session registry, and the properties the
-feature's security rests on - that the
-notification path carries no sandbox-controlled byte, and that no marker
-name outside `waiting`/`done` is ever acted on. `audit.bats` covers
-`bin/dejima-audit`'s own diffing.
-
-One assertion is worth calling out because it can only run for real on a
-Docker host: `runtime.bats` proves that a service bound to the host's
-loopback is unreachable from inside a container while one bound to the
-bridge gateway *is* reachable. The second half is a positive control - it is
-what stops the first from passing in an environment where the container
-simply reaches nothing. That pair is the ttyd front door's whole containment
-argument, so run it before trusting a front door you just set up.
-
-Every mutation in `runtime.bats` (firewall rules, `ipset` entries) happens
-inside the test container's own network namespace, same as any other
-container - none of it touches the host. Container/network names are
-derived from bats' own per-run temp directory, not anything guessable or
-likely to collide with a real container you have running.
-
-## Files
-
-| File | Purpose |
+| Doc | What is in it |
 | --- | --- |
-| `docker/Dockerfile` | Base image, dev tools, nvim, Claude Code + wrapper, `gitea-pr`/`gitea-issue` |
-| `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
-| `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
-| `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
-| `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL`; also ships session transcripts when `SANDBOX_LOG_CONVERSATION=1` |
-| `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
-| `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
-| `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
-| `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
-| `.dejima.md` | Project-level agent instructions, harness-agnostic — `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
-| `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
-| `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/merge-guard.sh` | `PreToolUse` hook: blocks the configured forge's merge command (`DEJIMA_MERGE_BLOCK`) in the sandbox — merging is a human decision |
-| `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see [docs/remote-access.md](docs/remote-access.md) |
-| `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
-| `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
-| `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
-| `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH — see [docs/providers.md](docs/providers.md) |
-| `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` — data, never sourced or executed; see [docs/providers.md](docs/providers.md) |
-| `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
-| `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
-| `bin/dejima-project` | Review and approve project domains and dependencies from the host |
-| `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
-| `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
-| `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
-| `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
-| `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
-| `ci/` | Worked runner, resolver and firewall examples for the setup `docs/ci.md` describes; installed by nothing, and belongs on a CI machine rather than a dejima one |
-| `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
-
-`bin/dejima` is the entry point — it resolves the project path,
-checks for a live `ssh-agent`, reads `GITEA_TOKEN`/`GH_TOKEN` from the token
-files named in the config, discovers which host directories need mounting for symlinks under
-`~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
-top-level entries like `statusline.sh`) to resolve, and runs
-`docker compose run`. `bin/dejima-allow`
-adds a domain to a running session's firewall from the host - see "Adding a
-domain to a running session" above. `install.sh` installs the hooks into
-`~/.claude/hooks` and registers them in `~/.claude/settings.json`.
+| [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
+| [security.md](docs/security.md) | Provider trust, the egress firewall, identity, and logging |
+| [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
+| [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
+| [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
+| [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
+| [development.md](docs/development.md) | The file map, the test suites, running them |
 
 ## License
 
 This project is licensed under the GNU General Public License v3.0 or later
-(GPL-3.0-or-later) — see [LICENSE](LICENSE) for the full text.
+(GPL-3.0-or-later); see [LICENSE](LICENSE) for the full text.
 
 Copyright (C) 2026 Brad Anderson
