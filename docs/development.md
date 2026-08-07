@@ -47,8 +47,9 @@ files named in the config, discovers which host directories need mounting for sy
 `~/.claude` (`hooks`, `skills`, `commands`, `agents`, `output-styles`, and
 top-level entries like `statusline.sh`) to resolve, and runs
 `docker compose run`. `bin/dejima-allow`
-adds a domain to a running session's firewall from the host - see "Adding a
-domain to a running session" in the README. `install.sh` installs the hooks into
+adds a domain to a running session's firewall from the host - see
+[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
+`install.sh` installs the hooks into
 `~/.claude/hooks` and registers them in `~/.claude/settings.json`.
 
 ## Tests

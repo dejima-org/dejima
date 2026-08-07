@@ -890,7 +890,7 @@ forwarding doesn't distinguish push from pull. Use a dedicated,
 no credential-loading path of its own. The flag itself has no config-file
 equivalent: an exported or saved value must not silently grant a push path,
 so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
-github` (see "GitHub forge (opt-in alternative)" in the README) is a
+github` (see [Shipped providers](providers.md#shipped-providers)) is a
 config-file path that opens the same port, but not
 silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
 manifest, and only when the selected workflow actually pushes. What it opens

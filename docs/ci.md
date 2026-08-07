@@ -394,10 +394,11 @@ Block IPv6 outright unless you have built the same allowlist for it: an
 address family with no allowlist is not a smaller hole than the one you just
 closed.
 
-**The working configuration for all of this is in [`ci/`](../ci/), and
-[`ci/README.md`](../ci/README.md) is the step-by-step.** It is deliberately not
-reproduced here: two copies of a firewall rule drift, and the one in `ci/` is
-the one with the ordering constraints and the substitution notes attached.
+**The working configuration for all of this is in
+[dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener),
+with the ordering constraints and substitution notes attached.** It is
+deliberately not reproduced here: two copies of a firewall rule drift, and
+dejima-ci-hardener is the one that stays runnable.
 
 ## The allowlist comes from `main`, not from the checkout
 
