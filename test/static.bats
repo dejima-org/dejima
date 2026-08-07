@@ -1987,6 +1987,28 @@ EOF
     grep -qi 'never from the checkout' "$REPO_ROOT/docs/ci.md"
 }
 
+# bin/dejima names docs/configuration.md in user-facing diagnostics and
+# comments; bin/dejima, bin/dejima-anthropic-proxy and bin/dejima-audit all
+# name docs/security.md the same way. Before the docs restructure these named
+# the README, which cannot be renamed. Now they name files that can be. None
+# of these are grep'd out of one canonical string the way docs/remote-access.md
+# is above - each script just spells the path out - so this walks every
+# docs/*.md reference actually present in these scripts and checks the target
+# exists, rather than hardcoding the two names here too and letting a rename
+# desync the test from the code.
+@test "docs/*.md references in bin/dejima, bin/dejima-anthropic-proxy and bin/dejima-audit resolve to real files" {
+    local f doc missing=0
+    for f in bin/dejima bin/dejima-anthropic-proxy bin/dejima-audit; do
+        for doc in $(grep -ohE 'docs/[a-z-]+\.md' "$REPO_ROOT/$f" | sort -u); do
+            if [ ! -f "$REPO_ROOT/$doc" ]; then
+                echo "$f references $doc, which does not exist" >&2
+                missing=1
+            fi
+        done
+    done
+    [ "$missing" -eq 0 ]
+}
+
 # --- the labels this repo's own workflow asks for ---
 #
 # Whether a job container gets the Docker socket is settled by the runner's
