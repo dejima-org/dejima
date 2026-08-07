@@ -195,8 +195,8 @@ see the whole resolved schema, real values included.
 | `[core] harness` | `claude-code` | agent harness the container runs |
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
-| `[core] command` | `claude` | container's main process (e.g. `nvim`); also settable per launch with `--cmd` |
-| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only); also settable per launch with `--no-firewall` |
+| `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
+| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
@@ -205,7 +205,7 @@ see the whole resolved schema, real values included.
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
-| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`; deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
 | `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |

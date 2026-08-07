@@ -866,8 +866,8 @@ also opens `ssh.github.com:22`, but persistently rather than per launch, and
 uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
 
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
-**default** it can never push there; enforced at the network layer, not
-just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
+**default** it can never push there: enforced at the network layer, not
+just by `git-push-guard.sh`. GitHub's IP ranges are only allowlisted on port
 443. Port 22 is unreachable, so SSH-based push has no transport at all,
 regardless of what any hook does or doesn't catch.
 
