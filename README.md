@@ -1175,7 +1175,7 @@ audit's findings are a time window, not a verdict on who caused them.
 Every behaviour this README asserts is enforced by a test that fails when it
 stops being true: that the firewall blocks what it says it blocks, that
 credentials never enter the container, that a push to anywhere but the
-allowed remote is refused. Hundreds of tests across nine suites, covering
+allowed remote is refused. Hundreds of tests across suites covering
 static analysis, host-side behaviour, and containers started for real.
 
 They are the reason claims here are stated flatly rather than hedged.

@@ -104,7 +104,7 @@ container - none of it touches the host. Container/network names are
 derived from bats' own per-run temp directory, not anything guessable or
 likely to collide with a real container you have running.
 
-`ci-runner.bats` is different in kind from the other eight: it doesn't test
+`ci-runner.bats` is different in kind from the others: it doesn't test
 this repository at all, it asserts on the CI runner executing it (the Docker
 socket withheld from the sandbox job, granted to the host-docker job, and
 the egress each is allowed) - see [docs/ci.md](ci.md). It skips outright
