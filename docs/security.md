@@ -107,7 +107,7 @@ it to, rather than assuming.
 
 **Write access, and specifically not ownership.** Add the account as a
 collaborator on the repositories it works on. Write is the ceiling here, not
-a floor: an account that owns a repository — or holds admin on it — can merge
+a floor: an account that owns a repository, or holds admin on it, can merge
 its own work and edit the settings in the table above, so every row of that
 table goes back to being decorative. `write:repository` and `write:issue` are
 the scopes its token needs (README, "Gitea/Forgejo PR workflow"), and nothing
@@ -118,9 +118,9 @@ misconfiguration and the obvious fix is the wrong one. Parts of Gitea's API
 are gated on *ownership* rather than on permission: `GET
 /repos/{owner}/{repo}/actions/runs` answers a non-owner with `"user should be
 the owner of the repo"` no matter which scopes the token carries. Read that
-way it looks like a scope error, and the reflex is to widen the token — which
-cannot work, since no scope grants ownership, and whose only real remedy is
-handing the sandbox your own token. That would undo this whole section.
+way it looks like a scope error, and the reflex is to widen the token. That
+cannot work, since no scope grants ownership, and its only real remedy is
+handing the sandbox your own token, which would undo this whole section.
 
 `gitea-actions` therefore reads CI through `actions/tasks`, the commit's
 statuses and the run view's log route, none of which are owner-gated. If some
@@ -198,6 +198,8 @@ hands to whichever session starts against it. See
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
+### The exit-time audit
+
 - `bin/dejima-audit` snapshots host-persistence surfaces before each
   run and diffs them after the container exits: `.git/config` (and worktree
   `config.worktree`) keys that run a command on the next `git` -
@@ -231,6 +233,32 @@ hands to whichever session starts against it. See
   session, another host process, or you editing the same files by hand
   during the run all land in the same diff and get reported identically -
   the tool has no way to tell them apart.
+- **Approving and ignoring are different decisions, and the difference is
+  what you are promising about next time.** Approving records the exact
+  content: `safe <id> <sha>`, so this file with these bytes is fine and any
+  other content re-fires. Ignoring records the surface: `spam <id>`, so this
+  path or key is fine whatever it later contains. Approve a hook you have
+  read; ignore a key some tool rewrites on every run and which you have
+  decided you will never care about. The review offers both, and says which
+  is which rather than leaving you to infer it:
+
+  ```
+  [a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
+  ```
+
+  Skipping is the third option on purpose: a finding you have not decided
+  about is asked again next session, which is the right default for anything
+  you are unsure of. A WARNING-tier git config change is curatable the same
+  way; it used to be the one class of finding with no id to record a decision
+  against, so keys that some tools rewrite every run re-fired forever and
+  pushed real findings out of the capped list.
+
+  Severity is not negotiable by either verb: an exec-capable git config key or
+  a shell alias is classified CRITICAL whatever the baseline says, and an
+  `ignore` entry is refused against a CRITICAL surface when the baseline is
+  read, not just when it is written. So neither decision can quietly downgrade
+  something that matters.
+
 - `dejima-audit ack` shows what it is asking you to approve. For a surface
   that changed during the session it prints a unified diff of the
   pre-session content against the current content; for one created during
@@ -857,6 +885,12 @@ pretty-printed by default, no extra parsing setup needed.
 
 
 ## GitHub push: blocked by default, optional opt-in
+
+`dejima --allow-github-push` is a per-launch *addition* to whichever forge is
+selected, not a substitute for selecting one. A pushing workflow is still
+refused at launch unless its forge resolves to a host with its required keys
+filled in, so the flag alone will not get an unconfigured `[forge.gitea]` past
+validation.
 
 This section is about `--allow-github-push`, a per-launch flag that adds
 GitHub as a push destination on top of whichever forge is selected, without
