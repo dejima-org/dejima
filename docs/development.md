@@ -38,7 +38,6 @@ run them.
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
-| `ci/` | Worked runner, resolver and firewall examples for the setup `docs/ci.md` describes; installed by nothing, and belongs on a CI machine rather than a dejima one |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point: it resolves the project path,
