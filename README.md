@@ -205,7 +205,7 @@ see the whole resolved schema, real values included.
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname — skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1` — skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
-| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github` — deliberately separate from `[github] token_file` below; see "GitHub push" |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github` — deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
 | `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path — for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
@@ -213,7 +213,7 @@ see the whole resolved schema, real values included.
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint — for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`) — see "Conversation logging (opt-in)" below |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`) — see "Conversation logging (opt-in)" in docs/security.md |
 | `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
 | `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
 | `[audit] keep` | `10` | how many past findings/baselines to retain |
@@ -245,8 +245,8 @@ To push, set `[core] workflow` to `worktree-pr` (push + open a PR) or
 `branch-push` (push, stop at the branch), and pick the forge to push to:
 `[core] forge = gitea` for a Gitea/Forgejo instance (fill in `[forge.gitea]`
 per "Gitea/Forgejo PR workflow" below), or `[core] forge = github` to push and
-open PRs through `gh` (see "GitHub push" below for the posture change that
-opens, and why its `push_token_file` is a separate credential from the
+open PRs through `gh` (see "GitHub push" in docs/security.md for the posture
+change that opens, and why its `push_token_file` is a separate credential from the
 read-only `[github] token_file`). `dejima --allow-github-push` is a
 per-launch *addition* to whichever forge is selected, not a substitute for
 selecting one: a pushing workflow is still refused at launch unless its forge
@@ -345,7 +345,7 @@ Skip this if you use `forge = github` or `forge = none` instead (below).
 Set `[core] forge = github` instead of the above to push and open PRs
 against GitHub directly through `gh`, rather than a Gitea/Forgejo instance.
 This is a persistent, per-config choice — different from the per-launch
-`--allow-github-push` flag (see "GitHub push" below), and it opens
+`--allow-github-push` flag (see "GitHub push" in docs/security.md), and it opens
 `ssh.github.com:22` for push every time this forge is selected with a
 workflow that pushes, not just for one launch. It opens it through the same
 grant that flag uses, so the posture is the one documented there and nothing
@@ -392,17 +392,17 @@ it too). `--global` writes only the approval — there is no project to declare
 in.
 
 → [Global and per-project domains and dependencies](docs/configuration.md#global-and-per-project-domains-and-dependencies),
-[Adding a domain to a running session](#adding-a-domain-to-a-running-session)
+[Adding a domain to a running session](docs/security.md#adding-a-domain-to-a-running-session)
 
 ### Log shipping
 
 1. Set `[logging] loki_url` to your Loki push endpoint.
 2. Optionally set `[logging] conversation = on` to ship transcripts as well —
    read
-   [Conversation logging (opt-in)](#conversation-logging-opt-in) first, since
-   that ships what you and the model actually say.
-   → [Network request logging](#network-request-logging),
-   [Viewing logs in Grafana](#viewing-logs-in-grafana)
+   [Conversation logging (opt-in)](docs/security.md#conversation-logging-opt-in)
+   first, since that ships what you and the model actually say.
+   → [Network request logging](docs/security.md#network-request-logging),
+   [Viewing logs in Grafana](docs/security.md#viewing-logs-in-grafana)
 
 ### GitHub push (opt-in)
 
@@ -413,7 +413,7 @@ dejima --allow-github-push ~/myproject
 ```
 
 Pair it with a repo-scoped deploy key in `[core] ssh_key`. Read
-[GitHub push: blocked by default, optional opt-in](#github-push-blocked-by-default-optional-opt-in)
+[GitHub push: blocked by default, optional opt-in](docs/security.md#github-push-blocked-by-default-optional-opt-in)
 before turning it on — with a forwarded personal agent this is much broader
 than it looks.
 
@@ -563,120 +563,31 @@ and everything the session briefing covers.
 
 ## Network egress firewall
 
-On start, the container runs an allowlist-only `iptables`/`ipset` firewall
-(`init-firewall.sh`), matching the reference dev container. Allowed by
-default:
+Outbound network access is default-deny: on start, the container builds an
+allowlist-only `iptables`/`ipset` firewall, and anything not explicitly
+allowed is rejected outright. The allowlist covers what the sandbox itself
+needs to function - DNS resolution, the Docker host, the selected forge, and
+the harness's own update and model endpoints - plus whatever a project has
+declared and had approved (see "Global and per-project domains and
+dependencies" above). IPv6 is blocked outright too, with no allowlist
+equivalent for it.
 
-- DNS resolution via a local proxy (see "DNS is allowlisted too")
-- the Docker host itself (not its whole subnet)
-- GitHub's published IP ranges, port 443 only (see "GitHub push" below)
-- `registry.npmjs.org` and `platform.claude.com` (the harness and its
-  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
-  separate CDN from github.com's own IPs, and where a good deal of tooling
-  fetches its binaries); `api.anthropic.com` when the credential proxy is off
-  (kill switch or API-key auth)
+DNS is allowlisted as well as IPs: a local resolver only forwards lookups
+for names already on that same allowlist, so a domain that isn't approved
+does not resolve at all, closing off exfiltration through query names and
+not just through a direct connection. A blocked connection is refused
+immediately rather than left to time out, so a session is told when
+something doesn't connect instead of being left to guess.
 
-  That is the whole built-in list, and it is meant to stay that way: it covers
-  what the sandbox itself cannot run without, not what a project might want.
-  Language package hosts are approved rather than assumed — `pypi.org`,
-  `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
-  or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
-  built-in list short is that everything on it is reachable from every sandbox
-  on the host whether or not a project has any use for it, and a name granted
-  by being built in is a name nobody ever reviewed
-- whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
-  by default) — not port-restricted, so git-over-ssh to the forge works
-  without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
-  protection because a self-hosted forge host legitimately resolves to an
-  internal address. `[core] forge = github` is deliberately *not* added here:
-  its three hostnames are public names already covered by the GitHub entry
-  above, so they stay on that entry — 443 by default, plus port 22 when the
-  selected workflow pushes, exactly as `--allow-github-push` opens it per
-  launch — rather than picking up all-port egress and losing rebind
-  protection on the way
+Run `dejima-allow --global <domain>` (or `--project <path>`) to approve a
+domain for future sessions - these deliberately do not touch a running container.
+`dejima-allow <domain>` with no scope flag patches a domain into a session
+that's already running instead. `dejima --no-firewall` disables the
+firewall for one launch (debugging only).
 
-Everything else is rejected. Run `dejima-allow --global <domain>`
-(or `--project <path>` for one project) to allow more permanently (e.g.
-`crates.io` for a Rust project), or `dejima --no-firewall` to disable the
-firewall entirely for one launch (debugging only).
-
-IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
-strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
-leaving it open would bypass the whole firewall on any host with IPv6
-egress.
-
-If your Gitea host only resolves via a LAN-local DNS server, make sure the
-Docker host itself can resolve it — containers inherit the host's resolver.
-
-### DNS is allowlisted too
-
-Resolution itself is restricted, not just the IP connections made
-afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
-and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
-above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
-since GitHub itself is allowlisted by IP range — see `fixed-domains.sh`) get
-forwarded to Docker's real resolver; anything else gets no upstream
-configured at all and is refused outright. Without this, a compromised
-session could exfiltrate data by encoding it into query names to an
-attacker-controlled domain, even with no direct connection ever possible.
-
-### Adding a domain to a running session
-
-Approved domains only take effect at container start. For a domain a
-*running* session needs right now, run from the host (not inside the
-sandbox — it has no privilege to do this itself):
-
-```sh
-dejima-allow crates.io                    # this running session only
-dejima-allow --container <id> crates.io   # a specific session, if more than one is running
-```
-
-It first adds the domain to the running dnsmasq's allowlist (appends a
-`server=` line to its servers-file and sends `SIGHUP` to reload just that
-file - no restart), then resolves it through the now-unblocked container
-resolver and adds the IP(s) to the running firewall's `ipset`, all via
-`docker exec -u root`. It finishes by checking the domain is actually
-reachable from inside that same container and prints a definitive verdict
-— exit code 2 if it isn't.
-
-`--global` and `--project` are the opposite of this: they record an approval
-for *future* sessions and deliberately do not touch a running container, even
-together - see
-[Global and per-project domains and dependencies](docs/configuration.md#global-and-per-project-domains-and-dependencies)
-in docs/configuration.md, since the domain being approved may legitimately
-not answer on 443 (an
-internal service, an SSH-only host) and the natural moment to add an approval
-is precisely when nothing is running to probe in the first place. Pass
-`--container <id>` alongside a scope flag to do both in one call:
-`dejima-allow --global --container <id> crates.io` records the approval and
-patches that session immediately, in that order, so the approval is never
-lost to a live-session failure. If more than one dejima container is
-running, the bare form above refuses and asks you to disambiguate with
-`--container <name>` - `docker ps` finds it, or use the
-container's own ID, which `sandbox-context.sh` already hands the agent in
-its startup context (and which is always available inside the sandbox as
-`cat /etc/hostname`), so there's no need for it to guess one and risk
-"successfully" updating someone else's session instead.
-
-A domain allowed this way stays allowed for the rest of the session even
-if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
-`ipset` from every DNS answer it serves, not just the one resolved at
-allow-time, since only allowlisted names get an upstream to answer from in
-the first place. GitHub's own domains sit outside this - their existing
-port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
-so that restriction is unaffected.
-
-One gap remains: allowing an *internal* hostname (one that resolves to an
-RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
-rejects private answers for any domain not exempted at startup, and that
-exemption list can only be extended by restarting dnsmasq. Internal hosts
-named before the container starts (`[forge.gitea] ssh_host`, `api`,
-`[logging] loki_url`, and any globally or per-project approved domain) are
-already exempted and unaffected by this.
-
-The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
-by name when a task is blocked on a single missing domain, rather than
-stopping the whole session over it.
+**→ [docs/security.md](docs/security.md#network-egress-firewall)** - how the
+ipsets are built, how `dnsmasq` is configured, and the NFLOG groups behind
+the request log below.
 
 ## Global and per-project domains and dependencies
 
@@ -711,122 +622,28 @@ and the complete `dejima-allow`/`dejima-dep`/`dejima-project` reference.
 
 ## Network request logging
 
-If `[logging] loki_url` is set (see Prerequisites), every DNS query and every new
-outbound connection attempt - allowed or rejected - is shipped to that Loki
-endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
+If `[logging] loki_url` is set (see Prerequisites), every DNS query and
+every new outbound connection attempt - allowed or rejected - is shipped
+there, and, opt-in, the session transcript alongside them. This is
+visibility on top of the firewall/DNS-proxy enforcement above, not a
+substitute for it.
 
-- `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
-  (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
-- `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
-  (group 1 for allowed, group 2 for rejected), which `ulogd2`
-  (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
-  `action` field - labeled `job=dejima-net`. Only new connection
-  attempts are logged, not every packet: the firewall's existing
-  ESTABLISHED,RELATED rule short-circuits the rest of a connection before it
-  ever reaches the tagged rules.
-
-This is visibility on top of the firewall/DNS-proxy enforcement above, not a
-substitute for it - nothing about logging changes what's actually allowed to
-resolve or connect.
-
-### Conversation logging (opt-in)
-
-Set `[logging] conversation = on` (with `loki_url` configured) to also ship
-session content to Loki as the `dejima-conversation` job: your
-prompts, the agent's text responses, and tool invocations (tool name +
-input - never tool outputs). Lines are JSON with the session ID inside
-(`{session, role, text}` / `{session, role: "tool", tool, input}`).
-
-Off by default - conversation content is a different sensitivity class
-than DNS names and firewall verdicts, so it never leaves the container
-unless you opt in. Transcripts of every session under the mounted
-workspace (including worktrees and subagent sessions) are shipped while
-the sandbox runs.
-
-### Viewing logs in Grafana
-
-Nothing sandbox-specific needed on the Grafana side beyond a Loki data
-source pointed at wherever `[logging] loki_url` resolves to (Connections → Data
-sources → Loki, if one isn't already configured against that instance) -
-`log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
-scrape target or exporter involved.
-
-In Grafana's Explore view (or a dashboard panel with a Loki query), both
-streams are selectable by their `job` label:
-
-```logql
-{job="dejima-dns"}                          # every DNS query + verdict
-{job="dejima-net"}                          # every connection attempt, as JSON
-```
-
-Useful filters on top of those:
-
-```logql
-# DNS lookups that got refused (not on the allowlist)
-{job="dejima-dns"} |= "REFUSED"
-
-# Rejected connections only (parses ulogd2's JSON, filters on its action field)
-{job="dejima-net"} | json | action="blocked"
-
-# Both streams together, e.g. to watch a live session across sources
-{source="dejima"}
-```
-
-`{job="dejima-net"}` lines are one full ulogd2 JSON object per
-connection attempt (`| json` in a query unpacks fields like `dest_ip`,
-`dest_port`, `action`) - Loki's Explore view shows these expandable/
-pretty-printed by default, no extra parsing setup needed.
+**→ [docs/security.md](docs/security.md#network-request-logging)** - the log
+sources, opt-in conversation logging, and viewing both in Grafana.
 
 ## GitHub push: blocked by default, optional opt-in
 
-This section is about `--allow-github-push`, a per-launch flag that adds
-GitHub as a push destination on top of whichever forge is selected, without
-changing that selection. It adds a destination; it does not stand in for a
-forge, so the launch-time rules for the selected forge/workflow pair still
-apply exactly as they would without it. If you
-want GitHub push and PRs as a standing choice instead, set
-`[core] forge = github` — see "GitHub forge (opt-in alternative)" above; it
-also opens `ssh.github.com:22`, but persistently rather than per launch, and
-uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
+The sandbox can always read from GitHub - clone, fetch, `gh` API calls. By
+default it can never push there: GitHub's IP ranges are only allowlisted on
+port 443, so port 22 is physically unreachable, not merely discouraged by a
+hook.
 
-The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
-**default** it can never push there — enforced at the network layer, not
-just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
-443. Port 22 is unreachable, so SSH-based push has no transport at all,
-regardless of what any hook does or doesn't catch.
+Pass `--allow-github-push` to open port 22 for that one launch, paired with
+a repo-scoped deploy key in `[core] ssh_key` rather than a forwarded
+personal agent.
 
-**Opt-in, not hardcoded** — pass `--allow-github-push` to open port 22 to
-GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
-push destination (the no-direct-to-main rule still applies):
-
-```sh
-dejima --allow-github-push ~/repos/some-project
-```
-
-**Read this before turning it on.** Whether a push actually succeeds depends
-entirely on what SSH key is loaded into the agent. A forwarded personal
-agent with your normal GitHub key would let a compromised session push to
-**any** repo that key can write to, not just the one you intended — agent
-forwarding doesn't distinguish push from pull. Use a dedicated,
-**repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
-`--allow-github-push` is set — that's what actually limits the blast radius.
-`--allow-github-push` only changes the firewall/hook's *host* check; it adds
-no credential-loading path of its own. The flag itself has no config-file
-equivalent — an exported or saved value must not silently grant a push path,
-so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
-github` (see above) is a config-file path that opens the same port, but not
-silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
-manifest, and only when the selected workflow actually pushes. What it opens
-is the same GitHub ranges the read-only path already allows on port 443, now
-also on port 22, logged like every other allowed connection and verified by
-the firewall's own startup self-check.
-
-`[github] token_file` must point at a **read-only** fine-grained PAT
-regardless of this setting. `gh auth setup-git` (run at container start if
-that file exists) points git's github.com HTTPS credential helper at `gh`,
-which only ever holds whatever token that file provides — a write-scoped
-token there would make HTTPS push possible independent of
-`--allow-github-push`, so don't use one.
+**→ [docs/security.md](docs/security.md#github-push-blocked-by-default-optional-opt-in)**
+- what a forwarded personal agent changes, and the persistent alternative.
 
 ## Remote access
 

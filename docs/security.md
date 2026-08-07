@@ -592,8 +592,7 @@ hands to whichever session starts against it. See
     sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
     re-checking if a future Claude Code version starts relying on that for
     normal operation.
-- DNS resolution itself is allowlisted (see "DNS is allowlisted too" in the
-  README),
+- DNS resolution itself is allowlisted (see "DNS is allowlisted too" below),
   not just the IP connections made afterward, closing off exfiltration via
   encoding data into query names to an attacker-controlled domain - verified
   a non-allowlisted domain gets refused outright (`status: REFUSED`) rather
@@ -609,7 +608,7 @@ hands to whichever session starts against it. See
   is given, or `[core] forge = github` is selected with a workflow that
   pushes (which opens the same grant), so the forwarded agent otherwise has
   no transport to use for it at all (see "GitHub push: blocked by default,
-  optional opt-in" above).
+  optional opt-in" below).
 - `[core] ssh_key` (see "Headless git push without agent forwarding") is a
   second, independent credential-loading path with the same "signs for any
   Gitea repo it has access to" shape as the forwarded agent above - the
@@ -666,3 +665,242 @@ hands to whichever session starts against it. See
   session can still edit those files during the run, and whatever it
   changes takes effect the *next* time `dejima` itself runs,
   not the current one.
+
+## Network egress firewall
+
+On start, the container runs an allowlist-only `iptables`/`ipset` firewall
+(`init-firewall.sh`), matching the reference dev container. Allowed by
+default:
+
+- DNS resolution via a local proxy (see "DNS is allowlisted too")
+- the Docker host itself (not its whole subnet)
+- GitHub's published IP ranges, port 443 only (see "GitHub push" below)
+- `registry.npmjs.org` and `platform.claude.com` (the harness and its
+  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
+  separate CDN from github.com's own IPs, and where a good deal of tooling
+  fetches its binaries); `api.anthropic.com` when the credential proxy is off
+  (kill switch or API-key auth)
+
+  That is the whole built-in list, and it is meant to stay that way: it covers
+  what the sandbox itself cannot run without, not what a project might want.
+  Language package hosts are approved rather than assumed — `pypi.org`,
+  `proxy.golang.org`, `crates.io` and the rest are one `dejima-allow --global`
+  or one reviewed `.dejima/allowed-domains` line away. The reason to keep the
+  built-in list short is that everything on it is reachable from every sandbox
+  on the host whether or not a project has any use for it, and a name granted
+  by being built in is a name nobody ever reviewed
+- whatever the selected forge needs reachable (`[forge.gitea] ssh_host`/`api`
+  by default) — not port-restricted, so git-over-ssh to the forge works
+  without a blanket "port 22 to anywhere" rule, and exempted from DNS-rebind
+  protection because a self-hosted forge host legitimately resolves to an
+  internal address. `[core] forge = github` is deliberately *not* added here:
+  its three hostnames are public names already covered by the GitHub entry
+  above, so they stay on that entry — 443 by default, plus port 22 when the
+  selected workflow pushes, exactly as `--allow-github-push` opens it per
+  launch — rather than picking up all-port egress and losing rebind
+  protection on the way
+
+Everything else is rejected. Run `dejima-allow --global <domain>`
+(or `--project <path>` for one project) to allow more permanently (e.g.
+`crates.io` for a Rust project), or `dejima --no-firewall` to disable the
+firewall entirely for one launch (debugging only).
+
+IPv6 is blocked outright (`ip6tables` DROP on INPUT/OUTPUT/FORWARD, `dnsmasq`
+strips AAAA answers) — there's no IPv6 equivalent of the allowlist above, so
+leaving it open would bypass the whole firewall on any host with IPv6
+egress.
+
+If your Gitea host only resolves via a LAN-local DNS server, make sure the
+Docker host itself can resolve it — containers inherit the host's resolver.
+
+### DNS is allowlisted too
+
+Resolution itself is restricted, not just the IP connections made
+afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
+and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
+above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
+since GitHub itself is allowlisted by IP range — see `fixed-domains.sh`) get
+forwarded to Docker's real resolver; anything else gets no upstream
+configured at all and is refused outright. Without this, a compromised
+session could exfiltrate data by encoding it into query names to an
+attacker-controlled domain, even with no direct connection ever possible.
+
+### Adding a domain to a running session
+
+Approved domains only take effect at container start. For a domain a
+*running* session needs right now, run from the host (not inside the
+sandbox — it has no privilege to do this itself):
+
+```sh
+dejima-allow crates.io                    # this running session only
+dejima-allow --container <id> crates.io   # a specific session, if more than one is running
+```
+
+It first adds the domain to the running dnsmasq's allowlist (appends a
+`server=` line to its servers-file and sends `SIGHUP` to reload just that
+file - no restart), then resolves it through the now-unblocked container
+resolver and adds the IP(s) to the running firewall's `ipset`, all via
+`docker exec -u root`. It finishes by checking the domain is actually
+reachable from inside that same container and prints a definitive verdict
+— exit code 2 if it isn't.
+
+`--global` and `--project` are the opposite of this: they record an approval
+for *future* sessions and deliberately do not touch a running container, even
+together - see
+[Global and per-project domains and dependencies](configuration.md#global-and-per-project-domains-and-dependencies)
+in docs/configuration.md, since the domain being approved may legitimately
+not answer on 443 (an
+internal service, an SSH-only host) and the natural moment to add an approval
+is precisely when nothing is running to probe in the first place. Pass
+`--container <id>` alongside a scope flag to do both in one call:
+`dejima-allow --global --container <id> crates.io` records the approval and
+patches that session immediately, in that order, so the approval is never
+lost to a live-session failure. If more than one dejima container is
+running, the bare form above refuses and asks you to disambiguate with
+`--container <name>` - `docker ps` finds it, or use the
+container's own ID, which `sandbox-context.sh` already hands the agent in
+its startup context (and which is always available inside the sandbox as
+`cat /etc/hostname`), so there's no need for it to guess one and risk
+"successfully" updating someone else's session instead.
+
+A domain allowed this way stays allowed for the rest of the session even
+if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
+`ipset` from every DNS answer it serves, not just the one resolved at
+allow-time, since only allowlisted names get an upstream to answer from in
+the first place. GitHub's own domains sit outside this - their existing
+port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
+so that restriction is unaffected.
+
+One gap remains: allowing an *internal* hostname (one that resolves to an
+RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
+rejects private answers for any domain not exempted at startup, and that
+exemption list can only be extended by restarting dnsmasq. Internal hosts
+named before the container starts (`[forge.gitea] ssh_host`, `api`,
+`[logging] loki_url`, and any globally or per-project approved domain) are
+already exempted and unaffected by this.
+
+The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
+by name when a task is blocked on a single missing domain, rather than
+stopping the whole session over it.
+
+## Network request logging
+
+If `[logging] loki_url` is set (see Prerequisites in the README), every DNS query and every new
+outbound connection attempt - allowed or rejected - is shipped to that Loki
+endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
+
+- `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
+  (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
+- `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
+  (group 1 for allowed, group 2 for rejected), which `ulogd2`
+  (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
+  `action` field - labeled `job=dejima-net`. Only new connection
+  attempts are logged, not every packet: the firewall's existing
+  ESTABLISHED,RELATED rule short-circuits the rest of a connection before it
+  ever reaches the tagged rules.
+
+This is visibility on top of the firewall/DNS-proxy enforcement above, not a
+substitute for it - nothing about logging changes what's actually allowed to
+resolve or connect.
+
+### Conversation logging (opt-in)
+
+Set `[logging] conversation = on` (with `loki_url` configured) to also ship
+session content to Loki as the `dejima-conversation` job: your
+prompts, the agent's text responses, and tool invocations (tool name +
+input - never tool outputs). Lines are JSON with the session ID inside
+(`{session, role, text}` / `{session, role: "tool", tool, input}`).
+
+Off by default - conversation content is a different sensitivity class
+than DNS names and firewall verdicts, so it never leaves the container
+unless you opt in. Transcripts of every session under the mounted
+workspace (including worktrees and subagent sessions) are shipped while
+the sandbox runs.
+
+### Viewing logs in Grafana
+
+Nothing sandbox-specific needed on the Grafana side beyond a Loki data
+source pointed at wherever `[logging] loki_url` resolves to (Connections → Data
+sources → Loki, if one isn't already configured against that instance) -
+`log-shipper.sh` pushes directly to Loki's HTTP API, there's no Prometheus
+scrape target or exporter involved.
+
+In Grafana's Explore view (or a dashboard panel with a Loki query), both
+streams are selectable by their `job` label:
+
+```logql
+{job="dejima-dns"}                          # every DNS query + verdict
+{job="dejima-net"}                          # every connection attempt, as JSON
+```
+
+Useful filters on top of those:
+
+```logql
+# DNS lookups that got refused (not on the allowlist)
+{job="dejima-dns"} |= "REFUSED"
+
+# Rejected connections only (parses ulogd2's JSON, filters on its action field)
+{job="dejima-net"} | json | action="blocked"
+
+# Both streams together, e.g. to watch a live session across sources
+{source="dejima"}
+```
+
+`{job="dejima-net"}` lines are one full ulogd2 JSON object per
+connection attempt (`| json` in a query unpacks fields like `dest_ip`,
+`dest_port`, `action`) - Loki's Explore view shows these expandable/
+pretty-printed by default, no extra parsing setup needed.
+
+
+## GitHub push: blocked by default, optional opt-in
+
+This section is about `--allow-github-push`, a per-launch flag that adds
+GitHub as a push destination on top of whichever forge is selected, without
+changing that selection. It adds a destination; it does not stand in for a
+forge, so the launch-time rules for the selected forge/workflow pair still
+apply exactly as they would without it. If you
+want GitHub push and PRs as a standing choice instead, set
+`[core] forge = github` — see "GitHub forge (opt-in alternative)" in the
+README; it
+also opens `ssh.github.com:22`, but persistently rather than per launch, and
+uses its own `[forge.github] push_token_file` rather than a loaded SSH key.
+
+The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
+**default** it can never push there — enforced at the network layer, not
+just by `git-push-guard.sh`: GitHub's IP ranges are only allowlisted on port
+443. Port 22 is unreachable, so SSH-based push has no transport at all,
+regardless of what any hook does or doesn't catch.
+
+**Opt-in, not hardcoded** — pass `--allow-github-push` to open port 22 to
+GitHub and let `git-push-guard.sh` accept `github.com`/`ssh.github.com` as a
+push destination (the no-direct-to-main rule still applies):
+
+```sh
+dejima --allow-github-push ~/repos/some-project
+```
+
+**Read this before turning it on.** Whether a push actually succeeds depends
+entirely on what SSH key is loaded into the agent. A forwarded personal
+agent with your normal GitHub key would let a compromised session push to
+**any** repo that key can write to, not just the one you intended — agent
+forwarding doesn't distinguish push from pull. Use a dedicated,
+**repo-scoped GitHub deploy key** via `[core] ssh_key` instead whenever
+`--allow-github-push` is set — that's what actually limits the blast radius.
+`--allow-github-push` only changes the firewall/hook's *host* check; it adds
+no credential-loading path of its own. The flag itself has no config-file
+equivalent — an exported or saved value must not silently grant a push path,
+so *this* opt-in stays a per-launch decision only. Selecting `[core] forge =
+github` (see "GitHub forge (opt-in alternative)" in the README) is a
+config-file path that opens the same port, but not
+silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
+manifest, and only when the selected workflow actually pushes. What it opens
+is the same GitHub ranges the read-only path already allows on port 443, now
+also on port 22, logged like every other allowed connection and verified by
+the firewall's own startup self-check.
+
+`[github] token_file` must point at a **read-only** fine-grained PAT
+regardless of this setting. `gh auth setup-git` (run at container start if
+that file exists) points git's github.com HTTPS credential helper at `gh`,
+which only ever holds whatever token that file provides — a write-scoped
+token there would make HTTPS push possible independent of
+`--allow-github-push`, so don't use one.

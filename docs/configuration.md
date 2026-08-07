@@ -126,7 +126,7 @@ Approved domains join the allowlist at the next launch. `dejima-allow` can
 also patch a running session immediately, but only when it is run bare or
 with `--container` - approving here (`--project`/`--global`, with no
 `--container`) never touches one; see
-[Adding a domain to a running session](../README.md#adding-a-domain-to-a-running-session).
+[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
 Approved dependencies are baked into a derived image built `FROM` the shared
 base - first `dejima:<username>-global`, if the global store has any
 dependency approved, then `dejima:<username>-<slug>` on top of that,
@@ -365,8 +365,8 @@ any `git push` whose resolved remote isn't the Gitea host, and any push to
 against an overeager agent, not a hard security boundary - a session has full
 shell access and could in principle edit `.git/config` to route around it.
 GitHub push is blocked by default too (see
-[GitHub push](../README.md#github-push-blocked-by-default-optional-opt-in) in
-the README) unless `--allow-github-push` is given. For a real guarantee
+[GitHub push](security.md#github-push-blocked-by-default-optional-opt-in) in
+docs/security.md) unless `--allow-github-push` is given. For a real guarantee
 against pushes to main/master, use branch protection on the remote itself.
 
 `merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
