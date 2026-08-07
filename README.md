@@ -1,11 +1,13 @@
 # dejima
 
-**Unsupervised agentic development you can take responsibility for.**
+**Agents work best unsupervised. Bound the blast radius instead, and assume
+the agent is hostile.**
 
-An agent with permission prompts turned off gets a lot done, and will
-occasionally do something you would not have allowed. dejima is for making
-the first worth having and the second survivable, without handing over your
-machine, your network, your credentials, or the last word on what ships.
+An agent with permission prompts turned off gets a lot done. It can also be
+turned against you mid-session, by a prompt injection or a poisoned
+dependency, and it will not announce that it has been. dejima is built for
+that case: the agent works without asking, and what it can reach, take and
+break was decided before it started.
 
 Runs a coding agent (Claude Code by default, or whatever command you point
 it at) inside a firewalled Docker container with
