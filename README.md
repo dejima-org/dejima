@@ -115,10 +115,11 @@ road with no barrier.
 dejima bounds what a session can reach. It has nothing to say about whether
 what that session wrote should exist. That part is yours.
 
-**Check whether they want it first.** A growing number of projects state that
-they do not accept AI-assisted contributions. Fork-and-review is the right
-workflow when a project is open to the work; it is not a way around a project
-that has said no. Read CONTRIBUTING before you start, not after.
+**Check whether the project wants it first.** A growing number of projects
+state that they do not accept AI-assisted contributions. Fork-and-review is
+the right workflow when a project is open to the work; it is not a way around
+one that has said no. Read its CONTRIBUTING before you start, not after.
+dejima has [its own](CONTRIBUTING.md).
 
 **Don't point it at repositories you don't own.** With an auto-push workflow a
 session opens branches and pull requests on its own. Maintainers are already
@@ -179,13 +180,18 @@ behind each of these, and the fork-and-review workflow in full.
 - `python3` (stdlib only, no packages): runs the host-side credential proxy
   (see [security notes](docs/security.md)).
 - A git push credential (**at least one** is required):
-  - `ssh-agent` running with your key added (`ssh-add -l` lists it). The
-    container only ever sees a forwarded agent socket, never your private
-    key, but it dies with your client connection, so it's fine for
-    interactive use, not for unattended/headless sessions.
-  - `[core] ssh_key`: a dedicated deploy key for headless/unattended use,
-    independent of any forwarded agent. See
+  - `[core] ssh_key`, a key of the session's own, belonging to an account
+    that is not you. This is the one to set up. It gives the sandbox an
+    identity separable from yours, so what it pushes is visibly its work and
+    the permissions you grant it are its permissions rather than all of
+    yours. It also works unattended, which a forwarded agent does not. See
     [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding).
+  - `ssh-agent` with your own key added (`ssh-add -l` lists it), as the
+    fallback. The container sees a forwarded socket and never the private
+    key, and the socket dies with your client connection. But the session is
+    then authenticating **as you**: everything it pushes is yours, and it
+    holds whatever that key can reach for as long as it runs. See
+    [To your forge, the sandbox is you](docs/security.md#to-your-forge-the-sandbox-is-you).
 
 Everything else is optional. It all lives in one file,
 `~/.config/dejima/config`: `./install.sh` writes a starter copy with every key
@@ -279,30 +285,30 @@ By default the container's entry point is bare `claude` (always running with
 `docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
-Typical loop: point it at a project, ask for a change, and let the session
-work. It commits to a feature branch, pushes it, and opens a pull request;
-then it stops. You review and merge that PR yourself, wherever you normally
-read them.
+The loop, in the part every workflow shares: point it at a project, ask for a
+change, and let the session work. What happens after that is the workflow you
+configured. The default, `local-only`, commits and pushes nowhere. Configure
+`worktree-pr` and the session pushes a branch and opens a pull request, then
+stops, and you review and merge it yourself wherever you normally read them.
+`branch-push` stops at the push. That choice is `[core] workflow`, one of the
+three axes: see [Provider axes](#provider-axes-forge-workflow-harness).
 
-`merge-guard.sh` and `git-push-guard.sh` are fast-fail guards against an
-overeager agent, not a boundary against a hostile one: a session holds the
-forge token in its environment and could call the merge endpoint directly,
-and the merge guard itself is per-workflow, inert unless that workflow turns
-it on. Branch protection on the remote is what actually stops a merge from
-happening without you.
+On a pushing workflow, `merge-guard.sh` and `git-push-guard.sh` are fast-fail
+guards against an overeager agent, not a boundary against a hostile one. If
+you hand a session a forge token that can merge, that token is in its
+environment and it can call the merge endpoint directly; the hooks will not
+stop it. The merge guard is also per-workflow and inert unless that workflow
+turns it on. Branch protection on the remote, and a token scoped to less than
+merge, are what actually stop a merge from happening without you.
 
-What holds regardless is the shape of the loop: it is arranged so that every
-session ends at something you read before it lands, a property of how the
-workflow is put together rather than something enforced against a hostile
-session.
+What holds across all three is where they stop: none of them puts work on
+your default branch. `local-only` never leaves the machine, and the pushing
+workflows stop at a branch or at a pull request. The last step is yours in
+every case, which is a property of how the workflows are arranged rather than
+something enforced against a session that does not want to cooperate.
 
 **→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
 the guards in full, and why they fail open.
-
-How far the session goes is the `[core] workflow` setting: `worktree-pr`
-pushes and opens the PR described above, `branch-push` stops at the push, and
-`local-only` commits and pushes nowhere. See
-[Provider axes](#provider-axes-forge-workflow-harness).
 
 ### Configuring the session
 
@@ -335,7 +341,9 @@ forwarding.
 the project mount, for passing files in and out of a session without
 touching the actual checkout. It persists across sessions since it's a real
 directory, not a container volume - but treat it as a handoff point, not
-general-purpose storage.
+general-purpose storage. **Clear it out between sessions.** Anything left
+there is readable by the next session, and by every session after that, which
+turns a file you forgot into something you handed over.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
@@ -361,9 +369,11 @@ download, and why Chromium's process sandbox isn't active in this image.
 `.dejima.md` at a project's root is that project's agent-instruction file -
 the harness-agnostic equivalent of `CLAUDE.md` - loaded into the session's
 context with no authority over the sandbox itself. A `SessionStart` hook
-also briefs the session on where it's running and the workflow to follow: a
-disposable, firewalled container, work in a git worktree, then push and open
-a pull request.
+also briefs the session on where it is running, a disposable and firewalled
+container, and on the instructions belonging to whichever workflow you
+selected. What those instructions say is the workflow's to define, so a
+session under `local-only` is told something different from one under
+`worktree-pr`.
 
 **→ [docs/configuration.md](docs/configuration.md)** - `.dejima.md` in full,
 and everything the session briefing covers.
@@ -408,8 +418,9 @@ session.
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a compromised session could write these files itself; they
-are read only to compare against reality and suggest a command. Approval is
-a separate act, made on the host, by hand:
+are read only to compare against reality and suggest a command. Approval is a
+separate act you do yourself on the host, by hand, and approvals are stored
+outside the reach of the session:
 
 ```sh
 dejima-project approve ~/myproject    # review and approve the declared set
