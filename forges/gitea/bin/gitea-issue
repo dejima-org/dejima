@@ -13,6 +13,7 @@ function usage() {
     echo "Usage: gitea-issue list [--state open|closed|all] [--limit N]"
     echo "       gitea-issue view NUMBER"
     echo "       gitea-issue create --title TITLE [--body BODY | --body-file FILE]"
+    echo "       gitea-issue edit NUMBER [--title TITLE] [--body BODY | --body-file FILE]"
     echo "       gitea-issue comment NUMBER (--body BODY | --body-file FILE)"
     echo "       gitea-issue close NUMBER"
     echo "       gitea-issue reopen NUMBER"
@@ -153,7 +154,7 @@ subcommand="$1"
 shift
 
 case "$subcommand" in
-    list|view|create|comment|close|reopen)
+    list|view|create|edit|comment|close|reopen)
         require_config
         require_token
         owner_repo=$(gitea_owner_repo)
@@ -221,6 +222,35 @@ ${body}"
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg title "$parsed_title" --arg body "$body" \
                 '{title: $title, body: $body}')"
+        echo "$json" | jq -r '.html_url'
+        ;;
+    edit)
+        require_number "${1:-}"
+        number="$1"
+        shift
+        parse_body_args "$@"
+        if [ -z "$parsed_title" ] && [ -z "$body" ]; then
+            echo "gitea-issue edit requires --title, --body or --body-file" >&2
+            exit 1
+        fi
+
+        # Only the fields actually given are sent: an omitted key leaves that
+        # field alone, so editing a title cannot blank a body by accident.
+        payload='{}'
+        if [ -n "$parsed_title" ]; then
+            payload=$(echo "$payload" | jq --arg t "$parsed_title" '. + {title: $t}')
+        fi
+        if [ -n "$body" ]; then
+            # The same marker create writes. It describes where the body came
+            # from rather than the event that wrote it, so an edited body
+            # keeps the disclosure instead of quietly shedding it.
+            payload=$(echo "$payload" | jq --arg b "**Filed by LLM agent**
+
+$body" '. + {body: $b}')
+        fi
+
+        api_or_die "edit issue #${number}" -X PATCH "${issues_api}/${number}" \
+            -H "Content-Type: application/json" -d "$payload"
         echo "$json" | jq -r '.html_url'
         ;;
     comment)

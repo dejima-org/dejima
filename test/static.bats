@@ -663,6 +663,19 @@ EOF
     grep -q "not the issue's URL" "$REPO_ROOT/workflows/worktree-pr/briefing.md"
 }
 
+@test "the worktree-pr workflow tells the agent not to hard-wrap bodies, and how to fix one" {
+    # The forge renders a single newline as a line break, so a body wrapped
+    # at a column arrives broken every ten words - worst on a phone, where
+    # the screen wraps the line and the stray newline wraps it again. The
+    # tools deliberately do not reflow anything (#79), which puts the whole
+    # of this on the briefing.
+    grep -q 'hard-wrap' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
+    grep -q 'newline as a line break' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
+    # And that revising the file a body came from sends nothing by itself -
+    # the other half of #79, where edits were reported but never made.
+    grep -q 'edit <N>' "$REPO_ROOT/workflows/worktree-pr/briefing.md"
+}
+
 @test "entrypoint runs as root and drops to node via gosu, not a baked-in USER node" {
     # The whole privilege-drop model depends on entrypoint.sh itself starting
     # as root (to set up the firewall) - a stray `USER node` before
@@ -811,6 +824,112 @@ EOF
         # picking one ships a body the caller did not mean to send.
         grep -q 'not both' "$REPO_ROOT/$f"
     done
+}
+
+# Runs a gitea CLI against a stub `curl` that records the request instead of
+# making one, from a throwaway repo whose origin looks like the configured
+# Gitea host. Every one of these tools reaches the network through a single
+# `curl -K -` call, so this is their whole outbound surface.
+#
+# The stub answers the way gitea_api's callers parse: the body, then the
+# status on its own line (which is what `-w '\n%{http_code}'` appends).
+gitea_cli() {
+    local cli="$1"; shift
+    local d="$BATS_TEST_TMPDIR/cli"
+    if [ ! -d "$d" ]; then
+        mkdir -p "$d/stub" "$d/repo"
+        cat > "$d/stub/curl" <<'STUB'
+#!/bin/bash
+prev=""
+payload=""
+for a in "$@"; do
+    if [ "$prev" = "-d" ]; then
+        payload="$a"
+        printf '%s' "$a" > "$STUB_PAYLOAD"
+    fi
+    prev="$a"
+done
+cat >/dev/null
+# A request carrying a body is a write, and its callers read one object
+# back; the reads these tools make before writing are list endpoints, whose
+# callers iterate. Answering both with the same shape would fail on the jq
+# rather than on anything under test.
+if [ -n "$payload" ]; then
+    echo '{"html_url": "https://forge.invalid/x/y/pulls/1"}'
+else
+    echo '[]'
+fi
+echo 200
+STUB
+        chmod +x "$d/stub/curl"
+        git -C "$d/repo" init -q -b feature
+        # Identity passed per-command rather than inherited: a CI container
+        # has no git config, and `commit` there exits 128 with "Author
+        # identity unknown" - a precondition this suite was taking from
+        # whoever ran it. The commit exists only so create's
+        # `rev-parse --abbrev-ref HEAD` has a branch to report.
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
+        git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
+    fi
+    : > "$d/payload"
+    ( cd "$d/repo" && env PATH="$d/stub:$PATH" \
+        GITEA_SSH_HOST=forge.invalid GITEA_API=https://forge.invalid/api/v1 \
+        GITEA_TOKEN=stub-token STUB_PAYLOAD="$d/payload" \
+        "$REPO_ROOT/forges/gitea/bin/$cli" "$@" )
+}
+
+# What was in the -d of the last gitea_cli call.
+cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
+
+@test "an edit sends only the fields it was given, so a title edit cannot blank a body" {
+    # The half of #79 that was silent: an agent that said it had updated a
+    # description had not, because there was no way to. Sending a fixed
+    # {title, body} pair instead would have traded that for a worse bug -
+    # every title-only edit wiping the description.
+    local cli
+    for cli in gitea-pr gitea-issue; do
+        gitea_cli "$cli" edit 1 --title "a new title"
+        [ "$(cli_payload | jq -r '.title')" = "a new title" ]
+        [ "$(cli_payload | jq 'has("body")')" = "false" ]
+
+        gitea_cli "$cli" edit 1 --body "a new body"
+        [ "$(cli_payload | jq 'has("title")')" = "false" ]
+        # The provenance marker create writes survives an edit rather than
+        # being shed by it.
+        [[ "$(cli_payload | jq -r '.body')" == *"LLM agent"* ]]
+        [[ "$(cli_payload | jq -r '.body')" == *"a new body"* ]]
+    done
+}
+
+@test "an edit with neither a title nor a body is refused rather than sent empty" {
+    local cli
+    for cli in gitea-pr gitea-issue; do
+        run gitea_cli "$cli" edit 1
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"requires --title"* ]]
+        # Nothing reached the network to be refused by the far end instead.
+        [ ! -s "$BATS_TEST_TMPDIR/cli/payload" ]
+    done
+}
+
+@test "create still sends head, base, title and body after sharing a parser with edit" {
+    # create's own argument parsing moved into the function edit uses, so
+    # that the two cannot disagree about --body vs --body-file. This is the
+    # side of that move with no test of its own before now.
+    gitea_cli gitea-pr create --title "a title" --body "a body" --base trunk
+    [ "$(cli_payload | jq -r '.head')" = "feature" ]
+    [ "$(cli_payload | jq -r '.base')" = "trunk" ]
+    [ "$(cli_payload | jq -r '.title')" = "a title" ]
+    [[ "$(cli_payload | jq -r '.body')" == *"a body"* ]]
+}
+
+@test "an edit takes its body from a file, the same way create does" {
+    # The flag that matters inside the sandbox: a body written to a file
+    # never enters the Bash command string deny-dangerous-bash.sh reads.
+    echo "body out of a file" > "$BATS_TEST_TMPDIR/b.md"
+    gitea_cli gitea-pr edit 1 --body-file "$BATS_TEST_TMPDIR/b.md"
+    [[ "$(cli_payload | jq -r '.body')" == *"body out of a file"* ]]
 }
 
 @test "gitea-issue list asks for issues only, never pull requests" {

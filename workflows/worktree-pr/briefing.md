@@ -44,5 +44,19 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   crash, a restart, or a destructive command it is warning about will get
   the call blocked, which looks like a broken tool rather than what it is.
   Writing the file first keeps the prose out of the command entirely.
-  `{{issue_command}}` (list/view/create/comment/close/reopen) takes the same
-  flag, for recording a problem you found but aren't fixing.
+  `{{issue_command}}` (list/view/create/edit/comment/close/reopen) takes the
+  same flag, for recording a problem you found but aren't fixing.
+- Do not hard-wrap prose in those bodies. Write each paragraph as one long
+  line and separate paragraphs with a blank line. The forge renders a single
+  newline as a line break, so text you wrapped at a column arrives with a
+  break every ten words: it wraps early on a desktop, and on a phone the
+  screen breaks the line first and your newline breaks it again a few words
+  later, which is much harder to read than either alone. Keep the breaks
+  that carry structure - list items, table rows, headings, and anything
+  inside a code fence - and drop the ones that were only there to keep the
+  source tidy. The tools send the body through exactly as written; nothing
+  reflows it for you.
+- To revise a body after the fact, use `{{pr_command}} edit <N> --body-file`
+  (or `{{issue_command}} edit <N>`). Rewriting the file you built the body
+  from changes nothing on its own - the forge has its own copy from the
+  moment you created it, so an edit has to be sent.
