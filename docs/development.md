@@ -15,8 +15,8 @@ run them.
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to `$LOKI_URL`; also ships session transcripts when `SANDBOX_LOG_CONVERSATION=1` |
-| `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, execs `$SANDBOX_CMD` |
+| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`); also ships session transcripts when conversation logging (`[logging] conversation`) is on |
+| `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, then execs the session's command |
 | `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
@@ -63,7 +63,7 @@ instead of finding out the hard way.
 `~/.claude` mount inventory is exactly what it should be, `dejima-allow`
 rejects a malicious domain argument. `runtime.bats` builds the image, boots
 a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
-env var makes it stop just short of execing `$SANDBOX_CMD`, so the suite can attach
+env var makes it stop just short of execing the session's command, so the suite can attach
 to a fully-initialized container instead of reimplementing its own copy of
 the setup sequence), and asserts against it: IPv6 blocked, DNS/IP allowlist
 enforcement in both directions, GitHub read-only, no working `sudo`/
