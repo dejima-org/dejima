@@ -18,14 +18,15 @@
 # a CI runner and there is nothing here to assert.
 #
 # Its values are the names of the jobs whose environment they verify -
-# `sandbox` and `host-docker` - rather than a separate vocabulary. A reader
-# looking at a red `runner-env (host-docker)` should not have to work out
+# `confined` and `privileged` - rather than a separate vocabulary. Those are
+# the same words the runner labels and dejima-ci-hardener's roles use, so a
+# reader looking at a red `runner-env (privileged)` should not have to work out
 # which job that corresponds to.
 
 setup() {
     [ -n "${DEJIMA_CI_TIER:-}" ] || skip "not on a CI runner (DEJIMA_CI_TIER unset)"
     case "$DEJIMA_CI_TIER" in
-        sandbox|host-docker) ;;
+        confined|privileged) ;;
         *) echo "unknown DEJIMA_CI_TIER: $DEJIMA_CI_TIER" >&2; return 1 ;;
     esac
 }
@@ -53,8 +54,8 @@ PY
 
 # --- the grant that decides everything --------------------------------------
 
-@test "the sandbox jobs are not handed the Docker daemon" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "asserted for the sandbox runner"
+@test "the confined jobs are not handed the Docker daemon" {
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "asserted for the confined runner"
     # act_runner mounts /var/run/docker.sock into every job container unless
     # container.docker_host is "-". An unset value is the default, and the
     # default mounts - so this is the assertion that a runner was actually
@@ -67,11 +68,11 @@ PY
     }
 }
 
-@test "the host-docker job does have the daemon it is scheduled for" {
-    [ "$DEJIMA_CI_TIER" = host-docker ] || skip "asserted for the host-docker runner"
-    # The positive control for the label routing. Without it, a host-docker
+@test "the privileged job does have the daemon it is scheduled for" {
+    [ "$DEJIMA_CI_TIER" = privileged ] || skip "asserted for the privileged runner"
+    # The positive control for the label routing. Without it, a privileged
     # job that landed on a hardened runner would fail later and obscurely, and
-    # a sandbox job that landed on this one would be caught only by the test
+    # a confined job that landed on this one would be caught only by the test
     # above - one direction of a two-direction problem.
     [ -e /var/run/docker.sock ]
 }
@@ -80,7 +81,7 @@ PY
     # Whatever else is true, exactly one of them gets the daemon. If both jobs
     # report the same answer here, the labels are not routing to two different
     # runners and the tiering exists only on paper.
-    if [ "$DEJIMA_CI_TIER" = sandbox ]; then
+    if [ "$DEJIMA_CI_TIER" = confined ]; then
         [ ! -e /var/run/docker.sock ]
     else
         [ -e /var/run/docker.sock ]
@@ -89,7 +90,7 @@ PY
 
 # --- egress, for the tier the rules actually apply to ------------------------
 #
-# Deliberately scoped to the sandbox runner. host-docker's job runs in the
+# Deliberately scoped to the confined runner. The privileged job runs in the
 # HOST network namespace - that is the grant they exist for - so the bridge
 # rules dejima-ci-hardener installs do not sit in front of them at all. Their
 # egress is the host's own, which this repository's examples do not define.
@@ -97,7 +98,7 @@ PY
 # the failure mode this whole suite is about.
 
 @test "an allowlisted destination is reachable" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "bridge rules do not apply in the host netns"
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "bridge rules do not apply in the host netns"
     # The positive control for everything below. Without it, a runner with no
     # network at all passes every negative assertion in this file.
     run getent hosts "$ALLOWED_HOST"
@@ -113,7 +114,7 @@ PY
 }
 
 @test "a name that is on no allowlist does not resolve" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "bridge rules do not apply in the host netns"
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "bridge rules do not apply in the host netns"
     # .invalid is reserved by RFC 2606 precisely so that it never resolves
     # anywhere - but here it has to be REFUSED by a resolver that answers for
     # allowlisted names, which the positive control above establishes.
@@ -122,7 +123,7 @@ PY
 }
 
 @test "a job cannot reach a resolver of its own choosing" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "bridge rules do not apply in the host netns"
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "bridge rules do not apply in the host netns"
     # The check most easily left out, and the one that decides whether the DNS
     # allowlist means anything: a job that can query any resolver it likes can
     # resolve anything it likes, whatever dnsmasq is configured with. Traffic
@@ -139,7 +140,7 @@ PY
 }
 
 @test "a destination that is on no allowlist is unreachable" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "bridge rules do not apply in the host netns"
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "bridge rules do not apply in the host netns"
     # An IP literal rather than a name, so this tests the firewall rather than
     # the resolver. Reaching it by name would fail at DNS first and prove
     # nothing about DOCKER-USER.
@@ -160,7 +161,7 @@ PY
 }
 
 @test "IPv6 egress is not an unfiltered way around all of the above" {
-    [ "$DEJIMA_CI_TIER" = sandbox ] || skip "bridge rules do not apply in the host netns"
+    [ "$DEJIMA_CI_TIER" = confined ] || skip "bridge rules do not apply in the host netns"
     # An address family with no allowlist is not a smaller hole than the one
     # the rules above close; on a runner with IPv6 egress it is the same hole.
     #
