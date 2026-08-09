@@ -2009,6 +2009,29 @@ EOF
     [ "$missing" -eq 0 ]
 }
 
+# Other repositories in the organisation link to these two by absolute URL
+# rather than keeping copies, so the terms cannot drift into two divergent
+# statements. A rename here is a 404 in a repository whose tests cannot see
+# this one.
+@test "the org-wide policy files other repositories link to keep their names" {
+    [ -f "$REPO_ROOT/SECURITY.md" ]
+    [ -f "$REPO_ROOT/ATTRIBUTION.md" ]
+}
+
+# The wordmark is referenced by a fixed filename on purpose - see the comment
+# above the tag - which means a rename is caught here or not at all.
+@test "every image the README points at is committed" {
+    local src missing=0
+    for src in $(grep -ohE 'src="[^"]+\.png"' "$REPO_ROOT/README.md" \
+        | sed 's/^src="//; s/"$//'); do
+        if [ ! -f "$REPO_ROOT/$src" ]; then
+            echo "README points at $src, which does not exist" >&2
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ]
+}
+
 # --- the labels this repo's own workflow asks for ---
 #
 # Whether a job container gets the Docker socket is settled by the runner's
@@ -2125,7 +2148,7 @@ EOF
 # This catches address- and hostname-shaped leaks only. A personal domain
 # that looks like any other public one is not mechanically distinguishable
 # and still rests on review.
-SCANNED_PATHS=(README.md docs docker bin forges workflows harnesses hooks install.sh systemd .gitea)
+SCANNED_PATHS=(README.md SECURITY.md ATTRIBUTION.md docs docker bin forges workflows harnesses hooks install.sh systemd .gitea)
 
 @test "no private or link-local address is used as a documentation example" {
     run grep -rnIE '\b(10|127\.0\.0\.[2-9]|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' \

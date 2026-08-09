@@ -1,7 +1,21 @@
-# dejima
+<!-- Fixed, not preference-aware, and that is the decision rather than an
+     oversight. `prefers-color-scheme` reports the browser's setting, never the
+     site's, and this is read on a forge that renders dark whichever way the
+     browser is set - so anything conditional shows dark ink on a dark page to
+     a reader whose browser prefers light, and does it silently.
+     The suffix names the mode a file is FOR, not the colour of its ink:
+     -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
+     light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
+     which is committed alongside for exactly that. One line, on the mirror,
+     where someone can see whether it worked. -->
+<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
 
 **Agents work best unsupervised. Bound the blast radius instead, and assume
 the agent is hostile.**
+
+**One maintainer, no support.** Nothing about this is promised: not a reply,
+not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
+where to report a vulnerability rather than in a public issue.
 
 An agent with permission prompts turned off gets a lot done. It can also be
 turned against you mid-session, by a prompt injection or a poisoned
@@ -567,6 +581,8 @@ covers, and how to run them.
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
+| [SECURITY.md](SECURITY.md) | What dejima claims, where to report a vulnerability, and what is promised in return |
+| [ATTRIBUTION.md](ATTRIBUTION.md) | Who holds the dejima marks and what may be done with them |
 
 ## License
 
@@ -574,3 +590,7 @@ This project is licensed under the GNU General Public License v3.0 or later
 (GPL-3.0-or-later); see [LICENSE](LICENSE) for the full text.
 
 Copyright (C) 2026 Brad Anderson
+
+The dejima wordmark and logo are not code and are not covered by that licence.
+They are trademarks; who holds them and what may be done with them is stated
+once for the organisation, in [ATTRIBUTION.md](ATTRIBUTION.md).
