@@ -13,10 +13,6 @@
 **Agents work best unsupervised. Bound the blast radius instead, and assume
 the agent is hostile.**
 
-**One maintainer, no support.** Nothing about this is promised: not a reply,
-not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
-where to report a vulnerability rather than in a public issue.
-
 An agent with permission prompts turned off gets a lot done. It can also be
 turned against you mid-session, by a prompt injection or a poisoned
 dependency, and it will not announce that it has been. dejima is built for
@@ -27,13 +23,17 @@ Runs a coding agent (Claude Code by default, or whatever command you point
 it at) inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
 auto-accepted), against a project bind-mounted from the host. The agent gets
-to work without stopping to ask; the container is what makes that a
-reasonable trade rather than a reckless one.
+to work without stopping to ask; the container is what makes that trade a
+reasonable one.
 
-Around that core is most of what running an agent unattended actually takes:
+**One maintainer, no support.** Nothing about this is promised: not a reply,
+not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
+where to report a vulnerability rather than in a public issue.
+
+Around that core is most of what running an agent unattended takes:
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
-  list does not connect, and the agent is told so rather than left to guess.
+  list does not connect, and the agent is told so.
 - **Credentials that stay on the host.** Your Anthropic OAuth credential
   never enters the container: a host-side proxy holds it and the container
   gets a placeholder. Your SSH key doesn't either; the container sees an
@@ -66,8 +66,7 @@ Around that core is most of what running an agent unattended actually takes:
   and git identity carry over; uid, home directory and project path match on
   both sides, so a session's transcript is readable from the host afterward.
 - **An exit-time audit** of the host surfaces a session could have written
-  to, so a change to your git config or `~/.claude` gets surfaced instead of
-  just happening.
+  to, so a change to your git config or `~/.claude` gets surfaced.
 
 Originally inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
@@ -126,8 +125,8 @@ road with no barrier.
 
 ## Using this responsibly
 
-dejima bounds what a session can reach. It has nothing to say about whether
-what that session wrote should exist. That part is yours.
+dejima bounds what a session can reach. Whether what that session wrote
+should exist is your call.
 
 **Check whether the project wants it first.** A growing number of projects
 state that they do not accept AI-assisted contributions. Fork-and-review is
@@ -208,10 +207,16 @@ every key, its default, and what it is for.
 The forge integration, the push/PR workflow, and the agent harness aren't
 hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
-`[core] harness`. Ships today: `forges/gitea`, `forges/github`, `forges/none`,
-`workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only`,
-`harnesses/claude-code`. The defaults are `forges/none` and
-`workflows/local-only`: a fresh install commits locally and pushes nowhere.
+`[core] harness`.
+
+Ships today:
+
+- **Forges:** `none`, `gitea`, `github`
+- **Workflows:** `local-only`, `branch-push`, `worktree-pr`
+- **Harnesses:** `claude-code`
+
+The defaults are `forge = none` and `workflow = local-only`: a fresh install
+commits locally and pushes nowhere.
 
 See [docs/providers.md](docs/providers.md) for the manifest contract, key by
 key, and the shipped providers as worked examples.
@@ -243,8 +248,8 @@ to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch
 unless its forge resolves to somewhere to push to, so the forge is not
 optional once you choose one of them.
 
-A pushing workflow also needs a git push credential, and which one you give it
-is a decision worth making deliberately rather than by default:
+A pushing workflow also needs a git push credential. Which one you give it
+matters:
 
 - **`[core] ssh_key`, a key of the session's own**, belonging to an account
   that is not you. This is the one to set up. It gives the sandbox an
@@ -320,8 +325,8 @@ merge, are what actually stop a merge from happening without you.
 What holds across all three is where they stop: none of them puts work on
 your default branch. `local-only` never leaves the machine, and the pushing
 workflows stop at a branch or at a pull request. The last step is yours in
-every case, which is a property of how the workflows are arranged rather than
-something enforced against a session that does not want to cooperate.
+every case. That comes from how the workflows are arranged, not from anything
+enforced against a session that does not want to cooperate.
 
 **→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
 the guards in full, and why they fail open.
@@ -358,8 +363,7 @@ the project mount, for passing files in and out of a session without
 touching the actual checkout. It persists across sessions since it's a real
 directory, not a container volume - but treat it as a handoff point, not
 general-purpose storage. **Clear it out between sessions.** Anything left
-there is readable by the next session, and by every session after that, which
-turns a file you forgot into something you handed over.
+there is readable by the next session, and by every session after that.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
@@ -533,9 +537,8 @@ you what changed.
 
 It is **advisory, not a block**. It fires after the session has ended, so a
 finding is something to read and clean up before your next `git` or `claude`
-in that repo, not something that was prevented. And its diff is time-windowed
-rather than session-attributed: it reports that a path changed while the
-session was running, not that the session changed it.
+in that repo. Its diff is also time-windowed: it reports that a path changed
+while the session was running, not that the session changed it.
 
 `dejima-audit ack` walks the findings and shows you each one before asking.
 Approving records the exact content, so any later change re-fires; ignoring
@@ -565,7 +568,7 @@ credentials never enter the container, that a push to anywhere but the
 allowed remote is refused. Hundreds of tests across suites covering
 static analysis, host-side behaviour, and containers started for real.
 
-They are the reason claims here are stated flatly rather than hedged.
+They are why the claims here are stated flatly.
 
 → **[docs/development.md](docs/development.md)**: the suites, what each
 covers, and how to run them.

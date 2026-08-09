@@ -20,9 +20,8 @@ Significant change is coming in the near future. Config keys, interfaces, the
 layout of the docs, and the boundaries between the CLIs are all still
 settling. A fork taken today will diverge from upstream quickly.
 
-That is worth knowing before you build anything on top of one. If you do fork,
-pinning to a commit you have read is more useful here than tracking a branch
-that is being rewritten under you.
+If you do fork, pinning to a commit you have read is more useful here than
+tracking a branch that is being rewritten under you.
 
 ## If you are running an agent against this repository
 

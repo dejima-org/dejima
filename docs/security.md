@@ -113,9 +113,9 @@ table goes back to being decorative. `write:repository` and `write:issue` are
 the scopes its token needs (README, "Gitea/Forgejo PR workflow"), and nothing
 about that changes for a collaborator.
 
-One consequence is worth knowing before you meet it, because it presents as a
-misconfiguration and the obvious fix is the wrong one. Parts of Gitea's API
-are gated on *ownership* rather than on permission: `GET
+One consequence presents as a misconfiguration, and the obvious fix is the
+wrong one. Parts of Gitea's API are gated on *ownership* rather than on
+permission: `GET
 /repos/{owner}/{repo}/actions/runs` answers a non-owner with `"user should be
 the owner of the repo"` no matter which scopes the token carries. Read that
 way it looks like a scope error, and the reflex is to widen the token. That
@@ -348,8 +348,8 @@ hands to whichever session starts against it. See
   is never in practice a constraint. `diffs = off` in the config's
   `[audit]` section disables retention (and staging) entirely.
 
-  Two residual limits worth knowing on top of the credential screen's
-  false negatives above. The prompt shows at most 40 lines of a diff or
+  Two residual limits sit on top of the credential screen's false
+  negatives above. The prompt shows at most 40 lines of a diff or
   of new content before truncating, naming the file so you can read the
   rest - a large planted change is truncated exactly where you would most
   want it whole. And the `SIGKILL` case above is a real exposure window,
@@ -421,8 +421,8 @@ hands to whichever session starts against it. See
   `ipset add` is duplicate-safe now, which is the pattern to expect. Each
   of these tests exists because something was got wrong first.
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
-  enters the container. It simply isn't mounted: `~/.claude` is not shared
-  as a whole (see the mount inventory below), so there is no path from
+  enters the container. It isn't mounted: `~/.claude` is not shared as a
+  whole (see the mount inventory below), so there is no path from
   inside the container to that file. `dejima` starts a host-side proxy
   (`bin/dejima-anthropic-proxy`) on a per-session unix socket and mounts a
   fake credential in place of the real one - the two secrets are
@@ -531,8 +531,7 @@ hands to whichever session starts against it. See
     `statusline.sh` are mounted read-only at `/etc/dejima-claude/` and
     installed into `~/.claude` by `entrypoint.sh` as root-owned, unwritable
     files. A session can still unlink and replace them - `~/.claude` belongs
-    to it - but only its own copy, which was the whole point of making them
-    read-only.
+    to it - but only its own copy, which is why they are read-only.
 
   The reason for the split is that a **single-file bind mount silently
   detaches**. It is pinned to the dentry at its mount point, so when the
@@ -930,10 +929,9 @@ sessions you have ever run, which is how a Loki instance stops being usable.
 Filter on it with `| json | session=` as above rather than expecting a
 selector.
 
-Two things are absent by design and worth knowing before you go looking for
-them. **Tool results are never shipped**, only invocations, so a query will
-show you that a session ran `Bash` with certain arguments and never what came
-back. **Thinking blocks are never shipped either.** Both dominate the volume
+Two things are absent by design. **Tool results are never shipped**, only
+invocations, so a query will show you that a session ran `Bash` with certain
+arguments and never what came back. **Thinking blocks are never shipped either.** Both dominate the volume
 and neither was what opting in asked for. Long values are clipped, so a very
 large prompt or tool input ends in `...[truncated]` rather than being dropped.
 

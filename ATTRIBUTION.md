@@ -11,6 +11,10 @@ link here rather than restating the terms.
 All logos, assets, and artwork are human-made. No AI tools were used in their
 creation. The artist is anonymous.
 
+The palette is based on [gruvbox](https://github.com/morhetz/gruvbox) by Pavel
+Pertsev, which is MIT-licensed. The colour values are gruvbox's; the marks
+drawn with them are not.
+
 ## What is covered
 
 Both marks, in every form:
