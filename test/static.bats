@@ -449,14 +449,58 @@ EOF
     # Directories, which is what makes them safe: a directory bind mount
     # can't detach the way a file one does, because a rename replaces an
     # entry *within* the mounted directory rather than the mount point.
-    # projects/ is what host-side `claude --resume` reads; the rest is the
-    # edit-undo record and the task/plan state skills write.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/projects:\$\{HOME\}/\.claude/projects\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    # projects/ is not in this list: it is mounted per slug by bin/dejima,
+    # see the tests below. The rest is the edit-undo record and the task/plan
+    # state skills write.
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/file-history:\$\{HOME\}/\.claude/file-history\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/backups:\$\{HOME\}/\.claude/backups\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/tasks:\$\{HOME\}/\.claude/tasks\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plans:\$\{HOME\}/\.claude/plans\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/sessions:\$\{HOME\}/\.claude/sessions\s*$' "$SANDBOX_DIR/docker-compose.yml"
+}
+
+# The whole tree carries every project's transcripts and agent memory, and
+# memory is loaded into context at session start - so write access to it is
+# enough to plant text a future session in another project reads as
+# background (#104). This is the assertion that the tree itself never comes
+# back; the per-slug mounts that replace it are covered below.
+@test "docker-compose.yml never mounts the whole ~/.claude/projects tree" {
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/projects:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || {
+        echo "the projects tree is mounted whole again:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
+@test "bin/dejima mounts ~/.claude/projects one slug at a time" {
+    grep -q 'workspace_slugs_sorted "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
+    grep -q 'extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")' \
+        "$REPO_ROOT/bin/dejima"
+}
+
+# Docker creates the parents of a mount point root-owned when they do not
+# already exist. projects/ is now such a parent, so without this the session
+# could not create a slug of its own - which is exactly what it must do when
+# the workspace has no history yet.
+@test "the image pre-creates ~/.claude/projects so the slug mounts have a writable parent" {
+    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude/projects' "$SANDBOX_DIR/Dockerfile"
+}
+
+# One definition of "this workspace's slugs", shared by the mount and the
+# audit. If they drift, a slug the mount exposes but the audit calls foreign
+# fires a finding every session, and a slug the audit calls its own but the
+# mount does not expose is a hole nothing reports.
+@test "bin/dejima and bin/dejima-audit share one slug definition" {
+    grep -q 'source "$SCRIPT_DIR/dejima-slug-lib.sh"' "$REPO_ROOT/bin/dejima"
+    grep -q 'dejima-slug-lib.sh"$' "$REPO_ROOT/bin/dejima-audit"
+    # and neither keeps a private copy of the sed scheme
+    run grep -n "s/\[^a-zA-Z0-9\]/-/g" "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ] || {
+        echo "an inline copy of the slug scheme is back:" >&2
+        echo "$output" >&2
+        false
+    }
 }
 
 @test "~/.claude config files are staged for copying, not mounted at their real paths" {

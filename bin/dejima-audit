@@ -12,6 +12,8 @@ set -uo pipefail
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-color-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
+# shellcheck source=dejima-slug-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
 # Defined empty here so every interpolation below is safe before a surface
 # picks its stream; compare (stderr) and ack (stdout) each re-init for theirs.
 color_init 1
@@ -53,7 +55,9 @@ AUDIT_DIR="$(config_get audit dir)"
 # suggesting a restart is an entirely ordinary thing to suggest.
 AUDIT_KEEP="$(config_get audit keep)"
 
-ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+# ws_slug and workspace_slugs come from dejima-slug-lib.sh, shared with
+# bin/dejima so the set of slugs it mounts and the set treated as this
+# workspace's own here cannot drift apart.
 
 # The one report both `show` and `ack` operate on: the OLDEST unacknowledged
 # CRITICAL report if there is one, else the newest report overall.
@@ -1192,13 +1196,17 @@ case "$cmd" in
 
         # projects diffs: a write to another project's ~/.claude/projects
         # slug during this session (transcript/memory-poisoning surface).
-        # "self" = current workspace's own slug or a worktree child of it.
-        current_slug="$(ws_slug "$ws")"
+        # "self" = the workspace's own slug or a live worktree nested under
+        # it, exactly the set bin/dejima mounts. This used to be a
+        # "$current_slug"-* glob, which also matched any sibling project whose
+        # directory name extended this one's - so on a host with `proj` and
+        # `proj-ci` side by side, writes to `proj-ci` were silently exempt.
+        self_slugs="$(workspace_slugs_sorted "$ws")"
         while IFS= read -r line; do
             slug="${line%%$'\t'*}"
-            case "$slug" in
-                "$current_slug"|"$current_slug"-*) continue ;;
-            esac
+            if printf '%s\n' "$self_slugs" | grep -qxF -- "$slug"; then
+                continue
+            fi
             warn+=("CROSS-PROJECT history/memory write: $(sanitize "$slug")")
         done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
                           <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )

@@ -34,6 +34,7 @@ run them.
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
+| `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-audit` (what counts as cross-project), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |

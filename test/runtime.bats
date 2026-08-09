@@ -594,6 +594,55 @@ dexec_node() {
     rm -rf "$src"
 }
 
+# #104: the whole ~/.claude/projects tree used to be mounted read-write, so a
+# session could write another project's transcripts and agent memory. Memory
+# is loaded into context at session start, which makes that a write into a
+# future session's premises rather than its input.
+#
+# Three properties, and the second is the one that decides whether scoping is
+# viable at all: a slug that is absent has to be creatable, because that is
+# what Claude Code does on a first run against a path with no history. If the
+# parent were read-only instead, this is where it would hang the way a
+# blocked ~/.claude.json write did.
+@test "only the mounted project slugs exist in the container, and an unmounted one is still creatable" {
+    local test_container="dejima-test-projects-$(basename "$BATS_FILE_TMPDIR")"
+    local src; src="$(mktemp -d)"
+    mkdir -p "$src/own" "$src/sibling"
+    echo host > "$src/own/existing.jsonl"
+    echo secret > "$src/sibling/other.jsonl"
+    chmod -R 777 "$src"
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -v "$src/own:/home/node/.claude/projects/own" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    # the sibling project is absent, not merely unwritable
+    run docker exec -u node "$test_container" test -e /home/node/.claude/projects/sibling
+    [ "$status" -ne 0 ]
+    run docker exec -u node "$test_container" ls /home/node/.claude/projects
+    [[ "$output" != *sibling* ]]
+
+    # a slug with no history yet can still be created, and stays in the
+    # container: it is not on the host afterwards
+    run docker exec -u node "$test_container" \
+        bash -c 'mkdir -p /home/node/.claude/projects/fresh && echo x > /home/node/.claude/projects/fresh/a.jsonl'
+    [ "$status" -eq 0 ]
+    [ ! -e "$src/fresh" ]
+
+    # and the mounted slug is the one that does reach the host
+    docker exec -u node "$test_container" \
+        bash -c 'echo written > /home/node/.claude/projects/own/new.jsonl'
+    [ "$(cat "$src/own/new.jsonl")" = written ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$src"
+}
+
 @test "a staged statusline.sh is copied in root-owned, and replacing it never reaches the host" {
     # Companion to the overlay-dirs test above, but for the config
     # bin/dejima stages at /etc/dejima-claude for entrypoint.sh to copy into
