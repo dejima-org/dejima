@@ -7,8 +7,13 @@
      -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
      light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
      which is committed alongside for exactly that. One line, on the mirror,
-     where someone can see whether it worked. -->
+     where someone can see whether it worked.
+     The <br> below is the spacing. An image alone between two blank lines is
+     not wrapped in a paragraph, so it has no bottom margin to sit on, and
+     Gitea's sanitizer strips `style` from both the tag and any wrapper. -->
 <img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+
+<br>
 
 **Agents work best unsupervised. Bound the blast radius instead, and assume
 the agent is hostile.**
