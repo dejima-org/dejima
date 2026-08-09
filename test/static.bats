@@ -2630,8 +2630,8 @@ q
     # of the two runners unasserted, which is the thing it exists to catch.
     ! grep -qE '^ *- *ci-runner$' "$wf"
     grep -q 'test/ci-runner.bats' "$wf"
-    grep -q 'DEJIMA_CI_TIER: sandbox' "$wf"
-    grep -q 'DEJIMA_CI_TIER: host-docker' "$wf"
+    grep -q 'DEJIMA_CI_TIER: confined' "$wf"
+    grep -q 'DEJIMA_CI_TIER: privileged' "$wf"
 }
 
 @test "the agent briefing teaches the project scope, not just global" {
