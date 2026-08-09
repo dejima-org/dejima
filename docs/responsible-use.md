@@ -57,10 +57,9 @@ at all.
 That second one is not a judgement about how good the containment is, and it
 does not get better with a version bump. There is no containment that fully
 prevents exfiltration: a determined attacker with code execution and any
-outbound path will find a way, and the allowlist narrows the paths rather
-than closing them. So the question is never whether you trust dejima enough.
-It is whether you can accept the risk of the contents leaving. If you cannot,
-do not hand them to an agent that could send them.
+outbound path will find a way. So the question is not whether you trust
+dejima enough, but whether you can accept the risk of the contents leaving.
+If you cannot, do not hand them to an agent that could send them.
 
 ## Look at what else is in the directory.
 
@@ -84,11 +83,9 @@ directory not to hand over.
 ## An allowlist entry is a grant, not a convenience.
 
 For every allowlist entry you give a dejima agent, consider what an attacker
-could do with it. That is the whole rule. What follows is why the answer
-varies so much between entries that look similar.
-
-The variable is what happens if the call is wrong, whether wrong means a
-prompt-injected instruction or an ordinary agent mistake.
+could do with it. The answer varies enormously between entries that look
+similar, and what it turns on is what happens if the call is wrong, whether
+wrong means a prompt-injected instruction or an ordinary agent mistake.
 
 A package registry or a docs site can be wrong without being expensive. A
 session that fetches the wrong package version, or scrapes a stale or
@@ -101,10 +98,9 @@ different shape entirely. A single call against any of them is the action,
 not a step toward one you'll review later: the deployment already ran, the
 row is already written or gone, the charge already happened. There is no
 diff downstream that catches it, because nothing about it passes through
-your repository at all. Allowlisting one of these isn't giving the session a
-faster way to fetch data; it's giving an unattended process standing
-authority to act on the world, unsupervised, the same authority you'd think
-twice about handing an unsupervised person.
+your repository at all. Allowlisting one of these gives an unattended process
+standing authority to act on the world, the same authority you would think
+twice about handing a person.
 
 Ask, before adding an entry: if this call happened by mistake, is the result
 something I fix in the next commit, or something I have to explain to
@@ -125,15 +121,14 @@ some vaguer sense. In this repository, dejima-ci-hardener resolves the
 CI-side egress
 allowlist by reading `.dejima/allowed-domains` from `origin/main`, never
 from a branch or a local checkout, and treats whatever it finds there as
-already reviewed. That trust isn't a policy statement, it's load-bearing:
-the only way content lands on `main` is through a pull request you merged,
-so reading from `main` is how the tool avoids asking a branch what it's
-allowed to do. Merging something onto `main` doesn't just ship it to users.
-It feeds a trust anchor that other tooling, this one and potentially future
-ones, is entitled to rely on without re-checking. Keeping insecure or broken
-code off `main` is what makes that reliance justified in the first place,
-and that job is yours; nothing about running the agent in a sandbox does it
-for you.
+already reviewed. That trust is load-bearing: the only way content lands on
+`main` is through a pull request you merged, so reading from `main` is how
+the tool avoids asking a branch what it's allowed to do. So merging onto
+`main` ships it to users and feeds a trust anchor that other tooling, this
+one and potentially future ones, is entitled to rely on without re-checking.
+Keeping insecure or broken code off `main` is what makes that reliance
+justified, and that job is yours; nothing about running the agent in a
+sandbox does it for you.
 
 ## Give it its own identity, then own what you merge.
 
@@ -150,10 +145,10 @@ actually holds a session to a smaller set of permissions than yours.
 
 Once the identity is separate, every commit and pull request the session
 produces is visibly labeled as the agent's own work, not yours, in your
-project's history. That visibility doesn't shrink your responsibility for
-it; it just makes it legible. Anyone reading your `main` later sees your
-name on the merge commit regardless of whose name is on the authored one,
-and will hold you to it accordingly.
+project's history. That visibility makes your responsibility legible without
+shrinking it. Anyone reading your `main` later sees your name on the merge
+commit regardless of whose name is on the authored one, and will hold you to
+it accordingly.
 
 ## Understand what you ship.
 
@@ -162,27 +157,27 @@ cheap enough that reading every diff starts to feel like the slow part of
 the loop, and skipping it works fine, repeatedly, until the one time it
 doesn't. A reviewer who reads every change catches most of what's wrong with
 it. A reviewer who only reads the ones that felt risky catches none of the
-ones that didn't feel risky, which is precisely the shape a subtle bug, or a
+ones that didn't feel risky, which is the shape a subtle bug, or a
 prompt-injected change dressed up as something ordinary, takes. Nothing
 about a faster loop changes what engineering judgment is for.
 
 ## This is not a blastproof box.
 
-The useful way to read this rule is as a statement about what kind of
-failure to plan for, not as a disclaimer to skim past. dejima's containment
-is Linux namespaces and a small capability set around the session, the same
-kind of isolation a container gives any process, not a virtual machine
-boundary; it shares the host kernel with everything else on the machine.
+Read this rule as a statement about what kind of failure to plan for.
+dejima's containment is Linux namespaces and a small capability set around
+the session, the same kind of isolation a container gives any process, not a
+virtual machine boundary; it shares the host kernel with everything else on
+the machine.
 That buys real things (see [docs/security.md](security.md) for the specific
 list: no working `sudo`, a deny-by-default firewall, read-only mounts over
 the surfaces that matter most), and every one of them assumes the container
 itself stays intact. A determined attacker, or a single container-escape
 vulnerability, doesn't erode that protection gradually; it removes every
 layer described in that document at once, because they all sit on the same
-kernel. The operating assumption to hold isn't "the walls will probably
-hold." It's "if this container is ever compromised at the kernel level,
-treat everything reachable from this host account as compromised with it,"
-which is a very different thing to plan around than an ordinary bug.
+kernel. So the assumption to hold is not that the walls will probably hold.
+It is that if this container is ever compromised at the kernel level,
+everything reachable from this host account should be treated as compromised
+with it, which is a very different thing to plan around than an ordinary bug.
 
 ## dejima's security says nothing about your software's.
 
@@ -195,12 +190,12 @@ SQL injection, hand-roll a broken authentication check, hardcode a secret,
 or pull in a compromised dependency, because those are properties of the
 code itself, decided at the moment it's written, not something a sandbox
 sitting around the process that wrote it can retrofit afterward. If what got
-built inside dejima turns out to be insecure, that isn't a containment
-failure; containment was never the control that was supposed to catch it.
+built inside dejima turns out to be insecure, containment was never the
+control that was supposed to catch it.
 
-**It is not something a future agent can retrofit either**, and that is the
-more useful half of this. "We will do a security pass later" was already a
-weak plan before agents made it cheap to say. Early architectural decisions
+**It is not something a future agent can retrofit either.** "We will do a
+security pass later" was already a weak plan before agents made it cheap to
+say. Early architectural decisions
 close off the fixes for whole classes of problem: where trust boundaries sit,
 what is authenticated and where, what data crosses which process, what a
 single compromised component reaches. A later pass can find a missing bounds
@@ -217,5 +212,4 @@ the one thing here no tooling in this repository is aiming at.
 
 The same practices you'd apply to code from any other source, review,
 linting, dependency scanning, tests aimed at the failure modes you care
-about, still have to happen here. dejima doesn't stand in for any of them;
-it operates on a different axis entirely.
+about, still have to happen here. dejima does not stand in for any of them.

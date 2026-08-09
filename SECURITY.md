@@ -1,0 +1,65 @@
+# Security policy
+
+This is the security policy for every repository in the dejima organisation.
+Individual repositories state what is specific to them and link here for the
+rest.
+
+## What dejima claims
+
+It bounds what an agent session can reach. It does not make an agent safe to
+run.
+
+A session runs in a container with no permission prompts, one bind-mounted
+project directory, a deny-by-default egress allowlist covering DNS as well as
+IP, and no copy of the credentials it authenticates with. That allowlist
+bounds where a prompt injection or a compromised dependency can send code and
+where it can fetch its next instruction. It does not prevent either one.
+
+Nothing here holds against a container escape or a kernel bug. The in-session
+hooks are fast-fail guards, not a boundary. The exit-time audit runs after the
+session has ended and attributes nothing to it. And none of it speaks to
+whether the code a session wrote is correct, secure, or fit to merge.
+
+[docs/security.md](docs/security.md) states the threat model and covers each
+of these in detail.
+
+## Reporting a vulnerability
+
+Email **dejima@branderson.io**. Please do not open a public issue for a
+vulnerability; the tracker is public, and a report there is a disclosure.
+
+Useful things to include:
+
+1. what an attacker gets;
+2. the steps to reproduce it;
+3. the repository and the commit you tested.
+
+## What you can expect in return
+
+Nothing is promised: no reply, no acknowledgement, no triage, no fix, and no
+timeline for any of them. Reports are read when there is time to read them.
+
+Nothing is asked in return either. There is no embargo period and no
+coordinated disclosure window. Disclose on whatever schedule you think is
+right.
+
+## There is no support
+
+These are personal projects with one maintainer.
+
+There is no paid version, no support contract, no service level, no sponsorship
+attached to them, and no commercial relationship with anyone who uses them.
+Questions may go unanswered. Issues may go unread. Nothing here is developed or
+supplied in the course of a commercial activity.
+
+Whoever deploys this is responsible for the result.
+
+## Supported versions
+
+The tip of `main`, and nothing else. There are no maintenance branches, no
+backports and no security releases for older tags or commits.
+
+## No warranty
+
+The software is provided without warranty of any kind. See sections 15 and 16
+of each repository's `LICENSE`.

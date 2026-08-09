@@ -117,8 +117,8 @@ archive, so `.tar.gz`, `.tar.xz` and `.tar.zst` all work.
 **The digest is mandatory**, and it is checked before anything is unpacked.
 Without one you would be approving a *name* whose contents the far end can
 change afterwards, which isn't a decision anyone can make once. With one, what
-you approved is a specific archive and nothing else can take its place. Two
-consequences worth knowing:
+you approved is a specific archive and nothing else can take its place. That
+has two consequences:
 
 - **A tarball dependency locks the project to one architecture**, because a
   digest does. A package name resolves per-host and a digest cannot: it names
@@ -128,7 +128,7 @@ consequences worth knowing:
   [#97](https://gitbox.branderson.io/dejima/dejima/issues/97).
 - **Upgrading is an approval, not a version bump.** A new release is a new
   digest, so it goes through `dejima-dep add` and `dejima-project approve`
-  again - which is the point, not friction to route around.
+  again. That is the mechanism working, not friction to route around.
 
 The URL's character set is deliberately narrower than URLs allow: the spec is
 interpolated into a `RUN` line that runs as root at build time, so anything
@@ -348,9 +348,9 @@ session is meant to write to and whose contents should outlive the container:
 read_write = ~/specs
 ```
 
-Both lists mount at the host path they name, which is the point: a convention
-that says "specs live in `~/specs`" keeps working inside the container without
-being rewritten. That is the difference from `[core] share_dir`, which is
+Both lists mount at the host path they name, so a convention that says
+"specs live in `~/specs`" keeps working inside the container without being
+rewritten. That is the difference from `[core] share_dir`, which is
 mounted at `~/shared` regardless of where it lives on the host because its job
 is to be a well-known handoff point.
 

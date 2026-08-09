@@ -44,7 +44,7 @@ What it does **not** add is a way *out* of a sandbox. Configured as
 described below, a compromised session cannot reach `ttyd`, cannot reach
 your proxy, and gains nothing from the fact that your phone can: it has a
 route to exactly one host address, and neither front door is on it. That
-property is worth stating precisely because it is the one a plausible-looking
+property needs stating exactly, because it is the one a plausible-looking
 mistake inverts - a proxy bound to `0.0.0.0` or to a bridge address is a
 front door opening *inward*, and that is a full sandbox escape rather than a
 degradation. [Verifying it](#verifying-it) is two commands, and worth
@@ -304,7 +304,7 @@ also what catches a distro `ttyd.service` still running on that port, which
 is why this is worth doing even if you are confident about the proxy. `test/runtime.bats`
 asserts this same containment property against a live container (with a
 positive control on the same path, so a passing result can't come from the
-container simply reaching nothing), and it passes on a real Docker host.
+container reaching nothing), and it passes on a real Docker host.
 
 ## SSH front door
 
@@ -801,8 +801,8 @@ the next one is worth checking.
    `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 2.
    That file is passed to Claude Code as `--settings` by `claude-wrapper.sh`;
    if it is missing entirely, this container was not started by `dejima`.
-3. **Does the marker reach the host?** This is the one worth knowing, because
-   it splits the chain cleanly in half. From inside the sandbox:
+3. **Does the marker reach the host?** This is the one to check first: it
+   splits the chain cleanly in half. From inside the sandbox:
 
    ```sh
    : > "$DEJIMA_NOTIFY_DIR/waiting" && sleep 2 && ls "$DEJIMA_NOTIFY_DIR"

@@ -1,4 +1,28 @@
-# dejima
+<!-- Fixed, not preference-aware, and that is the decision rather than an
+     oversight. `prefers-color-scheme` reports the browser's setting, never the
+     site's, and this is read on a forge that renders dark whichever way the
+     browser is set - so anything conditional shows dark ink on a dark page to
+     a reader whose browser prefers light, and does it silently.
+     The suffix names the mode a file is FOR, not the colour of its ink:
+     -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
+     light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
+     which is committed alongside for exactly that. One line, on the mirror,
+     where someone can see whether it worked.
+     Every &nbsp; here is spacing, and it has to be a character rather than CSS
+     or a presentation attribute. Gitea's sanitizer strips `style` from the tag
+     and from any wrapper, `hspace`/`vspace` survive sanitizing only to be
+     ignored by browsers that dropped HTML4 presentation attributes, and a bare
+     <br> ends a line nothing follows, which browsers collapse to no height.
+     &nbsp; survives as a real U+00A0: on its own line it fills a paragraph
+     that would otherwise be empty, and immediately before the tag it sits
+     inline and indents the image by one space. -->
+&nbsp;
+
+&nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+
+---
+
+&nbsp;
 
 **Agents work best unsupervised. Bound the blast radius instead, and assume
 the agent is hostile.**
@@ -13,13 +37,17 @@ Runs a coding agent (Claude Code by default, or whatever command you point
 it at) inside a firewalled Docker container with
 `--dangerously-skip-permissions` (no permission prompts, all tool use
 auto-accepted), against a project bind-mounted from the host. The agent gets
-to work without stopping to ask; the container is what makes that a
-reasonable trade rather than a reckless one.
+to work without stopping to ask; the container is what makes that trade a
+reasonable one.
 
-Around that core is most of what running an agent unattended actually takes:
+**One maintainer, no support.** Nothing about this is promised: not a reply,
+not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
+where to report a vulnerability rather than in a public issue.
+
+Around that core is most of what running an agent unattended takes:
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
-  list does not connect, and the agent is told so rather than left to guess.
+  list does not connect, and the agent is told so.
 - **Credentials that stay on the host.** Your Anthropic OAuth credential
   never enters the container: a host-side proxy holds it and the container
   gets a placeholder. Your SSH key doesn't either; the container sees an
@@ -52,8 +80,7 @@ Around that core is most of what running an agent unattended actually takes:
   and git identity carry over; uid, home directory and project path match on
   both sides, so a session's transcript is readable from the host afterward.
 - **An exit-time audit** of the host surfaces a session could have written
-  to, so a change to your git config or `~/.claude` gets surfaced instead of
-  just happening.
+  to, so a change to your git config or `~/.claude` gets surfaced.
 
 Originally inspired by
 [Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
@@ -112,8 +139,8 @@ road with no barrier.
 
 ## Using this responsibly
 
-dejima bounds what a session can reach. It has nothing to say about whether
-what that session wrote should exist. That part is yours.
+dejima bounds what a session can reach. Whether what that session wrote
+should exist is your call.
 
 **Check whether the project wants it first.** A growing number of projects
 state that they do not accept AI-assisted contributions. Fork-and-review is
@@ -194,10 +221,16 @@ every key, its default, and what it is for.
 The forge integration, the push/PR workflow, and the agent harness aren't
 hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
-`[core] harness`. Ships today: `forges/gitea`, `forges/github`, `forges/none`,
-`workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only`,
-`harnesses/claude-code`. The defaults are `forges/none` and
-`workflows/local-only`: a fresh install commits locally and pushes nowhere.
+`[core] harness`.
+
+Ships today:
+
+- **Forges:** `none`, `gitea`, `github`
+- **Workflows:** `local-only`, `branch-push`, `worktree-pr`
+- **Harnesses:** `claude-code`
+
+The defaults are `forge = none` and `workflow = local-only`: a fresh install
+commits locally and pushes nowhere.
 
 See [docs/providers.md](docs/providers.md) for the manifest contract, key by
 key, and the shipped providers as worked examples.
@@ -229,8 +262,8 @@ to `worktree-pr` or `branch-push`: a pushing workflow is refused at launch
 unless its forge resolves to somewhere to push to, so the forge is not
 optional once you choose one of them.
 
-A pushing workflow also needs a git push credential, and which one you give it
-is a decision worth making deliberately rather than by default:
+A pushing workflow also needs a git push credential. Which one you give it
+matters:
 
 - **`[core] ssh_key`, a key of the session's own**, belonging to an account
   that is not you. This is the one to set up. It gives the sandbox an
@@ -306,8 +339,8 @@ merge, are what actually stop a merge from happening without you.
 What holds across all three is where they stop: none of them puts work on
 your default branch. `local-only` never leaves the machine, and the pushing
 workflows stop at a branch or at a pull request. The last step is yours in
-every case, which is a property of how the workflows are arranged rather than
-something enforced against a session that does not want to cooperate.
+every case. That comes from how the workflows are arranged, not from anything
+enforced against a session that does not want to cooperate.
 
 **→ [docs/configuration.md](docs/configuration.md#the-session-briefing)** -
 the guards in full, and why they fail open.
@@ -344,8 +377,7 @@ the project mount, for passing files in and out of a session without
 touching the actual checkout. It persists across sessions since it's a real
 directory, not a container volume - but treat it as a handoff point, not
 general-purpose storage. **Clear it out between sessions.** Anything left
-there is readable by the next session, and by every session after that, which
-turns a file you forgot into something you handed over.
+there is readable by the next session, and by every session after that.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
@@ -519,9 +551,8 @@ you what changed.
 
 It is **advisory, not a block**. It fires after the session has ended, so a
 finding is something to read and clean up before your next `git` or `claude`
-in that repo, not something that was prevented. And its diff is time-windowed
-rather than session-attributed: it reports that a path changed while the
-session was running, not that the session changed it.
+in that repo. Its diff is also time-windowed: it reports that a path changed
+while the session was running, not that the session changed it.
 
 `dejima-audit ack` walks the findings and shows you each one before asking.
 Approving records the exact content, so any later change re-fires; ignoring
@@ -551,7 +582,7 @@ credentials never enter the container, that a push to anywhere but the
 allowed remote is refused. Hundreds of tests across suites covering
 static analysis, host-side behaviour, and containers started for real.
 
-They are the reason claims here are stated flatly rather than hedged.
+They are why the claims here are stated flatly.
 
 → **[docs/development.md](docs/development.md)**: the suites, what each
 covers, and how to run them.
@@ -567,6 +598,8 @@ covers, and how to run them.
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
+| [SECURITY.md](SECURITY.md) | What dejima claims, where to report a vulnerability, and what is promised in return |
+| [ATTRIBUTION.md](ATTRIBUTION.md) | Who holds the dejima marks and what may be done with them |
 
 ## License
 
@@ -574,3 +607,7 @@ This project is licensed under the GNU General Public License v3.0 or later
 (GPL-3.0-or-later); see [LICENSE](LICENSE) for the full text.
 
 Copyright (C) 2026 Brad Anderson
+
+The dejima wordmark and logo are not code and are not covered by that licence.
+They are trademarks; who holds them and what may be done with them is stated
+once for the organisation, in [ATTRIBUTION.md](ATTRIBUTION.md).

@@ -95,7 +95,7 @@ Docker host: `runtime.bats` proves that a service bound to the host's
 loopback is unreachable from inside a container while one bound to the
 bridge gateway *is* reachable. The second half is a positive control - it is
 what stops the first from passing in an environment where the container
-simply reaches nothing. That pair is the ttyd front door's whole containment
+reaches nothing at all. That pair is the ttyd front door's whole containment
 argument, so run it before trusting a front door you just set up.
 
 Every mutation in `runtime.bats` (firewall rules, `ipset` entries) happens

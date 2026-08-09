@@ -324,9 +324,9 @@ the vector is closed completely rather than bounded. The cost is one push
 after the review you were going to do anyway, and it is the only option here
 that does not depend on getting a forge's configuration right.
 
-If none of the three is available for a given project, that is worth knowing
-plainly: pointing a sandbox at it means accepting that a compromised session
-can run code on whatever that repository can reach.
+If none of the three is available for a given project, say so plainly:
+pointing a sandbox at it means accepting that a compromised session can run
+code on whatever that repository can reach.
 
 ## Egress
 
@@ -368,7 +368,7 @@ bridge subnet is one that check silently does not cover.
 
 With `runner.capacity: 1` one job occupies that network at a time. Above one,
 concurrent jobs share a broadcast domain and can reach each other's service
-containers, which is worth knowing before raising it.
+containers. Check that before raising it.
 
 The DNS and firewall shape is the same one dejima uses inside its own
 container (`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one
@@ -499,10 +499,9 @@ What still applies:
   session commits locally and stops. The push grant *is* the CI
   code-execution grant; declining the first declines the second.
 
-Gitea 1.27's **scoped workflows** are worth knowing about here: a workflow
-maintained in a central repository the sandbox cannot push to, registerable
-instance-wide, so the workflow file itself sits outside any agent branch's
-reach. Use it, but it is not a gate. Scoped workflows run *alongside* a
+Gitea 1.27's **scoped workflows** apply here: a workflow maintained in a
+central repository the sandbox cannot push to, registerable instance-wide,
+so the workflow file itself sits outside any agent branch's reach. Use it, but it is not a gate. Scoped workflows run *alongside* a
 consuming repository's own workflows rather than replacing them, so a branch
 can still add a workflow of its own.
 
