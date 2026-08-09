@@ -37,7 +37,7 @@ Around that core is most of what running an agent unattended actually takes:
   before you've read a line of it. The container bounds what a session reaches
   directly, not what it can arrange to have run elsewhere. So this one is
   work on the runner: [docs/ci.md](docs/ci.md) for what it takes, and
-  [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)
+  [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
   for a tool that does it.
 - **Logging.** Every DNS lookup and rejected connection is shipped to Loki,
   along with the session transcript if you opt in.
@@ -505,7 +505,7 @@ grant and the code execution with it.
 what that leaves, hardening a runner, and making CI's egress allowlist a
 version-controlled artifact read from `main`.
 
-**→ [dejima-ci-hardener](https://gitbox.branderson.io/branderson/dejima-ci-hardener)** - the *how*: a self-contained tool that
+**→ [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)** - the *how*: a self-contained tool that
 hardens a CI runner, installed on the CI box and nowhere near a dejima host.
 Nothing in this repository needs to be copied onto a runner.
 

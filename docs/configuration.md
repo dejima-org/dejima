@@ -125,7 +125,7 @@ consequences worth knowing:
   one archive, built for one architecture. There is no per-architecture
   tarball spec today, so a project that declares one is a project that builds
   on machines of that architecture and no others. Track that at
-  [#97](https://gitbox.branderson.io/branderson/dejima/issues/97).
+  [#97](https://gitbox.branderson.io/dejima/dejima/issues/97).
 - **Upgrading is an approval, not a version bump.** A new release is a new
   digest, so it goes through `dejima-dep add` and `dejima-project approve`
   again - which is the point, not friction to route around.
