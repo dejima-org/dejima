@@ -8,16 +8,21 @@
      light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
      which is committed alongside for exactly that. One line, on the mirror,
      where someone can see whether it worked.
-     The &nbsp; above the tag is the spacing, and it has to be a character
-     rather than CSS or a break. Gitea's sanitizer strips `style` from both the
-     tag and any wrapper; a bare <br> ends a line nothing follows, which
-     browsers collapse to no height at all. &nbsp; survives as a real U+00A0,
-     so the paragraph holding it is not empty and occupies a line. -->
+     Every &nbsp; here is spacing, and it has to be a character rather than CSS
+     or a presentation attribute. Gitea's sanitizer strips `style` from the tag
+     and from any wrapper, `hspace`/`vspace` survive sanitizing only to be
+     ignored by browsers that dropped HTML4 presentation attributes, and a bare
+     <br> ends a line nothing follows, which browsers collapse to no height.
+     &nbsp; survives as a real U+00A0: on its own line it fills a paragraph
+     that would otherwise be empty, and immediately before the tag it sits
+     inline and indents the image by one space. -->
 &nbsp;
 
-<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+&nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
 
 ---
+
+&nbsp;
 
 **Agents work best unsupervised. Bound the blast radius instead, and assume
 the agent is hostile.**
