@@ -143,50 +143,30 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$count" -eq 1 ]
 }
 
-@test "flags a cross-project write under ~/.claude/projects" {
+# The cross-project finding is gone, and these are its replacement: writes
+# under ~/.claude/projects must produce NOTHING now, whichever slug they land
+# in. It reported a poisoning route a session could once take - the whole
+# tree was mounted - and since #104 a session gets its own slugs only, so
+# every remaining write it could see belongs to some other session doing its
+# own work. With several sessions running it reported all of them on every
+# report.
+@test "a write to another project's slug is not reported" {
     mkdir -p "$PROJDIR/-some-other-project"
     echo x > "$PROJDIR/-some-other-project/file1"
     snap
     echo y > "$PROJDIR/-some-other-project/file2"; touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
     run cmp_
-    [[ "$output" == *"CROSS-PROJECT history/memory write: -some-other-project"* ]]
+    [[ "$output" != *"CROSS-PROJECT"* ]]
+    [[ "$output" != *"-some-other-project"* ]]
 }
 
-@test "does not flag the current project's own projects slug" {
+@test "a write to this project's own slug is not reported either" {
     mkdir -p "$PROJDIR/$CURRENT_SLUG"
     echo x > "$PROJDIR/$CURRENT_SLUG/file1"
     snap
     echo y > "$PROJDIR/$CURRENT_SLUG/file2"; touch -d '+1 hour' "$PROJDIR/$CURRENT_SLUG/file2"
     run cmp_
     [[ "$output" != *"CROSS-PROJECT"* ]]
-}
-
-@test "does not flag a worktree child's projects slug" {
-    # A real worktree, not just a directory named like one. "Self" is derived
-    # from live worktree paths now, so the fixture has to produce one.
-    git -C "$WS" commit -q --allow-empty -m base
-    git -C "$WS" worktree add -q "$WS/.worktrees/featurex" -b featurex
-    mkdir -p "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex"
-    echo x > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file1"
-    snap
-    echo y > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"; touch -d '+1 hour' "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"
-    run cmp_
-    [[ "$output" != *"CROSS-PROJECT"* ]]
-}
-
-# The regression guard for #104's sibling case. The old test was a
-# "$CURRENT_SLUG"-* glob, which this slug matches: a project checked out
-# beside this one, whose directory name merely extends it, was silently
-# exempt from cross-project reporting. `proj` and `proj-ci-hardener` side by
-# side is an ordinary layout, not a contrived one.
-@test "flags a sibling project whose directory name extends this one's" {
-    mkdir -p "$PROJDIR/${CURRENT_SLUG}-ci-hardener"
-    echo x > "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file1"
-    snap
-    echo y > "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file2"
-    touch -d '+1 hour' "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file2"
-    run cmp_
-    [[ "$output" == *"CROSS-PROJECT"* ]]
 }
 
 @test "silent when no projects changed" {
@@ -230,7 +210,11 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [[ "$output" == *".claude/evil"* ]]
 }
 
-@test "TCB: flags a change under bin/ when workspace is the audit's own repo root" {
+@test "TCB: a change git can see is reported as info, not as a CRITICAL to ack" {
+    # tcb_snapshot only populates when the workspace IS dejima's own repo, so
+    # every change here is also in the git working tree the operator is about
+    # to read. One CRITICAL per file duplicated `git status` and made
+    # developing dejima itself unusable.
     mkdir -p "$WS/bin"
     echo x > "$WS/bin/x"
     echo x > "$WS/install.sh"
@@ -238,7 +222,27 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     snap
     echo changed > "$WS/bin/x"
     run cmp_
-    [[ "$output" == *"TCB (sandbox self) modified: bin/x"* ]]
+    [[ "$output" != *"TCB (sandbox self) modified"* ]]   # nothing to acknowledge
+    # Recorded as INFO in the report rather than shouted on stderr: the
+    # startup warning already said the TCB is writable this session.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    run bash -c "cat '$AUDITDIR/$slug'/*.txt"
+    [[ "$output" == *"this workspace IS dejima"* ]]
+}
+
+@test "TCB: a change git CANNOT see is still a CRITICAL finding" {
+    # The case that justifies keeping the check at all. A file listed in
+    # .git/info/exclude is live code that runs on the next launch and appears
+    # nowhere in `git status`, so nothing but this hash sees it.
+    mkdir -p "$WS/bin" "$WS/.git/info"
+    echo x > "$WS/bin/hidden"
+    echo x > "$WS/install.sh"
+    echo 'bin/hidden' > "$WS/.git/info/exclude"
+    export DEJIMA_AUDIT_REPO_ROOT="$(readlink -f "$WS")"
+    snap
+    echo changed > "$WS/bin/hidden"
+    run cmp_
+    [[ "$output" == *"TCB (sandbox self) modified, INVISIBLE to git: bin/hidden"* ]]
 }
 
 @test "TCB: does not flag changes when the workspace is not the audit's own repo root" {
@@ -611,14 +615,56 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     [ "$result" -ne 124 ]
 }
 
-@test "show prints the only report there is, and names it" {
+# One `ack` run used to walk one report and exit, saying nothing about the
+# rest, so clearing a backlog took as many runs as there were reports and
+# looked like the tool was stuck on the first one.
+@test "ack walks every report in one run when told to continue" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    snap; mkdir -p "$WS/.claude"; echo '{}' > "$WS/.claude/settings.json"; cmp_ >/dev/null 2>&1
+    [ "$(find "$AUDITDIR/$slug" -name '*.txt' | wc -l)" -eq 2 ]
+    # approve, continue, approve
+    run bash -c "printf 'a\ny\na\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 reports waiting"* ]]
+    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"settings.json"* ]]      # the second report, same run
+}
+
+@test "ack stops at one report when told not to continue" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    snap; mkdir -p "$WS/.claude"; echo '{}' > "$WS/.claude/settings.json"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\nn\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"still waiting"* ]]      # said what is left behind
+    [[ "$output" != *"settings.json"* ]]      # and did not open it
+}
+
+@test "show indexes the reports rather than dumping one" {
+    # It used to `cat` a single report: a wall of text that answered neither
+    # question an operator has - how much is waiting, and what still needs a
+    # decision - and included findings already acknowledged, so it did not
+    # even shrink as they worked through it.
     snap
     echo 'export X=1' > "$WS/.envrc"
     cmp_ >/dev/null 2>&1
     run bash -c "'$AUDIT' show '$WS' 2>&1"
     [ "$status" -eq 0 ]
+    [[ "$output" == *"1 report(s)"* ]]
+    [[ "$output" == *"-CRITICAL.txt"* ]]      # names it
+    [[ "$output" == *"ack starts here"* ]]    # and which one ack will open
+    [[ "$output" != *".envrc"* ]]             # without the contents
+}
+
+@test "show --full prints the report ack would open" {
+    snap
+    echo 'export X=1' > "$WS/.envrc"
+    cmp_ >/dev/null 2>&1
+    run bash -c "'$AUDIT' show '$WS' --full 2>&1"
+    [ "$status" -eq 0 ]
     [[ "$output" == *".envrc"* ]]
-    [[ "$output" == *"-CRITICAL.txt"* ]]   # said which report it printed
+    [[ "$output" == *"-CRITICAL.txt"* ]]
 }
 
 @test "show and ack agree on which report they mean" {
@@ -638,19 +684,20 @@ WARNING  changed workspace file: .vscode/settings.json
 REPORT
     run "$AUDIT" show "$WS"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]           # the stale CRITICAL report...
+    [[ "$output" == *"-CRITICAL.txt"* ]]    # the stale CRITICAL report...
     [[ "$output" != *"settings.json"* ]]    # ...not the newer clean one
 }
 
-@test "show falls back to the newest report when no CRITICAL one is pending" {
+@test "show marks the newest report as the one ack will open, absent a CRITICAL" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     report_dir="$AUDITDIR/$slug"; mkdir -p "$report_dir"
     echo 'older' > "$report_dir/2020-01-01-000000.txt"
     echo 'newer' > "$report_dir/2026-01-01-000001.txt"
     run "$AUDIT" show "$WS"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"newer"* ]]
-    [[ "$output" != *"older"* ]]
+    [[ "$output" == *"2 report(s)"* ]]             # both listed, not just one
+    [[ "$output" == *"2020-01-01-000000.txt"* ]]
+    [[ "$output" == *"2026-01-01-000001.txt"*"ack starts here"* ]]
 }
 
 @test "ack presents a stale unacknowledged CRITICAL report before a newer clean one" {
@@ -791,39 +838,32 @@ REPORT
     [[ "$output" != *"-CRITICAL.txt"* ]]
 }
 
-@test "a finding that cannot be acknowledged is presented once, not on every run" {
-    # There is nothing to record for one, so without a marker it re-prompted
-    # forever and `ack` could never reach a state of having nothing to ask.
+@test "a cleared finding is presented once, not on every run" {
+    # There is nothing to record for a surface that no longer exists, so
+    # without a `reviewed` marker the report re-prompted forever and `ack`
+    # could never reach a state of having nothing to ask.
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$PROJDIR/-some-other-project"
-    echo x > "$PROJDIR/-some-other-project/file1"
-    snap
-    echo y > "$PROJDIR/-some-other-project/file2"
-    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
-    cmp_ >/dev/null 2>&1
-    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"CROSS-PROJECT"* ]]
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    rm -f "$WS/.envrc"
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *".envrc"* ]]
     grep -q '^reviewed ' "$BASEDIR/$slug"
 
-    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" != *"CROSS-PROJECT"* ]]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" != *".envrc"* ]]
 }
 
 @test "quitting a report does not mark it reviewed" {
-    # The marker means "walked to the end". An abort discards everything
-    # else, and must discard this too or one q would silence the report.
+    # The marker means "walked to the end". An abort discards everything else,
+    # and must discard this too or one q would silence the report.
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$PROJDIR/-some-other-project"
-    echo x > "$PROJDIR/-some-other-project/file1"
-    snap
-    echo y > "$PROJDIR/-some-other-project/file2"
-    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
-    cmp_ >/dev/null 2>&1
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    rm -f "$WS/.envrc"
     run bash -c "printf 'q\n' | '$AUDIT' ack '$WS'"
     ! grep -q '^reviewed ' "$BASEDIR/$slug" 2>/dev/null
 
-    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"CROSS-PROJECT"* ]]
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" == *".envrc"* ]]
 }
 
 @test "a WARNING git config finding can be acknowledged, both ways (#45)" {
@@ -873,24 +913,6 @@ REPORT
     [[ "$output" != *"-CRITICAL.txt"* ]]
 }
 
-@test "ack does not write an unmatchable entry for a finding with no id" {
-    # Was written against a changed git config, which #45 made ackable. The
-    # invariant is about findings that have no id to record at all, so it now
-    # uses the one class that still has none: a cross-project write, whose
-    # subject is another project's slug rather than anything this audit can
-    # hash and pin.
-    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$PROJDIR/-some-other-project"
-    echo x > "$PROJDIR/-some-other-project/file1"
-    snap
-    echo y > "$PROJDIR/-some-other-project/file2"
-    touch -d '+1 hour' "$PROJDIR/-some-other-project/file2"
-    cmp_ >/dev/null 2>&1
-    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
-    [[ "$output" == *"cannot"* ]]
-    ! grep -qE '^(safe|spam) ' "$BASEDIR/$slug" 2>/dev/null
-}
-
 @test "an ack-approved finding is suppressed on the next compare (id round-trips through the baseline)" {
     snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
     run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
@@ -919,24 +941,37 @@ REPORT
                                              # so the report must stay eviction-protected
 }
 
-@test "ack refuses to approve a finding whose path no longer exists, and the CRITICAL suffix survives" {
-    # A since-deleted path has no content left to pin a `safe` approval to -
-    # writing one anyway (the old behaviour) produced a baseline entry
-    # baseline_suppresses() can never match (its own empty-sha guard rejects
-    # it as malformed), so the surface stayed permanently unsuppressible -
-    # while `a` still advanced crit_acked and let the report shed its
-    # -CRITICAL.txt protection for good. Refusing outright keeps both the
-    # baseline and the report's protection honest.
+@test "a finding whose path no longer exists is cleared, not refused forever" {
+    # Refusing outright kept the baseline honest - there is no content left to
+    # pin a `safe` entry to - but it also meant crit_acked never reached
+    # crit_seen, so the report kept -CRITICAL.txt. select_report prefers
+    # CRITICAL, so one deleted file pinned `ack` to a report that no decision
+    # could resolve and hid every other report behind it, permanently.
+    #
+    # Still nothing written to the baseline: an entry with an empty sha can
+    # never match. The finding is simply cleared, because a surface that does
+    # not exist does not run. If it comes back, it comes back as new.
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
     rm -f "$WS/.envrc"   # gone by the time ack runs
     run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"cannot approve: .envrc no longer exists"* ]]
-    [[ "$output" == *"nothing recorded"* ]]
-    [ ! -f "$BASEDIR/$slug" ]                    # nothing written to the baseline at all
+    [[ "$output" == *"cleared"* ]]
+    [[ "$output" == *".envrc"* ]]
+    ! grep -qE '^(safe|spam) ' "$BASEDIR/$slug" 2>/dev/null   # nothing unmatchable recorded
+    grep -q '^reviewed ' "$BASEDIR/$slug"                     # but the report is done with
     run bash -c "ls '$AUDITDIR/$slug'"
-    [[ "$output" == *"-CRITICAL.txt"* ]]         # unacknowledged CRITICAL keeps its protection
+    [[ "$output" != *"-CRITICAL.txt"* ]]                      # and no longer blocks the queue
+}
+
+# The other half: clearing is not a way to launder a finding whose surface is
+# still there. Only an absent one can be cleared.
+@test "a finding whose path still exists is approved against its content, not cleared" {
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
+    [[ "$output" != *"cleared"* ]]
+    grep -q '^safe .envrc ' "$BASEDIR/$slug"
 }
 
 @test "a workspace path containing its own ': ' cannot hijack ack's id derivation" {
@@ -1079,7 +1114,10 @@ REPORT
 
 @test "ack records a safe tcb entry whose id round-trips and suppresses the next compare" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$WS/bin"; echo x > "$WS/bin/x"; echo x > "$WS/install.sh"
+    # Hidden from git, which is the only shape that is still a finding.
+    mkdir -p "$WS/bin" "$WS/.git/info"
+    echo x > "$WS/bin/x"; echo x > "$WS/install.sh"
+    echo 'bin/x' > "$WS/.git/info/exclude"
     export DEJIMA_AUDIT_REPO_ROOT="$(readlink -f "$WS")"
     snap
     echo changed > "$WS/bin/x"
@@ -1137,7 +1175,7 @@ REPORT
     cmp_ >/dev/null
     run bash -c "cd '$WS' && '$AUDIT' show 2>/dev/null"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"report(s) for $WS"* ]]
 }
 
 @test "show finds the workspace when run from a subdirectory" {
@@ -1147,7 +1185,7 @@ REPORT
     cmp_ >/dev/null
     run bash -c "cd '$WS/src/deep' && '$AUDIT' show 2>/dev/null"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"report(s) for $WS"* ]]
 }
 
 @test "show finds the parent repo when run from a linked worktree" {
@@ -1162,7 +1200,7 @@ REPORT
     cmp_ >/dev/null
     run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"report(s) for $WS"* ]]
 }
 
 @test "show finds the parent repo's report even after the worktree itself was snapshotted" {
@@ -1177,7 +1215,7 @@ REPORT
     "$AUDIT" snapshot "$WS/.worktrees/wt" "$(mktemp)"
     run bash -c "cd '$WS/.worktrees/wt' && '$AUDIT' show 2>/dev/null"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"report(s) for $WS"* ]]
 }
 
 @test "show names the path it resolved when that workspace has no reports" {
@@ -1198,7 +1236,7 @@ REPORT
     other="$(mktemp -d)"; git -C "$other" init -q
     run bash -c "cd '$other' && '$AUDIT' show '$WS' 2>/dev/null"
     [ "$status" -eq 0 ]
-    [[ "$output" == *".envrc"* ]]
+    [[ "$output" == *"report(s) for $WS"* ]]
     rm -rf "$other"
 }
 

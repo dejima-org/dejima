@@ -1989,12 +1989,15 @@ EOF
     grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
 }
 
-@test "docs/security.md documents the ~/.claude/projects cross-session false-positive case" {
-    # Presence-only grep, same caveat as above: confirms the specific
-    # ~/.claude/projects wording landed, not that the surrounding
-    # reasoning is sound.
-    grep -q 'CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
-    grep -q 'directory shared by' "$REPO_ROOT/docs/security.md"
+# Was: that the cross-session false-positive case is documented. The finding
+# itself is gone - a session can no longer write another project's slug, so
+# every one it could still see belonged to some other session - and what
+# needs documenting now is its absence, so that removing detection stays a
+# stated decision rather than something a reader has to infer from silence.
+@test "docs/security.md says why there is no cross-project finding" {
+    grep -q 'no longer a .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
+    run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
 }
 
 # The CI disclosure is the one part of issue #72 that helps a reader whatever
