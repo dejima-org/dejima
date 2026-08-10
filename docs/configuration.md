@@ -366,6 +366,31 @@ resolving symlinks, so `read_write = ~` is caught too.
 Sessions are told which directories these are, so "everything else is
 disposable" stays true in the briefing rather than becoming a trap.
 
+### One-off mounts for a single launch
+
+`--extra-readonly PATH` and `--extra-read-write PATH` add a path for one run
+without editing the config. `--ro` and `--rw` are the short forms. Both are
+repeatable, one path per occurrence:
+
+```sh
+dejima --ro ~/other-project ~/myproject          # read while migrating code out
+dejima --rw ~/scratch --ro ~/reference ~/myproject
+```
+
+They **append** to the config's lists rather than replacing them, and they
+are the same lists, so everything above applies unchanged: the existence
+check, the refusal when a path overlaps something dejima keeps out of a
+session's reach, the refusal when one path appears in both lists, and the
+briefing sentence naming what a session can write. A flag says *where*, not
+*whether*, and there is no flag that waives a refusal.
+
+Two differences from the config form, both because a command line is not a
+file. A relative path is accepted and made absolute against the working
+directory, which a config file has no equivalent of. And a path containing a
+colon is refused outright: both lists are colon-separated, so such a path
+cannot be represented in one at all and would otherwise split into two
+mounts that each fail the existence check.
+
 ## Shared scratch space
 
 `~/shared` is a read-write bind mount of `[core] share_dir` (default

@@ -61,6 +61,65 @@ _need_value() {
     }
 }
 
+# Per-launch additions to [mounts] readonly and [mounts] read_write, for the
+# one-off cases: reading another checkout while migrating code out of it,
+# writing to a scratch directory for one session. Repeatable, one path each.
+#
+# These append to the config's own lists rather than carrying their own mount
+# code, which is the whole design. Everything that already applies to a
+# configured mount then applies to a flag automatically and with nothing
+# duplicated: the existence check, the refusal when a path names the approval
+# store or the audit stores, the refusal when the same path appears in both
+# lists, and the read-write paths the session briefing and the audit report
+# header name. A flag is a way to say where, not a way around any of that.
+EXTRA_RO_FLAGS=()
+EXTRA_RW_FLAGS=()
+FLAG_MOUNTS=""
+_add_mount_flag() {
+    local flag="$1" value="$2"
+    # Both lists are colon-separated, so a path containing one cannot be
+    # represented in them at all - it would silently split into two mounts
+    # that each fail the existence check. Say so instead.
+    case "$value" in
+        *:*) echo "$flag path must not contain a colon: $value" >&2; exit 1 ;;
+    esac
+    # Same leading-~ expansion the config's list:path type does, for the
+    # quoted case the shell leaves alone.
+    value="${value/#\~/$HOME}"
+    # Relative paths are worth accepting here and meaningless in a config
+    # file, which has no working directory to be relative to. Made absolute
+    # by prefixing rather than by readlink -f: resolving would mount the
+    # symlink's target under a path the operator never typed.
+    case "$value" in /*) ;; *) value="$PWD/$value" ;; esac
+    case "$flag" in
+        --extra-readonly)   EXTRA_RO_FLAGS+=("$value") ;;
+        --extra-read-write) EXTRA_RW_FLAGS+=("$value") ;;
+    esac
+    # Recorded here, at parse time, and not where the lists are assembled:
+    # that happens inside a command substitution, whose subshell would throw
+    # the assignment away and leave every flag reported as a config entry.
+    FLAG_MOUNTS="${FLAG_MOUNTS:+$FLAG_MOUNTS:}$value"
+}
+_append_mounts() {
+    local list="$1"; shift
+    local p
+    for p in "$@"; do
+        list="${list:+$list:}$p"
+    done
+    printf '%s' "$list"
+}
+# Which of the two the operator actually wrote, for the refusals below.
+# Without this a mistyped --ro is reported as a "[mounts] readonly entry",
+# sending someone to a config file that does not mention the path at all.
+
+_mount_label() {
+    local path="$1" from_config="$2" from_flag="$3"
+    case ":$FLAG_MOUNTS:" in
+        *":$path:"*) printf '%s' "$from_flag" ;;
+        *)           printf '%s' "$from_config" ;;
+    esac
+}
+
 PRINT_CONFIG=0
 PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
@@ -74,6 +133,12 @@ while [ $# -gt 0 ]; do
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
+        --extra-readonly|--ro)
+            _need_value --extra-readonly "${2:-}"
+            _add_mount_flag --extra-readonly "$2"; shift 2 ;;
+        --extra-read-write|--rw)
+            _need_value --extra-read-write "${2:-}"
+            _add_mount_flag --extra-read-write "$2"; shift 2 ;;
         --*) echo "unknown option: $1" >&2; exit 1 ;;
         *) break ;;
     esac
@@ -268,6 +333,8 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
 SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
+    ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
 
 # Read-write host mounts. Distinct from [core] share_dir, which is mounted at
 # ~/shared - a well-known handoff point the agent is told about by name -
@@ -321,6 +388,8 @@ _refuse_guarded_mount() {
     done
 }
 SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
+SANDBOX_RW_MOUNTS="$(_append_mounts "$SANDBOX_RW_MOUNTS" \
+    ${EXTRA_RW_FLAGS[@]+"${EXTRA_RW_FLAGS[@]}"})"
 RW_MOUNT_PATHS=()
 DEJIMA_RW_MOUNTS=""
 if [ -n "$SANDBOX_RW_MOUNTS" ]; then
@@ -328,7 +397,7 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
     for path in "${rw_paths[@]}"; do
         [ -n "$path" ] || continue
         if [ ! -d "$path" ]; then
-            echo "[mounts] read_write entry is not an existing directory: $path" >&2
+            echo "$(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path") is not an existing directory: $path" >&2
             exit 1
         fi
         # readlink -m, not -f: -f yields nothing unless at most the final
@@ -345,7 +414,7 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
             "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
             guarded_real="$(readlink -m "$guarded")"
             _paths_overlap "$rw_real" "$guarded_real" || continue
-            echo "Refusing [mounts] read_write entry: $path" >&2
+            echo "Refusing $(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path"): $path" >&2
             echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
             echo "A writable mount there would let a session approve its own domains and" >&2
             echo "dependencies, delete the audit findings it is named in, or plant code" >&2
@@ -932,14 +1001,15 @@ if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
     for path in "${extra_paths[@]}"; do
         [ -n "$path" ] || continue
         if [ ! -e "$path" ]; then
-            echo "[mounts] readonly entry does not exist: $path" >&2
+            echo "$(_mount_label "$path" "[mounts] readonly entry" "--extra-readonly path") does not exist: $path" >&2
             exit 1
         fi
         # [mounts] read_write has been guarded since it was added; this one
         # never was, so `readonly = ~/.config/dejima` mounted the approval
         # store into the container and nothing said a word (#15).
         _guarded_stores
-        _refuse_guarded_mount "[mounts] readonly entry" "$path" "${GUARDED_STORES[@]}"
+        _refuse_guarded_mount "$(_mount_label "$path" "[mounts] readonly entry" "--extra-readonly path")" \
+            "$path" "${GUARDED_STORES[@]}"
         extra_mounts+=(-v "$path:$path:ro")
     done
 fi

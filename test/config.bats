@@ -1168,6 +1168,109 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
 # The positive control for the test above: with no key configured the
 # forwarded agent really is the only way to push, and an empty one is worth
 # saying so before it fails deep into a session.
+# --extra-readonly / --extra-read-write append to the config's own lists
+# rather than carrying their own mount code, so these assert the mount lands
+# and then that every refusal the configured form gets applies to the flag
+# too. If they ever stop sharing a path, the guard tests below pass while the
+# flags quietly stop being covered by them.
+_rw_launch_flags() {
+    local ws="$1"; shift
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" \
+        run "$REPO_ROOT/bin/dejima" "$@" "$ws"
+}
+
+@test "--extra-readonly and --extra-read-write mount for one launch" {
+    _rw_setup
+    workspace="$(mktemp -d)"; ro="$(mktemp -d)"; rw="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --extra-readonly "$ro" --extra-read-write "$rw"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$ro:$ro:ro" "$docker_log" || { cat "$docker_log"; return 1; }
+    grep -qxF "$rw:$rw" "$docker_log" || { cat "$docker_log"; return 1; }
+    rm -rf "$workspace" "$ro" "$rw"
+}
+
+@test "the short forms are the same flags, and both are repeatable" {
+    _rw_setup
+    workspace="$(mktemp -d)"; a="$(mktemp -d)"; b="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --ro "$a" --ro "$b"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$a:$a:ro" "$docker_log" || { cat "$docker_log"; return 1; }
+    grep -qxF "$b:$b:ro" "$docker_log" || { cat "$docker_log"; return 1; }
+    rm -rf "$workspace" "$a" "$b"
+}
+
+# The flags add to the configured lists; they do not replace them. A launch
+# that dropped the config's own entries would still pass the two tests above.
+@test "a flag adds to [mounts] readonly rather than replacing it" {
+    _rw_setup
+    workspace="$(mktemp -d)"; configured="$(mktemp -d)"; extra="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "readonly = $configured"
+    _rw_launch_flags "$workspace" --ro "$extra"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$configured:$configured:ro" "$docker_log" || { cat "$docker_log"; return 1; }
+    grep -qxF "$extra:$extra:ro" "$docker_log" || { cat "$docker_log"; return 1; }
+    rm -rf "$workspace" "$configured" "$extra"
+}
+
+# The point of appending to the same list: a flag is a way to say where, not
+# a way past the refusals. Both directions, since the two lists are guarded
+# by different code.
+@test "--extra-readonly is refused when it names the approval store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --ro "$CONFIG_DIR"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing --extra-readonly path"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "--extra-read-write is refused when it names the approval store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --rw "$CONFIG_DIR"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing --extra-read-write path"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+# A refusal that named "[mounts] readonly" would send someone to a config
+# file that does not mention the path.
+@test "a rejected flag path is reported as a flag, not as a config entry" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --ro /nonexistent-flag-path
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--extra-readonly path does not exist"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+# Both lists are colon-separated, so such a path cannot be represented in one
+# and would split into two mounts that each fail the existence check.
+@test "a flag path containing a colon is refused" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch_flags "$workspace" --ro /tmp/has:colon
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not contain a colon"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
 # #15. Both of these reach `extra_mounts+=(-v ...)` with a path computed at
 # run time, so the static grep for a literal $PROJECT_STORE / config_root
 # cannot see either one - it passed throughout. [mounts] read_write has been
