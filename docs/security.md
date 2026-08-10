@@ -369,32 +369,42 @@ hands to whichever session starts against it. See
   what you acknowledge is the file that is actually on disk rather than a
   readable approximation of its name.
 - `~/.claude/projects` (session transcripts and per-project memory) is
-  **not** mounted read-only, unlike the code-carrying `~/.claude`
-  directories - deliberately. Scoping a read-only mount to "the
-  current project's slug"
-  would break the sandbox's own worktree workflow: a session running in
-  `WORKSPACE/.worktrees/<branch>` writes to a *different* projects slug
-  than the parent repo, so a slug-scoped overlay would either block that
-  legitimate write or have to be widened until it stopped protecting
-  anything. Instead, cross-project writes are **detected, not prevented**:
-  the exit-time audit above flags any write during the session to another
-  project's `~/.claude/projects/<slug>` directory, excluding the current
-  project's own slug and its worktree children. That's after-the-fact
-  reporting of transcript/memory poisoning in *other* projects, not a
-  block on it happening. Residual even within that: the current project's
-  own transcripts/memory stay fully writable throughout, since Claude Code
-  needs that for host-side `claude --resume` to work; and detection keys
-  off each slug's max file mtime, so an edit to a file that isn't already
-  that project's newest doesn't advance the max and goes unflagged. A
-  read-only mount for `projects/` remains a possible future option if
-  Claude Code is confirmed to fail cleanly (not hang, as `~/.claude.json`
-  did) when a write to it is blocked. This is also the sharpest case of
-  the time-window caveat above: `~/.claude/projects` is a single
-  directory shared by *every* Claude Code session on the host, not scoped
-  to the one being audited, so an entirely innocent concurrent session
-  working on some unrelated project can produce a `CROSS-PROJECT` finding
-  here that reads like the audited session poisoned another project's
-  history - it didn't, it just happened to be running at the same time.
+  **not** mounted as a tree. A session gets the workspace's own slug
+  directory plus one for each live git worktree nested under it,
+  read-write, and nothing else. Every other project's slug is *absent*
+  from the container rather than present-but-unwritable. Agent memory is
+  loaded into context at session start, so a write into another project's
+  `memory/` is text a future session there reads as established background
+  rather than as input - and until #104 the mount alone was enough to do
+  that, with no escape and no credential involved.
+
+  The set is derived from real worktree paths
+  (`bin/dejima-slug-lib.sh`), not from the slug string, because a slug
+  cannot tell a child from a sibling: `/w/proj/wt1` and `/w/proj-wt1`
+  produce the same one. A `<slug>-*` glob therefore also matches any
+  project checked out beside this one whose directory name merely extends
+  it, which is an ordinary layout rather than a contrived one.
+
+  `projects/` itself stays container-local, so a slug that is not mounted
+  is still writable during the session and just does not survive it. That
+  is what lets Claude Code create a slug it does not find, which is the
+  first-run case it already handles, and it is why an absent sibling does
+  not risk the hang that a blocked write to `~/.claude.json` caused.
+
+  Cross-project writes are still **detected** as well. The exit-time audit
+  runs host-side over the whole tree, so narrowing the mount does not
+  narrow it; it now covers what the mount cannot reach, which is
+  concurrent *host* sessions. Residual: the workspace's own transcripts
+  and memory stay fully writable throughout, since Claude Code needs that
+  for host-side `claude --resume` to work; and detection keys off each
+  slug's max file mtime, so an edit to a file that isn't already that
+  project's newest doesn't advance the max and goes unflagged. The
+  time-window caveat above applies most sharply here, because on the host
+  `~/.claude/projects` is a single
+  directory shared by *every* Claude Code session, not scoped to the one
+  being audited - so an entirely innocent concurrent session working on
+  some unrelated project can still produce a `CROSS-PROJECT` finding that
+  reads like poisoning and isn't.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level

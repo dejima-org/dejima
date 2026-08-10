@@ -185,7 +185,11 @@ RUN mkdir /commandhistory && \
 # from the host, and Docker creates the parents of a mount point root-owned
 # if they don't already exist - which would leave the sandbox user unable to
 # write the caches and history it keeps directly in ~/.claude.
-RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
+# projects/ is in that list for the same reason one level down: it is no
+# longer mounted itself, only individual slug directories inside it, so
+# without this Docker creates it root-owned while setting those up and the
+# session cannot write a slug of its own.
+RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude $SANDBOX_HOME/.claude/projects && \
   chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
   chmod 700 $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude
 

@@ -162,12 +162,31 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
 }
 
 @test "does not flag a worktree child's projects slug" {
+    # A real worktree, not just a directory named like one. "Self" is derived
+    # from live worktree paths now, so the fixture has to produce one.
+    git -C "$WS" commit -q --allow-empty -m base
+    git -C "$WS" worktree add -q "$WS/.worktrees/featurex" -b featurex
     mkdir -p "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex"
     echo x > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file1"
     snap
     echo y > "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"; touch -d '+1 hour' "$PROJDIR/${CURRENT_SLUG}--worktrees-featurex/file2"
     run cmp_
     [[ "$output" != *"CROSS-PROJECT"* ]]
+}
+
+# The regression guard for #104's sibling case. The old test was a
+# "$CURRENT_SLUG"-* glob, which this slug matches: a project checked out
+# beside this one, whose directory name merely extends it, was silently
+# exempt from cross-project reporting. `proj` and `proj-ci-hardener` side by
+# side is an ordinary layout, not a contrived one.
+@test "flags a sibling project whose directory name extends this one's" {
+    mkdir -p "$PROJDIR/${CURRENT_SLUG}-ci-hardener"
+    echo x > "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file1"
+    snap
+    echo y > "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file2"
+    touch -d '+1 hour' "$PROJDIR/${CURRENT_SLUG}-ci-hardener/file2"
+    run cmp_
+    [[ "$output" == *"CROSS-PROJECT"* ]]
 }
 
 @test "silent when no projects changed" {

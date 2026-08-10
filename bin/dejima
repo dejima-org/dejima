@@ -23,6 +23,8 @@ source "$SCRIPT_DIR/dejima-project-lib.sh"
 source "$SCRIPT_DIR/dejima-provider-lib.sh"
 # shellcheck source=dejima-color-lib.sh
 source "$SCRIPT_DIR/dejima-color-lib.sh"
+# shellcheck source=dejima-slug-lib.sh
+source "$SCRIPT_DIR/dejima-slug-lib.sh"
 # fd 2: everything this script says for itself goes to stderr, so the
 # session's own stdout stays exactly what the container wrote.
 color_init 2
@@ -927,6 +929,31 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
+# ~/.claude/projects, one slug at a time rather than the whole tree.
+#
+# The tree holds every project's transcripts and agent memory. Memory is
+# loaded into context at session start, so a write into another project's
+# slug is text a future session there reads as established background - and
+# the mount alone was enough for that, no escape and no credential (#104).
+# Mounting per slug leaves the others absent rather than present-but-
+# unwritable, which is the state Claude Code already handles on a first run.
+#
+# The directory itself stays container-local, so a slug that is not mounted
+# is still writable during the session and simply does not survive it. That
+# is what lets Claude Code create a slug it does not find, which it does
+# whenever a session runs against a path with no history yet.
+#
+# Only slugs that already exist on the host are mounted, apart from the
+# workspace's own. A checkout with forty worktrees would otherwise have forty
+# empty directories created under ~/.claude/projects on its first launch, all
+# of them litter for the worktrees no session has ever run in.
+mkdir -p "$HOME/.claude/projects/$(ws_slug "$WORKSPACE_DIR")"
+while IFS= read -r _slug; do
+    [ -n "$_slug" ] || continue
+    [ -d "$HOME/.claude/projects/$_slug" ] || continue
+    extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")
+done < <(workspace_slugs_sorted "$WORKSPACE_DIR")
+
 # ~/.claude/statusline.sh is the same class of file as the config staged at
 # /etc/dejima-claude by docker-compose.yml: settings.json's statusLine.command
 # points at it, and Claude Code executes it on the host. Staged the same way,
@@ -1270,7 +1297,7 @@ export SANDBOX_IMAGE
 # because exit-time output can be ignored exactly once, permanently. This is
 # host-side and stays host-side: it must never be routed into the session's
 # context, which would make it a cross-session persistence channel.
-audit_slug="$(printf '%s' "$WORKSPACE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
+audit_slug="$(ws_slug "$WORKSPACE_DIR")"
 audit_reports="$AUDIT_DIR/$audit_slug"
 # `|| true`: a workspace with no history yet (the common case - nothing has
 # ever run against it, or every past finding is already acknowledged) has no

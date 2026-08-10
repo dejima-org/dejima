@@ -133,10 +133,16 @@ services:
       # directories, which is what makes them safe: a directory bind mount
       # can't detach the way a file one does, because a rename replaces an
       # entry *within* the mounted directory rather than the mount point.
-      # projects/ is what host-side `claude --resume` reads (and what
-      # log-shipper.sh tails); the rest is Claude Code's edit-undo record
-      # and the task/plan state skills write.
-      - ${HOME}/.claude/projects:${HOME}/.claude/projects
+      # projects/ is deliberately absent here. It holds every project's
+      # transcripts and agent memory, and mounting the tree gave a session
+      # write access to all of it - enough on its own to plant text a future
+      # session in another project reads as established background (#104).
+      # bin/dejima mounts the launching workspace's own slug and its live
+      # worktree children instead, one -v each, so the rest are absent rather
+      # than merely unwritable. The directory holding them stays
+      # container-local, which is what lets Claude Code create a slug it does
+      # not find. See bin/dejima-slug-lib.sh for which slugs those are and
+      # why the set comes from real worktree paths.
       - ${HOME}/.claude/file-history:${HOME}/.claude/file-history
       - ${HOME}/.claude/backups:${HOME}/.claude/backups
       - ${HOME}/.claude/tasks:${HOME}/.claude/tasks
