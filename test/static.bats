@@ -449,10 +449,9 @@ EOF
     # Directories, which is what makes them safe: a directory bind mount
     # can't detach the way a file one does, because a rename replaces an
     # entry *within* the mounted directory rather than the mount point.
-    # projects/ is not in this list: it is mounted per slug by bin/dejima,
-    # see the tests below. The rest is the edit-undo record and the task/plan
-    # state skills write.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/file-history:\$\{HOME\}/\.claude/file-history\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    # projects/ and file-history/ are not in this list: both are mounted an
+    # entry at a time by bin/dejima, see the tests below. The rest is the
+    # task/plan state skills write and the ~/.claude.json backups.
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/backups:\$\{HOME\}/\.claude/backups\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/tasks:\$\{HOME\}/\.claude/tasks\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plans:\$\{HOME\}/\.claude/plans\s*$' "$SANDBOX_DIR/docker-compose.yml"
@@ -485,6 +484,30 @@ EOF
 # the workspace has no history yet.
 @test "the image pre-creates ~/.claude/projects so the slug mounts have a writable parent" {
     grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude/projects' "$SANDBOX_DIR/Dockerfile"
+}
+
+# Each file-history/<session>/<hash>@v1 is a verbatim copy of an edited file,
+# so mounting the tree hands a session every project's source outright -
+# worse than the transcripts, which are a record about the work rather than
+# the work. Writable too, so tampering with another project's undo record
+# puts chosen content into a later restore there.
+@test "docker-compose.yml never mounts the whole ~/.claude/file-history tree" {
+    run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/file-history:' "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || {
+        echo "the file-history tree is mounted whole again:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
+@test "bin/dejima mounts ~/.claude/file-history one session at a time" {
+    grep -q 'workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
+    grep -q 'extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")' \
+        "$REPO_ROOT/bin/dejima"
+}
+
+@test "the image pre-creates ~/.claude/file-history so the session mounts have a writable parent" {
+    grep -qE '\$SANDBOX_HOME/\.claude/file-history' "$SANDBOX_DIR/Dockerfile"
 }
 
 # One definition of "this workspace's slugs", shared by the mount and the

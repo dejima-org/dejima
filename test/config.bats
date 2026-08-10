@@ -1153,6 +1153,42 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
 # docs recommend, because it is a dedicated identity and works unattended.
 # So an empty agent is only worth mentioning when nothing else can push -
 # otherwise the warning fires at exactly the operators who took the advice.
+# ~/.claude/file-history is keyed by session id, so nothing in its own paths
+# says which project a directory belongs to. The transcript names are what
+# resolve it, and this is the assertion that the resolution is right: a
+# session of this workspace is mounted, one belonging to another project is
+# not, and neither is one whose slug merely extends this workspace's - the
+# sibling case that #104 turned on.
+@test "file-history is mounted for this workspace's sessions and no others" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local slug sib own foreign sibling
+    slug="$(printf '%s' "$workspace" | sed 's/[^a-zA-Z0-9]/-/g')"
+    sib="$slug-extra"
+    own=11111111-1111-1111-1111-111111111111
+    foreign=22222222-2222-2222-2222-222222222222
+    sibling=33333333-3333-3333-3333-333333333333
+    mkdir -p "$RW_HOME/.claude/projects/$slug" \
+             "$RW_HOME/.claude/projects/-some-other-project" \
+             "$RW_HOME/.claude/projects/$sib"
+    : > "$RW_HOME/.claude/projects/$slug/$own.jsonl"
+    : > "$RW_HOME/.claude/projects/-some-other-project/$foreign.jsonl"
+    : > "$RW_HOME/.claude/projects/$sib/$sibling.jsonl"
+    mkdir -p "$RW_HOME/.claude/file-history/$own" \
+             "$RW_HOME/.claude/file-history/$foreign" \
+             "$RW_HOME/.claude/file-history/$sibling"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "file-history/$own" "$docker_log" \
+        || { echo "own session not mounted:"; grep file-history "$docker_log"; return 1; }
+    run grep -F "file-history/$foreign" "$docker_log"
+    [ "$status" -ne 0 ] || { echo "another project's file-history was mounted"; return 1; }
+    run grep -F "file-history/$sibling" "$docker_log"
+    [ "$status" -ne 0 ] || { echo "a sibling project's file-history was mounted"; return 1; }
+    rm -rf "$workspace"
+}
+
 @test "an empty ssh-agent is not warned about when [core] ssh_key is set" {
     _rw_setup
     workspace="$(mktemp -d)"

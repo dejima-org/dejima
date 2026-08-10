@@ -143,7 +143,12 @@ services:
       # container-local, which is what lets Claude Code create a slug it does
       # not find. See bin/dejima-slug-lib.sh for which slugs those are and
       # why the set comes from real worktree paths.
-      - ${HOME}/.claude/file-history:${HOME}/.claude/file-history
+      # file-history/ is absent here for the same reason as projects/, and a
+      # sharper one: each `<session>/<hash>@v1` is a verbatim copy of an
+      # edited file, so the tree is every project's source rather than a
+      # record about it. bin/dejima mounts the sessions belonging to this
+      # workspace, one -v each, resolved through the transcript names since
+      # these paths are keyed by session id and carry no slug of their own.
       - ${HOME}/.claude/backups:${HOME}/.claude/backups
       - ${HOME}/.claude/tasks:${HOME}/.claude/tasks
       - ${HOME}/.claude/plans:${HOME}/.claude/plans
