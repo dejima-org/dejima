@@ -329,28 +329,17 @@ manifest_get() {
 # directory whose manifest declares its own keys, not editing core.
 # ---------------------------------------------------------------------------
 
-# config_validate re-parses the WHOLE config file on every config_get call
-# (see its own comment - "on the order of thirty reads" per launch), and each
-# pass through a [forge.<name>]/[harness.<name>] line calls back into here.
-# Going through manifest_get/manifest_validate here would mean thirty-odd
-# full-manifest validations (every field, not just `keys`) for every key in
-# those sections - so this reads and validates only the `keys` field itself,
-# a plain line-scan plus the one type check _provider_valid_value already
-# does for it, skipping fields (pr_command, capabilities, env_export, ...)
-# that this lookup never uses. The manifest's OTHER fields still get their
-# full manifest_validate elsewhere before anything consequential reads them
-# (provider_validate_selection, forge_hosts, forge_env_exports,
-# briefing_compose) - this function only ever feeds a config schema type
-# check, never a forge action.
+# config_validate re-parses the whole config on every config_get (~thirty per
+# launch), and each [forge.<name>] line calls back here. Going through
+# manifest_validate would mean that many full-manifest validations, so this
+# line-scans the `keys` field alone. Every other field still gets a full
+# manifest_validate before anything consequential reads it - this feeds a
+# config schema type check, never a forge action.
 #
-# Cached per axis+name for the rest of THIS command substitution: a
-# manifest cannot change mid-launch, so re-deriving it for every key in the
-# same section within one config_validate pass is pure waste. The cache
-# itself does not survive past this subshell (bash forks a new one per
-# config_get call), so it only dedupes the N keys of one section against
-# each other, not across a launch's ~thirty reads - a cheap, safe partial
-# win rather than a cross-process cache this file has no story for
-# invalidating.
+# Cached per axis+name for this command substitution only. bash forks a new
+# subshell per config_get, so it dedupes the keys of one section against each
+# other rather than across a launch: a cheap partial win, not a cross-process
+# cache this file has no way to invalidate.
 declare -gA _PROVIDER_KEYS_CACHE
 _provider_keys_cached() {
     local axis="$1" name="$2" cache_key="$axis:$name"

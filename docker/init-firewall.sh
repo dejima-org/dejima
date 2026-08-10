@@ -312,31 +312,23 @@ iptables -P OUTPUT DROP
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Docker's embedded resolver does not answer external names itself - it
-# forwards them to the host's nameservers, and on current Docker it does that
-# from inside THIS network namespace. Those queries therefore traverse the
-# chain below like any other packet, and nothing here can match them: the
-# host's resolver is neither in an ipset nor the bridge gateway. They reach
-# the catch-all REJECT, every lookup comes back SERVFAIL, and the container
-# dies in a self-check that says only that a host was unreachable.
+# Docker's embedded resolver forwards external names to the host's
+# nameservers, and on some versions does it from inside THIS namespace. Those
+# queries then traverse the chain below and match nothing - the host's
+# resolver is neither in an ipset nor the bridge gateway - so they hit the
+# catch-all REJECT and every lookup SERVFAILs. Only the first hop stays on
+# loopback. Two hosts with byte-identical /etc/resolv.conf behaved
+# differently, so this is version-dependent and cannot be assumed either way.
 #
-# The comment on the loopback rule above used to claim DNS "stays on
-# loopback, so this also covers DNS". Only the first hop does. Two hosts with
-# byte-identical /etc/resolv.conf behaved differently here, so this is not a
-# property of any host's configuration and cannot be assumed either way.
+# --uid-owner 0 keeps this from being the hole the DNS allowlist closes: the
+# forwarding socket is dockerd's (root), the session is `node` with no sudo,
+# so it still cannot address a resolver directly. This newly permits DNS only
+# from processes already root in a NET_ADMIN container, which could flush the
+# ruleset anyway.
 #
-# --uid-owner 0 is what keeps this from being the hole the DNS allowlist
-# exists to close. The forwarding socket belongs to dockerd, which is root;
-# the session runs as `node` and there is no sudo in the image, so a
-# compromised session still cannot address a resolver directly and still has
-# no path to a name dns-proxy.sh has not allowed. What this does newly permit
-# is DNS from processes that are already root in a container holding
-# NET_ADMIN - which could simply flush this ruleset instead, so it grants
-# nothing that was not already available.
-#
-# Guarded rather than asserted: xt_owner is a module, and a kernel without it
-# should leave a container that says why (the DNS self-check below), not one
-# that aborts here with an iptables usage error.
+# Guarded, not asserted: xt_owner is a module, and a kernel without it should
+# leave a container that says why (the DNS self-check below) rather than one
+# that aborts here.
 if iptables -A OUTPUT -p udp --dport 53 -m owner --uid-owner 0 -j ACCEPT 2>/dev/null; then
     iptables -A OUTPUT -p tcp --dport 53 -m owner --uid-owner 0 -j ACCEPT 2>/dev/null \
         || echo "WARNING: could not add the TCP/53 rule for root-owned sockets - large answers may fail" >&2

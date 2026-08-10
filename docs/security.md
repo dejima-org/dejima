@@ -429,10 +429,9 @@ hands to whichever session starts against it. See
 - `~/.claude/file-history` (Claude Code's edit-undo record) is **not**
   mounted as a tree either, and the reason is sharper than for `projects/`.
   Each `<session>/<hash>@v1` is a **verbatim copy of an edited file**, so the
-  tree is other projects' source rather than a record about it: on the host
-  this was developed on, 47M across ten checkouts. Read access alone is the
-  leak; the mount was read-write on top of that, and tampering with another
-  project's undo record puts chosen content into a later restore there.
+  tree is other projects' source rather than a record about it. Read access
+  alone is the leak; it was read-write on top of that, and tampering with
+  another project's undo record puts chosen content into a later restore.
 
   It is keyed by session id, so unlike `projects/` there is no slug in its
   own paths to scope it by. The transcript names supply it: `projects/<slug>/

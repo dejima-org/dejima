@@ -24,23 +24,17 @@ fi
 STATE_DIR="$(remote_state_dir)"
 SESSIONS_DIR="$STATE_DIR/sessions"
 
-# gruvbox dark. Every value below is upstream's, tagged with the name of the
-# color.table row it came from:
+# gruvbox dark, every value upstream's and tagged with its color.table row:
 # https://github.com/gruvbox-community/gruvbox-contrib/blob/master/color.table
-# Carrying the name and not just the hex is the point - a palette this widely
-# known is one almost nobody has memorised to six digits, so a wrong value is
-# only catchable by reading if there is something to check it against.
+# The names are carried so a wrong hex is catchable by reading.
 #
-# Truecolor only, and deliberately not paired with a 256-colour table: a
-# terminal without it - or tmux without `Tc` - approximates 38;2 to its own
-# nearest colour rather than printing the escape, so the fallback already
-# exists one layer down and a second palette here would only duplicate it.
+# Truecolor only: a terminal without it, or tmux without `Tc`, approximates
+# 38;2 to its nearest colour rather than printing the escape, so the fallback
+# already exists one layer down.
 #
-# Everything below is empty unless stdout is a terminal that says it can show
-# colour, which is what keeps --list clean: it is a machine interface (ttyd's
-# --url-arg feeds run ids back in, and the README documents the rows as
-# scriptable), and it is also how the bats suite reads this script, so its
-# assertions see the same bare words either way.
+# Empty unless stdout is a colour-capable terminal, which keeps --list a
+# machine interface (ttyd feeds run ids back in) and is also how the bats
+# suite reads this script.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
     C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
     C_BADGE=$'\033[38;2;254;128;25m'    # bright_orange #fe8019, the wordmark

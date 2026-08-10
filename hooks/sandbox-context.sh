@@ -66,29 +66,24 @@ fi
 requirements=""
 decl_dir="$project_dir/.dejima"
 
-# Everything below reads attacker-controllable text on its way into an
-# agent's context window, so all three costs it can impose are bounded:
+# Everything below reads attacker-controllable text on its way into a context
+# window, so each cost it can impose is bounded:
 #
 #   MAX_DECLARED  entries considered - the same cap read_declared() applies
-#                 host-side, so this reports on the same window
-#                 `dejima-project approve` will act on.
+#                 host-side, so this reports the window `approve` acts on.
 #   MAX_ENTRY_LEN characters per entry.
+#   MAX_LISTED    entries named; the rest are counted only. Without it, 200
+#                 entries of 200 chars is 40 KB of attacker-chosen tokens per
+#                 section, and a large enough $requirements pushed the jq call
+#                 past MAX_ARG_STRLEN and emitted nothing - costing every
+#                 later session its whole briefing.
 #
-# Within that window the report is a strict subset of what `approve` accepts,
-# never a superset: it never names something approve would reject, but it can
-# stay silent about something approve would take - a dotless domain (the
-# regex below requires a label separator, deliberately, so a bare
-# IGNORE-PREVIOUS-INSTRUCTIONS can't be echoed into the context) and a valid
-# domain longer than MAX_ENTRY_LEN are both approvable host-side and both
-# silently skipped here. Fail-closed in the direction that matters: the worst
-# case is a missing line of advice, not an unapproved entry presented as fine.
-#   MAX_LISTED    entries actually named in the report; the rest are only
-#                 counted. Without it 200 entries of 200 chars would be 40 KB
-#                 of attacker-chosen tokens per section, and a big enough
-#                 $requirements used to push the jq call at the end past
-#                 Linux's 128 KiB MAX_ARG_STRLEN and emit nothing at all -
-#                 silently costing every later session in the project its
-#                 entire briefing.
+# The report is a strict subset of what `approve` accepts, never a superset:
+# it can stay silent about something approvable (a dotless domain, which the
+# regex refuses so a bare IGNORE-PREVIOUS-INSTRUCTIONS cannot be echoed into
+# context; or one longer than MAX_ENTRY_LEN) but never names something
+# `approve` would reject. The worst case is a missing line of advice, not an
+# unapproved entry presented as fine.
 MAX_DECLARED=200
 MAX_ENTRY_LEN=200
 MAX_LISTED=20

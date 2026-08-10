@@ -252,27 +252,18 @@ fi
 [ -n "${ANTHROPIC_BASE_URL:-}" ] || unset ANTHROPIC_BASE_URL
 [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || unset ANTHROPIC_AUTH_TOKEN
 
-# Remote access is opt-in and off by default, so this whole block is skipped
-# for the sessions that never asked for it: DEJIMA_NOTIFY_DIR is set only by
-# bin/dejima's remote_enabled branch. An unset value is the ordinary case and
-# says nothing.
+# Unset is the ordinary case (remote access is opt-in) and says nothing.
+# Set-but-unusable is worth a startup line because of how it presents: the
+# marker directory's source is created per launch and removed on exit, so
+# restarting the container rather than relaunching `dejima` leaves it gone,
+# and Docker answers a missing bind source by creating one root-owned. The
+# hook's `[ -d ]` guard then passes and every notification fails EACCES,
+# while the session is also missing from `dejima-attach` because its registry
+# entry went with the same directory - three unrelated-looking symptoms.
 #
-# Set-but-unusable is different, and it is worth a line at startup because of
-# how it otherwise presents. The marker directory is a bind mount whose source
-# bin/dejima creates per launch and removes on exit, so restarting the
-# container - `docker start`, or a restart policy - rather than relaunching
-# `dejima` leaves the source gone. Docker's answer to a missing bind source is
-# not to refuse: it creates one, root-owned. The directory then exists, so the
-# notify hook's own `[ -d ]` guard passes and every notification fails with
-# EACCES instead; the session is also absent from `dejima-attach`, because its
-# registry entry went with the same directory. Three unrelated-looking symptoms
-# and no obvious moment they started.
-#
-# Reported, not repaired. Chowning this would restore notifications while the
-# session stayed missing from the registry - which bin/dejima writes host-side
-# and never mounts here - so a session would look fixed while half of the
-# feature was still broken. Relaunching is the actual remedy, and it is one the
-# message can name.
+# Reported, not repaired: chowning would restore notifications while the
+# session stayed absent from the registry, looking fixed with half the
+# feature broken. Relaunching is the remedy, and the message can say so.
 if [ -n "${DEJIMA_NOTIFY_DIR:-}" ]; then
     if [ ! -d "$DEJIMA_NOTIFY_DIR" ]; then
         echo "WARNING: remote access is enabled, but $DEJIMA_NOTIFY_DIR is not a directory." >&2
