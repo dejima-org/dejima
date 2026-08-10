@@ -329,6 +329,21 @@ nvim_config = ~/.config/nvim
 Set both in `~/.config/dejima/config` if you use this mode regularly, or pass
 `--cmd nvim` per launch once `nvim_config` is set.
 
+The lockfile is layered on as a **copy**, not as your file: `bin/dejima`
+mounts a `mktemp` duplicate and deletes it afterwards, so a plugin sync
+inside a session cannot rewrite the host's `lazy-lock.json`.
+
+`~/.local/share/nvim` (plugin source and `mason/` binaries), `~/.local/state/
+nvim` and `~/.cache/nvim` are **Docker volumes, not host directories**. Your
+own nvim data is never mounted, so nothing a session installs can reach the
+editor you run outside the container. They do persist across containers,
+which is what stops every launch from reinstalling plugins - so they are
+named per project. Under one shared name, a session that wrote a Lua file
+under `lazy/`, or replaced a binary under `mason/bin/`, would leave something
+the next session in an *unrelated* project executed. Nothing there is
+protection against a session tampering with its own project's plugins, which
+it can do freely and which only ever runs inside the sandbox.
+
 If your config references something outside that directory by absolute host
 path (a helper script in a dotfiles `bin/`, say), bring it in with
 `[mounts] readonly` (colon-separated, mounted read-only at the same path):

@@ -239,6 +239,18 @@ services:
 
 volumes:
   claude-code-bashhistory:
+  # Named explicitly so bin/dejima can give each project its own set. These
+  # persist across containers by design (a plugin install should not have to
+  # happen every launch), which without the split meant one project's session
+  # could leave a Lua file or a mason/bin binary that another project's
+  # session executes the next time nvim runs. The service still refers to the
+  # static keys; only the volume Docker actually creates varies.
+  #
+  # The defaults reproduce the previous names exactly, so a `docker compose`
+  # invocation that bypasses bin/dejima behaves as it did.
   nvim-data:
+    name: ${SANDBOX_NVIM_DATA:-dejima_nvim-data}
   nvim-state:
+    name: ${SANDBOX_NVIM_STATE:-dejima_nvim-state}
   nvim-cache:
+    name: ${SANDBOX_NVIM_CACHE:-dejima_nvim-cache}
