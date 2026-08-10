@@ -908,6 +908,42 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
 }
 
+# nvim's data/state/cache are Docker volumes, not host paths, so nothing a
+# session installs reaches the host's own nvim. They do outlive the container
+# though, and under one fixed name each they were shared by every project on
+# the machine: a Lua file dropped under lazy/, or a binary replaced under
+# mason/bin/, is executed by whatever project's session next runs nvim in the
+# sandbox. Scoped per project, the same way the derived image tag is.
+@test "the nvim volumes are per project, not one set shared by every project" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+    [ "$(launched_env SANDBOX_NVIM_DATA)" = "dejima_nvim-data$slug" ]
+    [ "$(launched_env SANDBOX_NVIM_STATE)" = "dejima_nvim-state$slug" ]
+    [ "$(launched_env SANDBOX_NVIM_CACHE)" = "dejima_nvim-cache$slug" ]
+
+    local other; other="$(mktemp -d)"
+    run launch "$other"
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_NVIM_DATA)" != "dejima_nvim-data$slug" ]
+    rm -rf "$other"
+}
+
+# project_slug turns a leading / into -, and a Docker volume name may not
+# start with one: without the prefix every launch would fail at `compose run`
+# rather than at anything that names the cause.
+@test "the derived nvim volume names are valid Docker volume names" {
+    launch_setup
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    local v
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE; do
+        [[ "$(launched_env "$v")" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
+            || { echo "$v=$(launched_env "$v") is not a valid volume name"; return 1; }
+    done
+}
+
 @test "the launcher builds and runs the global layer when only global deps are approved" {
     "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     launch_setup

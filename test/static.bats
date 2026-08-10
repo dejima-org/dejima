@@ -463,6 +463,16 @@ EOF
 # enough to plant text a future session in another project reads as
 # background (#104). This is the assertion that the tree itself never comes
 # back; the per-slug mounts that replace it are covered below.
+# The service still refers to the static keys; only the volume Docker
+# actually creates varies, so a hardcoded name here would silently put every
+# project back on one shared set.
+@test "the nvim volumes take their names from the environment" {
+    grep -qE '^\s*name:\s*\$\{SANDBOX_NVIM_DATA:-' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*name:\s*\$\{SANDBOX_NVIM_STATE:-' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*name:\s*\$\{SANDBOX_NVIM_CACHE:-' "$SANDBOX_DIR/docker-compose.yml"
+    grep -q 'export SANDBOX_NVIM_DATA=' "$REPO_ROOT/bin/dejima"
+}
+
 @test "docker-compose.yml never mounts the whole ~/.claude/projects tree" {
     run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/projects:' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ] || {

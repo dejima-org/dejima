@@ -1432,6 +1432,22 @@ if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
 fi
 export SANDBOX_IMAGE
 
+# nvim's data, state and cache are Docker volumes rather than host paths, so
+# nothing a session installs reaches the host's own nvim. They did outlive
+# the container under one fixed name each, though, shared by every project
+# on the machine: a session that drops a file under `lazy/`, or replaces a
+# binary under `mason/bin/`, is writing something a later session in an
+# unrelated project executes the next time nvim runs in the sandbox. That is
+# the persistence this repository closes everywhere else, so it is scoped
+# the same way the derived image tag is - per project.
+#
+# The prefix is not decoration: project_slug maps a leading `/` to `-`, and
+# a Docker volume name may not start with one.
+_nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
+export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"
+export SANDBOX_NVIM_STATE="dejima_nvim-state${_nvim_volume_slug}"
+export SANDBOX_NVIM_CACHE="dejima_nvim-cache${_nvim_volume_slug}"
+
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
 # Ctrl-C returning 130 - would otherwise abort the script here, skipping the
