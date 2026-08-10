@@ -20,8 +20,6 @@
 
 &nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
 
-&nbsp;[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima-badge)
-
 ---
 
 &nbsp;
@@ -87,6 +85,8 @@ Around that core is most of what running an agent unattended takes:
 This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
+
+[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
 ## The name
 
