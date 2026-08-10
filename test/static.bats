@@ -2657,6 +2657,27 @@ q
     grep -q 'DEJIMA_CI_TIER: privileged' "$wf"
 }
 
+# test/remote.bats used to stand in a failing exit-time audit by overwriting
+# `$REPO_ROOT/bin/dejima-audit` and restoring it afterwards. The restore does
+# not happen if the run is killed partway, and two runs of that file at once
+# restore each other's stub, so a suite could pass while leaving the real
+# audit disabled - and a file watcher looking at the tree during the window
+# sees a security tool replaced by a two-line `exit 3`, which reads exactly
+# like an attack.
+#
+# Tests get a throwaway copy to mutate instead. Redirects and removals are
+# what actually went wrong, so those are what this pins; a test that finds
+# some third way to write into the checkout is not covered.
+@test "no test suite writes into the repository it is testing" {
+    run grep -rnE '(>>?|rm +(-[a-zA-Z]+ +)*)[[:space:]]*"?\$\{?(REPO_ROOT|BATS_TEST_DIRNAME)' \
+        "$REPO_ROOT"/test/*.bats
+    [ "$status" -ne 0 ] || {
+        echo "a test writes into the checkout; give it a copy instead:" >&2
+        echo "$output" >&2
+        false
+    }
+}
+
 @test "the agent briefing teaches the project scope, not just global" {
     # The observed failure: an agent asked for a project-specific domain to be
     # added container-wide and globally, because --project was never named.
