@@ -430,51 +430,45 @@ hands to whichever session starts against it. See
   similar. It shares the host kernel, so a container-escape vulnerability
   would defeat every other control described here at once.
 - Most of what this document asserts is re-checked by the `test/` suite on
-  every change - over 300 bats tests across six files, and `runtime.bats`
-  builds the image and asserts against a real running container rather than
-  a mock: IPv6 blocked, a non-allowlisted domain refused by the DNS proxy
-  and a non-allowlisted destination unreachable, `node` unable to re-run
-  `init-firewall.sh` to widen the allowlist, no working `sudo`. Coverage is
-  not the same as completeness, though. The reasoning in this document is
-  judgement rather than assertions, nothing tests it, and a property nobody
-  thought to write a test for can still regress quietly. A missing `ipset`
-  dedup flag broke firewall startup entirely - twice, on two different
-  ipsets - before anyone caught it; there is a test asserting every
-  `ipset add` is duplicate-safe now, which is the pattern to expect. Each
-  of these tests exists because something was got wrong first.
+  every change, and `runtime.bats` asserts against a real running container
+  rather than a mock: IPv6 blocked, a non-allowlisted domain refused and a
+  non-allowlisted destination unreachable, `node` unable to re-run
+  `init-firewall.sh`, no working `sudo`. Coverage is not completeness: the
+  reasoning here is judgement, nothing tests it, and a property nobody wrote
+  a test for can regress quietly. A missing `ipset` dedup flag broke firewall
+  startup twice before anyone caught it; there is a test for that now, which
+  is the pattern to expect - each of these exists because something was got
+  wrong first.
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
   inside the container to that file. `dejima` starts a host-side proxy
   (`bin/dejima-anthropic-proxy`) on a per-session unix socket and mounts a
-  fake credential in place of the real one - the two secrets are
-  placeholders, while `scopes`/`subscriptionType`/`rateLimitTier`/`clientId`
-  are copied from the real file so the session's own UI stays accurate. Its
-  expiry is set a year out rather than mirrored, deliberately: a near-term
-  one would make Claude Code refresh on its own, with a refresh token that
-  isn't real, and log the session out. Inside the container,
+  fake credential in place of the real one - the secrets are placeholders,
+  while `scopes`/`subscriptionType`/`rateLimitTier`/`clientId` are copied so
+  the session's UI stays accurate. Its expiry is a year out rather than
+  mirrored: a near-term one would make Claude Code refresh on its own with a
+  refresh token that isn't real, logging the session out. Inside the
+  container,
   `entrypoint.sh` points `api.anthropic.com` at a loopback TLS terminator
   (`anthropic-proxy-forwarder.js`) whose certificate is generated at startup
   and trusted only there, and which pipes raw bytes into the proxy's socket.
   The proxy injects the real access token per request and owns OAuth refresh
   - rotated tokens are written back to the real host file atomically, so
   host-side sessions stay logged in. Claude Code itself is configured
-  exactly as it would be on the host: no `ANTHROPIC_BASE_URL`, no
-  `ANTHROPIC_AUTH_TOKEN`, nothing that marks the session as unusual to the
-  client. The proxy then forwards the client's header block verbatim -
-  same names, same casing, same order, repeats intact, and no
-  `Accept-Encoding` it didn't send - changing only the `Authorization`
-  value, and `anthropic-beta` if the OAuth value isn't already there. Left
-  to itself, Python's `http.client` would have rewritten all of that into
-  its own house style and moved the fingerprint from the client to the
-  wire. What it cannot disguise is that the connection is made by CPython's
-  `ssl` rather than by Node: the TLS handshake (JA3/JA4) and the absence of
-  connection reuse still distinguish it at that layer. What remains is
-  session-scoped: a
-  compromised session can still *use* the model API as you while it runs
-  (that's inherent to the sandbox working at all), but it can no longer read
-  a durable credential and exfiltrate it for offline use via the other
-  allowed egress destinations (npm, GitHub, your Gitea host). Caveats:
+  exactly as on the host: no `ANTHROPIC_BASE_URL`, no
+  `ANTHROPIC_AUTH_TOKEN`, nothing marking the session as unusual. The proxy
+  forwards the client's header block verbatim - same names, casing, order and
+  repeats, and no `Accept-Encoding` it didn't send - changing only
+  `Authorization`, and `anthropic-beta` if the OAuth value isn't there. Left
+  alone, Python's `http.client` would rewrite all of that into its own style
+  and move the fingerprint from the client to the wire. It cannot disguise
+  that the connection is CPython's `ssl` rather than Node: the TLS handshake
+  (JA3/JA4) and the absence of connection reuse still distinguish it.
+  What remains is session-scoped: a compromised session can still *use* the
+  API as you while it runs, which is inherent to the sandbox working at all,
+  but it cannot read a durable credential and exfiltrate it for offline use.
+  Caveats:
   `/login` inside the container doesn't work while the proxy is on; the
   refresh flow mirrors a Claude Code internal and may break if upstream
   changes it, in which case the proxy fails loudly (launch abort, 502s on

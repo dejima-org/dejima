@@ -700,16 +700,14 @@ what the outer proxy sends.
 
 ## Notifications
 
-`dejima` registers `hooks/dejima-notify.sh` as a `Notification` and
-`Stop` hook for a remote-enabled session - into the throwaway settings
-override layer it already generates for that session, never into your real
-`~/.claude/settings.json`, which every sandbox and your host's own Claude
-Code read directly. Your own `Notification` and `Stop` hooks keep running
-alongside it: Claude Code merges hooks across settings layers rather than
-letting the higher one replace the lower. That layer is mounted read-only, so a
-session cannot unregister its own hook. The hook writes one empty file, named `waiting` or
-`done`, into this run's own bind-mounted marker directory. No content, no
-stdin, no network.
+`dejima` registers `hooks/dejima-notify.sh` as a `Notification` and `Stop`
+hook for a remote-enabled session, into the throwaway settings override layer
+it already generates - never into your real `~/.claude/settings.json`. Your
+own hooks keep running alongside it, since Claude Code merges hooks across
+layers rather than replacing. The layer is mounted read-only, so a session
+cannot unregister its own hook. The hook writes one empty file named
+`waiting` or `done` into this run's marker directory: no content, no stdin,
+no network.
 
 On the host, `dejima-notify-watch` turns those markers into ntfy pushes.
 Same installation shape as above:
@@ -726,14 +724,13 @@ loop plus a five-second sleep). Repeat markers for the same session and
 event inside 60 seconds are debounced (`[remote-access] debounce` overrides
 that).
 
-One environment gotcha, because it fails silently: the watcher and
-`dejima` both resolve the marker root as `${XDG_RUNTIME_DIR:-/tmp}/dejima`,
-so they only meet when they agree on `XDG_RUNTIME_DIR`. systemd sets it for
-user units and a login shell gets it from pam_systemd, but a `dejima`
-run from a context that has neither - a bare `su`, a cron job, a tmux server
-started before login - writes its markers under `/tmp/dejima` while the unit
-watches `/run/user/<uid>/dejima`, and no push is ever sent, with nothing
-logged to say so. `systemctl --user show-environment` is where to check.
+One gotcha, because it fails silently: both sides resolve the marker root as
+`${XDG_RUNTIME_DIR:-/tmp}/dejima`, so they only meet when they agree on
+`XDG_RUNTIME_DIR`. systemd sets it for user units and a login shell gets it
+from pam_systemd, but a run from a context with neither - a bare `su`, cron,
+a tmux server started before login - writes to `/tmp/dejima` while the unit
+watches `/run/user/<uid>/dejima`. No push is sent and nothing is logged.
+Check with `systemctl --user show-environment`.
 
 The same directory is why you probably want lingering on:
 
@@ -741,23 +738,19 @@ The same directory is why you probably want lingering on:
 loginctl enable-linger "$USER"
 ```
 
-Both units here are *user* units. Without lingering they are stopped at
-logout and `/run/user/<uid>` is destroyed with the session, taking the
-session registry and every marker with it - so a sandbox left running in a
-detached tmux session has no front door and sends no notification until you
-log in again. It fails closed rather than open (nothing is left listening
-unguarded), but it fails invisibly, and it is the same `XDG_RUNTIME_DIR`
-that the gotcha above is about.
+Both are *user* units. Without lingering they stop at logout and
+`/run/user/<uid>` is destroyed with the session, taking the registry and
+every marker with it - so a sandbox left in a detached tmux session has no
+front door and sends nothing until you log in again. It fails closed, but
+invisibly, and on the same `XDG_RUNTIME_DIR` as the gotcha above.
 
 **The marker directory is a write channel into your runtime tmpfs**, and
-nothing bounds it. `/run/user/<uid>` is RAM-backed and sized at a fraction
-of physical memory, and each session gets its own directory under it
-bind-mounted read-write, so a session that writes into `/run/dejima-notify`
-until it is full degrades your whole login session - D-Bus, the systemd user
-manager - and not just dejima. A session can already fill the workspace
-mount, so this is an increment rather than a new kind of exposure, but a
-RAM-backed filesystem fails harder and sooner than a disk. There is
-deliberately no quota here; `rm -rf` on that run's marker directory (or
+nothing bounds it. `/run/user/<uid>` is RAM-backed and sized at a fraction of
+physical memory, so a session filling `/run/dejima-notify` degrades your
+whole login session - D-Bus, the systemd user manager - not just dejima. A
+session can already fill the workspace mount, so this is an increment rather
+than a new exposure, but a RAM-backed filesystem fails harder and sooner.
+There is deliberately no quota here; `rm -rf` on that run's marker directory (or
 logging out, which discards the tmpfs) is the recovery.
 
 **What a notification contains.** A title of `dejima: <project> needs input`
