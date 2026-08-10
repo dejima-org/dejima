@@ -1168,6 +1168,54 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
 # The positive control for the test above: with no key configured the
 # forwarded agent really is the only way to push, and an empty one is worth
 # saying so before it fails deep into a session.
+# #15. Both of these reach `extra_mounts+=(-v ...)` with a path computed at
+# run time, so the static grep for a literal $PROJECT_STORE / config_root
+# cannot see either one - it passed throughout. [mounts] read_write has been
+# guarded since it was added; these two were not.
+@test "[mounts] readonly is refused when it names the approval store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "readonly = $CONFIG_DIR"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+# The target is discovered from a symlink rather than configured, so nothing
+# had vetted it: a hook pointing into the approval store mounted the store.
+@test "a ~/.claude symlink is refused when its target sits in the approval store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    mkdir -p "$RW_HOME/.claude/hooks" "$CONFIG_DIR/sub"
+    : > "$CONFIG_DIR/sub/hook.sh"
+    ln -s "$CONFIG_DIR/sub/hook.sh" "$RW_HOME/.claude/hooks/hook.sh"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing ~/.claude symlink target"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+# The ordinary case the symlink scan exists for: this repo's own hooks/ are
+# symlinked into ~/.claude and must still be mounted. Without this, refusing
+# everything would pass the two tests above.
+@test "a ~/.claude symlink to an ordinary directory is still mounted" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    hookdir="$(mktemp -d)"
+    : > "$hookdir/hook.sh"
+    mkdir -p "$RW_HOME/.claude/hooks"
+    ln -s "$hookdir/hook.sh" "$RW_HOME/.claude/hooks/hook.sh"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$hookdir:$hookdir:ro" "$docker_log" \
+        || { echo "hook target not mounted:"; cat "$docker_log"; return 1; }
+    rm -rf "$workspace" "$hookdir"
+}
+
 @test "an empty ssh-agent is warned about when [core] ssh_key is not set" {
     _rw_setup
     workspace="$(mktemp -d)"

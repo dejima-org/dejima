@@ -522,7 +522,13 @@ hands to whichever session starts against it. See
     below).
   - **Read-only**: `plugins/`, `hooks/`, `skills/`, `commands/`, `agents/`,
     `output-styles/`, plus the symlink-target directories `dejima`
-    discovers at launch. Hooks execute automatically with no separate
+    discovers at launch. Those targets are discovered rather than
+    configured, so they are checked against the approval store and the
+    audit stores and refused if they overlap either - a hook symlinked into
+    the approval store used to mount it, read-only and silently, and
+    read-only is no protection when the content is every project's
+    approvals. The same check now covers `[mounts] readonly`, which had
+    none at all. Hooks execute automatically with no separate
     approval step, skills can ship executable scripts, and
     commands/agents/output-styles are prompt text loaded into a later host
     session, so without this a compromised session could plant a backdoored

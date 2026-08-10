@@ -288,6 +288,38 @@ _paths_overlap() {
     case "$b/" in "$a"/*) return 0 ;; esac
     return 1
 }
+
+# The stores that decide what a session may do next, and the record of what
+# it did. Read-only is not enough to make mounting them harmless: the
+# approval store discloses every project's approved domains and
+# dependencies, and the audit baselines say which findings have already been
+# waved through. Refusing beats mounting and hoping the mode holds (#15).
+GUARDED_STORES=()
+_guarded_stores() {
+    [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
+    GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR")
+}
+
+# Refuse $2 if it overlaps any of the paths in $3.., in either direction: an
+# ancestor of a store exposes it just as surely as the store itself.
+_refuse_guarded_mount() {
+    local kind="$1" path="$2"; shift 2
+    local real guarded guarded_real
+    # readlink -m rather than -f, same reason as the read_write guard below:
+    # -f gives nothing for a path that does not exist yet, and an empty
+    # result compares equal to nothing and would sail through.
+    real="$(readlink -m "$path")"
+    for guarded in "$@"; do
+        [ -n "$guarded" ] || continue
+        guarded_real="$(readlink -m "$guarded")"
+        _paths_overlap "$real" "$guarded_real" || continue
+        echo "Refusing $kind: $path" >&2
+        echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
+        echo "Even read-only, that hands the session every project's approvals or the" >&2
+        echo "record of what earlier sessions were caught doing." >&2
+        exit 1
+    done
+}
 SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
 RW_MOUNT_PATHS=()
 DEJIMA_RW_MOUNTS=""
@@ -849,6 +881,13 @@ for mounted_dir in hooks skills commands agents output-styles; do
         case " $mounted_dirs " in
             *" $real_dir "*) continue ;;
         esac
+        # The target is discovered, not configured, so nothing has vetted it
+        # (#15). A hook symlinked into the approval store would mount it
+        # here, read-only and silently. Refusing rather than skipping: a
+        # skipped mount leaves the symlink dangling inside the container and
+        # the hook failing for a reason nothing states.
+        _guarded_stores
+        _refuse_guarded_mount "~/.claude symlink target" "$real_dir" "${GUARDED_STORES[@]}"
         mounted_dirs="$mounted_dirs $real_dir"
         extra_mounts+=(-v "$real_dir:$real_dir:ro")
     done
@@ -896,6 +935,11 @@ if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
             echo "[mounts] readonly entry does not exist: $path" >&2
             exit 1
         fi
+        # [mounts] read_write has been guarded since it was added; this one
+        # never was, so `readonly = ~/.config/dejima` mounted the approval
+        # store into the container and nothing said a word (#15).
+        _guarded_stores
+        _refuse_guarded_mount "[mounts] readonly entry" "$path" "${GUARDED_STORES[@]}"
         extra_mounts+=(-v "$path:$path:ro")
     done
 fi

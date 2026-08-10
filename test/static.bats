@@ -1718,6 +1718,13 @@ this line is not json'
     [ "$status" -ne 0 ]
     run grep -nE '^\s*extra_mounts\+=.*(PROJECT_STORE|config_root)' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
+    # Both greps are literal, so neither can see a mount whose path is
+    # computed at run time - and two of those reached the store (#15): a
+    # [mounts] readonly entry naming it, and a ~/.claude symlink pointing
+    # into it. What refuses them is asserted by running the launcher, in
+    # config.bats ("refused when it names the approval store"). This test
+    # is the cheap half and does not stand in for that one.
+    grep -q '_refuse_guarded_mount' "$REPO_ROOT/bin/dejima"
 }
 
 @test "sandbox-context escapes a declared domain's dots before matching the servers file" {
