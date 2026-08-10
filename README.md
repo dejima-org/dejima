@@ -82,10 +82,6 @@ Around that core is most of what running an agent unattended takes:
 - **An exit-time audit** of the host surfaces a session could have written
   to, so a change to your git config or `~/.claude` gets surfaced.
 
-Originally inspired by
-[Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-reworked to run via `docker compose` directly and grown well past it since.
-
 This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
@@ -611,3 +607,7 @@ Copyright (C) 2026 Brad Anderson
 The dejima wordmark and logo are not code and are not covered by that licence.
 They are trademarks; who holds them and what may be done with them is stated
 once for the organisation, in [ATTRIBUTION.md](ATTRIBUTION.md).
+
+The egress firewall's original shape came from
+[Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer).
+`docker/init-firewall.sh` records what it kept and what it did not.

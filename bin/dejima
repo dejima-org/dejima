@@ -510,12 +510,20 @@ fi
 # A valid forwarded socket with zero identities loaded forwards fine (the
 # container sees a live, working agent) but is useless for git-over-ssh -
 # warn now rather than have that surface confusingly deep into a session as
-# a failed push. Non-fatal: a task might not need git-over-ssh at all, and
-# SANDBOX_SSH_KEY (if set) provides its own identity independently of this.
-if [ "$have_forwarded_agent" = 1 ] && ! ssh-add -l >/dev/null 2>&1; then
+# a failed push. Non-fatal: a task might not need git-over-ssh at all.
+#
+# Silent when [core] ssh_key is set, because then the premise is false: the
+# key is loaded into the container's own agent and pushes work without the
+# forwarded one carrying anything. It is also the better arrangement of the
+# two - a dedicated identity that works unattended, rather than the
+# operator's own - so warning about the fallback being empty, while the
+# recommended path is configured and working, tells someone who took the
+# advice that they got it wrong.
+if [ "$have_forwarded_agent" = 1 ] && [ -z "$SANDBOX_SSH_KEY" ] \
+   && ! ssh-add -l >/dev/null 2>&1; then
     echo "Warning: ssh-agent has no identities loaded (ssh-add -l shows none)." >&2
     echo "git-over-ssh (e.g. pushing to the configured forge) will fail until you ssh-add a key," >&2
-    echo "unless [core] ssh_key is also set." >&2
+    echo "or set [core] ssh_key in $(config_path) to a dedicated key - see docs/configuration.md." >&2
 fi
 
 # Deliberately not `gh auth token` / gh's own hosts.yml: a normal `gh
