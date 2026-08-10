@@ -5,6 +5,25 @@
 # compromised session writes into - so most of what's here is about what it
 # refuses to do with that input.
 
+# No test in this file may modify the repository's own CLIs. Two of them need
+# an exit-time audit that fails, and they get it from a temp shadow of bin/
+# (see shadow_repo) rather than by overwriting the real one. This is what
+# proves it stayed that way even if a test aborts partway through, and it is
+# checked against a hash rather than against `git status` so that it holds
+# while someone has uncommitted edits to that file.
+setup_file() {
+    REMOTE_AUDIT_SUM="$(sha256sum "$BATS_TEST_DIRNAME/../bin/dejima-audit" | cut -d' ' -f1)"
+    export REMOTE_AUDIT_SUM
+}
+teardown_file() {
+    local now
+    now="$(sha256sum "$BATS_TEST_DIRNAME/../bin/dejima-audit" | cut -d' ' -f1)"
+    [ "$now" = "$REMOTE_AUDIT_SUM" ] || {
+        echo "test/remote.bats modified bin/dejima-audit in the repository" >&2
+        return 1
+    }
+}
+
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     LIB="$REPO_ROOT/bin/dejima-project-lib.sh"
@@ -18,15 +37,6 @@ teardown() {
     # never the operator's.
     if [ -n "${TMUX_DIR:-}" ]; then
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
-    fi
-    # Safety net for tests that temporarily swap out the real bin/dejima-
-    # audit: each such test restores it itself right after `run`, before any
-    # assertion that could short-circuit the test body, but this catches the
-    # case anyway if something in between still managed to abort first.
-    if [ -n "${AUDIT_BACKUP:-}" ] && [ -f "$AUDIT_BACKUP" ]; then
-        cp "$AUDIT_BACKUP" "$REPO_ROOT/bin/dejima-audit"
-        chmod +x "$REPO_ROOT/bin/dejima-audit"
-        rm -f "$AUDIT_BACKUP"
     fi
     rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
         ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
@@ -68,6 +78,54 @@ write_remote_config() {
 @test "remote_state_dir honors XDG_RUNTIME_DIR" {
     run lib remote_state_dir
     [ "$output" = "$RUNTIME_DIR/dejima" ]
+}
+
+# A throwaway copy of the repository whose bin/dejima-audit a test may
+# replace or delete. Everything else is a symlink to the real thing, so this
+# costs one directory of links.
+#
+# bin/ is copied rather than linked, and both reasons matter. bin/dejima
+# resolves its own location with `readlink -f`, so a symlinked copy would
+# point SCRIPT_DIR back at the repository and the stub would never be the one
+# it calls. And a symlink is actively dangerous here: `cat > $SHADOW/bin/
+# dejima-audit` follows it and truncates the real script, which is precisely
+# what this helper exists to stop. Copying removes the whole class rather
+# than one instance of it.
+#
+# Two tests here need an audit binary that fails, and they used to get one by
+# overwriting `$REPO_ROOT/bin/dejima-audit` and restoring it afterwards. That
+# left the working tree holding a two-line stub for the length of the test,
+# which is a poor thing to do to a security tool: a run killed partway, or
+# two runs of this file at once, restores the stub permanently instead of the
+# script, and a suite that passes while silently disabling the exit-time
+# audit is the exact failure this file exists to prevent. It also, reasonably
+# enough, reads like an attack to anything watching the repository for
+# changes.
+shadow_repo() {
+    local root entry
+    root="$(cd "$REPO_ROOT" && pwd)"
+    SHADOW="$BATS_TEST_TMPDIR/shadow"
+    mkdir -p "$SHADOW"
+    for entry in "$root"/*; do
+        [ "$(basename "$entry")" = bin ] && continue
+        ln -sfn "$entry" "$SHADOW/$(basename "$entry")"
+    done
+    cp -a "$root/bin" "$SHADOW/bin"
+    DEJIMA_BIN="$SHADOW/bin/dejima"
+}
+
+# Stands in for the real audit and does nothing but fail. Self-describing
+# because a file watcher can surface it mid-test, and a bare `exit 3` sitting
+# where a security tool belongs is alarming without this comment on it.
+shadow_failing_audit() {
+    cat > "$SHADOW/bin/dejima-audit" <<'EOF'
+#!/bin/bash
+# Test fixture for test/remote.bats, living in that test's temp directory
+# and never in the repository. Fails on purpose: bin/dejima must still
+# report the container's exit code and not this one.
+exit 3
+EOF
+    chmod +x "$SHADOW/bin/dejima-audit"
 }
 
 # A fake `docker` that records its argv, so bin/dejima's launch path can be
@@ -124,7 +182,7 @@ launch() {
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
-        "$REPO_ROOT/bin/dejima" "$@"
+        "${DEJIMA_BIN:-$REPO_ROOT/bin/dejima}" "$@"
 }
 
 run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
@@ -280,15 +338,9 @@ done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
-    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
-    AUDIT_BACKUP="$(mktemp)"
-    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
-    printf '#!/bin/bash\nexit 3\n' > "$AUDIT_REAL"
-    chmod +x "$AUDIT_REAL"
+    shadow_repo
+    shadow_failing_audit
     run launch "$PROJ"
-    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
-    chmod +x "$AUDIT_REAL"
-    rm -f "$AUDIT_BACKUP"
     [ "$status" -eq 5 ]
     rm -rf "$PROJ"
 }
@@ -309,14 +361,9 @@ done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
-    AUDIT_REAL="$REPO_ROOT/bin/dejima-audit"
-    AUDIT_BACKUP="$(mktemp)"
-    cp "$AUDIT_REAL" "$AUDIT_BACKUP"
-    rm -f "$AUDIT_REAL"
+    shadow_repo
+    rm -f "$SHADOW/bin/dejima-audit"
     run launch "$PROJ"
-    cp "$AUDIT_BACKUP" "$AUDIT_REAL"
-    chmod +x "$AUDIT_REAL"
-    rm -f "$AUDIT_BACKUP"
     [ "$status" -eq 5 ]
     rm -rf "$PROJ"
 }
