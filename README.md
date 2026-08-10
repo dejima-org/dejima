@@ -20,6 +20,8 @@
 
 &nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
 
+&nbsp;[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima-badge)
+
 ---
 
 &nbsp;
