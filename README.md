@@ -344,12 +344,22 @@ the guards in full, and why they fail open.
 ### Configuring the session
 
 Running a different editor or application than the default (`--cmd`,
-`[core] command`, `[mounts] nvim_config`), and mounting extra writable host
-directories a session should have access to (`[mounts] read_write`), are
-both config-file changes rather than anything you set up per launch.
+`[core] command`, `[mounts] nvim_config`) is a config-file change, as are the
+extra host directories a session should reach: `[mounts] readonly` and
+`[mounts] read_write`, mounted at their own path.
 
-**→ [docs/configuration.md](docs/configuration.md)** - both, including which
-host paths a writable mount is refused over and why.
+For a one-off, `--extra-readonly PATH` and `--extra-read-write PATH` (short
+forms `--ro` and `--rw`, both repeatable) add a path for a single launch, for
+things like reading another checkout while migrating code out of it. They
+append to those same lists, so a path a configured mount would be refused
+over is refused here too.
+
+```sh
+dejima --ro ~/other-project ~/myproject
+```
+
+**→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
+both forms, and which host paths a mount is refused over and why.
 
 ## Config parity with your host Claude Code setup
 
