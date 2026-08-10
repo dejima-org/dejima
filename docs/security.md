@@ -213,7 +213,22 @@ hands to whichever session starts against it. See
   changes under the workspace's `.claude/`, `.mcp.json`, `.envrc`,
   `.vscode/`, and `.git/hooks/` (symlinks included - a repointed symlink is
   hashed by its target, not just its content), plus cross-project writes
-  under `~/.claude/projects` (see below). When the mounted workspace *is*
+  under `~/.claude/projects` (see below).
+
+  Worth knowing about that first surface, because the sandbox's own workflow
+  makes it easy to get wrong: **a git worktree isolates the working tree,
+  not `.git/config`.** Config is shared with the parent checkout, so a bare
+  `git config <key> <value>` run inside a worktree writes the real
+  repository's config - including any of the exec keys listed above. The
+  briefing tells a session to work in a worktree, so it now also tells it
+  that, and to use `git -C <path> config` when setting config for a test or
+  a repro. It is a fast-fail guard against an unaware agent rather than a
+  boundary: `.git/config` sits in the read-write project mount and cannot be
+  made read-only without breaking `git push -u`, which writes
+  `branch.<name>.merge` on every push. Detection is what covers the rest, and
+  it does: this was found by the audit reporting a `.git/config` change.
+
+  When the mounted workspace *is*
   this repo's own sandbox itself (see the trusted-computing-base note
   further below), it also diffs content hashes of the sandbox's own trusted
   computing base - `bin/`, `hooks/`, `docker/`, `install.sh`,

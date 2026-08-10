@@ -750,6 +750,14 @@ _briefing_core_worktree() {
   `.worktrees/` to `.git/info/exclude` (not `.gitignore` - this is
   sandbox-local, not something to commit) so it doesn't clutter `git
   status` for the user's real checkout.
+- A worktree isolates the working tree, NOT `.git/config`, which is shared
+  with the parent checkout. A bare `git config <key> <value>` run from
+  inside a worktree writes to the user's real repository config, not to
+  anything scoped to your branch. Use `git -C <path> config` against a
+  throwaway repo when setting config for a test or a repro. This matters
+  beyond a stray `user.name`: `core.hooksPath`, `credential.helper` and
+  `!`-aliases all execute on the host, and the same unscoped command
+  reaches them.
 BRIEFING_EOF
 }
 
