@@ -24,8 +24,8 @@
 
 &nbsp;
 
-**Agents work best unsupervised. Bound the blast radius instead, and assume
-the agent is hostile.**
+**Agents work best without you babysitting them. Bound the blast radius, let them
+work, and assume they are hostile.**
 
 An agent with permission prompts turned off gets a lot done. It can also be
 turned against you mid-session, by a prompt injection or a poisoned
