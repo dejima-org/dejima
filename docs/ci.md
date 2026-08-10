@@ -267,45 +267,39 @@ The rule underneath everything here:
 > **Every runner reachable from a repository that receives agent-authored
 > branches must be one you would accept an attacker running code on.**
 
-Note what that does *not* say. It says nothing about what the repository's
-workflows currently do, because a branch can add the first one. **A project
-with no CI at all is still exposed**, on a forge where its branches can reach
-a runner, and that is the case people do not expect, because there is nothing
-in the repository to look at.
+Note what that does *not* say: nothing about what the workflows currently do,
+because a branch can add the first one. **A project with no CI at all is still
+exposed** on a forge where its branches can reach a runner - the case people
+do not expect, because there is nothing in the repository to look at.
 
-So before pointing a sandbox at a project, ask one question: *what runners can
+So ask one question before pointing a sandbox at a project: *what runners can
 this repository's branches reach?*
 
-**If the answer is "hosted runners only"** (GitHub-hosted and nothing
-self-hosted attached), this is the mildest case, and it is worth saying so
-rather than alarming people. The runner is disposable and is not your machine,
-so "execution on a host you own" largely evaporates: there is no LAN behind
-it and nothing of yours on it. What remains is the third item, credentials:
-give pull-request runs no secrets they do not need and a read-only token
-(`permissions: contents: read`), and do not attach a self-hosted runner to
-that repository.
+**"Hosted runners only"** is the mildest case. The runner is disposable and is
+not your machine, so "execution on a host you own" largely evaporates - no LAN
+behind it, nothing of yours on it. What remains is credentials: give
+pull-request runs no secrets they do not need and a read-only token
+(`permissions: contents: read`), and attach no self-hosted runner.
 
-**If self-hosted runners are reachable**, that is the sharp case, and there are
-three ways to hold the rule, none of which require moving or renaming
-anything.
+**If self-hosted runners are reachable**, that is the sharp case. Three ways
+to hold the rule, none of which require moving or renaming anything.
 
-**1. Turn CI off for that repository, if it does not use CI.** Disabling the
-Actions unit means no workflow runs for that repository at all, so no runner is
-reachable and a branch cannot add the first workflow. Changing it back needs
-*admin* on the repository (Gitea's API puts repository settings behind
-`reqAdmin()`), so a bot account with Write cannot undo it. For a project that
-was not using CI anyway this costs nothing and closes the vector outright. It
-is the first thing to reach for and the most commonly overlooked.
+**1. Turn CI off for that repository, if it does not use CI.** No workflow
+runs at all, so no runner is reachable and a branch cannot add the first
+workflow. Turning it back on needs *admin* (Gitea puts repository settings
+behind `reqAdmin()`), so a bot account with Write cannot undo it. For a
+project not using CI this costs nothing, and it is the most commonly
+overlooked option.
 
 **2. Scope the dangerous runner down, rather than moving the repository out.**
 The instinct is to move agent-developed repositories somewhere with only
-hardened runners. For a public project that means breaking its name, its
-links and its ownership, which nobody should be asked to do.
+hardened runners, which for a public project breaks its name, links and
+ownership.
 
-Invert it. A runner can belong to an **owner** (a user as well as an
-organization) and then serves that owner's repositories; Gitea's runner model
-names the three cases: global (`OwnerID` and `RepoID` both zero), org/user
-level (`OwnerID` set), repository level (`RepoID` set). So:
+Invert it. A runner can belong to an **owner** - a user as well as an
+organization - and then serves that owner's repositories. Gitea's model has
+three cases: global (`OwnerID` and `RepoID` zero), org/user (`OwnerID` set),
+repository (`RepoID` set). So:
 
 - Make the *hardened* runner the owner-level default, so every repository gets
   it.

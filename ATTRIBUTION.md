@@ -28,9 +28,20 @@ listed here are covered too.
 
 ## Terms
 
-The dejima name, logo and wordmark are trademarks of Brad Anderson. All rights
-are reserved. They are not licensed under the GPL; GPL-3.0 §7(e) permits
-declining to grant trademark rights.
+The dejima name, logo and wordmark are trademarks of Brad Anderson **as they
+identify this software**. A trademark attaches to a mark as used for
+particular goods and services, never to a word in the abstract, and the claim
+here goes no further than that.
+
+Dejima is a real place - the island in Nagasaki harbour this project is named
+after, and rebuilt there today. Nothing in this file claims the word itself,
+its historical or geographic sense, or any use unconnected with this
+software. Writing about the island, naming something after it, or using the
+name in any way that is not about this project is outside these terms and
+always was.
+
+The marks are not licensed under the GPL; GPL-3.0 §7(e) permits declining to
+grant trademark rights. All rights not granted below are reserved.
 
 **You may, without asking:**
 
@@ -40,14 +51,16 @@ declining to grant trademark rights.
 
 **You may not, without written permission:**
 
-- modify them: recolour, redraw, crop, animate, or fold them into another mark;
-- use them in your own work, or as the mark of any other project, product or
-  organisation;
-- use them so as to suggest that dejima endorses, sponsors or produced your
-  work.
+- modify the artwork: recolour, redraw, crop, animate, or fold it into
+  another mark;
+- use the artwork in your own work, or as the mark of any other project,
+  product or organisation;
+- use the name for software in a way likely to be taken as referring to this
+  project - which is the only sense in which the name is claimed at all;
+- use any of them so as to suggest that dejima endorses, sponsors or produced
+  your work.
 
 A fork that remains a copy of dejima may keep the files. A fork that diverges
 into a project of its own must replace them with a mark of its own.
 
-Copyright in the image files is reserved. All rights not granted above are
-withheld.
+Copyright in the image files is reserved.

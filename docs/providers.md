@@ -318,30 +318,21 @@ every launch:
   that has config keys but none of them resolve to a host is refused with
   "configure it, or select `forge = github`, or `forge = none` with a
   workflow that does not push".
-- A forge whose `requires` keys are **partly** set - some configured, some
-  not (a key written but left empty, as `install.sh`'s commented-out starter
-  config makes easy, counts as not set: it resolves to nothing, and every
-  call the forge makes with it would fail inside the container) - is refused
-  as a likely typo, but only when the workflow actually
-  pushes: a non-pushing workflow never invokes the forge, so e.g. gitea's
-  `ssh_host` alone (set only so the firewall allows fetches) is a legitimate
-  configuration, not a typo. A wholly unconfigured forge is never flagged by
-  this rule - that's the case above.
-- A pushing workflow whose forge has **none** of its required settings
-  configured is refused too, even when `fixed_hosts` means the "resolves to
-  no host" rule above never fires. This is what catches `github`: its single
-  `requires` key (`push_token_file`) means "partly configured" (the rule
-  above) can never trigger for it either - there's nothing to be partial
-  between - so without this rule a pushing workflow could select `github`
-  with no `push_token_file` set and launch anyway, `fixed_hosts` masking the
-  fact that nothing was actually configured.
-
-Two qualifications worth stating explicitly for the "partly configured" rule:
-it only applies when the workflow's `push = on` (a non-pushing workflow never
-touches the forge, so an incomplete `[forge.<name>]` section is harmless),
-and a required key with a non-empty schema default - gitea's `token_file`,
-defaulting to `~/.config/gitea/token` - never counts as missing, since its
-resolved value is already correct even when the operator never wrote it.
+- A forge whose `requires` keys are **partly** set is refused as a likely
+  typo, but only when the workflow pushes. A key written but left empty
+  counts as not set - it resolves to nothing, and every call made with it
+  would fail inside the container. A non-pushing workflow never invokes the
+  forge, so gitea's `ssh_host` alone (set only so the firewall allows
+  fetches) is legitimate. A required key with a non-empty schema default -
+  gitea's `token_file` - never counts as missing, since its resolved value is
+  correct even unwritten. A wholly unconfigured forge is the case above, not
+  this one.
+- A pushing workflow whose forge has **none** of its required settings is
+  refused too, even where `fixed_hosts` stops the "resolves to no host" rule
+  firing. This catches `github`: with a single `requires` key there is
+  nothing to be partial between, so without this rule a pushing workflow
+  could select it with no `push_token_file` and launch anyway, `fixed_hosts`
+  masking that nothing was configured.
 
 ## Shipped providers
 
