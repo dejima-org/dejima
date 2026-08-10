@@ -89,22 +89,16 @@ state_color() {
 # How long after its own started= a registered session may still have no
 # container, before the prune in list_sessions treats that as "gone".
 #
-# Sized against the step that actually holds a launch up: bin/dejima writes
-# the registry entry, then rewrites the settings copy, snapshots the
-# workspace for the audit, runs an UNCONDITIONAL `docker compose build
-# claude`, optionally builds up to two derived images on top of it, and only
-# then reaches `docker compose run`. A cold base build is the Dockerfile's
-# apt and npm layers fetched over the network - minutes, not seconds - and
-# the derived builds add to it, while a warm run reaches the container in
-# seconds and never comes near this window.
+# Sized against what holds a launch up: the registry entry is written before
+# an unconditional `docker compose build`, plus up to two derived image
+# builds, and a cold base build fetches apt and npm layers - minutes. A warm
+# run never comes near this window.
 #
-# The two errors are not symmetric, which is why this is generous. Too long
-# only leaves a session that really did die listed until the window passes,
-# and the next listing prunes it. Too short deletes the registry entry of a
-# session that is about to start: bin/dejima never rewrites that entry, so
-# the session is permanently absent from both front doors, and the marker
-# directory deleted with it is the source of a bind mount the imminent
-# `docker compose run` declares.
+# Generous because the errors are not symmetric. Too long leaves a dead
+# session listed until the window passes. Too short deletes the entry of a
+# session about to start: bin/dejima never rewrites it, so the session is
+# permanently absent from both front doors, and the marker directory removed
+# with it is a bind source the imminent `compose run` declares.
 STARTUP_GRACE=900
 
 # Parsed, never sourced: this file is host-written, but treating state files
@@ -275,26 +269,21 @@ attach() {
         exit 1
     fi
     group="dejima-$run_id"
-    # Both values come from the same live pane, in one round trip. Taking the
-    # session name from the recorded label instead would follow a name rather
-    # than the sandbox: an operator renaming sessions is enough to point it at
-    # an unrelated session that has since taken the old name.
+    # Both values from the same live pane, one round trip. Taking the session
+    # name from the recorded label would follow a name rather than the
+    # sandbox, and a rename is enough to point it at an unrelated session.
     #
-    # The name is a starting point, never a guarantee. It is frequently
-    # ANOTHER remote client's throwaway group (tmux reports whichever session
-    # holding the window is most recent, and every grouped session here is
-    # newer than the operator's own), and those carry destroy-unattached - so
-    # the base can be made to stop existing on demand by anyone holding a
-    # second connection. That is why the session created from it is verified
-    # below instead of trusted: `new-session -t` does not fail on a name that
-    # matches nothing, it silently creates a fresh UNGROUPED session, which
-    # for a remote client is a plain host shell with no sandbox in it.
+    # The name is a starting point, not a guarantee: it is often another
+    # remote client's throwaway group, and those carry destroy-unattached, so
+    # anyone with a second connection can make the base stop existing. Hence
+    # the verification below - `new-session -t` does not fail on a name
+    # matching nothing, it silently creates an UNGROUPED session, which for a
+    # remote client is a plain host shell with no sandbox in it.
     #
-    # display-message prints nothing and still exits 0 for a target that no
-    # longer exists, so an empty result means the pane went away between the
-    # check above and here. That case is caught by the verification below too;
-    # bailing early just avoids creating a junk session to immediately kill,
-    # and says what actually happened.
+    # display-message prints nothing and exits 0 for a vanished target, so an
+    # empty result means the pane went away since the check above. The
+    # verification catches that too; bailing early just avoids creating a
+    # junk session and says what happened.
     target="$(tmux display-message -p -t "$entry_pane" '#{session_name}:#{window_index}' 2>/dev/null || true)"
     # Session names may contain ':', window indexes can't.
     base="${target%:*}"

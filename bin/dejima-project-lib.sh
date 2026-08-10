@@ -115,24 +115,20 @@ read_declared() {
 # Shared argument parsing for dejima-allow and dejima-dep, so the two CLIs
 # cannot drift on what --project means.
 #
-# The hard part is that --project's path is OPTIONAL, which makes
-# `--project X` ambiguous on its own: X could be the path, or the required
-# positional. Deciding by "is X the last token" is wrong for `dejima-dep list
-# --project ~/p`, which has no trailing positional to protect and would
-# silently resolve to the current directory instead - the scope quietly
-# becoming one the caller did not name. So the decision is made against how
-# many positionals the command actually requires after the flag:
+# --project's path is OPTIONAL, so `--project X` is ambiguous: X could be the
+# path or the required positional. Deciding by "is X the last token" breaks
+# `dejima-dep list --project ~/p`, which has no trailing positional and would
+# silently scope to the current directory instead. So:
 #
-#   --project takes the next token as its path only if doing so still leaves
-#   the command its required trailing positional(s).
+#   --project takes the next token as its path only if that still leaves the
+#   command its required trailing positional(s).
 #
-# Required counts are per-command constants declared by the caller, not
-# inferred here.
+# Required counts are per-command constants the caller declares.
 #
-# Sets dj_global, dj_project, dj_project_set, dj_container and the
-# dj_positional array. dj_project_set exists because "--project with no path"
-# (the current directory) and "no --project at all" are different scopes and
-# an empty dj_project cannot tell them apart.
+# Sets dj_global, dj_project, dj_project_set, dj_container and dj_positional.
+# dj_project_set exists because "--project with no path" (the current
+# directory) and "no --project at all" are different scopes that an empty
+# dj_project cannot distinguish.
 parse_scope_args() {
     local required="$1"; shift
     local -a args=("$@")

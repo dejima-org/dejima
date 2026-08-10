@@ -11,23 +11,17 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# Nothing in here may die quietly. Under `set -e` a failing command aborts the
-# script with no output at all, and this script's failures are invisible in the
-# worst possible way: the container simply never appears, which reads as the
-# sandbox being broken rather than as one command in one loop having failed.
-# Three CI failures were spent on two different instances of exactly that (#59)
-# - one at the GitHub ranges fetch, one in the domain loop below - and neither
-# left a single line to go on.
+# Nothing here may die quietly. Under `set -e` a failure aborts with no output
+# and the container simply never appears, which reads as the sandbox being
+# broken rather than one command failing. Three CI failures went to two
+# instances of exactly that (#59), neither leaving a line to go on.
 #
-# The explicit `exit 1` paths below say more than this can and are worth
-# keeping; this is the floor under everything else. -E on the line above is
-# what extends it into functions and subshells, where it would otherwise not
-# fire at all.
+# This is the floor; the explicit `exit 1` paths below say more. -E extends it
+# into functions and subshells, where it would not fire at all.
 #
-# A failure inside a command substitution reports twice - once from the
-# subshell, naming the command that actually failed, and once from the
-# statement containing it. That is worth the noise: for `x=$(a | b)` the first
-# line is the only thing that says whether it was `a` or `b`.
+# A failure inside a command substitution reports twice, from the subshell and
+# from the containing statement. Worth the noise: for `x=$(a | b)` the first
+# line is the only thing saying whether it was `a` or `b`.
 trap 'status=$?; echo "ERROR: init-firewall.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

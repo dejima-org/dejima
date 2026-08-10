@@ -87,19 +87,16 @@ BASELINE_DIR="$(config_get audit baselines_dir)"
 # should mean that repo. bin/dejima always passes an explicit path, so this
 # only ever fires for a hand-run show/ack.
 #
-# Candidates in order, first one that already HAS reports wins - existence of
-# a report directory is the only evidence available about which path
-# bin/dejima was actually invoked with, and the three candidates can
-# genuinely differ:
-#   1. the enclosing repo's toplevel (the ordinary case, and from a subdir);
-#   2. the MAIN worktree root, when cwd is a linked worktree - the sandbox's
-#      own .worktrees/<branch> workflow keys reports to the parent repo;
-#   3. $PWD, which covers a non-git directory and the case where the path
-#      bin/dejima was given (logical, via `cd && pwd`) differs from git's
-#      physical toplevel because of a symlinked path component.
-# Falling back to candidate 1 when none of them has reports is purely so the
-# "no reports for X" message can name a concrete path: a wrong guess must be
-# visible rather than silent.
+# Candidates in order, first one that already HAS reports wins - a report
+# directory is the only evidence of which path bin/dejima was invoked with,
+# and the three can genuinely differ:
+#   1. the enclosing repo's toplevel (ordinary case, and from a subdir);
+#   2. the MAIN worktree root, when cwd is a linked worktree - the
+#      .worktrees/<branch> workflow keys reports to the parent repo;
+#   3. $PWD, for a non-git directory, or when the logical path bin/dejima was
+#      given differs from git's physical toplevel through a symlink.
+# Falling back to 1 when none has reports is so "no reports for X" can name a
+# concrete path: a wrong guess must be visible rather than silent.
 resolve_ws() {
     local given="$1" top common main c
     if [ -n "$given" ]; then
