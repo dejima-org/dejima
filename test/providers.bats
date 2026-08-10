@@ -591,6 +591,39 @@ assert_remedy_forges_exist() {
     [[ "$output" != *"create"*"PR"* ]] || { echo "branch-push briefing mentions opening a PR"; return 1; }
 }
 
+# #32: an implementer ran a bare `git config user.name ...` inside a
+# worktree and wrote the parent checkout's real config, misattributing three
+# commits. A worktree isolates the working tree, not `.git/config`, and the
+# briefing told the agent to use worktrees while saying nothing about that -
+# which reads as more isolation than is on offer. The same unscoped command
+# reaches core.hooksPath and credential.helper, which execute on the host.
+#
+# In the core paragraph rather than a workflow's own prose, so a workflow can
+# opt into worktrees but cannot ship them without this.
+@test "every worktree briefing says a worktree does not isolate .git/config" {
+    local wf
+    for wf in worktree-pr branch-push; do
+        [ "$(lib manifest_get workflow "$wf" requires_worktree)" = "on" ]
+        run lib briefing_compose gitea "$wf" claude-code
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        [[ "$output" == *".git/config"* ]] \
+            || { echo "$wf briefing does not mention .git/config"; return 1; }
+        [[ "$output" == *"git -C"* ]] \
+            || { echo "$wf briefing does not give the scoped form"; return 1; }
+    done
+}
+
+# The negative half: a workflow that does not use worktrees has no reason to
+# carry the paragraph, and its presence there would mean the splice is
+# unconditional rather than opt-in.
+@test "a workflow without worktrees does not carry the worktree paragraph" {
+    [ "$(lib manifest_get workflow local-only requires_worktree)" = "off" ]
+    run lib briefing_compose none local-only claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"does not isolate"* ]]
+    [[ "$output" != *"worktree MUST live"* ]]
+}
+
 @test "local-only pushes nothing and blocks no branches" {
     run lib manifest_validate workflow local-only
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
