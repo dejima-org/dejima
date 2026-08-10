@@ -1134,9 +1134,49 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
     docker_log="$(mktemp)"
-    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK="${RW_AGENT_SOCK-}" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$1"
+}
+
+# A real agent, carrying nothing. `ssh-add -l` against it exits nonzero,
+# which is the condition the "no identities loaded" warning keys on, and a
+# handmade socket file would not reproduce it.
+_empty_agent() {
+    eval "$(ssh-agent -s)" >/dev/null
+    RW_AGENT_SOCK="$SSH_AUTH_SOCK"
+    RW_AGENT_PID="$SSH_AGENT_PID"
+}
+_kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; return 0; }
+
+# The forwarded agent is the fallback; [core] ssh_key is the arrangement the
+# docs recommend, because it is a dedicated identity and works unattended.
+# So an empty agent is only worth mentioning when nothing else can push -
+# otherwise the warning fires at exactly the operators who took the advice.
+@test "an empty ssh-agent is not warned about when [core] ssh_key is set" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _empty_agent
+    _rw_launch "$workspace"
+    _kill_agent
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"no identities loaded"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+# The positive control for the test above: with no key configured the
+# forwarded agent really is the only way to push, and an empty one is worth
+# saying so before it fails deep into a session.
+@test "an empty ssh-agent is warned about when [core] ssh_key is not set" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    _empty_agent
+    _rw_launch "$workspace"
+    _kill_agent
+    [[ "$output" == *"no identities loaded"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
 }
 
 @test "a read_write entry is mounted without :ro, unlike a readonly one" {
