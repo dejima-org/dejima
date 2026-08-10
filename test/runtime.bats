@@ -607,9 +607,12 @@ dexec_node() {
 @test "only the mounted project slugs exist in the container, and an unmounted one is still creatable" {
     local test_container="dejima-test-projects-$(basename "$BATS_FILE_TMPDIR")"
     local src; src="$(mktemp -d)"
-    mkdir -p "$src/own" "$src/sibling"
+    mkdir -p "$src/own" "$src/sibling" "$src/fh-own"
     echo host > "$src/own/existing.jsonl"
     echo secret > "$src/sibling/other.jsonl"
+    # file-history holds verbatim copies of edited files, so an unmounted
+    # session directory being absent is the whole point of scoping it.
+    echo 'other project source' > "$src/fh-own/aaaa@v1"
     chmod -R 777 "$src"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
@@ -617,6 +620,7 @@ dexec_node() {
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$src/own:/home/node/.claude/projects/own" \
+        -v "$src/fh-own:/home/node/.claude/file-history/own-session" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
@@ -638,6 +642,20 @@ dexec_node() {
     docker exec -u node "$test_container" \
         bash -c 'echo written > /home/node/.claude/projects/own/new.jsonl'
     [ "$(cat "$src/own/new.jsonl")" = written ]
+
+    # Same three properties for file-history. The middle one is what the
+    # image's pre-created directory buys: without it Docker creates
+    # file-history/ root-owned while setting up the mount nested in it, and
+    # the session cannot record an undo entry for its own id at all.
+    run docker exec -u node "$test_container" ls /home/node/.claude/file-history
+    [[ "$output" != *other-session* ]]
+    run docker exec -u node "$test_container" \
+        bash -c 'mkdir -p /home/node/.claude/file-history/fresh-session && echo x > /home/node/.claude/file-history/fresh-session/b@v1'
+    [ "$status" -eq 0 ]
+    [ ! -e "$src/fresh-session" ]
+    docker exec -u node "$test_container" \
+        bash -c 'echo written > /home/node/.claude/file-history/own-session/c@v1'
+    [ "$(cat "$src/fh-own/c@v1")" = written ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     rm -rf "$src"

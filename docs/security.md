@@ -405,6 +405,27 @@ hands to whichever session starts against it. See
   being audited - so an entirely innocent concurrent session working on
   some unrelated project can still produce a `CROSS-PROJECT` finding that
   reads like poisoning and isn't.
+- `~/.claude/file-history` (Claude Code's edit-undo record) is **not**
+  mounted as a tree either, and the reason is sharper than for `projects/`.
+  Each `<session>/<hash>@v1` is a **verbatim copy of an edited file**, so the
+  tree is other projects' source rather than a record about it: on the host
+  this was developed on, 47M across ten checkouts. Read access alone is the
+  leak; the mount was read-write on top of that, and tampering with another
+  project's undo record puts chosen content into a later restore there.
+
+  It is keyed by session id, so unlike `projects/` there is no slug in its
+  own paths to scope it by. The transcript names supply it: `projects/<slug>/
+  <id>.jsonl` and `file-history/<id>` name the same session, so the slugs the
+  workspace owns select the session ids it owns
+  (`workspace_session_ids` in `bin/dejima-slug-lib.sh`). A directory whose
+  session has no transcript belongs to no project dejima can identify, and is
+  left out.
+
+  The session about to start has an id nothing can know in advance, so its
+  own directory is created container-local and does not survive the run.
+  That costs undo history for that session if it is later resumed on the
+  host, and it is the reason this cannot be scoped as completely as
+  `projects/`, where the workspace's own slug is known at launch.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level
@@ -516,10 +537,12 @@ hands to whichever session starts against it. See
   are enumerated in `docker-compose.yml`, in three classes, and anything not
   listed is container-local: writable during the session and gone with the
   container.
-  - **Read-write, because it has to survive the session**: `projects/`,
-    `file-history/`, `backups/`, `tasks/`, `plans/`, `sessions/`. All
-    directories, which is what makes them safe (see the detachment note
-    below).
+  - **Read-write, because it has to survive the session**: `backups/`,
+    `tasks/`, `plans/`, `sessions/`, plus the entries of `projects/` and
+    `file-history/` that belong to this workspace. All directories, which is
+    what makes them safe (see the detachment note below). The two trees are
+    not mounted whole: see the `projects/` note further down, and the
+    `file-history/` note below it.
   - **Read-only**: `plugins/`, `hooks/`, `skills/`, `commands/`, `agents/`,
     `output-styles/`, plus the symlink-target directories `dejima`
     discovers at launch. Hooks execute automatically with no separate

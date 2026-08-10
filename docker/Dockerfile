@@ -189,7 +189,7 @@ RUN mkdir /commandhistory && \
 # longer mounted itself, only individual slug directories inside it, so
 # without this Docker creates it root-owned while setting those up and the
 # session cannot write a slug of its own.
-RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude $SANDBOX_HOME/.claude/projects && \
+RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude $SANDBOX_HOME/.claude/projects $SANDBOX_HOME/.claude/file-history && \
   chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
   chmod 700 $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude
 

@@ -51,3 +51,31 @@ workspace_slugs() {
 
 # Every slug in workspace_slugs, sorted and deduplicated.
 workspace_slugs_sorted() { workspace_slugs "$1" | sort -u; }
+
+# The Claude Code session ids belonging to workspace $2, one per line, taken
+# from the transcript filenames under $1 (a ~/.claude/projects directory).
+#
+# ~/.claude/file-history is keyed by session id rather than by project, so
+# there is no slug in its own paths to scope it by. The transcript is what
+# ties the two together: projects/<slug>/<id>.jsonl and file-history/<id>
+# name the same session, so the slugs this workspace owns select the ids it
+# owns. A session id that has no transcript belongs to no project this can
+# see, and is left out.
+workspace_session_ids() {
+    local projects_dir="$1" ws="$2" slug f id
+    [ -d "$projects_dir" ] || return 0
+    while IFS= read -r slug; do
+        [ -n "$slug" ] || continue
+        [ -d "$projects_dir/$slug" ] || continue
+        for f in "$projects_dir/$slug"/*.jsonl; do
+            [ -f "$f" ] || continue
+            id="$(basename "$f" .jsonl)"
+            # Only a real session id, never whatever else a directory might
+            # hold: this value becomes a mount path.
+            case "$id" in
+                *[!a-fA-F0-9-]*) continue ;;
+            esac
+            [ -n "$id" ] && printf '%s\n' "$id"
+        done
+    done < <(workspace_slugs_sorted "$ws") | sort -u
+}

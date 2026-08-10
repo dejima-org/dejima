@@ -962,6 +962,30 @@ while IFS= read -r _slug; do
     extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")
 done < <(workspace_slugs_sorted "$WORKSPACE_DIR")
 
+# ~/.claude/file-history, one session at a time, for the same reason and with
+# the same shape.
+#
+# It holds verbatim copies of edited files - `<session>/<hash>@v1` is the file
+# as it was - so the whole tree is every project's source, not a record of it.
+# On the host this was developed on that was 47M across ten checkouts, all of
+# it readable by any session, and writable too: tampering with another
+# project's undo record puts chosen content into a later restore there.
+#
+# Keyed by session id rather than by project, so there is no slug in these
+# paths to scope by. workspace_session_ids resolves it through the transcript
+# names, which do carry the slug.
+#
+# The session about to start gets an id nothing can know yet, so its own
+# directory is created container-local and does not survive the run. What
+# that costs is undo history for this session if it is later resumed on the
+# host; what it buys is that the other 39 directories are not there at all.
+mkdir -p "$HOME/.claude/file-history"
+while IFS= read -r _sid; do
+    [ -n "$_sid" ] || continue
+    [ -d "$HOME/.claude/file-history/$_sid" ] || continue
+    extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")
+done < <(workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR")
+
 # ~/.claude/statusline.sh is the same class of file as the config staged at
 # /etc/dejima-claude by docker-compose.yml: settings.json's statusLine.command
 # points at it, and Claude Code executes it on the host. Staged the same way,
