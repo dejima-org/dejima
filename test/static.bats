@@ -2060,8 +2060,13 @@ EOF
             false
         }
     done
-    # the eager-agent case, which is what makes the principle concrete
-    grep -q 'not a compromised agent but an eager one' "$REPO_ROOT/docs/security.md"
+    # the eager-agent case, which is what makes the principle concrete - and
+    # that it is not softened into a well-meaning near-miss. The unsolicited
+    # pull request is the thing being prevented, not a good deed with bad
+    # timing; docs/responsible-use.md is where the cost to maintainers is set
+    # out, and this must not read as disagreeing with it.
+    grep -q 'an eager agent, not a compromised one' "$REPO_ROOT/docs/security.md"
+    grep -q 'does not make it harmless' "$REPO_ROOT/docs/security.md"
     # and the ordering a reader got backwards: CI follows from the principle
     # rather than being the reason for it
     grep -q 'not the$\|reason for it' "$REPO_ROOT/docs/security.md"
