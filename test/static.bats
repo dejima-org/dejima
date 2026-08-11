@@ -2043,6 +2043,31 @@ EOF
     grep -q 'not proven software' "$REPO_ROOT/SECURITY.md"
 }
 
+# The GitHub push default was documented as mechanism only - port 443, port 22
+# unreachable - and a reader who needed the reason inferred the wrong one: that
+# it is a containment measure against a hostile session. It is not. The
+# repositories on the other side are other people's, and the failure it
+# prevents takes no compromise, only an agent being helpful at a stranger's
+# expense. Pinned in both places a reader lands, because getting this wrong
+# leads someone to turn the flag on believing it costs them nothing.
+@test "the GitHub push default is documented with its reason, not just its mechanism" {
+    # Matched on a fragment rather than the whole sentence: it wraps
+    # differently in each file, and a line-based grep cannot span that.
+    local f
+    for f in README.md docs/security.md; do
+        grep -q 'not being used to push' "$REPO_ROOT/$f" || {
+            echo "$f gives the mechanism without the principle" >&2
+            false
+        }
+    done
+    # the eager-agent case, which is what makes the principle concrete
+    grep -q 'not a compromised agent but an eager one' "$REPO_ROOT/docs/security.md"
+    # and the ordering a reader got backwards: CI follows from the principle
+    # rather than being the reason for it
+    grep -q 'not the$\|reason for it' "$REPO_ROOT/docs/security.md"
+    grep -q 'dont-point-it-at-repositories-you-dont-own' "$REPO_ROOT/docs/security.md"
+}
+
 @test "docs/ci.md says a project with no CI is exposed too" {
     grep -q 'applies to projects with no CI at all' "$REPO_ROOT/docs/ci.md"
     grep -q 'no workflows is not therefore safe' "$REPO_ROOT/docs/ci.md"

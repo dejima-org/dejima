@@ -984,6 +984,26 @@ want GitHub push and PRs as a standing choice instead, set
 `ssh.github.com:22`, but persistently rather than per launch, and uses its
 own `[forge.github] push_token_file` rather than a loaded SSH key.
 
+**Why the default is off.** The principle is narrower than CI and holds
+whether or not CI exists anywhere: *a session that is not being used to push
+to a forge should not be able to push to it.* Your configured forge is the
+one you chose to push to. GitHub is where everything else lives - every
+dependency a session reads, every repository it clones to understand an
+error - so that is where the rule bites by default.
+
+The case that makes it concrete is not a compromised agent but an eager one.
+It finds a real bug in an unrelated open-source project and helpfully pushes
+a fix branch to somebody else's repository. Nothing about that is an attack,
+the change might even be good, and it is still something you should have
+decided rather than discovered afterwards. See
+[Don't point it at repositories you don't own](responsible-use.md#dont-point-it-at-repositories-you-dont-own).
+
+Closing the CI chain follows from this - a push is code execution on whatever
+runners that repository can reach, per the section above - but it is not the
+reason for it. Reading it the other way round gets the order backwards, and
+makes the default look like a CI workaround to be turned off once CI is
+handled.
+
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
 **default** it can never push there: enforced at the network layer, not
 just by `git-push-guard.sh`. GitHub's IP ranges are only allowlisted on port

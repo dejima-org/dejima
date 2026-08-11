@@ -510,6 +510,13 @@ sources, opt-in conversation logging, and viewing both in Grafana.
 
 ## GitHub push: blocked by default, optional opt-in
 
+A session that is not being used to push to a forge should not be able to
+push to it. Your configured forge is the one you chose; GitHub is where
+everything else lives - every dependency a session reads, every repository it
+clones to understand an error. The case this prevents is not a compromised
+agent but an eager one, helpfully pushing a fix to a stranger's project you
+would rather have been asked about.
+
 The sandbox can always read from GitHub - clone, fetch, `gh` API calls. By
 default it can never push there: GitHub's IP ranges are only allowlisted on
 port 443, so port 22 is physically unreachable, not merely discouraged by a
