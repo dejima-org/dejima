@@ -93,32 +93,27 @@ name a release archive instead:
 dejima-dep add --global tarball:go@<sha256>:https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
 ```
 
-To get the digest, fetch the archive on the host and hash it. Do not take a
-digest from the same page that serves the download unless you are willing to
-trust that page for both:
+Fetch the archive on the host and hash it. Do not take the digest from the
+same page that serves the download unless you trust that page for both:
 
 ```sh
 curl -fLO https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
 sha256sum go1.25.0.linux-amd64.tar.gz
 ```
 
-Many projects publish a checksums file or sign their releases. Where they do,
-verifying against that is worth more than hashing whatever arrived, because it
-tells you the archive is the one the project published rather than the one
-your connection received.
+Where a project publishes a checksums file or signs its releases, verifying
+against that beats hashing whatever arrived: it says the archive is the one
+the project published, not the one your connection received.
 
 It unpacks with `--strip-components=1` into `/opt/dejima/<name>`, and
-`/opt/dejima/<name>/bin` goes on `PATH`. That one convention covers the usual
-shapes without the spec needing layout options: a Go archive has everything
-under `go/`, an nvim release under `nvim-linux-<arch>/`, and stripping one
-level puts `bin/` in the same place for both. Compression is detected from the
-archive, so `.tar.gz`, `.tar.xz` and `.tar.zst` all work.
+`/opt/dejima/<name>/bin` goes on `PATH` - one convention covering the usual
+shapes without layout options, since a Go archive is under `go/` and an nvim
+release under `nvim-linux-<arch>/`. Compression is detected, so `.tar.gz`,
+`.tar.xz` and `.tar.zst` all work.
 
-**The digest is mandatory**, and it is checked before anything is unpacked.
-Without one you would be approving a *name* whose contents the far end can
-change afterwards, which isn't a decision anyone can make once. With one, what
-you approved is a specific archive and nothing else can take its place. That
-has two consequences:
+**The digest is mandatory** and is checked before anything is unpacked.
+Without one you would approve a *name* whose contents the far end can change
+afterwards. Two consequences:
 
 - **A tarball dependency locks the project to one architecture**, because a
   digest does. A package name resolves per-host and a digest cannot: it names
@@ -136,12 +131,11 @@ shell-active is refused outright rather than quoted around, and only `https`
 is accepted.
 
 **Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a compromised session could write these files - they are read
-only to compare against reality and suggest a command. Approvals live
-outside the container, under `~/.config/dejima/` by default
-(`$DEJIMA_CONFIG_DIR` relocates the whole tree) - global at its
-root, per project under `projects/<slug>/` - and are written only by tools
-you run on the host:
+read-write, so a session could write these files; they are read only to
+compare against reality and suggest a command. Approvals live outside the
+container under `~/.config/dejima/` (`$DEJIMA_CONFIG_DIR` relocates the
+tree) - global at its root, per project under `projects/<slug>/` - written
+only by tools you run on the host:
 
 ```sh
 dejima-project status ~/myproject     # declared vs approved vs missing

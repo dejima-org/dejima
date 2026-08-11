@@ -22,26 +22,20 @@
 # Schema
 #
 # Three TAB-separated columns: key, type, default. One source of truth - both
-# _config_spec and _config_keys read this, so a key cannot exist for lookup
-# but be missing from enumeration (which is what --print-config walks).
+# _config_spec and _config_keys read it, so a key cannot be lookup-able but
+# missing from --print-config's enumeration.
 #
-# A "?" prefix on the type means the empty string is a legal value. Without
-# it, empty is rejected: the distinction is between a setting that is
-# meaningfully absent (ssh_key, loki_url) and one that must always have a
+# A "?" type prefix means empty is legal, distinguishing a setting that is
+# meaningfully absent (ssh_key, loki_url) from one that must always have a
 # value (firewall, share_dir).
 #
-# The three axis keys are `provider:<axis>` - validated by looking the name
-# up under the provider root (see _config_extra_type_valid below and
-# dejima-provider-lib.sh) rather than a fixed enum, so adding a provider is
-# adding a directory, not editing this schema.
-#
-# [forge.<name>] and [harness.<name>] keys are absent from this table for the
-# same reason: enumerating a forge's own keys here would mean a new forge
-# needs a core edit, which is exactly what the provider axes are for.
-# Those two sections are resolved instead through the _config_extra_*
-# functions below, stubbed here and overridden by dejima-provider-lib.sh once
-# it is sourced, against the type+default each provider's own `keys` manifest
-# entry declares (see _provider_keyspec_parse there).
+# The axis keys are `provider:<axis>`, validated against the provider root
+# rather than a fixed enum, so adding a provider is adding a directory.
+# [forge.<name>] and [harness.<name>] keys are absent here for the same
+# reason - enumerating them would make a new forge need a core edit. They
+# resolve through the _config_extra_* functions below, stubbed here and
+# overridden by dejima-provider-lib.sh, against each provider's own `keys`
+# manifest entry.
 # ---------------------------------------------------------------------------
 _config_table() {
     cat <<'EOF'

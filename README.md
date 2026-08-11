@@ -40,16 +40,6 @@ auto-accepted), against a project bind-mounted from the host. The agent gets
 to work without stopping to ask; the container is what makes that trade a
 reasonable one.
 
-**Early development. Not ready to be depended on.** Nothing here has been
-through outside review, an external audit, or adversarial testing by anyone
-but the person who wrote it. Every security property this describes is a
-claim awaiting scrutiny, not one that has survived it. Do not put this
-anywhere that being wrong about it would matter.
-
-**One maintainer, no support.** Nothing about this is promised: not a reply,
-not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
-where to report a vulnerability rather than in a public issue.
-
 Around that core is most of what running an agent unattended takes:
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
@@ -62,6 +52,10 @@ Around that core is most of what running an agent unattended takes:
   and dependencies it needs in `.dejima/`. Declaring is not granting: the
   approval is a separate decision you make on the host, by hand, and the
   approval store is never mounted where a session could reach it.
+- **One project's session cannot reach another's.** `~/.claude` is not
+  mounted whole. A session gets its own project's transcripts, memory and
+  edit history and nothing else, so it cannot read what you did elsewhere or
+  write into the memory a future session in another project will believe.
 - **A PR and issue workflow.** `gitea-pr` and `gitea-issue` let a session
   open pull requests and issues against Gitea or Forgejo and pull review
   feedback back in, on a token scoped for exactly that. Merging stays a
@@ -69,12 +63,16 @@ Around that core is most of what running an agent unattended takes:
 - **CI hardening, because push access is code execution.** A session opens a
   pull request, the workflow fires, and your runner executes that commit
   before you've read a line of it. The container bounds what a session reaches
-  directly, not what it can arrange to have run elsewhere. So this one is
-  work on the runner: [docs/ci.md](docs/ci.md) for what it takes, and
+  directly, not what it can arrange to have run elsewhere. Preventing this
+  requires hardening your CI runner: [docs/ci.md](docs/ci.md) for what it
+  takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
   for a tool that does it.
-- **Logging.** Every DNS lookup and rejected connection is shipped to Loki,
-  along with the session transcript if you opt in.
+- **Logging, off unless you turn it on.** Point `[logging] loki_url` at your
+  own Loki instance and every DNS lookup and rejected connection is shipped
+  there, with the session transcript too if you separately opt in. Nothing
+  leaves the machine otherwise, and there is no endpoint of ours anywhere in
+  this.
 - **Remote access, opt-in and off by default.** Attach to a live session
   from a terminal or a browser, with a push notification when it wants you.
 - **Guard rails inside the session.** Hooks refuse obviously destructive
@@ -87,6 +85,16 @@ Around that core is most of what running an agent unattended takes:
   both sides, so a session's transcript is readable from the host afterward.
 - **An exit-time audit** of the host surfaces a session could have written
   to, so a change to your git config or `~/.claude` gets surfaced.
+
+**Early development. Not ready to be depended on.** Nothing here has been
+through outside review, an external audit, or adversarial testing by anyone
+but the person who wrote it. Every security property this describes is a
+claim awaiting scrutiny, not one that has survived it. Do not put this
+anywhere that being wrong about it would matter.
+
+**One maintainer, no support.** Nothing about this is promised: not a reply,
+not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
+where to report a vulnerability rather than in a public issue.
 
 This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at

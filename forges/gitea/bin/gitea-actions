@@ -1,23 +1,19 @@
 #!/bin/bash
 # Read Gitea Actions runs and job logs from a shell - the CI-side counterpart
-# to gitea-pr and gitea-issue, and deliberately their twin rather than their
-# sibling: all three are copied into the sandbox image as single
-# self-contained files, and gitea-pr also lives in a dotfiles checkout, so a
-# shared library would be a third thing to keep in step across three places.
-# The duplicated config/token/curl preamble is pinned in all three by
-# test/static.bats instead.
+# to gitea-pr and gitea-issue. Self-contained like both of them rather than
+# sharing a library: all three are copied into the image as single files, so
+# a library would be another thing to keep in step. test/static.bats pins the
+# duplicated config/token/curl preamble instead.
 #
-# Its reason to exist is a sandboxed agent's: CI is where the tests that
-# cannot run in the sandbox actually run, and without this the only way to
-# see why one failed is for the operator to paste the log in by hand.
+# It exists for the agent: CI is where the tests the sandbox cannot run
+# actually run, and without this the only way to see a failure is for the
+# operator to paste the log in.
 #
-# Nothing here touches /repos/{owner}/{repo}/actions/runs, or the job and
-# log endpoints reached through it, however natural they look. Gitea gates
-# that group behind reqOwner(): a token belonging to a dedicated non-owner
-# account - which is what a sandbox should be given - is refused with "user
-# should be the owner of the repo", and no scope grants ownership, so
-# widening the token cannot fix it. The three sources used instead need only
-# read access to the repo:
+# Nothing here touches /repos/{owner}/{repo}/actions/runs or the endpoints
+# reached through it, however natural they look. Gitea gates that group
+# behind reqOwner(), so a dedicated non-owner account - what a sandbox should
+# have - is refused, and no scope grants ownership. The three sources used
+# instead need only read access:
 #
 #   actions/tasks            one record per job, carrying its run number,
 #                            head_sha, event and result

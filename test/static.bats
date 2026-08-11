@@ -2593,39 +2593,26 @@ q
 }
 
 @test "core names no forge" {
-    # The single assertion that keeps this separation from decaying: without
-    # it, the first convenient edit puts a forge name back into core. A
-    # whole-file skip or a substring loose enough to stop catching a real
-    # prose leak would both defeat the point, so each file gets its own
-    # narrow, justified exclusion for the specific lines that are not a
-    # forge coupling - everything else in scope must still match nothing.
+    # What keeps core free of forge names. Each file gets a narrow, justified
+    # exclusion rather than a whole-file skip; everything else must match
+    # nothing. Two scans, different subjects:
     #
-    # Two scans, because they have different subjects:
+    # (1) `gitea` and `github.com` as case-insensitive substrings, which
+    #     catches a PROSE leak ("push to the Gitea remote") as much as a
+    #     coupling.
+    # (2) Every name `provider_list forge` reports, in literal position -
+    #     derived from the shipped directories, so a new forge is covered the
+    #     day it lands. Scan 1 missed exactly that: bare `github` matches
+    #     neither alternative, so core could compare a forge name with this
+    #     test green.
     #
-    # (1) `gitea` and `github.com` as substrings, case-insensitively. This is
-    #     the original scan, and it is what catches a PROSE leak ("push to
-    #     the Gitea remote") as much as a coupling.
-    #
-    # (2) Every name `provider_list forge` reports, in literal position.
-    #     Derived from the shipped directories rather than written out here,
-    #     so a forge is covered the day it lands - which is exactly what
-    #     scan 1 missed: `github` became a shipped FORGE name, and a bare
-    #     `github` matches neither of scan 1's alternatives, so core could
-    #     (and did) compare a forge name to a literal with this test green.
-    #
-    #     "Literal position" means quoted, backticked, bracketed as a config
-    #     section, prefixed `forge.`, under `forges/`, or a `case` arm -
-    #     every shape a lookup or comparison actually takes here. It is not a
-    #     bare-word scan because two shipped names cannot survive one: `none`
-    #     is an ordinary English word this repo's prose uses constantly, and
-    #     `github` is also the name of a CORE feature that predates the forge
-    #     axis (GitHub read-only: `[github] token_file`, the `github.com`
-    #     credential helper, `--allow-github-push`). Operator-facing remedy
-    #     text naming a config VALUE (`set [core] forge = none`, `or [core]
-    #     forge = github`) is deliberately outside these shapes too: a rule
-    #     that refuses a combination has to be able to say which one works,
-    #     and "pick a different forge" without saying which is a worse
-    #     message, not a purer one.
+    #     "Literal position" means quoted, backticked, a config section,
+    #     `forge.`-prefixed, under `forges/`, or a case arm - not a bare-word
+    #     scan, because `none` is an ordinary English word and `github` also
+    #     names a core feature predating the forge axis (`[github]
+    #     token_file`, `--allow-github-push`). Remedy text naming a config
+    #     VALUE is outside these shapes too: a rule that refuses a
+    #     combination has to say which one works.
     local f matches fail=0 name literals="" body
     while IFS= read -r name; do
         [ -n "$name" ] || continue
