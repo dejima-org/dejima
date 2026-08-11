@@ -598,14 +598,10 @@ finding is something to read and clean up before your next `git` or `claude`
 in that repo. Its diff is also time-windowed: it reports that a path changed
 while the session was running, not that the session changed it.
 
-`dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it,
-report by report, asking after each whether to continue. Approving records
-the exact content, so any later change re-fires; ignoring records the
-surface, so that path is fine whatever it later contains; and skipping
-decides nothing, which means you are asked again next session. A finding
-whose file has since been deleted is cleared rather than approved - there is
-no content left to pin an approval to, and a surface that does not exist does
-not run.
+`dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it.
+Approving records the exact content, so any later change re-fires; ignoring
+records the surface, so that path is fine whatever it later contains; and
+skipping decides nothing, which means you are asked again next session.
 `[audit] strict` refuses a headless launch while CRITICAL findings are
 unacknowledged, which is the setting that turns the audit from a report into a
 gate for unattended runs.

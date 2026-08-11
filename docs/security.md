@@ -259,6 +259,13 @@ hands to whichever session starts against it. See
   [a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
   ```
 
+  A finding whose file has since been deleted is **cleared** rather than
+  approved: there is no content left to pin an approval to, and a surface
+  that does not exist does not run. Nothing is recorded, so if it comes back
+  it comes back as a new finding. Refusing instead - the old behaviour - left
+  the report unresolvable, and because `ack` opens CRITICAL reports first it
+  hid every other report behind that one.
+
   Skipping asks again next session, the right default when you are unsure.
   It matters for keys some tools rewrite on every run: with no decision
   recorded, one re-fires every session and pushes real findings out of the
