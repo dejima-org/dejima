@@ -984,6 +984,32 @@ want GitHub push and PRs as a standing choice instead, set
 `ssh.github.com:22`, but persistently rather than per launch, and uses its
 own `[forge.github] push_token_file` rather than a loaded SSH key.
 
+**Why the default is off.** The principle is narrower than CI and holds
+whether or not CI exists anywhere: *a session that is not being used to push
+to a forge should not be able to push to it.* Your configured forge is the
+one you chose to push to. GitHub is where everything else lives - every
+dependency a session reads, every repository it clones to understand an
+error - so that is where the rule bites by default.
+
+The case is an eager agent, not a compromised one: it finds a real bug in an
+unrelated open-source project and pushes a fix branch to somebody else's
+repository. That this is not an attack does not make it harmless. Maintainers
+are already triaging a flood of unsolicited AI-generated pull requests, and
+one more arriving in your name, unreviewed, is a cost imposed on someone who
+did not ask for it. The block exists so that it cannot happen, not so that
+you get to approve it first.
+
+[Don't point it at repositories you don't own](responsible-use.md#dont-point-it-at-repositories-you-dont-own)
+is the rule this enforces, and gives the fork-and-review workflow to use
+instead: work against your own fork, review the result, and open the upstream
+pull request by hand if you still want to.
+
+Closing the CI chain follows from this - a push is code execution on whatever
+runners that repository can reach, per the section above - but it is not the
+reason for it. Reading it the other way round gets the order backwards, and
+makes the default look like a CI workaround to be turned off once CI is
+handled.
+
 The sandbox can always read from GitHub (clone, fetch, `gh` API calls). By
 **default** it can never push there: enforced at the network layer, not
 just by `git-push-guard.sh`. GitHub's IP ranges are only allowlisted on port
