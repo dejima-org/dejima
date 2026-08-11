@@ -308,6 +308,21 @@ DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
 
+# Whether GitHub is a push destination this session, which the briefing tells
+# the agent about. Two ways in: the per-launch flag, or a forge whose hosts
+# core allowlists (github) under a workflow that pushes. Derived from the
+# manifests directly rather than from DEJIMA_WORKFLOW_PUSH, which is resolved
+# further down - this has to be settled before --print-briefing exits, or that
+# would render a briefing a real launch does not.
+DEJIMA_GITHUB_PUSH=off
+if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+    DEJIMA_GITHUB_PUSH=on
+elif [ "$(manifest_get forge "$DEJIMA_FORGE_NAME" hosts_allowlisted_by_core)" = "on" ] \
+     && [ "$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)" = "on" ]; then
+    DEJIMA_GITHUB_PUSH=on
+fi
+export DEJIMA_GITHUB_PUSH
+
 # Resolved here, ahead of --print-briefing below, because briefing_compose
 # needs DEJIMA_RW_MOUNTS (the {{writable_mounts}} placeholder) to render the
 # same sentence a real launch renders - see the read_write mounts block this

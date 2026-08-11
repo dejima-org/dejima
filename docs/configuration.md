@@ -489,6 +489,14 @@ since the same session can be resumed unrestricted on the host via
 `claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
 (`PreToolUse`) also applies here, since `~/.claude/hooks` is mounted in.
 
+When GitHub is a push destination this session - `--allow-github-push`, or
+`forge = github` under a pushing workflow - the briefing also tells the
+session not to push branches or open pull requests on any project other than
+the one it was pointed at. Lifting the default gives an agent the ability
+without the reason it is normally off (see
+[docs/security.md](security.md#github-push-blocked-by-default-optional-opt-in)),
+so the reason is supplied where it will be read.
+
 `git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
 any `git push` whose resolved remote isn't the Gitea host, and any push to
 `main`/`master` even there. Like the other hooks, this is a fast-fail guard

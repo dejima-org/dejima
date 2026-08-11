@@ -726,6 +726,14 @@ What this means:
   .dejima/allowed-domains, so it is shared with everyone working on it
   rather than living on one machine. Quote that --container value exactly as
   written here - it is this container's real ID, not something to infer.
+  And a domain can be an action rather than a source: a deploy hook, a
+  payment or production API acts on the world the moment it is called, with
+  no diff for anyone to review afterwards. Do not ask for one of those to
+  finish a task - say what you need and let the operator decide.
+- The project directory is mounted whole, so it can hold things that are not
+  code: a .env, a database dump, a key someone left in the tree. Say so if
+  you find one, and do not open, copy or send it anywhere unless the task
+  actually requires it.
 - Stay within the task you were given. Since there are no permission
   prompts here, be more conservative than usual about anything destructive,
   irreversible, or outside the project directory.
@@ -758,6 +766,25 @@ _briefing_core_worktree() {
   beyond a stray `user.name`: `core.hooksPath`, `credential.helper` and
   `!`-aliases all execute on the host, and the same unscoped command
   reaches them.
+BRIEFING_EOF
+}
+
+# Only when GitHub is a push destination this session. The default is off for
+# a reason the agent cannot infer from having the ability: docs/security.md,
+# "GitHub push". An agent that finds a real bug in a dependency and helpfully
+# opens a pull request on it has not made a mistake about permissions - it
+# has done something the operator was supposed to decide, and added to a queue
+# maintainers are already drowning in. Saying so here is cheaper than
+# discovering it afterwards, and the flag is exactly when it becomes possible.
+_briefing_core_github_push() {
+    cat <<'BRIEFING_EOF'
+- GitHub push is enabled for this session, for the repository you were
+  pointed at and nothing else. Do NOT push a branch, open a pull request, or
+  file an issue on any other project, however good the change would be. An
+  unsolicited pull request is a cost imposed on maintainers who did not ask
+  for it, not a contribution, and it arrives under the operator's name. If
+  you find a real bug somewhere else, say so in your reply and let them
+  decide what to do about it.
 BRIEFING_EOF
 }
 
@@ -1021,6 +1048,10 @@ briefing_compose() {
     text+=$'\n\n'
     text+="$workflow_frag"
     text+=$'\n\n'
+    if [ "${DEJIMA_GITHUB_PUSH:-off}" = "on" ]; then
+        text+="$(_briefing_core_github_push)"
+        text+=$'\n\n'
+    fi
     text+="$(_briefing_core_closing_a)"
     text+=$'\n\n'
     text+="$harness_frag"
