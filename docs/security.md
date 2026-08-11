@@ -10,6 +10,12 @@ at repositories you already trust. Everything below is about how bad a
 compromised session *inside* that trust boundary can get, not a claim that
 one can't happen.
 
+**And none of it has been reviewed by anyone else.** This is early
+development: the reasoning here is one person's, the tests assert what that
+person thought to check, and no outside audit or adversarial testing has
+happened. Read what follows as claims awaiting scrutiny rather than claims
+that have survived it. See [SECURITY.md](../SECURITY.md).
+
 ## CI: push access is code execution elsewhere
 
 The controls in this document bound what a session can reach *directly*. They

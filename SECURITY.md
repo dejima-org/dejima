@@ -43,6 +43,18 @@ Nothing is asked in return either. There is no embargo period and no
 coordinated disclosure window. Disclose on whatever schedule you think is
 right.
 
+## This is not proven software
+
+These projects are in early development. Nothing in them has been through
+outside review, an external audit, or adversarial testing by anyone other
+than the people who wrote them. Where a design argument is stated it is one
+person's reasoning; where a test asserts something it asserts what that
+person thought to check.
+
+Treat every security property described in any of these repositories as a
+claim awaiting scrutiny rather than one that has survived it, and do not
+deploy them where being wrong would matter.
+
 ## There is no support
 
 These are personal projects with one maintainer.

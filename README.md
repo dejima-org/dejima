@@ -40,6 +40,12 @@ auto-accepted), against a project bind-mounted from the host. The agent gets
 to work without stopping to ask; the container is what makes that trade a
 reasonable one.
 
+**Early development. Not ready to be depended on.** Nothing here has been
+through outside review, an external audit, or adversarial testing by anyone
+but the person who wrote it. Every security property this describes is a
+claim awaiting scrutiny, not one that has survived it. Do not put this
+anywhere that being wrong about it would matter.
+
 **One maintainer, no support.** Nothing about this is promised: not a reply,
 not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
 where to report a vulnerability rather than in a public issue.
