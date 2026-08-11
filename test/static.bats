@@ -2027,6 +2027,22 @@ EOF
 # likely to skip: a project with no CI is exposed too, because a branch adds
 # the first workflow. If that goes missing, the document reads as being about
 # people who already run CI, which is the smaller group.
+# The maturity disclaimer, pinned in all three places a reader can land. A
+# project that argues at length for its own security properties is exactly the
+# one that has to say those properties are unreviewed - and it is the first
+# thing that gets quietly dropped as a project starts to feel established.
+@test "every entry point says this is unreviewed early development" {
+    local f
+    for f in README.md SECURITY.md docs/security.md; do
+        grep -q 'reviewed by anyone else\|outside review' "$REPO_ROOT/$f" || {
+            echo "$f does not say the work is unreviewed" >&2
+            false
+        }
+    done
+    grep -q 'Not ready to be depended on' "$REPO_ROOT/README.md"
+    grep -q 'not proven software' "$REPO_ROOT/SECURITY.md"
+}
+
 @test "docs/ci.md says a project with no CI is exposed too" {
     grep -q 'applies to projects with no CI at all' "$REPO_ROOT/docs/ci.md"
     grep -q 'no workflows is not therefore safe' "$REPO_ROOT/docs/ci.md"
