@@ -86,6 +86,8 @@ This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
 
+[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
+
 ## The name
 
 [Dejima](https://en.wikipedia.org/wiki/Dejima) was a small artificial island

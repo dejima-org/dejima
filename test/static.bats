@@ -2104,10 +2104,12 @@ EOF
 
 # The wordmark is referenced by a fixed filename on purpose - see the comment
 # above the tag - which means a rename is caught here or not at all.
+# Markdown image syntax as well as <img>, and svg as well as png: the badge
+# is referenced the markdown way and is the case this exists for.
 @test "every image the README points at is committed" {
     local src missing=0
-    for src in $(grep -ohE 'src="[^"]+\.png"' "$REPO_ROOT/README.md" \
-        | sed 's/^src="//; s/"$//'); do
+    for src in $(grep -ohE 'src="[^"]+\.(png|svg)"|\]\([^)]+\.(png|svg)\)' "$REPO_ROOT/README.md" \
+        | sed 's/^src="//; s/"$//; s/^](//; s/)$//'); do
         if [ ! -f "$REPO_ROOT/$src" ]; then
             echo "README points at $src, which does not exist" >&2
             missing=1

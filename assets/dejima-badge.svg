@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="122" height="20" role="img"
+     aria-label="Developed in dejima">
+  <title>Developed in dejima</title>
+  <linearGradient id="g" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="122" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="79" height="20" fill="#282828"/>
+    <rect x="79" width="43" height="20" fill="#8ec07c"/>
+    <rect width="122" height="20" fill="url(#g)"/>
+  </g>
+  <g font-family="Verdana,DejaVu Sans,Geneva,sans-serif" font-size="11"
+     text-anchor="middle">
+    <text x="39.5" y="15" fill="#010101" fill-opacity=".3">Developed in</text>
+    <text x="39.5" y="14" fill="#ebdbb2">Developed in</text>
+    <text x="100.5" y="15" fill="#010101" fill-opacity=".3">dejima</text>
+    <text x="100.5" y="14" fill="#282828">dejima</text>
+  </g>
+</svg>

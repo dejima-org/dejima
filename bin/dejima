@@ -1379,6 +1379,17 @@ if remote_enabled; then
     mv "$SANDBOX_REMOTE_SETTINGS_TMP" "$SANDBOX_SETTINGS_FILE"
 fi
 
+# Everything from here to the container's own first output is silent: the
+# audit snapshot, an image build that prints nothing when every layer is
+# cached, and Docker creating the container with a mount per allowed path.
+# Long enough to read as hung, so say what is happening first. A first run,
+# or one after a Dockerfile change, builds the image and takes minutes rather
+# than seconds - the line names that, since it is the case where someone is
+# most likely to give up and interrupt.
+printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
+printf '%sA first run builds the container image, which takes several minutes.%s\n' \
+    "$C_DIM" "$C_RESET" >&2
+
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
 "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
