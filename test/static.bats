@@ -2027,6 +2027,19 @@ EOF
 # likely to skip: a project with no CI is exposed too, because a branch adds
 # the first workflow. If that goes missing, the document reads as being about
 # people who already run CI, which is the smaller group.
+# Who wrote the prose. The repository argues at length in a voice that is not
+# its maintainer's, and saying so is the difference between disclosure and
+# letting a reader assume. Pinned because it is the kind of line that goes
+# quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README says the prose is written by agents" {
+    grep -q 'A note from the developer' "$REPO_ROOT/README.md"
+    grep -q 'the words are written rapidly' "$REPO_ROOT/README.md"
+    # the contrast that makes both claims credible: ATTRIBUTION.md says the
+    # artwork is the other way round, and the README points at it
+    grep -q 'no AI tools were used to create it' "$REPO_ROOT/README.md"
+    grep -q 'No AI tools were used' "$REPO_ROOT/ATTRIBUTION.md"
+}
+
 # The maturity disclaimer, pinned in all three places a reader can land. A
 # project that argues at length for its own security properties is exactly the
 # one that has to say those properties are unreviewed - and it is the first

@@ -100,6 +100,19 @@ This repo only holds the tooling; it's not where any project lives. Point
 it at a project on disk; that project is bind-mounted into the container at
 runtime.
 
+A note from the developer about the voice in this repository:
+
+> dejima is developed in dejima, and that means the words are written rapidly
+> by AI agents. That applies to this README, the docs, the commit messages,
+> the pull requests, and the code comments. I periodically take passes at
+> smoothing out the AI voice in the docs, but it's inefficient to do with
+> every pull request. I'm prioritizing thorough documentation over human
+> voice. If you feel something sounds painfully "AI", it is.
+>
+> The artwork (logo, wordmark, etc.) is a different story. It's made by a
+> human, and no AI tools were used to create it. See
+> [ATTRIBUTION.md](ATTRIBUTION.md).
+
 [![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
 ## The name
