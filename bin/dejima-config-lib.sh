@@ -39,7 +39,7 @@
 # ---------------------------------------------------------------------------
 _config_table() {
     cat <<'EOF'
-core.harness	provider:harness	claude-code
+core.harness	provider:harness
 core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
 core.command	identifier	claude

@@ -188,6 +188,16 @@ EOF
 
 write_config() {
     printf '%s\n' "$@" > "$CONFIG_DIR/config"
+    # A launch is refused without a harness, so every fixture needs one. Its
+    # own [core] section, which is legal and resolves the same; a test that
+    # means to omit it writes the file directly.
+    # A key assignment, not the word anywhere in the arguments: a [mounts]
+    # path containing "harness" would otherwise suppress the seeding.
+    local _a _has=0
+    for _a in "$@"; do
+        [[ "$_a" =~ ^[[:space:]]*harness[[:space:]]*= ]] && _has=1
+    done
+    [ "$_has" -eq 1 ] || printf '[core]\nharness = claude-code\n' >> "$CONFIG_DIR/config"
 }
 
 @test "config_get returns the schema default when the key is absent" {
@@ -1181,6 +1191,41 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
     rm -rf "$workspace"
 }
 
+# No default on purpose: a release changing it would move an operator who
+# never chose to a different harness on upgrade.
+@test "a config with no [core] harness is refused, and says what to add" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # Written directly, not through write_config, which seeds a harness for
+    # every other fixture precisely because a launch needs one.
+    printf '[core]\nssh_key = %s\nforge = none\nworkflow = local-only\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with no harness selected:"; echo "$output"; return 1; }
+    [[ "$output" == *"[core] harness is not set"* ]]
+    [[ "$output" == *"harness = claude-code"* ]]   # the line to add
+    [[ "$output" == *"Available:"*"claude-code"* ]]
+    rm -rf "$workspace"
+}
+
+@test "the harness schema carries no default to fall back to" {
+    # Directly again: write_config seeds one, which is the whole point of it.
+    printf '[core]\nforge = none\nworkflow = local-only\n' > "$CONFIG_DIR/config"
+    run lib config_get core harness
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "" ]
+}
+
+# --print-config is what an operator reaches for to find out what is unset, so
+# it has to survive the thing being unset.
+@test "--print-config still works when no harness is selected" {
+    printf '[core]\nforge = none\nworkflow = local-only\n' > "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"core.harness="* ]]
+    [[ "$output" != *"invalid harness name"* ]]
+}
+
 @test "an empty ssh-agent is not warned about when [core] ssh_key is set" {
     _rw_setup
     workspace="$(mktemp -d)"
@@ -1557,7 +1602,7 @@ EOF
     # a gitea token reaching the container: the shipped defaults select no
     # forge at all, so leaving them implicit would mean nothing ever reads
     # token_file and the refusal under test could never fire.
-    printf '[core]\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+    printf '[core]\nharness = claude-code\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
         "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
     printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
     STUB_DIR="$(mktemp -d)"

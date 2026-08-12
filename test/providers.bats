@@ -236,7 +236,8 @@ assert_remedy_forges_exist() {
     local forge workflow harness
     forge="$(lib config_default core.forge)"
     workflow="$(lib config_default core.workflow)"
-    harness="$(lib config_default core.harness)"
+    # No default to read: the shipped pair under test is forge/workflow.
+    harness=claude-code
     [ "$(lib manifest_get workflow "$workflow" push)" = "off" ] \
         || { echo "default workflow '$workflow' pushes - a fresh install has no forge to push to"; return 1; }
     run lib provider_validate_selection "$forge" "$workflow" "$harness"

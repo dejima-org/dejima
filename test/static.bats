@@ -2323,6 +2323,7 @@ EOF
     # past validation.
     cat > "$DEJIMA_T/config/config" <<EOF
 [core]
+harness = claude-code
 ssh_key = $DEJIMA_T/sandbox-key
 forge = none
 workflow = local-only

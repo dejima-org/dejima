@@ -92,7 +92,8 @@ launch() {
     local conf
     conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
     mkdir -p "$(dirname "$conf")"
-    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
+    # No default, so a config that launches must select one.
+    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
@@ -817,7 +818,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # no domains at all, or by the env prefix below never reaching the child.
     printf 'good.example.com\n' > "$CONFIG_DIR/allowed-domains"
     launch_setup
-    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
+    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \

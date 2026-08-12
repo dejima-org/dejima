@@ -18,7 +18,7 @@ what a given launch will actually use.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `[core] harness` | `claude-code` | agent harness the container runs |
+| `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection |
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
