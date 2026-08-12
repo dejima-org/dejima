@@ -397,8 +397,30 @@ dexec_node() {
 }
 
 @test "GitHub is reachable on port 443" {
-    run dexec curl --connect-timeout 5 -s -o /dev/null -w "%{http_code}" https://api.github.com/zen
-    [ "$status" -eq 0 ]
+    # Retried, and only because this is a POSITIVE assertion: more attempts
+    # can only turn a pass into a pass. The unreachability assertions below
+    # are never retried - there, a retry could hide a hole that opens once.
+    #
+    # It failed once on CI with nothing to go on: no curl exit code, no HTTP
+    # status, no way to tell DNS from the ipset from the far end. Everything
+    # else in that run said the firewall was right - the port-22 push grant
+    # reached GitHub, so github-domains held real addresses - which left one
+    # five-second connect against a live third-party service as the only
+    # explanation, and no evidence to confirm it with. Hence the diagnostics
+    # as much as the retries.
+    local attempt code rc=0
+    for attempt in 1 2 3; do
+        code="$(dexec curl --connect-timeout 5 -s -o /dev/null \
+                     -w '%{http_code}' https://api.github.com/zen 2>&1)" && return 0
+        rc=$?
+        sleep 2
+    done
+    echo "api.github.com:443 unreachable after 3 attempts." >&2
+    echo "last curl exit: $rc, last output: '$code'" >&2
+    echo "exit 6 is DNS, 7 or 28 is the route or the firewall; an HTTP code" >&2
+    echo "with a non-zero exit means the connection worked. Check with" >&2
+    echo "'ipset list github-domains' inside the container." >&2
+    false
 }
 
 @test "GitHub is NOT reachable on port 22 (push transport is physically absent)" {
