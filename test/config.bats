@@ -1621,3 +1621,83 @@ EOF
         || { echo "docker was invoked despite the refusal"; return 1; }
     rm -rf "$workspace" "$RW_HOME" "$STUB_DIR"
 }
+
+# --- epitaph: what a session leaves when its context dies ---------------------------------------------------
+#
+# What a long session worked out is in the summary Claude Code writes when it
+# compacts, and that goes away with the container. The store is host-side and
+# never mounted, so a later session can neither read what an earlier one
+# concluded nor edit what this one is about to record (#104).
+
+_epitaph_fixture() {
+    EPI_STORE="$(mktemp -d)"
+    EPI_TR="$(mktemp -d)"
+    EPI_WS="$(mktemp -d)"; git -C "$EPI_WS" init -q
+    EPI_SLUG="$(printf '%s' "$EPI_WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$EPI_TR/$EPI_SLUG"
+    write_config '[epitaph]' "dir = $EPI_STORE"
+}
+
+# One compact_boundary carrying the metadata, then the summary itself.
+_epitaph_transcript() {
+    local f="$EPI_TR/$EPI_SLUG/$1.jsonl" text="${2:-worked out X}" uid="${3:-aaaabbbb}"
+    {
+        printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":900,"postTokens":90}}\n'
+        printf '{"type":"user","isCompactSummary":true,"uuid":"%s","sessionId":"s-1","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"%s"}}\n' "$uid" "$text"
+    } > "$f"
+}
+
+@test "an epitaph is written out of the container's reach" {
+    _epitaph_fixture
+    _epitaph_transcript s1 "the thing this session worked out"
+    run "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local saved; saved="$(find "$EPI_STORE" -name '*.md')"
+    [ -n "$saved" ]
+    grep -q 'the thing this session worked out' "$saved"
+    grep -q 'trigger: manual' "$saved"
+    grep -q '900 before, 90 after' "$saved"
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "saving twice does not duplicate an epitaph already kept" {
+    # `save` runs on every exit, and a session compacted three times has two
+    # epitaphs an earlier run already wrote.
+    _epitaph_fixture
+    _epitaph_transcript s1 "once only"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 1 ]
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "another project's epitaphs are not collected" {
+    _epitaph_fixture
+    _epitaph_transcript s1 "mine"
+    mkdir -p "$EPI_TR/-some-other-project"
+    printf '{"type":"user","isCompactSummary":true,"uuid":"cccc","sessionId":"s-2","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"theirs"}}\n' \
+        > "$EPI_TR/-some-other-project/s2.jsonl"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    run grep -rl 'theirs' "$EPI_STORE"
+    [ "$status" -ne 0 ] || { echo "collected another project's summary"; return 1; }
+    grep -rq 'mine' "$EPI_STORE"
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "no epitaph is written when [epitaph] enabled is off" {
+    _epitaph_fixture
+    write_config '[epitaph]' "dir = $EPI_STORE" 'enabled = off'
+    _epitaph_transcript s1 "should not be kept"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    [ -z "$(find "$EPI_STORE" -name '*.md' 2>/dev/null)" ]
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "the epitaph store is not mounted into the container" {
+    # The whole point: a session must not be able to read what earlier
+    # sessions concluded, or edit what this one is about to record.
+    run grep -n 'epitaph' "$REPO_ROOT/docker/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    run grep -nE 'extra_mounts\+=.*epitaph' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}

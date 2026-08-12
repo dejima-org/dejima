@@ -805,6 +805,10 @@ cleanup() {
     # read it, so this function's own cleanup can't race the audit that
     # needs it - and its removal is guarded too, so it stays truly last.
     DEJIMA_RW_MOUNTS="$DEJIMA_RW_MOUNTS" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    # Keep whatever the session compacted away, into a store nothing mounts.
+    # `|| true` for the same reason every other line in this trap has it: a
+    # failure here must not replace the container's exit status.
+    "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT

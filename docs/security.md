@@ -417,6 +417,13 @@ hands to whichever session starts against it. See
   That costs undo history for that session if it is later resumed on the
   host, and it is the reason this cannot be scoped as completely as
   `projects/`, where the workspace's own slug is known at launch.
+- Epitaphs - the summary a session leaves when its context is compacted away -
+  are kept host-side in `[epitaph] dir`, and that directory is never mounted. A session can neither read what earlier
+  sessions concluded nor edit what this one is about to record, which is the
+  same arrangement as the audit store and for the same reason. The transcript
+  they are extracted from *is* session-writable, so a summary records what was
+  there rather than vouching for it - and nothing loads one back into a later
+  session, deliberately: that would be the channel #104 closed, rebuilt.
 - Allowing egress to a domain at all creates a channel for exfiltrating data
   through *that service's own request surface* (query strings, lookups,
   etc.), not just to a literal attacker-controlled destination. Domain-level
