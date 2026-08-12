@@ -1,30 +1,23 @@
 #!/usr/bin/env bash
 # PreToolUse hook: inside dejima, block a merge command matching
-# DEJIMA_MERGE_BLOCK - a literal command prefix (the forge's PR command
-# followed by its merge subcommand) resolved host-side by bin/dejima from
-# the configured forge and workflow
-# (see dejima-provider-lib.sh), not hardcoded to any one forge. The sandbox
-# workflow is feature branch -> open a PR/MR -> a human merges; what lands
-# on the default branch is an operator decision, exactly as it already is
-# for `git push` (see git-push-guard.sh, whose no-direct-push-to-a-blocked-
-# branch rule this is the API-side counterpart to - a merge reaches the
-# branch without a push, so that guard never sees it).
+# DEJIMA_MERGE_BLOCK - a literal command prefix resolved host-side by
+# bin/dejima from the configured forge and workflow, never hardcoded to one
+# forge. What lands on the default branch is an operator decision, as it
+# already is for `git push`; this is the API-side counterpart to
+# git-push-guard.sh, since a merge reaches the branch without a push.
 #
-# Deliberately not conditional on intent. A hook is handed a command, not a
-# conversation, so it cannot tell an instructed merge from an unprompted one;
-# the only honest place to draw the line is the context, and the context that
-# needs the line is this one - headless unattended runs under
-# --dangerously-skip-permissions, where nobody is watching the turn happen.
-# On the host the hook is a no-op and an operator can still ask for a merge.
+# Not conditional on intent: a hook is handed a command, not a conversation,
+# so it cannot tell an instructed merge from an unprompted one. The line is
+# drawn by context instead, and the context that needs it is this one -
+# unattended runs under --dangerously-skip-permissions. On the host it is a
+# no-op.
 #
-# Like its sibling this is a fast-fail guard against an overeager agent, not
-# a hard security boundary: a sandbox session has full shell access and the
-# forge token in its environment, so it could call the merge endpoint with
-# curl directly. It stops the mistake, not the attack.
+# A fast-fail guard against an overeager agent, not a boundary: a session has
+# shell access and the forge token, so it could call the merge endpoint with
+# curl. It stops the mistake, not the attack.
 #
-# DEJIMA_MERGE_BLOCK fails OPEN: empty means no command is blocked, so the
-# hook is inert rather than conditionally installed - a workflow with no
-# merge-block policy (or a forge with nothing to block) genuinely has none.
+# Fails OPEN - empty means nothing is blocked, so a workflow with no
+# merge-block policy genuinely has none rather than the hook guessing.
 
 if [ -z "${DEJIMA:-}" ]; then
     exit 0

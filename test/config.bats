@@ -1045,24 +1045,16 @@ run_install() {
 
     local name out hit=0
 
-    # docs/ and systemd/ are pure operator-facing prose - nothing there is
-    # live shell plumbing, so any mention of a retired name is either the
-    # deliberate "no longer read" notice (install.sh's remote.conf one lives
-    # outside these two directories, but the exclusion is kept here too in
-    # case a future doc adds one), a stale instruction, or one of the two
-    # cases below that are neither:
+    # docs/ and systemd/ are operator-facing prose, no live plumbing, so a
+    # retired name there is either the deliberate "no longer read" notice, a
+    # stale instruction, or one of two cases that are neither:
     #
-    # - A manifest-field line (`env_export    = GITEA_API=api ...`): this is
-    #   docs/providers.md quoting a forge manifest's `env_export` value
-    #   verbatim, which *declares* a container-side environment variable -
-    #   the exact thing env_export is for - not an instruction to an operator
-    #   to set one. `GITEA_API` and friends are retired only as host-side,
-    #   operator-set variables (what _warn_legacy_env's table is about); they
-    #   are not retired as the container-side names env_export produces, and
-    #   docs/providers.md documenting that mapping is not a regression.
-    # - A backtick-quoted mention (`` `GITEA_API` ``): prose naming a
-    #   variable - "the container gets `GITEA_API`" - reads a value, it
-    #   doesn't tell anyone to set one.
+    # - A manifest-field line (`env_export = GITEA_API=api ...`), which is
+    #   providers.md quoting a manifest verbatim. These names are retired as
+    #   host-side operator-set variables, not as the container-side names
+    #   env_export produces.
+    # - A backtick-quoted mention - prose naming a variable reads a value, it
+    #   does not tell anyone to set one.
     while IFS= read -r name; do
         out="$(grep -rnE "\b${name}\b" "$REPO_ROOT/docs" "$REPO_ROOT/systemd" 2>/dev/null \
             | grep -v 'no longer read' \

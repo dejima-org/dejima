@@ -87,19 +87,16 @@ BASELINE_DIR="$(config_get audit baselines_dir)"
 # should mean that repo. bin/dejima always passes an explicit path, so this
 # only ever fires for a hand-run show/ack.
 #
-# Candidates in order, first one that already HAS reports wins - existence of
-# a report directory is the only evidence available about which path
-# bin/dejima was actually invoked with, and the three candidates can
-# genuinely differ:
-#   1. the enclosing repo's toplevel (the ordinary case, and from a subdir);
-#   2. the MAIN worktree root, when cwd is a linked worktree - the sandbox's
-#      own .worktrees/<branch> workflow keys reports to the parent repo;
-#   3. $PWD, which covers a non-git directory and the case where the path
-#      bin/dejima was given (logical, via `cd && pwd`) differs from git's
-#      physical toplevel because of a symlinked path component.
-# Falling back to candidate 1 when none of them has reports is purely so the
-# "no reports for X" message can name a concrete path: a wrong guess must be
-# visible rather than silent.
+# Candidates in order, first one that already HAS reports wins - a report
+# directory is the only evidence of which path bin/dejima was invoked with,
+# and the three can genuinely differ:
+#   1. the enclosing repo's toplevel (ordinary case, and from a subdir);
+#   2. the MAIN worktree root, when cwd is a linked worktree - the
+#      .worktrees/<branch> workflow keys reports to the parent repo;
+#   3. $PWD, for a non-git directory, or when the logical path bin/dejima was
+#      given differs from git's physical toplevel through a symlink.
+# Falling back to 1 when none has reports is so "no reports for X" can name a
+# concrete path: a wrong guess must be visible rather than silent.
 resolve_ws() {
     local given="$1" top common main c
     if [ -n "$given" ]; then
@@ -658,37 +655,26 @@ sanitize() {
         | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g'
 }
 
-# sanitize() is lossy, so it must never be what an ID passes through.
+# sanitize() is lossy, so an ID must never pass through it. `ack` derives the
+# baseline id from the report text and the next `compare` matches it against
+# the RAW bytes on disk, so a stripped id cannot round-trip: the surface
+# becomes permanently unsuppressible and the startup warning fires forever.
 #
-# `ack` derives the baseline id it records from the report's text, and the
-# next `compare` matches that id against the RAW bytes on disk. An id
-# containing anything sanitize() strips therefore could not round-trip at
-# all: the surface stayed permanently unsuppressible and its report
-# permanently unclearable, so bin/dejima's startup warning fired forever -
-# the alert fatigue this whole feature exists to end, reached from the other
-# side. Ids are encoded instead, and the encoded form is canonical
-# everywhere it is written down: in the report AND in the baseline file.
+# Ids are encoded instead, canonically, in the report AND the baseline file.
+# An id sanitize() leaves alone is written verbatim (every ordinary one, so
+# existing baselines are unchanged); anything else is hex-encoded behind a
+# marker, which is ASCII and reverses exactly.
 #
-# An id that survives sanitize() unchanged is already display-safe and is
-# written verbatim - that is every ordinary id, so reports and existing
-# baseline files are byte-for-byte what they were. Anything else is
-# hex-encoded behind a marker, which is ASCII by construction and reverses
-# exactly.
+# An id that merely LOOKS encoded is encoded too, so the marker's presence
+# always means this encoder put it there. Otherwise a workspace could present
+# an id `ack` decodes into one of the attacker's choosing - baselining
+# something other than the finding while counting it acknowledged. Only the
+# START matters, and no monitored path begins with the marker, but a git
+# config section name is free text the session can write.
 #
-# An id that merely LOOKS encoded is encoded too, so that decoding stays
-# unambiguous: the marker's presence always means this encoder put it there.
-# Without that, a workspace could present an id that `ack` decoded into one
-# of the attacker's choosing - baselining something other than the finding
-# while still counting it acknowledged, the same shape as the id-derivation
-# hijacks the anchored case arms in `ack` guard against. Only the START of
-# an id is significant, and no monitored path can begin with the marker
-# (they are all rooted at .claude/.vscode/.git/.envrc/.mcp.json), but a git
-# config section name is free text in a file the session can write and the
-# audit parses that file directly rather than through git.
-#
-# The encoded form is also the honest rendering. sanitize() DELETES those
-# bytes, so a planted ".git/hooks/pre<U+202E>commit" displayed as
-# "precommit" sends an operator grepping for a name no file on disk has.
+# Encoding is also the honest rendering: sanitize() DELETES those bytes, so a
+# planted ".git/hooks/pre<U+202E>commit" shown as "precommit" sends an
+# operator grepping for a name no file has.
 HEX_MARK='{hex}'
 enc_id() {
     local v="$1"
@@ -1448,47 +1434,28 @@ case "$cmd" in
                 *) continue ;;
             esac
             [ "$tier" = CRITICAL ] && crit_seen=$((crit_seen + 1))
-            # Derive the namespaced id baseline_suppresses() will later
-            # compare against (see id_severity/current_sha_for_id above) -
-            # one case arm per finding-producing loop in `compare`. Every
-            # pattern is anchored to the fixed label text `compare` itself
-            # emits at the START of body, never matched as a substring
-            # anywhere in it: a workspace-controlled value (a git config
-            # value, a path) can contain text like "workspace file: " or
-            # "TCB (sandbox self) modified: " and reach $body unmodified, so
-            # an unanchored match could be hijacked into deriving the wrong
-            # (attacker-chosen) id for the wrong namespace - approving it
-            # would then baseline an id that can never match, un-baselining
-            # the real finding while still counting it as acknowledged. A
-            # finding whose body matches none of these (currently only
-            # CROSS-PROJECT) has no id to record, so it's shown but not
-            # offered a/s.
+            # Derive the namespaced id baseline_suppresses() compares
+            # against - one arm per finding-producing loop in `compare`.
             #
-            # The id itself must then be recovered with a shortest-prefix
-            # strip of that same fixed label (`${body#LABEL}`), never
-            # `${body##*: }`: the latter strips up to the LAST ": " in the
-            # whole string, and a workspace-controlled path can itself
-            # contain a literal ": " (e.g. ".git/hooks/pre-commit: decoy"),
-            # which would truncate the derived id to everything after that
-            # planted separator - the case match being anchored doesn't
-            # protect the extraction that follows it.
+            # Both steps must resist workspace-controlled text in $body. The
+            # patterns anchor to the fixed label at the START of body: a git
+            # config value or path can contain "workspace file: ", so an
+            # unanchored match derives an attacker-chosen id in the wrong
+            # namespace, and approving it baselines an id that never matches
+            # while counting the real finding as acknowledged. The id is then
+            # recovered with `${body#LABEL}`, never `${body##*: }` - the
+            # latter strips to the LAST ": ", and a path can contain one.
+            # A body matching no arm (currently only CROSS-PROJECT) gets no
+            # id: shown, but not offered a/s.
             #
-            # Two forms come out of this, because the two consumers need
-            # different ones (see enc_id): $id is the ENCODED id exactly as
-            # the report carries it, and is what gets written to the
-            # baseline file, which stores that form. $rid is the same id
-            # decoded back to the raw bytes on disk, for current_sha_for_id
-            # to stat and hash and for id_severity to classify. Only the
-            # id-bearing portion is decoded - never the namespace prefix
-            # this code adds itself.
-            #
-            # $lbl and $surface are for DISPLAY only: the fixed label this
-            # arm matched, and the workspace-named thing inside the body that
-            # the finding is about. Splitting them is what lets the surface
-            # be coloured without colouring the audit's own words around it,
-            # and they are recomputed here rather than derived from $id
-            # because a gitconfig body carries `key=value` while its id is
-            # the key alone.
+            # $id is the ENCODED form the report and baseline file carry;
+            # $rid is it decoded, for current_sha_for_id to stat and hash and
+            # id_severity to classify. Only the id-bearing portion decodes,
+            # never the namespace prefix added here. $lbl and $surface are
+            # display-only, split so the surface can be coloured without the
+            # audit's own words around it, and recomputed rather than derived
+            # from $id because a gitconfig body carries `key=value` while its
+            # id is the key alone.
             ackable=0; id=""; rid=""; lbl=""; surface=""
             case "$body" in
                 "HOST-CODE-EXECUTION workspace file: "*)

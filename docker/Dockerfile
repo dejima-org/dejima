@@ -77,19 +77,15 @@ ENV DEJIMA=1
 # this user, so it doesn't need to own anything itself.
 RUN useradd -r -s /usr/sbin/nologin ulogd
 
-# Every fetch from here down retries, and none is single-shot. What matters
-# isn't the odds of a particular download failing, it's the odds of any of
-# them failing - and without retries a single blip anywhere throws away the
-# whole build.
+# Every fetch from here down retries. What matters is not the odds of one
+# download failing but of ANY of them failing, and without retries a single
+# blip discards the whole build.
 #
-# These steps deliberately sit *above* the SANDBOX_* ARGs, not below. Nothing
-# between here and `USER` needs the sandbox user to exist yet - they all
-# install system-wide as root - so keeping them ahead of the ARGs means a
-# build that overrides one (test/runtime.bats does, and so does any host
-# whose uid isn't 1000) still reuses every layer down to this point instead
-# of re-running all of it. That single ordering was most of the cost of the
-# override rebuild: it was 1169s of a 1379s test run, for a difference that
-# amounts to one useradd.
+# These steps sit ABOVE the SANDBOX_* ARGs on purpose: nothing here needs the
+# sandbox user, so a build overriding a uid (runtime.bats, and any host not
+# on 1000) still reuses every layer to this point. That ordering alone was
+# most of the cost of an override rebuild, for a difference amounting to one
+# useradd.
 # gosu lets entrypoint.sh (root) drop to the node user for the actual
 # session after setting up the firewall, without leaving any setuid/sudo
 # escalation path available to node afterward. Verified against the
@@ -259,16 +255,12 @@ RUN npm install -g tree-sitter-cli@0.24.7
 # matching Chromium build into node's own cache, both at build time so a
 # session never needs network access for either.
 #
-# Chromium's own internal process sandbox is questionable here: it launches
-# without --no-sandbox and without error, but its setuid sandbox helper
-# (chrome_sandbox) isn't actually setuid-root in this image, and this host
-# has the same unprivileged-userns restriction that broke bubblewrap - so
-# its namespace-based isolation almost certainly isn't active either, it's
-# just not hard-failing the way bubblewrap did. Not treated as a real
-# security boundary either way: this container is already the boundary that
-# matters, and a compromised session already has full `node`-level bash
-# access, which a Chromium exploit couldn't exceed regardless of whichever
-# of its own internal sandbox layers happen to be active.
+# Chromium's own process sandbox is probably not active here: it launches
+# without error, but chrome_sandbox is not setuid-root in this image and the
+# unprivileged-userns restriction that broke bubblewrap applies, so it just
+# fails softer than bubblewrap did. Not treated as a boundary either way -
+# the container is the boundary, and a session already has node-level shell
+# access that a Chromium exploit could not exceed.
 RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
   npx playwright install chromium
 

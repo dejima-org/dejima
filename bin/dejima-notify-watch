@@ -7,30 +7,24 @@
 #   (no argument)  watch until killed - what the systemd unit runs
 #   --once         one scan, then exit
 #
-# This script is the trust boundary. Everything under the marker root is
-# written by a sandboxed session that may be compromised, and the device it
-# ultimately reaches - the operator's phone - is outside the sandbox. The
-# in-container hook's own enum constrains nothing here: a session owns the
-# contents of its bind-mounted marker directory and can create any name it
-# likes in it, hook or no hook. The guarantee rests entirely on this file:
+# This script is the trust boundary: a possibly-compromised session writes
+# the markers, and the phone they reach is outside the sandbox. The
+# in-container hook's enum constrains nothing here - a session owns its
+# marker directory and can create any name it likes. The guarantee is here:
 #
-#   - the marker NAME is the only thing consulted, and only by iterating a
-#     literal enum, so a name outside it is never stat'd, read, or removed
-#   - marker CONTENT is never read, so there is nothing to inject
-#   - names are never interpolated into a command
-#   - `rm -f` unlinks a symlink instead of following it, so a marker aimed at
-#     a host file removes the link and leaves the file alone
+#   - only the marker NAME is consulted, by iterating a literal enum, so a
+#     name outside it is never stat'd, read, or removed
+#   - marker CONTENT is never read, and names never reach a command
+#   - `rm -f` unlinks a symlink rather than following it
 #   - the click URL and every ntfy header are composed from host-side data
 #
-# That last point is what the enum is really for. ntfy's own headers include
-# X-Actions (which can make the phone issue an arbitrary HTTP request or fire
-# an Android intent), X-Attach and X-Icon (which fetch URLs), X-Email and
-# X-Call. A single attacker-controlled header here would turn the phone into
-# a confused deputy inside the operator's network.
+# The last point is what the enum is for: ntfy's X-Actions can make the phone
+# issue an HTTP request or fire an Android intent, X-Attach and X-Icon fetch
+# URLs. One attacker-controlled header makes the phone a confused deputy
+# inside the operator's network.
 #
-# One scan covers every run directory, so nothing a single session can do to
-# its own markers may abort it: that would let one compromised sandbox silence
-# every other session's notifications.
+# One scan covers every run directory, so nothing a session does to its own
+# markers can abort it and silence every other session's notifications.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

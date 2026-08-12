@@ -329,28 +329,17 @@ manifest_get() {
 # directory whose manifest declares its own keys, not editing core.
 # ---------------------------------------------------------------------------
 
-# config_validate re-parses the WHOLE config file on every config_get call
-# (see its own comment - "on the order of thirty reads" per launch), and each
-# pass through a [forge.<name>]/[harness.<name>] line calls back into here.
-# Going through manifest_get/manifest_validate here would mean thirty-odd
-# full-manifest validations (every field, not just `keys`) for every key in
-# those sections - so this reads and validates only the `keys` field itself,
-# a plain line-scan plus the one type check _provider_valid_value already
-# does for it, skipping fields (pr_command, capabilities, env_export, ...)
-# that this lookup never uses. The manifest's OTHER fields still get their
-# full manifest_validate elsewhere before anything consequential reads them
-# (provider_validate_selection, forge_hosts, forge_env_exports,
-# briefing_compose) - this function only ever feeds a config schema type
-# check, never a forge action.
+# config_validate re-parses the whole config on every config_get (~thirty per
+# launch), and each [forge.<name>] line calls back here. Going through
+# manifest_validate would mean that many full-manifest validations, so this
+# line-scans the `keys` field alone. Every other field still gets a full
+# manifest_validate before anything consequential reads it - this feeds a
+# config schema type check, never a forge action.
 #
-# Cached per axis+name for the rest of THIS command substitution: a
-# manifest cannot change mid-launch, so re-deriving it for every key in the
-# same section within one config_validate pass is pure waste. The cache
-# itself does not survive past this subshell (bash forks a new one per
-# config_get call), so it only dedupes the N keys of one section against
-# each other, not across a launch's ~thirty reads - a cheap, safe partial
-# win rather than a cross-process cache this file has no story for
-# invalidating.
+# Cached per axis+name for this command substitution only. bash forks a new
+# subshell per config_get, so it dedupes the keys of one section against each
+# other rather than across a launch: a cheap partial win, not a cross-process
+# cache this file has no way to invalidate.
 declare -gA _PROVIDER_KEYS_CACHE
 _provider_keys_cached() {
     local axis="$1" name="$2" cache_key="$axis:$name"
@@ -726,6 +715,14 @@ What this means:
   .dejima/allowed-domains, so it is shared with everyone working on it
   rather than living on one machine. Quote that --container value exactly as
   written here - it is this container's real ID, not something to infer.
+  And a domain can be an action rather than a source: a deploy hook, a
+  payment or production API acts on the world the moment it is called, with
+  no diff for anyone to review afterwards. Do not ask for one of those to
+  finish a task - say what you need and let the operator decide.
+- The project directory is mounted whole, so it can hold things that are not
+  code: a .env, a database dump, a key someone left in the tree. Say so if
+  you find one, and do not open, copy or send it anywhere unless the task
+  actually requires it.
 - Stay within the task you were given. Since there are no permission
   prompts here, be more conservative than usual about anything destructive,
   irreversible, or outside the project directory.
@@ -758,6 +755,25 @@ _briefing_core_worktree() {
   beyond a stray `user.name`: `core.hooksPath`, `credential.helper` and
   `!`-aliases all execute on the host, and the same unscoped command
   reaches them.
+BRIEFING_EOF
+}
+
+# Only when GitHub is a push destination this session. The default is off for
+# a reason the agent cannot infer from having the ability: docs/security.md,
+# "GitHub push". An agent that finds a real bug in a dependency and helpfully
+# opens a pull request on it has not made a mistake about permissions - it
+# has done something the operator was supposed to decide, and added to a queue
+# maintainers are already drowning in. Saying so here is cheaper than
+# discovering it afterwards, and the flag is exactly when it becomes possible.
+_briefing_core_github_push() {
+    cat <<'BRIEFING_EOF'
+- GitHub push is enabled for this session, for the repository you were
+  pointed at and nothing else. Do NOT push a branch, open a pull request, or
+  file an issue on any other project, however good the change would be. An
+  unsolicited pull request is a cost imposed on maintainers who did not ask
+  for it, not a contribution, and it arrives under the operator's name. If
+  you find a real bug somewhere else, say so in your reply and let them
+  decide what to do about it.
 BRIEFING_EOF
 }
 
@@ -1021,6 +1037,10 @@ briefing_compose() {
     text+=$'\n\n'
     text+="$workflow_frag"
     text+=$'\n\n'
+    if [ "${DEJIMA_GITHUB_PUSH:-off}" = "on" ]; then
+        text+="$(_briefing_core_github_push)"
+        text+=$'\n\n'
+    fi
     text+="$(_briefing_core_closing_a)"
     text+=$'\n\n'
     text+="$harness_frag"

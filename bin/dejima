@@ -229,28 +229,18 @@ if ! config_exists; then
     exit 1
 fi
 
-# A selected forge's env_export can name a variable core also fills from its
-# own config. Today that is GH_TOKEN, which core sets from the read-only
-# credential at [github] token_file - one every session gets regardless of
-# which forge is selected - and which a forge exporting the same name takes over
-# for the launch, since a single variable can only carry one token. Said out
-# loud rather than left as two configured credentials with one silently
-# ignored: an operator who set both is entitled to know which is in effect. A
-# warning, not a refusal - the forge's value winning is exactly what
-# selecting that forge asked for.
+# A forge's env_export can name a variable core also fills - today GH_TOKEN,
+# which core sets from [github] token_file for every session regardless of
+# forge. One variable carries one token, so the forge's wins. Warned rather
+# than left silent: an operator who configured both is entitled to know which
+# is in effect. Not a refusal, since the forge winning is what selecting it
+# asked for.
 #
-# Driven off the manifest's env_export rather than off the forge's name: the
-# collision is a property of the variable a forge exports, identical for any
-# forge that exports it, and core has no business knowing which forge that is
-# today. Checked here, ahead of --print-config's own exit below (like
-# _warn_legacy_env above it) rather than down by the GH_TOKEN block further
-# down that --print-config never reaches, so --print-config reports it too.
-#
-# Both files, not just core's: a forge key resolving to nothing is the
-# "wholly unconfigured" case forge_env_exports deliberately emits no pair for
-# (see its own comment), leaving core's own value in effect - so claiming the
-# forge's key won would be false in exactly that state. The warning only
-# means something once both are actually set.
+# Driven off env_export rather than the forge's name - the collision belongs
+# to the variable, not to any particular forge. Checked here, ahead of
+# --print-config's exit, so that reports it too. Both values must actually be
+# set: a forge key resolving to nothing leaves core's in effect, and claiming
+# the forge won would be false.
 _warn_forge_env_collisions() {
     local forge="$1" pair name ref core core_name core_section core_leaf
     local core_file forge_file
@@ -307,6 +297,21 @@ DEJIMA_FORGE_NAME="$(config_get core forge)"
 DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+# Whether GitHub is a push destination this session, which the briefing tells
+# the agent about. Two ways in: the per-launch flag, or a forge whose hosts
+# core allowlists (github) under a workflow that pushes. Derived from the
+# manifests directly rather than from DEJIMA_WORKFLOW_PUSH, which is resolved
+# further down - this has to be settled before --print-briefing exits, or that
+# would render a briefing a real launch does not.
+DEJIMA_GITHUB_PUSH=off
+if [ "$ALLOW_GITHUB_PUSH_FLAG" = 1 ]; then
+    DEJIMA_GITHUB_PUSH=on
+elif [ "$(manifest_get forge "$DEJIMA_FORGE_NAME" hosts_allowlisted_by_core)" = "on" ] \
+     && [ "$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)" = "on" ]; then
+    DEJIMA_GITHUB_PUSH=on
+fi
+export DEJIMA_GITHUB_PUSH
 
 # Resolved here, ahead of --print-briefing below, because briefing_compose
 # needs DEJIMA_RW_MOUNTS (the {{writable_mounts}} placeholder) to render the
@@ -681,47 +686,29 @@ if ! settings_error="$(jq . "$HOME/.claude/settings.json" 2>&1 >/dev/null)"; the
     exit 1
 fi
 
-# Claude Code's own internal per-command sandboxing (~/.claude/settings.json's
-# "sandbox" block) is redundant here - it can't even function inside this
-# container (bwrap can't create a namespace, and getting it to would need
-# privilege escalation approaching --privileged, undoing this container's own
-# hardening), and this container is already a real, working sandbox on its
-# own. A session can't be trusted to turn it off itself, so the override is
-# generated here, on the host, and reaches Claude Code as an extra settings
-# layer: docker-compose.yml mounts this file read-only at a container-local
-# path and claude-wrapper.sh passes it as --settings, which loads above
-# ~/.claude/settings.json in the precedence order. Everything else in the
-# operator's real settings (hooks, permissions, plugins) still applies from
-# there, so this file holds only what the sandbox overrides.
+# Claude Code's own per-command sandboxing is redundant here and cannot work
+# anyway - bwrap can't create a namespace without privileges that would undo
+# this container's hardening - and a session can't be trusted to turn it off
+# itself. So the override is generated host-side and reaches Claude Code as
+# an extra --settings layer above ~/.claude/settings.json, which holds only
+# what the sandbox overrides; the operator's hooks, permissions and plugins
+# still apply from there.
 #
-# The earlier arrangement - a full modified copy of the operator's settings,
-# mounted over ~/.claude/settings.json - detached itself whenever the host
-# rewrote the real file, because that mount point sits inside the read-write
-# ~/.claude mount and a rename unlinks the dentry the mount is pinned to. The
-# session then silently fell back to the operator's settings, with sandboxing
-# back on and the notify hooks below gone. Mounting outside ~/.claude removes
-# that: nothing on the host can rename over a container-local path. See #47.
+# It is mounted at a container-local path, not over ~/.claude/settings.json.
+# That earlier arrangement detached whenever the host rewrote the real file
+# (a rename unlinks the dentry the mount is pinned to), silently restoring
+# the operator's settings with sandboxing back on. See #47.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
 jq -n '{sandbox: {enabled: false}}' > "$SANDBOX_SETTINGS_FILE"
 
-# ~/.claude.json mixes live app state (project registry, usage stats,
-# caches) with config (mcpServers) that can't be split at the mount level -
-# unlike settings.json above, it can't just be made read-only either:
-# Claude Code does an atomic write-temp-then-rename against this exact file
-# during normal startup (before login even completes), and a read-only
-# file makes that hang instead of failing cleanly (confirmed against a
-# real read-only copy of this file - see
-# https://github.com/anthropics/claude-code/issues/29162). Generate a
-# throwaway copy instead, seeded from the real file, and mount *that*
-# read-write in its place - same "generate a sandbox-specific file on the
-# host" pattern as SANDBOX_SETTINGS_FILE above, just solving a different
-# problem: nothing a compromised session writes here (mcpServers or
-# anything else) ever reaches the real file, since the copy is discarded,
-# not merged back, when this session ends. This also means concurrent
-# sandbox sessions never contend over the same file - each gets its own
-# copy. See docs/configuration.md "Config parity with your host Claude Code
-# setup" for exactly what that means
-# doesn't carry over from a sandboxed session.
+# ~/.claude.json mixes live app state with config (mcpServers) that cannot be
+# split at the mount level, and read-only is not an option: Claude Code does
+# an atomic write-and-rename against it during startup, and a read-only file
+# makes that HANG rather than fail cleanly (anthropics/claude-code#29162).
+# So it gets a throwaway copy, seeded from the real file and discarded rather
+# than merged back - nothing a session writes here reaches the host, and
+# concurrent sessions never contend. See docs/configuration.md, "Config
+# parity with your host Claude Code setup".
 SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then
     cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
@@ -1051,24 +1038,14 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
-# ~/.claude/projects, one slug at a time rather than the whole tree.
-#
-# The tree holds every project's transcripts and agent memory. Memory is
-# loaded into context at session start, so a write into another project's
-# slug is text a future session there reads as established background - and
-# the mount alone was enough for that, no escape and no credential (#104).
-# Mounting per slug leaves the others absent rather than present-but-
-# unwritable, which is the state Claude Code already handles on a first run.
-#
-# The directory itself stays container-local, so a slug that is not mounted
-# is still writable during the session and simply does not survive it. That
-# is what lets Claude Code create a slug it does not find, which it does
-# whenever a session runs against a path with no history yet.
-#
-# Only slugs that already exist on the host are mounted, apart from the
-# workspace's own. A checkout with forty worktrees would otherwise have forty
-# empty directories created under ~/.claude/projects on its first launch, all
-# of them litter for the worktrees no session has ever run in.
+# ~/.claude/projects, one slug at a time: the tree is every project's
+# transcripts and memory, and memory is loaded into context at session start,
+# so a write into another slug is background a future session there believes
+# (#104). projects/ itself stays container-local, so an unmounted slug is
+# still writable and just does not survive - which is how Claude Code creates
+# a slug it does not find. Existing slugs only, apart from the workspace's
+# own, so a checkout full of worktrees does not litter the host with empty
+# directories for worktrees nothing has run in.
 mkdir -p "$HOME/.claude/projects/$(ws_slug "$WORKSPACE_DIR")"
 while IFS= read -r _slug; do
     [ -n "$_slug" ] || continue
@@ -1076,23 +1053,13 @@ while IFS= read -r _slug; do
     extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")
 done < <(workspace_slugs_sorted "$WORKSPACE_DIR")
 
-# ~/.claude/file-history, one session at a time, for the same reason and with
-# the same shape.
-#
-# It holds verbatim copies of edited files - `<session>/<hash>@v1` is the file
-# as it was - so the whole tree is every project's source, not a record of it.
-# On the host this was developed on that was 47M across ten checkouts, all of
-# it readable by any session, and writable too: tampering with another
-# project's undo record puts chosen content into a later restore there.
-#
-# Keyed by session id rather than by project, so there is no slug in these
-# paths to scope by. workspace_session_ids resolves it through the transcript
-# names, which do carry the slug.
-#
-# The session about to start gets an id nothing can know yet, so its own
-# directory is created container-local and does not survive the run. What
-# that costs is undo history for this session if it is later resumed on the
-# host; what it buys is that the other 39 directories are not there at all.
+# ~/.claude/file-history, same shape, sharper reason: `<session>/<hash>@v1`
+# is a verbatim copy of an edited file, so the tree is other projects' source
+# rather than a record of it, and it was writable - tampering there puts
+# chosen content into a later restore. Keyed by session id, so there is no
+# slug to match on; workspace_session_ids resolves it through the transcript
+# names. The starting session's id cannot be known yet, so its directory is
+# container-local: undo history for it is lost if it is resumed on the host.
 mkdir -p "$HOME/.claude/file-history"
 while IFS= read -r _sid; do
     [ -n "$_sid" ] || continue
@@ -1100,36 +1067,21 @@ while IFS= read -r _sid; do
     extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")
 done < <(workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR")
 
-# ~/.claude/statusline.sh is the same class of file as the config staged at
-# /etc/dejima-claude by docker-compose.yml: settings.json's statusLine.command
-# points at it, and Claude Code executes it on the host. Staged the same way,
-# for entrypoint.sh to copy into place, rather than mounted at its real path.
+# statusline.sh is executed on the host by Claude Code (settings.json's
+# statusLine.command), so it is staged for entrypoint.sh to copy rather than
+# mounted at its real path - same as the config in docker-compose.yml.
 #
-# It used to be mounted read-only at $HOME/.claude/statusline.sh, and that
-# protected only the plain-regular-file case - confirmed against a live
-# container, not just reasoned about. When statusline.sh was itself a symlink
-# (the common case - typically into a dotfiles checkout), the read-write
-# ~/.claude mount was established first, so the destination already had that
-# symlink sitting on it, and bind-mount destination resolution (runc's
-# SecureJoin) followed it: the :ro mount landed on the target directory
-# instead of the symlink dentry, which stayed writable and replaceable. There
-# was no mount-based fix while ~/.claude was mounted whole, and the
-# compensating control was detection after the fact (bin/dejima-audit hashes
-# the symlink's target string). Staging closes it outright: Docker resolves
-# the symlink when it sets up the staging mount, so entrypoint.sh copies the
-# real content to a path nothing on the host can reach.
+# A :ro mount there protected only the plain-file case, confirmed against a
+# live container. When statusline.sh is itself a symlink (the common case),
+# bind-mount destination resolution follows it, so the mount lands on the
+# target and the link stays replaceable. Staging closes that: Docker resolves
+# the symlink setting up the staging mount, and the copy lands where the host
+# cannot reach it.
 #
-# Conditional on existence because not every host has one, and mounting a
-# nonexistent source would make Docker create a root-owned directory at the
-# target instead - worse than the gap this closes.
-#
-# A *dangling* symlink (target doesn't exist, e.g. a dotfiles checkout that
-# isn't present) is neither "exists" nor safely mountable, so it gets its own
-# branch that refuses to launch rather than either silently skipping the
-# mount (reopens the gap plain -e had) or attempting it anyway (Docker can't
-# bind-mount a dangling symlink - it fails deep in mount setup with an opaque
-# "mkdir ...: file exists", since the symlink already occupies that path,
-# with nothing connecting that error back to the statusline for the user).
+# Conditional on existence - mounting a missing source makes Docker create a
+# root-owned directory at the target. A dangling symlink is neither
+# mountable nor "exists", so it refuses rather than skipping the mount
+# (reopening the gap) or failing later with an opaque "mkdir: file exists".
 if [ -L "$HOME/.claude/statusline.sh" ] && [ ! -e "$HOME/.claude/statusline.sh" ]; then
     echo "$HOME/.claude/statusline.sh is a symlink to a target that doesn't" >&2
     echo "exist. Docker can't bind-mount a dangling symlink, and skipping the" >&2
@@ -1140,16 +1092,12 @@ elif [ -e "$HOME/.claude/statusline.sh" ]; then
     extra_mounts+=(-v "$HOME/.claude/statusline.sh:/etc/dejima-claude/statusline.sh:ro")
 fi
 
-# Keep the real Anthropic OAuth credential out of the container entirely:
-# run a host-side proxy that injects it per-request (see
-# bin/dejima-anthropic-proxy and docs/security.md). Nothing needs masking
-# any more - ~/.claude isn't mounted as a whole, so the real credential (and
-# the proxy's .credentials-proxy-tmp staging directory beside it) simply
-# never crosses into the container. That masking is what #50 was: both masks
-# were single-file/-directory mounts nested in the read-write ~/.claude
-# mount, and the proxy's own write-back renamed the credential out from
-# under them, detaching the mask and exposing the real token from the first
-# refresh on.
+# The real Anthropic OAuth credential never enters the container: a host-side
+# proxy injects it per request (bin/dejima-anthropic-proxy, docs/security.md).
+# Nothing needs masking now that ~/.claude isn't mounted whole - and masking
+# is what #50 was, a single-file mount nested in the read-write ~/.claude
+# that the proxy's own write-back renamed out from under, exposing the real
+# token on the first refresh.
 #
 # How the container then reaches the proxy depends on the transport. In the
 # default tls one, entrypoint.sh points api.anthropic.com at an in-container

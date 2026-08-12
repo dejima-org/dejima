@@ -29,42 +29,31 @@ IMAGE=dejima:latest
 container_name() { echo "dejima-test-$(basename "$BATS_FILE_TMPDIR")"; }
 network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
 
-# Every container this file starts must go on network_name(), never the
-# default bridge: dns-proxy.sh forwards allowlisted names to Docker's
-# embedded resolver at 127.0.0.11, which only exists on a user-defined
-# network (compose gives the real sandbox one). On the default bridge the
-# container gets the host's nameservers instead, dnsmasq has nowhere to
-# forward, and startup dies in dns-proxy.sh - see its own check for this.
+# Every container here must go on network_name(), never the default bridge:
+# dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
+# only exists on a user-defined network. On the default bridge dnsmasq has
+# nowhere to forward and startup dies in dns-proxy.sh.
 #
-# Readiness is the *final* `sleep infinity` (entrypoint.sh's
-# SANDBOX_TEST_MODE exec), matched exactly. A bare `pgrep -x sleep` also
-# matches the short-lived sleeps of the startup sequence itself
-# (dns-proxy.sh's dig-retry loop, entrypoint.sh's forwarder-bind wait), and
-# a test that proceeds on one of those asserts against a container whose
-# firewall hasn't been installed yet - which silently turns egress
-# assertions into vacuous passes, since everything is still reachable at
-# that point. Waiting for `sleep infinity` means the whole startup sequence
-# (DNS proxy, firewall, ipsets, logging, forwarder bind) has completed.
+# Readiness is the FINAL `sleep infinity` (entrypoint.sh's SANDBOX_TEST_MODE
+# exec), matched exactly. A bare `pgrep -x sleep` also matches the startup
+# sequence's own short sleeps, and proceeding on one of those asserts against
+# a container with no firewall yet - turning egress assertions into vacuous
+# passes, since everything is still reachable.
 #
-# 120 rather than 60: init-firewall.sh's GitHub ranges fetch now retries, and a
-# run that loses two attempts before succeeding spends ~26s of the budget on
-# that call alone (#59) - which on a runner that has just spent three minutes
-# unpacking an image is enough to turn a recovery into a spurious failure. A
-# longer budget only delays reporting a genuinely stuck startup; it cannot hide
-# one, since nothing here passes on a timeout.
-# `docker wait` returns the moment the container exits, but the json-file log
-# driver writes asynchronously - so reading the log right then can return one
-# that stops mid-stream, with everything after some flush boundary missing.
+# 120s rather than 60: the GitHub ranges fetch retries, and losing two
+# attempts costs ~26s (#59), which on a runner that just spent minutes
+# unpacking an image turns a recovery into a spurious failure. A longer
+# budget only delays reporting a stuck startup; nothing here passes on a
+# timeout.
+# `docker wait` returns on exit, but the json-file log driver writes
+# asynchronously, so reading right then can return a log that stops
+# mid-stream. That presented as a container "aborting" partway through
+# init-firewall.sh's domain loop at a different domain each run, and survived
+# three fixes before the giveaway: no message from an ERR trap that cannot be
+# bypassed. Nothing had aborted; the read was short.
 #
-# That is not hypothetical. It presented as a container "aborting" partway
-# through init-firewall.sh's domain loop, at a slightly different domain each
-# run, and survived three separate fixes to that loop before the giveaway: the
-# log ended with no message from an ERR trap that cannot be bypassed and no
-# output from a retry that prints on every path. Nothing had aborted. The read
-# was short.
-#
-# Two identical consecutive reads means the driver has caught up. Deliberately
-# content-neutral - waiting for an expected string would make the wait pass or
+# Two identical consecutive reads means the driver has caught up.
+# Content-neutral on purpose - waiting for an expected string would pass or
 # fail on the very thing the caller is about to assert.
 settled_logs() {
     local container="$1" current previous=""

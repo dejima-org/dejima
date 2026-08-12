@@ -111,44 +111,24 @@ services:
       # (based on cwd) lines up with the host, letting a session started
       # here be resumed on the host with `claude --resume`.
       - ${WORKSPACE_DIR:?set WORKSPACE_DIR to the project directory to mount}:${WORKSPACE_DIR}
-      # ~/.claude is deliberately not mounted as a whole. It used to be,
-      # read-write, with the config inside it layered back read-only on top.
-      # Every one of those overlays was a mount point nested in a
-      # host-writable mount, and a single-file bind mount is pinned to the
-      # dentry at that path: a host-side rename of the underlying file - a
-      # sync daemon, or Claude Code's own atomic writes - unlinks it, the
-      # mount silently detaches, and the path falls through to the real,
-      # writable host file (#47, #48). The same thing happened to the mask
-      # over .credentials.json, handing the sandbox the operator's real
-      # OAuth token on the first refresh (#50).
+      # ~/.claude is enumerated, never mounted whole. A single-file bind
+      # mount is pinned to the dentry at its path, so a host-side rename -
+      # a sync daemon, or Claude Code's own atomic writes - unlinks it, the
+      # mount detaches silently, and the path falls through to the real
+      # writable host file (#47, #48; #50 did exactly that to the
+      # .credentials.json mask). Anything not listed here is
+      # container-local, which is the safer default but means new state that
+      # should persist has to be added deliberately.
       #
-      # So the contents are enumerated instead. Anything not listed below is
-      # container-local: writable during the session, gone with the
-      # container. That is the safer default - a config file a future Claude
-      # Code version adds simply doesn't persist, instead of sitting
-      # unprotected on a writable mount - but it does mean new state that
-      # *should* persist has to be added here deliberately.
+      # Read-write below, and all directories: a directory mount can't
+      # detach that way, because a rename replaces an entry within it rather
+      # than the mount point itself.
       #
-      # Runtime state that has to survive the session, read-write. All
-      # directories, which is what makes them safe: a directory bind mount
-      # can't detach the way a file one does, because a rename replaces an
-      # entry *within* the mounted directory rather than the mount point.
-      # projects/ is deliberately absent here. It holds every project's
-      # transcripts and agent memory, and mounting the tree gave a session
-      # write access to all of it - enough on its own to plant text a future
-      # session in another project reads as established background (#104).
-      # bin/dejima mounts the launching workspace's own slug and its live
-      # worktree children instead, one -v each, so the rest are absent rather
-      # than merely unwritable. The directory holding them stays
-      # container-local, which is what lets Claude Code create a slug it does
-      # not find. See bin/dejima-slug-lib.sh for which slugs those are and
-      # why the set comes from real worktree paths.
-      # file-history/ is absent here for the same reason as projects/, and a
-      # sharper one: each `<session>/<hash>@v1` is a verbatim copy of an
-      # edited file, so the tree is every project's source rather than a
-      # record about it. bin/dejima mounts the sessions belonging to this
-      # workspace, one -v each, resolved through the transcript names since
-      # these paths are keyed by session id and carry no slug of their own.
+      # projects/ and file-history/ are absent on purpose - the trees are
+      # every project's memory and every project's file contents, and a
+      # write into either reaches sessions elsewhere (#104). bin/dejima
+      # mounts this workspace's own entries, one -v each; see
+      # bin/dejima-slug-lib.sh for how that set is chosen.
       - ${HOME}/.claude/backups:${HOME}/.claude/backups
       - ${HOME}/.claude/tasks:${HOME}/.claude/tasks
       - ${HOME}/.claude/plans:${HOME}/.claude/plans

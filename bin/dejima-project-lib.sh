@@ -115,24 +115,20 @@ read_declared() {
 # Shared argument parsing for dejima-allow and dejima-dep, so the two CLIs
 # cannot drift on what --project means.
 #
-# The hard part is that --project's path is OPTIONAL, which makes
-# `--project X` ambiguous on its own: X could be the path, or the required
-# positional. Deciding by "is X the last token" is wrong for `dejima-dep list
-# --project ~/p`, which has no trailing positional to protect and would
-# silently resolve to the current directory instead - the scope quietly
-# becoming one the caller did not name. So the decision is made against how
-# many positionals the command actually requires after the flag:
+# --project's path is OPTIONAL, so `--project X` is ambiguous: X could be the
+# path or the required positional. Deciding by "is X the last token" breaks
+# `dejima-dep list --project ~/p`, which has no trailing positional and would
+# silently scope to the current directory instead. So:
 #
-#   --project takes the next token as its path only if doing so still leaves
-#   the command its required trailing positional(s).
+#   --project takes the next token as its path only if that still leaves the
+#   command its required trailing positional(s).
 #
-# Required counts are per-command constants declared by the caller, not
-# inferred here.
+# Required counts are per-command constants the caller declares.
 #
-# Sets dj_global, dj_project, dj_project_set, dj_container and the
-# dj_positional array. dj_project_set exists because "--project with no path"
-# (the current directory) and "no --project at all" are different scopes and
-# an empty dj_project cannot tell them apart.
+# Sets dj_global, dj_project, dj_project_set, dj_container and dj_positional.
+# dj_project_set exists because "--project with no path" (the current
+# directory) and "no --project at all" are different scopes that an empty
+# dj_project cannot distinguish.
 parse_scope_args() {
     local required="$1"; shift
     local -a args=("$@")
@@ -336,34 +332,26 @@ declare_entry() {
     local project="$1" kind="$2" entry="$3" validator
     validator="$(_approved_validator "$kind")" || return 1
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
-    # This is the one write in this file that lands on the session-writable
-    # bind mount, so it is the one that must not follow a symlink. A
-    # compromised session can plant one and then ask the user - through the
-    # startup briefing, which tells it to hand over exactly this command - to
-    # run the CLI that trips it. Following it would aim a host-privileged
-    # append anywhere the user can write: at ~/.config/dejima/allowed-domains,
-    # silently turning a project approval into a global one; at
-    # ~/.config/dejima/dependencies, where the entry is installed as root at
-    # image build, on the one code path with no egress firewall in front of it;
-    # or at any host file at all.
+    # The one write here that lands on the session-writable bind mount, so
+    # the one that must not follow a symlink. A session can plant one and
+    # then ask the user - via the briefing, which hands over exactly this
+    # command - to run the CLI that trips it, aiming a host-privileged
+    # append at ~/.config/dejima/allowed-domains (project approval becomes
+    # global) or dependencies (installed as root at image build, the one
+    # path with no firewall in front of it).
     #
-    # A test would not be enough. The briefing tells the agent to have the user
-    # run `dejima-allow --project` from a terminal outside the sandbox, so the
-    # session is normally still LIVE while this runs - and since it is the one
-    # asking for the command, it picks the moment and can spin a rename loop
-    # across any window between a check and the write. So there is no check:
-    # the guard is the open itself. O_NOFOLLOW makes a symlink at either path
-    # fail the open outright, the directory is opened O_DIRECTORY and the file
-    # is opened relative to that fd, so neither can be swapped for the other's
-    # sake afterwards, and the whole read-then-append happens through that one
-    # fd. A session that wins the swap gets an open of the object it replaced,
-    # not a redirected write.
+    # Checking first is not enough: the session is normally still live when
+    # the user runs this, and it chose the moment, so it can spin a rename
+    # loop across any check-to-write window. The guard is the open itself.
+    # O_NOFOLLOW fails outright on a symlink, the directory is opened
+    # O_DIRECTORY and the file relative to that fd, and the whole
+    # read-then-append goes through it - so winning the swap gets an open of
+    # the replaced object, not a redirected write.
     #
-    # bash cannot open a path that way, so this is python3 - a hard dependency
-    # already (install.sh refuses to install without it). O_NONBLOCK and the
-    # S_ISREG check cover the non-symlink shapes: a FIFO planted here would
-    # otherwise block a host CLI the user was told to run for as long as the
-    # session declines to open the other end.
+    # bash cannot open a path that way, hence python3 (already a hard
+    # dependency). O_NONBLOCK and the S_ISREG check cover the non-symlink
+    # shapes: a planted FIFO would otherwise hang the host CLI for as long as
+    # the session declined to open the other end.
     python3 - "$project/.dejima" "$kind" "$entry" "$DEJIMA_MAX_DECLARED" <<'PY'
 import errno, os, stat, sys
 

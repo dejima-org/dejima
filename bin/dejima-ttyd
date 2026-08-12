@@ -5,37 +5,27 @@
 # systemd/dejima-ttyd.service.
 # See docs/remote-access.md.
 #
-# --interface 127.0.0.1 is a security requirement, not a preference.
-# docker/init-firewall.sh:187 accepts container OUTPUT to the default-route
-# address - the Docker bridge gateway, i.e. the host - and attaching tmux
-# gives a HOST shell (the prefix key opens a new window outside the
-# container). A listener on any address the container can route to would hand
-# a compromised session its own escape hatch. Loopback is not one of those
-# addresses: the container has no route to the host's 127.0.0.1. Put nginx in
-# front, bound to one specific LAN address - see
-# docs/nginx-dejima.conf.example.
+# --interface 127.0.0.1 is a requirement, not a preference. init-firewall.sh
+# accepts container OUTPUT to the bridge gateway (the host), and attaching
+# tmux gives a HOST shell - the prefix key opens a window outside the
+# container. A listener on any address the container can route to is a
+# compromised session's escape hatch; loopback is not one of them. Put nginx
+# in front, bound to one LAN address - docs/nginx-dejima.conf.example.
 #
-# ttyd is given no credential of its own, so the reverse proxy is the only
-# thing authenticating a request, and the loopback bind is what makes that
-# safe rather than careless: nothing but a process on this host can open the
-# socket at all. --writable is what makes the terminal a terminal rather than
-# a viewer.
+# ttyd carries no credential of its own, so the proxy is the only thing
+# authenticating and the loopback bind is what makes that safe. --writable
+# makes it a terminal rather than a viewer.
 #
-# --check-origin is the other half of that, and it is not optional. Without
-# it ttyd does no origin validation at all (it only calls check_host_origin
-# when the flag is set), and browsers do not apply the same-origin policy to
-# WebSockets: any page the operator's browser loads could open
-# wss://<front-door>/ws, have the browser attach its cached credential for
-# that origin, and be handed this host shell. Proxy authentication cannot
-# stop that - it is satisfied by the victim's own browser. ttyd compares the
-# Origin authority against the Host header, which is why the nginx example
-# passes Host through unchanged; the two go together.
+# --check-origin is not optional: without it ttyd does no origin validation
+# at all, and browsers do not apply same-origin to WebSockets, so any page
+# the operator loads could open wss://<front-door>/ws with the browser
+# attaching its cached credential and be handed this shell. Proxy auth cannot
+# stop that - the victim's own browser satisfies it. ttyd compares Origin
+# against Host, which is why the nginx example passes Host through unchanged.
 #
-# --url-arg lets the client pass ?arg=<run-id>, which is what the notification
-# deep link uses. It reaches dejima-attach as argv, never as a shell word, and
-# anything there that is not --list or the empty string (a bare `?arg=`, which
-# lands on the picker) has to match the run-id shape before it is used as a
-# path component or anything else.
+# --url-arg carries ?arg=<run-id> for the notification deep link. It reaches
+# dejima-attach as argv, never a shell word, and anything but --list or empty
+# must match the run-id shape before it is used as a path component.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

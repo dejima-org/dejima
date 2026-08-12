@@ -624,6 +624,47 @@ assert_remedy_forges_exist() {
     [[ "$output" != *"worktree MUST live"* ]]
 }
 
+# The default that blocks GitHub push exists to stop an eager agent pushing to
+# somebody else's project. When the operator lifts it, the agent gains the
+# ability without the reason, so the briefing supplies the reason.
+@test "the briefing warns against pushing elsewhere when GitHub push is on" {
+    DEJIMA_GITHUB_PUSH=on run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"GitHub push is enabled for this session"* ]]
+    [[ "$output" == *"pointed at and nothing else"* ]]
+    [[ "$output" == *"not a contribution"* ]]
+    # and it says what to do instead of nothing at all
+    [[ "$output" == *"say so in your reply"* ]]
+}
+
+# Two points from docs/responsible-use.md that an agent can act on, as
+# opposed to the majority which are the operator's to follow. Kept short on
+# purpose: this text is in every session's context, for every user.
+@test "the briefing names the two responsible-use points an agent can act on" {
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # a domain that acts on the world rather than serving data
+    [[ "$output" == *"action rather than a source"* ]]
+    [[ "$output" == *"let the operator decide"* ]]
+    # and things in the working tree that are not code
+    [[ "$output" == *"not"*"code"* ]]
+    [[ "$output" == *".env"* ]]
+}
+
+@test "the briefing says nothing about GitHub push when it is off" {
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"GitHub push is enabled"* ]]
+}
+
+@test "bin/dejima turns the GitHub push briefing on for both routes to it" {
+    # --allow-github-push, and forge = github under a pushing workflow.
+    grep -q 'DEJIMA_GITHUB_PUSH=on' "$REPO_ROOT/bin/dejima"
+    grep -q 'ALLOW_GITHUB_PUSH_FLAG" = 1 \]; then' "$REPO_ROOT/bin/dejima"
+    grep -q 'hosts_allowlisted_by_core" ) \?= "on"\|hosts_allowlisted_by_core)" = "on"' "$REPO_ROOT/bin/dejima"
+    grep -q 'export DEJIMA_GITHUB_PUSH' "$REPO_ROOT/bin/dejima"
+}
+
 @test "local-only pushes nothing and blocks no branches" {
     run lib manifest_validate workflow local-only
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
