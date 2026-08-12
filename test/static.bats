@@ -2086,6 +2086,22 @@ EOF
     grep -q 'dont-point-it-at-repositories-you-dont-own' "$REPO_ROOT/docs/security.md"
 }
 
+# The branch convention is only a convention - nothing refuses a pull request
+# aimed at main - so the three places an agent or a contributor looks have to
+# agree, or the one that is stale becomes the instruction someone follows.
+@test "the development-branch convention is stated where it is looked for" {
+    local f
+    for f in .dejima.md CONTRIBUTING.md docs/development.md; do
+        grep -q 'development' "$REPO_ROOT/$f" || {
+            echo "$f does not mention the development branch" >&2
+            false
+        }
+    done
+    # and the one thing that is easy to get wrong: gitea-pr's default base
+    grep -q -- '--base development' "$REPO_ROOT/.dejima.md"
+    grep -q -- '--base development' "$REPO_ROOT/docs/development.md"
+}
+
 @test "docs/ci.md says a project with no CI is exposed too" {
     grep -q 'applies to projects with no CI at all' "$REPO_ROOT/docs/ci.md"
     grep -q 'no workflows is not therefore safe' "$REPO_ROOT/docs/ci.md"
