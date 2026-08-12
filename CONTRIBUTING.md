@@ -14,6 +14,12 @@ different, **fork it and make the change in your fork**. Nothing here depends
 on an upstream maintainer accepting a patch. The fork is yours to run, and
 running it is the point.
 
+## Branches
+
+Work is opened against `development`, which merges to `main` periodically.
+`main` is what a reader should expect to be releasable; `development` is
+where it happens first.
+
 ## Expect it to move
 
 Significant change is coming in the near future. Config keys, interfaces, the

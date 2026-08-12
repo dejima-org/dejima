@@ -111,6 +111,22 @@ socket withheld from the confined job, granted to the privileged job, and
 the egress each is allowed) - see [docs/ci.md](ci.md). It skips outright
 unless `DEJIMA_CI_TIER` is set, so it has nothing to say when run locally.
 
+### Branches
+
+Pull requests target `development`, which merges to `main` periodically, so
+`main` stays releasable while work lands quickly. `gitea-pr` defaults its
+base to the repository's default branch, so pass `--base development`.
+
+CI needs no change for this: `.gitea/workflows/tests.yml` triggers on
+`pull_request_target` with no branch filter, so it already runs whatever the
+base is.
+
+Nothing *enforces* the target. `git-push-guard.sh` blocks direct pushes to
+the branches a workflow names, and that list is workflow-wide rather than
+per-project - adding `development` would impose it on every dejima user,
+most of whom have no such branch. So this is a convention with a check
+attached: read what `gitea-pr` printed.
+
 ### Running the tests
 
 ```sh
