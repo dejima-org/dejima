@@ -246,7 +246,8 @@ every key, its default, and what it is for.
 The forge integration, the push/PR workflow, and the agent harness aren't
 hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
 `harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
-`[core] harness`.
+`[core] harness`. `harness` has no default and must be set, so a later
+release cannot change which one you get.
 
 Ships today:
 

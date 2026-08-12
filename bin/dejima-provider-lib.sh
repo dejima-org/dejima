@@ -360,6 +360,10 @@ _provider_keys_cached() {
 # here is a per-line fork thirty times over.
 _provider_keys_field() {
     local axis="$1" name="$2" dir file line key value="" seen=0 type n=0
+    # An unselected axis contributes no keys - a different question from
+    # whether a selection is valid. Without this, --print-config prints
+    # "invalid harness name:" and fails at the thing it is for.
+    [ -n "$name" ] || return 1
     dir="$(provider_dir "$axis" "$name")" || return 1
     file="$dir/$(_provider_manifest_name "$axis")"
     [ -f "$file" ] || return 1

@@ -344,7 +344,7 @@ every launch:
 | workflow | `worktree-pr` | worktree → push → PR, stops at the PR |
 | workflow | `branch-push` | worktree → push, stops at the branch |
 | workflow | `local-only` | **default** - commits locally, pushes nothing |
-| harness | `claude-code` | **default**, and the only harness today |
+| harness | `claude-code` | the only harness today, and **not a default** - `[core] harness` must be set |
 
 **The shipped defaults are deliberately the non-pushing pair**
 (`forge = none`, `workflow = local-only`). A fresh install has no forge host

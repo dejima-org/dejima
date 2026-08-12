@@ -235,9 +235,9 @@ else
         printf '# dejima configuration. See README.md.\n'
         printf '# Every key below is shown at its default; uncomment to change one.\n'
         printf '#\n'
-        printf '# [core] forge and [core] workflow are the exception: they are written\n'
-        printf '# out uncommented, so this file states what it selects rather than\n'
-        printf '# inheriting whatever a future release defaults to.\n'
+        printf '# [core] harness, forge and workflow are written out uncommented, so\n'
+        printf '# this file states what it selects rather than inheriting a future\n'
+        printf '# default. harness has none at all - dejima refuses to start unset.\n'
         printf '#\n'
         printf '# Those two decide whether this sandbox pushes at all. The shipped\n'
         printf '# default is forge = none with workflow = local-only: the agent\n'
@@ -261,6 +261,7 @@ else
             case "$_key" in
                 forge.gitea.ssh_host)      _seed="${GITEA_SSH_HOST:-}" ;;
                 forge.gitea.api)           _seed="${GITEA_API:-}" ;;
+                core.harness)              _seed="claude-code" ;;
                 core.forge)                _seed="$_starter_forge" ;;
                 core.workflow)             _seed="$_starter_workflow" ;;
                 core.command)              _seed="${SANDBOX_CMD:-}" ;;

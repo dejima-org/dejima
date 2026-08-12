@@ -177,7 +177,8 @@ launch() {
     local conf
     conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
     mkdir -p "$(dirname "$conf")"
-    printf '[core]\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
+    # No default, so a config that launches must select one.
+    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \

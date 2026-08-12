@@ -296,6 +296,18 @@ fi
 DEJIMA_FORGE_NAME="$(config_get core forge)"
 DEJIMA_WORKFLOW_NAME="$(config_get core workflow)"
 DEJIMA_HARNESS_NAME="$(config_get core harness)"
+# No default: claude-code was one, and a release changing it would move an
+# operator who never chose to a different harness on upgrade.
+if [ -z "$DEJIMA_HARNESS_NAME" ]; then
+    echo "[core] harness is not set in $(config_path)." >&2
+    echo "There is no default, so a later release cannot change your choice." >&2
+    echo "" >&2
+    echo "  [core]" >&2
+    echo "  harness = claude-code" >&2
+    echo "" >&2
+    echo "Available: $(provider_list harness | tr '\n' ' ')" >&2
+    exit 1
+fi
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
 
 # Whether GitHub is a push destination this session, which the briefing tells
