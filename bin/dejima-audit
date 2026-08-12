@@ -73,6 +73,24 @@ AUDIT_KEEP="$(config_get audit keep)"
 # startup warning may well reach for `show` first, and showing them a
 # different report than the one being warned about sends them looking for a
 # finding that is not in it.
+# How many reports are waiting, and how many of those are CRITICAL. `ack`
+# walks one report at a time by design - each is a separate session's worth of
+# findings - but saying nothing about the rest is what made clearing a backlog
+# feel like the tool was stuck on one.
+# A report's stable identity: its basename without the -CRITICAL marker, which
+# `ack` removes once every CRITICAL in it has been dealt with.
+report_key() {
+    local b; b="$(basename "$1")"
+    printf '%s' "${b%-CRITICAL.txt}.txt" | sed 's/\.txt\.txt$/.txt/'
+}
+
+count_reports() {
+    local dir="$1"
+    printf '%s %s\n' \
+        "$(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l)" \
+        "$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | wc -l)"
+}
+
 select_report() {
     local dir="$1" r
     r="$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
@@ -569,6 +587,11 @@ baseline_suppresses() {
 }
 
 # Whether `ack` has already walked this report to its end. Recorded in the
+# Recorded against the report's name with any -CRITICAL suffix stripped,
+# because a report that sheds that suffix later in the same run would
+# otherwise carry a marker naming a file that no longer exists - and re-prompt
+# forever, which is the failure the marker exists to prevent.
+#
 # baseline file, alongside the approvals, as `reviewed <report-basename>`:
 # the file is already the per-workspace record of what the operator has
 # decided, already parsed line-by-line, and already tolerant of verbs it does
@@ -775,6 +798,22 @@ hash_paths() {
             fi
         done
     } | sort
+}
+
+# Whether `git status` would show a change to $2 inside repo $1. One call per
+# candidate path rather than one listing compared as a set: the candidate list
+# is what changed this session, which is small, and --porcelain on a path is
+# cheap. A path git does not know about at all (never added, and ignored)
+# prints nothing, which is exactly the invisible case.
+#
+# A repo git refuses to read (not a repository, or a dubious-ownership
+# refusal) makes this return false, so every change is reported rather than
+# silently downgraded - failing towards the noisier answer, not the quieter
+# one.
+git_shows_change() {
+    local repo="$1" path="$2" out
+    out="$(git -C "$repo" status --porcelain --untracked-files=all -- "$path" 2>/dev/null)" || return 1
+    [ -n "$out" ]
 }
 
 tcb_snapshot() {
@@ -1011,20 +1050,6 @@ render_finding() {
     return 0
 }
 
-projects_snapshot() {
-    # slug<TAB>maxmtime for each immediate subdir of PROJECTS_DIR, sorted by
-    # slug; maxmtime is 0 if the slug dir has no files.
-    local dir="$1" d slug mtime
-    [ -d "$dir" ] || return 0
-    for d in "$dir"/*/; do
-        [ -d "$d" ] || continue
-        slug="$(basename "$d")"
-        mtime="$(find "$d" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
-        mtime="${mtime%%.*}"
-        printf '%s\t%s\n' "$slug" "${mtime:-0}"
-    done | sort
-}
-
 statusline_snapshot() {
     # path<TAB>sha for $HOME/.claude/statusline.sh, or nothing if this host
     # has none - see STATUSLINE_PATH above for why this one path is
@@ -1050,7 +1075,11 @@ case "$cmd" in
         { echo "### staging $STAGE_DIR";
           echo "### gitconfig"; git_config_snapshot "$ws";
           echo "### paths";     hash_paths "$ws";
-          echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+          # Empty since the cross-project finding was retired, and kept
+          # rather than dropped: it is a range boundary for the paths section
+          # above, and removing it would make a state file written by one
+          # version unparseable by the other across an upgrade mid-session.
+          echo "### projects";
           echo "### tcb";       tcb_snapshot "$ws";
           echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$state" 2>/dev/null || true
         exit 0
@@ -1089,7 +1118,7 @@ case "$cmd" in
 
         new="$(mktemp)"; { echo "### gitconfig"; git_config_snapshot "$ws";
                            echo "### paths";     hash_paths "$ws";
-                           echo "### projects";  projects_snapshot "$PROJECTS_DIR";
+                           echo "### projects";
                            echo "### tcb";       tcb_snapshot "$ws";
                            echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
             echo "dejima audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
@@ -1180,38 +1209,55 @@ case "$cmd" in
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
-        # projects diffs: a write to another project's ~/.claude/projects
-        # slug during this session (transcript/memory-poisoning surface).
-        # "self" = the workspace's own slug or a live worktree nested under
-        # it, exactly the set bin/dejima mounts. This used to be a
-        # "$current_slug"-* glob, which also matched any sibling project whose
-        # directory name extended this one's - so on a host with `proj` and
-        # `proj-ci` side by side, writes to `proj-ci` were silently exempt.
-        self_slugs="$(workspace_slugs_sorted "$ws")"
-        while IFS= read -r line; do
-            slug="${line%%$'\t'*}"
-            if printf '%s\n' "$self_slugs" | grep -qxF -- "$slug"; then
-                continue
-            fi
-            warn+=("CROSS-PROJECT history/memory write: $(sanitize "$slug")")
-        done < <(comm -13 <(sed -n '/^### projects/,/^### tcb/p' "$state" | grep -v '^### ') \
-                          <(sed -n '/^### projects/,/^### tcb/p' "$new"   | grep -v '^### ') )
+        # There is deliberately no cross-project finding here any more. It
+        # reported a write to another project's ~/.claude/projects slug, and
+        # a session could once make one: the whole tree was mounted. Since
+        # #104 it gets its own slugs and nothing else, so the only writes this
+        # could still see are other host or dejima sessions doing their own
+        # legitimate work - and with several sessions running it reported all
+        # of them, on every report, drowning the findings that mattered.
+        #
+        # Detection that cannot observe the thing it was built for, and fires
+        # constantly on the thing it was not, is worse than no detection: it
+        # trains the operator to skim. The mount is the control now, and
+        # static.bats pins it.
 
         # tcb diffs: any change under the sandbox's own trusted computing
         # base, only populated when this session's workspace IS the
         # sandbox's own repo (see tcb_snapshot) - empty/no-op otherwise.
         # Bounded at ### statusline (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
+        # Split on whether git can see the change, because that decides
+        # whether this finding is telling the operator anything.
+        #
+        # tcb_snapshot only populates when the workspace IS dejima's own repo,
+        # so every change here is also a change to a git working tree the
+        # operator is about to read in `git status` and in the pull request.
+        # Reporting each one as a CRITICAL to acknowledge duplicated a
+        # stronger control and made ordinary development unusable.
+        #
+        # What git cannot show is the case worth keeping: a file listed in
+        # .gitignore or .git/info/exclude, or marked assume-unchanged or
+        # skip-worktree, is live code that runs on the next launch and appears
+        # nowhere in `git status`. Nothing but this hash sees it, so it stays
+        # a CRITICAL finding.
+        tcb_visible=0
         while IFS= read -r line; do
-            # Encoded on arrival, same as the path loop above.
             rline="$(dec_id "$line")"
             tid="tcb:$rline"; tsha=""; [ -e "$ws/$rline" ] && tsha="$(hash_entry "$ws/$rline")"
             baseline_suppresses "$tid" "$tsha" && continue
-            crit+=("TCB (sandbox self) modified: $line")
+            if git_shows_change "$ws" "$rline"; then
+                tcb_visible=$((tcb_visible + 1))
+                continue
+            fi
+            crit+=("TCB (sandbox self) modified, INVISIBLE to git: $line")
             finding_ids+=("$tid")
         done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
                          <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
+        if [ "$tcb_visible" -gt 0 ]; then
+            info+=("$tcb_visible change(s) under the sandbox's own bin/, hooks/, docker/, test/ - this workspace IS dejima; review them with git")
+        fi
 
         # statusline diff: ~/.claude/statusline.sh added/changed/removed/
         # repointed - see STATUSLINE_PATH above for why this gets its own
@@ -1362,15 +1408,41 @@ case "$cmd" in
         exit 0
         ;;
     show)
+        color_init 1
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         report="$(select_report "$report_dir")" \
             || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
-        # Which report, on stderr so stdout stays the report content alone:
-        # `show` no longer necessarily prints the newest one, and an operator
-        # cross-referencing the run timestamps in the startup warning needs to
-        # know which of them they are looking at.
-        echo "dejima audit: $report" >&2
-        cat "$report"
+        # Default is an index, not a dump. `cat` of one report was a wall of
+        # text that answered neither question an operator actually has - how
+        # much is waiting, and which of it still needs a decision - and it
+        # printed findings already acknowledged, so the wall did not even
+        # shrink as they worked through it.
+        if [ "${2:-}" = --full ] || [ "${3:-}" = --full ] || [ "${4:-}" = --full ]; then
+            echo "dejima audit: $report" >&2
+            cat "$report"
+            exit 0
+        fi
+        read -r n_all n_crit <<< "$(count_reports "$report_dir")"
+        printf '%s report(s) for %s' "$n_all" "$ws"
+        [ "$n_crit" -gt 0 ] && printf ', %s%s with unacknowledged CRITICAL%s' \
+            "$C_CRIT" "$n_crit" "$C_RESET"
+        printf '\n\n'
+        # Newest last, so the one `ack` will offer first is the one nearest
+        # the prompt - and mark it, since select_report prefers CRITICAL over
+        # recency and "the newest" is the wrong guess.
+        r=""; line=""; pending=""
+        while IFS= read -r r; do
+            pending=$(grep -cE '^(CRITICAL|WARNING|INFO)' "$r" 2>/dev/null || true)
+            line="$(printf '  %-44s %s finding(s)' "$(basename "$r")" "${pending:-0}")"
+            case "$r" in
+                *-CRITICAL.txt) printf '%s%s%s' "$C_CRIT" "$line" "$C_RESET" ;;
+                *)              printf '%s' "$line" ;;
+            esac
+            [ "$r" = "$report" ] && printf '   %s<- ack starts here%s' "$C_KEY" "$C_RESET"
+            printf '\n'
+        done < <(find "$report_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort)
+        printf '\n%sdejima-audit ack%s walks them; %sdejima-audit show --full%s prints one.\n' \
+            "$C_KEY" "$C_RESET" "$C_KEY" "$C_RESET"
         exit 0
         ;;
     ack)
@@ -1379,6 +1451,17 @@ case "$cmd" in
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
         report="$(select_report "$report_dir")" \
             || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        read -r n_all n_crit <<< "$(count_reports "$report_dir")"
+        if [ "$n_all" -gt 1 ]; then
+            printf '%s reports waiting' "$n_all"
+            [ "$n_crit" -gt 0 ] && printf ', %s%s with unacknowledged CRITICAL%s' \
+                "$C_CRIT" "$n_crit" "$C_RESET"
+            printf '.\n\n'
+        fi
+        # One report per pass, every report in one invocation. Walking one and
+        # exiting meant clearing a backlog took as many runs as there were
+        # reports, with nothing on screen to say another was behind it.
+        while :; do
         sc="$(sidecar_dir "$report")"
         # Removed only at the end, and only for findings actually
         # acknowledged - an abort must leave the operator exactly where they
@@ -1397,6 +1480,10 @@ case "$cmd" in
         # (or a non-path CRITICAL, which can never be "approved" - see
         # ackable below) must keep its suffix and stay eviction-protected.
         crit_seen=0; crit_acked=0
+        # Set when a finding was cleared because its surface no longer exists.
+        # Like unackable_shown, it means the report has been dealt with as far
+        # as it can be, so it earns a `reviewed` marker.
+        removed_cleared=0
         # Findings passed over because the baseline already covers them, or
         # because this report has been walked before - counted so a run that
         # displays nothing can say why instead of looking broken.
@@ -1406,7 +1493,7 @@ case "$cmd" in
         # end. Together they decide if a `reviewed` line gets written below.
         unackable_shown=0
         report_reviewed=0
-        if baseline_reviewed "$(basename "$report")"; then report_reviewed=1; fi
+        if baseline_reviewed "$(report_key "$report")"; then report_reviewed=1; fi
         # The loop below reads report lines on its own stdin (`< "$report"`),
         # so operator keystrokes are read from fd 3 - a copy of the script's
         # original stdin taken before that redirection - rather than
@@ -1489,9 +1576,9 @@ case "$cmd" in
                     esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
                     surface="$esl"
                     id="statusline:$esl"; rid="statusline:$(dec_id "$esl")" ;;
-                "TCB (sandbox self) modified: "*)
-                    ackable=1; lbl="TCB (sandbox self) modified: "
-                    etcb="${body#TCB (sandbox self) modified: }"
+                "TCB (sandbox self) modified, INVISIBLE to git: "*)
+                    ackable=1; lbl="TCB (sandbox self) modified, INVISIBLE to git: "
+                    etcb="${body#TCB (sandbox self) modified, INVISIBLE to git: }"
                     surface="$etcb"
                     id="tcb:$etcb"; rid="tcb:$(dec_id "$etcb")" ;;
                 *) ackable=0 ;;
@@ -1516,6 +1603,18 @@ case "$cmd" in
             # -CRITICAL.txt, or the startup warning nags about a report whose
             # every finding has been dealt with.
             if [ "$ackable" -eq 1 ] && baseline_suppresses "$rid" "$(current_sha_for_id "$rid")"; then
+                already=$((already + 1))
+                if [ "$tier" = CRITICAL ]; then crit_acked=$((crit_acked + 1)); fi
+                continue
+            fi
+            # A finding cleared on an earlier pass because its surface was
+            # gone. Nothing was recorded for it - there is no content to pin -
+            # so baseline_suppresses cannot cover it, and it is ackable, so
+            # the un-ackable branch below does not either. Without this it
+            # re-presents on every run: the same forever-loop the clear was
+            # meant to end, one step further along.
+            if [ "$ackable" -eq 1 ] && [ "$report_reviewed" -eq 1 ] \
+               && [ -z "$(current_sha_for_id "$rid")" ]; then
                 already=$((already + 1))
                 if [ "$tier" = CRITICAL ]; then crit_acked=$((crit_acked + 1)); fi
                 continue
@@ -1586,18 +1685,25 @@ case "$cmd" in
                     else
                         sha="$(current_sha_for_id "$rid")"
                         if [ -z "$sha" ]; then
-                            # Nothing left to pin the approval to: current_sha_for_id
-                            # returning empty means $id no longer exists (deleted
-                            # between compare and ack, or - for gitconfig - the key
-                            # was unset). Writing `safe <id> ` anyway would record a
-                            # baseline entry baseline_suppresses() can never match
-                            # (its own empty-sha guard rejects it as malformed), so
-                            # the surface would stay permanently unsuppressible -
-                            # while still advancing crit_acked and letting a CRITICAL
-                            # report shed its -CRITICAL.txt protection. Refuse
-                            # instead: record nothing, and leave the report's
-                            # protection exactly as it was.
-                            echo "  cannot approve: $id no longer exists"
+                            # The surface is gone - deleted since compare, or a
+                            # gitconfig key unset. There is nothing to pin an
+                            # approval to, and `safe <id> ` with an empty sha would
+                            # record a baseline line baseline_suppresses() can never
+                            # match, leaving the surface permanently unsuppressible.
+                            #
+                            # So nothing is recorded - but the finding is CLEARED,
+                            # because a surface that does not exist does not run.
+                            # Refusing outright is what made one deleted file pin
+                            # the audit forever: crit_acked never reached crit_seen,
+                            # the report kept -CRITICAL.txt, and select_report picks
+                            # CRITICAL first, so every other report stayed hidden
+                            # behind a finding that could not be resolved by any
+                            # means. If the surface comes back, it comes back as a
+                            # new finding, which is the honest outcome.
+                            echo "  ${C_OK}cleared${C_RESET}: $(sanitize "$id") no longer exists"
+                            removed_cleared=1
+                            [ "$tier" = CRITICAL ] && crit_acked=$((crit_acked + 1))
+                            sc_done+=("$rid")
                         else
                             pending+=("safe $id $sha")
                             sc_done+=("$rid")
@@ -1618,8 +1724,9 @@ case "$cmd" in
         # Written once the report has been walked to its end, and only when
         # it actually showed something that cannot be acknowledged - there is
         # nothing else to stop those from re-prompting forever.
-        if [ "$unackable_shown" -eq 1 ] && [ "$report_reviewed" -eq 0 ]; then
-            pending+=("reviewed $(basename "$report")")
+        if { [ "$unackable_shown" -eq 1 ] || [ "$removed_cleared" -eq 1 ]; } \
+           && [ "$report_reviewed" -eq 0 ]; then
+            pending+=("reviewed $(report_key "$report")")
         fi
         if [ "${#pending[@]}" -gt 0 ]; then
             mkdir -p "$BASELINE_DIR"
@@ -1657,10 +1764,33 @@ case "$cmd" in
         else
             echo "dejima audit: nothing recorded."
         fi
+
+        # Next report, if there is one. Asked rather than assumed: an operator
+        # who has decided enough for now should not have to abort out of a
+        # report they have not read to stop.
+        next_report="$(select_report "$report_dir")" || next_report=""
+        if [ -n "$next_report" ] && [ "$next_report" != "$report" ]; then
+            read -r n_all n_crit <<< "$(count_reports "$report_dir")"
+            printf '\n%s report(s) still waiting' "$n_all"
+            [ "$n_crit" -gt 0 ] && printf ', %s%s with unacknowledged CRITICAL%s' \
+                "$C_CRIT" "$n_crit" "$C_RESET"
+            printf '. Continue? [%sy%s/%sn%s] ' "$C_KEY" "$C_RESET" "$C_KEY" "$C_RESET"
+            # fd 3, the same duplicate of the original stdin the finding
+            # prompt reads: the report is this loop's stdin, and /dev/tty is
+            # not the caller's input when `ack` is driven by a pipe.
+            { read -r answer <&3; } 2>/dev/null || answer=n
+            printf '\n'
+            case "$answer" in
+                y|Y|"") report="$next_report"; sc="$(sidecar_dir "$report")"; continue ;;
+            esac
+        fi
+        break
+        done
         exit 0
         ;;
     *)
         echo "usage: dejima-audit {snapshot|compare|show|ack} [workspace] [state-file]" >&2
+        echo "  show [--full]   index of waiting reports; --full prints one" >&2
         echo "  workspace defaults to the enclosing git repository, else the current directory" >&2
         exit 2
         ;;
