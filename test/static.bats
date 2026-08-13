@@ -2042,6 +2042,29 @@ EOF
     done
 }
 
+@test "the harness-coupling audit still matches the tree" {
+    # docs/development.md lists every place core reads the harness config by
+    # literal name instead of by the selected harness. An audit nobody
+    # re-runs is a claim, so the count is checked: fixing one of these forces
+    # the row to go with it, and adding a new one forces a row to appear.
+    local n_code n_doc
+    n_code=$(cat "$REPO_ROOT"/bin/* | grep -c 'harness\.claude-code')
+    n_doc=$(sed -n '/^### Where core still says/,/^### /p' \
+        "$REPO_ROOT/docs/development.md" | grep -c '^| `bin/')
+    [ "$n_code" -eq "$n_doc" ] \
+        || { echo "bin/ has $n_code literal harness.claude-code reads, the audit lists $n_doc"; return 1; }
+}
+
+@test "the harness guide states the precondition a harness has to meet" {
+    # Running without a permission prompt per tool call is the premise the
+    # container makes survivable, not a detail of one harness. A guide that
+    # lists the integration points without it invites someone to start on a
+    # harness that cannot work this way.
+    grep -q '^## Adding a new harness' "$REPO_ROOT/docs/development.md"
+    sed -n '/^## Adding a new harness/,$p' "$REPO_ROOT/docs/development.md" \
+        | grep -q 'dangerously-skip-permissions'
+}
+
 @test "docs/ci.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/ci.md" ]
     grep -q 'docs/ci\.md' "$REPO_ROOT/README.md"

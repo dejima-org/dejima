@@ -148,3 +148,107 @@ push to one, `runtime.bats` included. That job needs two things from the
 runner that an ordinary one doesn't (the host's Docker socket and the host
 network namespace), and it checks for both up front rather than failing
 obscurely partway through; the file says why each is needed.
+
+## Adding a new harness
+
+`[core] harness` picks a directory under `harnesses/`, and a harness manifest
+declares four things. Everything else dejima does for Claude Code is written
+against Claude Code, and this is the inventory of it: what a second harness
+has to supply, and where dejima has to stop assuming. Taken from a pass over
+the tree, so each row names the file to change rather than describing a
+sketch.
+
+### The precondition
+
+**The harness must have a way to run without asking permission per tool
+call.** Claude Code's is `--dangerously-skip-permissions`, forced by
+`docker/claude-wrapper.sh`, which shadows `claude` on `PATH` so an invocation
+dejima never sees - an interactive shell, an editor plugin - still gets it.
+
+This is the premise the whole project rests on, not a convenience. A harness
+that stops to ask is one an operator has to sit in front of, and the argument
+for accepting `--dangerously-skip-permissions` is that the container makes
+being unattended survivable. A harness with no such mode can still be run,
+but it is a different product and none of the reasoning in
+[threat-model.md](threat-model.md) is about it.
+
+### What the manifest already covers
+
+`harnesses/<name>/harness.conf`, and the full contract is in
+[providers.md](providers.md):
+
+| Key | What it decides |
+| --- | --- |
+| `command` | the container's main process |
+| `keys` | this harness's own `[harness.<name>]` config schema |
+| `resume_command` | what the briefing tells a session to hand the operator |
+| `briefing` | this harness's fragment of the session briefing |
+
+### Where core still says `claude-code` out loud
+
+Five call sites read the harness config by literal name rather than by the
+selected harness, so `keys` is declared per harness but consumed as though
+there were only one. This is the first thing to fix, because until it is
+fixed a second harness silently gets Claude Code's paths:
+
+| File | Line reads |
+| --- | --- |
+| `bin/dejima` | `DEJIMA_AUDIT_STATUSLINE=[harness.claude-code] statusline_path` |
+| `bin/dejima` | `DEJIMA_AUDIT_PROJECTS_DIR=[harness.claude-code] projects_dir` |
+| `bin/dejima-audit` | `config_get harness.claude-code projects_dir` |
+| `bin/dejima-audit` | `config_get harness.claude-code statusline_path` |
+| `bin/dejima-epitaph` | `config_get harness.claude-code projects_dir` |
+
+`provider_keys` already resolves the selected harness; these predate it.
+
+### The inventory
+
+| Area | What is Claude Code specific | Where |
+| --- | --- | --- |
+| Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
+| Permission bypass | the wrapper that shadows `claude` and forces the flag | `docker/claude-wrapper.sh` |
+| Settings layering | sandbox overrides arrive as `--settings /etc/dejima-settings.json`, an extra layer rather than a mount over the operator's file (#47) | `docker/claude-wrapper.sh`, `bin/dejima` |
+| Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
+| Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it | `docker/fixed-domains.sh` |
+| Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
+| Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
+| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash` | `install.sh` |
+| Briefing delivery | the briefing and the project's `.dejima.md` reach the session *through* the `SessionStart` hook. No hooks, no briefing | `hooks/sandbox-context.sh` |
+| Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
+| Config parity | every `~/.claude` subdirectory is enumerated and mounted by name: `plugins`, `hooks`, `skills`, `commands`, `agents`, `output-styles` read-only; `backups`, `tasks`, `plans`, `sessions` read-write | `docker/docker-compose.yml` |
+| Staged config | `settings.json`, `CLAUDE.md` and `statusline.sh` are staged read-only under `/etc/dejima-claude` and installed into place | `docker/entrypoint.sh`, `bin/dejima` |
+| App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
+| State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
+| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104) | `bin/dejima`, `bin/dejima-slug-lib.sh` |
+| Transcript format | conversation logging transforms Claude Code's JSONL line by line | `docker/log-shipper.sh` |
+| Compaction format | epitaph keys on `isCompactSummary` records and the `compact_boundary` that precedes them | `bin/dejima-epitaph` |
+| Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
+| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host** | `bin/dejima-audit`, `bin/dejima` |
+
+### Two things worth deciding early
+
+**What runs on the host when the harness is configured.** `statusLine.command`
+is the one that exists today, and it is not a quirk: a harness that will
+execute an operator-configured command outside the container hands a session
+that writes that file a way onto the host. Find that surface in the new
+harness before supporting it, because it belongs in the audit from the first
+release rather than after someone finds it.
+
+**What the harness keeps, and who else can read it.** The per-project
+scoping of `projects/` and `file-history/` exists because a session that can
+write another project's memory can plant text a later session there reads as
+established background (#104). A new harness's state directory needs the same
+question asked of it, one directory at a time. Anything mounted host-wide
+should be there because it is keyed by session rather than by project, and
+because nothing loads it into a session's context at startup - which is the
+reasoning that leaves `tasks`, `plans`, `sessions` and `backups` mounted
+whole today.
+
+### Testing a new harness
+
+`providers.bats` covers the manifest contract itself and is where a new
+`harness.conf` gets its parsing and validation tests. The suites that assert
+on Claude Code paths by name - `config.bats`, `audit.bats`, `static.bats`,
+`runtime.bats` - are the ones that will need a second set, and a green run
+against the existing harness proves nothing about a new one. Nothing in
+`test/` currently runs a second harness end to end.
