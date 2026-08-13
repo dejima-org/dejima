@@ -218,9 +218,8 @@ hands to whichever session starts against it. See
   appears in `.git/config` directly), `!`-shell aliases - plus content
   changes under the workspace's `.claude/`, `.mcp.json`, `.envrc`,
   `.vscode/`, and `.git/hooks/` (symlinks included - a repointed symlink is
-  hashed by its target, not just its content), plus cross-project writes
-  under `~/.claude/projects` (see below). When the mounted workspace is this
-  repo itself, it also hashes the sandbox's own trusted computing base -
+  hashed by its target, not just its content). When the mounted workspace is
+  this repo itself, it also hashes the sandbox's own trusted computing base -
   `bin/`, `hooks/`, `docker/`, `install.sh`, `test/`.
 
   Worth knowing about that first surface, because the sandbox's own workflow
@@ -259,6 +258,13 @@ hands to whichever session starts against it. See
   ```
   [a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
   ```
+
+  A finding whose file has since been deleted is **cleared** rather than
+  approved: there is no content left to pin an approval to, and a surface
+  that does not exist does not run. Nothing is recorded, so if it comes back
+  it comes back as a new finding. Refusing instead - the old behaviour - left
+  the report unresolvable, and because `ack` opens CRITICAL reports first it
+  hid every other report behind that one.
 
   Skipping asks again next session, the right default when you are unsure.
   It matters for keys some tools rewrite on every run: with no decision
@@ -386,17 +392,17 @@ hands to whichever session starts against it. See
   first-run case it already handles, and it is why an absent sibling does
   not risk the hang that a blocked write to `~/.claude.json` caused.
 
-  Cross-project writes are still **detected**: the audit runs host-side over
-  the whole tree, so narrowing the mount does not narrow it, and it now
-  covers what the mount cannot reach - concurrent *host* sessions. Residual:
-  the workspace's own transcripts and memory stay writable, since
-  `claude --resume` needs that; and detection keys off each slug's max file
-  mtime, so an edit to a file that is not already the newest goes unflagged.
-  The time-window caveat applies most sharply here, because on the host
-  `~/.claude/projects` is a single
-  directory shared by *every* Claude Code session - so an innocent concurrent
-  session elsewhere can produce a `CROSS-PROJECT` finding that reads like
-  poisoning and isn't.
+  Residual: the workspace's own transcripts and memory stay fully writable
+  throughout, since Claude Code needs that for host-side `claude --resume`.
+
+  There is no longer a `CROSS-PROJECT` finding for this. It existed when the
+  whole tree was mounted and a session really could write another project's
+  slug. Now that it cannot, the only writes the audit could still see there
+  are other sessions doing their own work - and on a host running several at
+  once it reported all of them, on every report. Detection that cannot
+  observe what it was built for, and fires constantly on what it was not,
+  trains an operator to skim. The mount is the control, and `static.bats`
+  pins it.
 - `~/.claude/file-history` (Claude Code's edit-undo record) is **not**
   mounted as a tree either, and the reason is sharper than for `projects/`.
   Each `<session>/<hash>@v1` is a **verbatim copy of an edited file**, so the
@@ -727,6 +733,18 @@ hands to whichever session starts against it. See
   session can still edit those files during the run, and whatever it
   changes takes effect the *next* time `dejima` itself runs,
   not the current one.
+
+  The report splits on whether git can see the change. tcb_snapshot only
+  populates when the workspace IS dejima's own repo, so an ordinary change
+  there is already in the working tree you are about to read in `git status`
+  and in the pull request - reporting each one as a CRITICAL to acknowledge
+  duplicated a stronger control and made developing dejima itself unusable.
+  Those are counted in one INFO line instead.
+
+  A change git *cannot* see stays a CRITICAL finding, because nothing else
+  would catch it: a file in `.gitignore` or `.git/info/exclude`, or one
+  marked `assume-unchanged` or `skip-worktree`, is live code that runs on the
+  next launch and appears nowhere in `git status`.
 
 ### Declaration files are session-writable
 

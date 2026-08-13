@@ -598,7 +598,7 @@ finding is something to read and clean up before your next `git` or `claude`
 in that repo. Its diff is also time-windowed: it reports that a path changed
 while the session was running, not that the session changed it.
 
-`dejima-audit ack` walks the findings and shows you each one before asking.
+`dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it.
 Approving records the exact content, so any later change re-fires; ignoring
 records the surface, so that path is fine whatever it later contains; and
 skipping decides nothing, which means you are asked again next session.
