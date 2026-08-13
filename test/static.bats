@@ -2034,6 +2034,22 @@ EOF
 # its maintainer's, and saying so is the difference between disclosure and
 # letting a reader assume. Pinned because it is the kind of line that goes
 # quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README frames dejima as a development environment, not only a sandbox" {
+    grep -q 'sandboxed development environment' "$REPO_ROOT/README.md"
+    # The half that is not containment has to be visible as such. A reader
+    # who is shown only the boundary learns what dejima stops and not what
+    # it is for.
+    grep -q 'What it gives an agent to work with' "$REPO_ROOT/README.md"
+}
+
+@test "the README does not promise a default harness" {
+    # `[core] harness` has had no default since it became required - a launch
+    # is refused without it - but the opening paragraph still read "Claude
+    # Code by default", which is the promise that change exists to not make.
+    run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
 @test "the README says the prose is written by agents" {
     grep -q 'A note from the developer' "$REPO_ROOT/README.md"
     grep -q 'the words are written rapidly' "$REPO_ROOT/README.md"
