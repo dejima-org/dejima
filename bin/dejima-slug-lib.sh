@@ -1,12 +1,12 @@
 # Shared library: the ~/.claude/projects slug scheme, and which slugs belong
 # to a given workspace. Sourced by bin/dejima (to decide what to mount) and
-# bin/dejima-audit (to decide what counts as a cross-project write). Not on
-# PATH and not executable.
+# bin/dejima-epitaph (to decide whose transcripts to keep). Not on PATH and
+# not executable.
 #
-# One definition, because the two callers must not disagree. A slug the mount
-# exposes but the audit treats as foreign produces a finding on every ordinary
-# session; a slug the audit treats as the workspace's own but the mount does
-# not expose is a hole that nothing reports.
+# One definition, because the callers must not disagree. A slug the mount
+# exposes but a caller treats as foreign is a session whose work is silently
+# left behind; a slug a caller treats as the workspace's own but the mount
+# does not expose is a hole that nothing reports.
 
 # Claude Code's own project key: the absolute cwd with every non-alphanumeric
 # replaced by a dash. Matches docker/log-shipper.sh's Loki key and

@@ -1693,6 +1693,32 @@ _epitaph_transcript() {
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
 
+@test "a slug that kept nothing gets no directory" {
+    # A workspace's worktrees are slugs of its own, and they have transcripts;
+    # what they mostly do not have is a compaction summary in any of them. A
+    # directory per slug therefore made the store read as one entry per
+    # worktree, all of them empty.
+    _epitaph_fixture
+    _epitaph_transcript s1 "kept"
+    git -C "$EPI_WS" -c user.email=t@example.com -c user.name=t \
+        commit -q --allow-empty -m init
+    local wt="$EPI_WS/wt" wt_slug
+    git -C "$EPI_WS" worktree add -q "$wt" -b side
+    wt_slug="$(printf '%s' "$wt" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$EPI_TR/$wt_slug"
+    printf '{"type":"user","message":{"content":"no summary in here"}}\n' \
+        > "$EPI_TR/$wt_slug/s2.jsonl"
+    # A directory an earlier run already left behind goes too.
+    mkdir -p "$EPI_STORE/$wt_slug"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    [ ! -d "$EPI_STORE/$wt_slug" ] \
+        || { echo "empty directory left for $wt_slug"; return 1; }
+    [ -n "$(find "$EPI_STORE/$EPI_SLUG" -name '*.md' 2>/dev/null)" ] \
+        || { echo "the workspace's own epitaph was not kept"; return 1; }
+    git -C "$EPI_WS" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
 @test "the epitaph store is not mounted into the container" {
     # The whole point: a session must not be able to read what earlier
     # sessions concluded, or edit what this one is about to record.
