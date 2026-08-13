@@ -1755,19 +1755,32 @@ _epitaph_fixture() {
     EPI_SLUG="$(printf '%s' "$EPI_WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$EPI_TR/$EPI_SLUG"
     # The transcripts directory reaches the tool through the harness's own
-    # config key now, not as an argument: where transcripts live is the
-    # harness's, and dejima-epitaph no longer knows the shape of it.
+    # config key, not as an argument: where transcripts live is the harness's,
+    # and dejima-epitaph no longer knows the shape of it. `list` needs the same
+    # key to report whether the session behind an epitaph is still resumable.
     write_config '[epitaph]' "dir = $EPI_STORE" \
         '[harness.claude-code]' "projects_dir = $EPI_TR"
 }
 
-# One compact_boundary carrying the metadata, then the summary itself.
+# One compact_boundary carrying the metadata, then the summary itself. The
+# session id matches the transcript's filename, as Claude Code's own do -
+# that pairing is what `list` resolves to decide a session is still there.
 _epitaph_transcript() {
     local f="$EPI_TR/$EPI_SLUG/$1.jsonl" text="${2:-worked out X}" uid="${3:-aaaabbbb}"
+    local ts="${4:-2026-01-02T03:04:05.000Z}"
     {
         printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":900,"postTokens":90}}\n'
-        printf '{"type":"user","isCompactSummary":true,"uuid":"%s","sessionId":"s-1","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"%s"}}\n' "$uid" "$text"
+        printf '{"type":"user","isCompactSummary":true,"uuid":"%s","sessionId":"%s","timestamp":"%s","message":{"content":"%s"}}\n' "$uid" "$1" "$ts" "$text"
     } > "$f"
+}
+
+# Three epitaphs in a known order, so an index means something to assert on.
+_epitaph_three() {
+    _epitaph_fixture
+    _epitaph_transcript s1 "the firewall drops IPv6"      aaaa1111 2026-01-02T03:04:05.000Z
+    _epitaph_transcript s2 "the DNS proxy rewrote resolv" bbbb2222 2026-02-03T04:05:06.000Z
+    _epitaph_transcript s3 "worked out the audit baseline" cccc3333 2026-03-04T05:06:07.000Z
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
 }
 
 @test "an epitaph is written out of the container's reach" {
@@ -1839,6 +1852,113 @@ _epitaph_transcript() {
     [ -n "$(find "$EPI_STORE/$EPI_SLUG" -name '*.md' 2>/dev/null)" ] \
         || { echo "the workspace's own epitaph was not kept"; return 1; }
     git -C "$EPI_WS" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list shows one row per epitaph, oldest first" {
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    # Chronological by the timestamp in the name, which is what makes an
+    # index stable enough for `show <n>` to mean anything.
+    grep -q '^ *1  2026-01-02' <<< "$output" || { echo "$output"; return 1; }
+    grep -q '^ *3  2026-03-04' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list says whether the session behind an epitaph is still resumable" {
+    # Resuming the real session beats reading a summary of it, so the listing
+    # has to say which of the two is still on offer.
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    rm -f "$EPI_TR/$EPI_SLUG/s2.jsonl"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 2 ] || { echo "$output"; return 1; }
+    grep -q '^ *2  .*aged out' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "reading the store is not gated on [epitaph] enabled" {
+    # Turning epitaph off must not strand what it already kept: the operator
+    # who switches it off is the one most likely to want to look at, and get
+    # rid of, what is there.
+    _epitaph_three
+    write_config '[epitaph]' "dir = $EPI_STORE" 'enabled = off' \
+        '[harness.claude-code]' "projects_dir = $EPI_TR"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    # Writing still is.
+    _epitaph_transcript s4 "should not be kept" dddd4444 2026-04-05T06:07:08.000Z
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 3 ]
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "search finds an epitaph by content and reports its listing index" {
+    # The names are a timestamp and a uuid, so nothing about a filename says
+    # which session it was. Search is the only way in.
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" search "resolv" "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '1 of 3' <<< "$output" || { echo "$output"; return 1; }
+    # The index it prints is the position in the same listing `list` shows,
+    # so `show <n>` straight after a search opens what the search found.
+    grep -qE '^ *2  20260203' <<< "$output" || { echo "$output"; return 1; }
+    run "$REPO_ROOT/bin/dejima-epitaph" show 2 "$EPI_WS"
+    grep -q 'the DNS proxy rewrote resolv' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "search matching nothing says so without failing" {
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" search "nothing-in-any-of-them" "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'no epitaph matches' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "show writes to stdout when there is no terminal to open an editor on" {
+    # `dejima-epitaph show | grep` must not try to launch an editor, and a
+    # test is the same case as a pipe.
+    _epitaph_three
+    run env VISUAL=/bin/false EDITOR=/bin/false \
+        "$REPO_ROOT/bin/dejima-epitaph" show 1 "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'the firewall drops IPv6' <<< "$output" || { echo "$output"; return 1; }
+    # Newest by default.
+    run env VISUAL=/bin/false "$REPO_ROOT/bin/dejima-epitaph" show "$EPI_WS"
+    grep -q 'worked out the audit baseline' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "show opens the editor and leaves the epitaph at 0600" {
+    command -v script >/dev/null 2>&1 || skip "no script(1) to allocate a pty"
+    _epitaph_three
+    local ed; ed="$(mktemp -d)"
+    # Rewrites through a temp file and a rename, which is what an editor
+    # does and what drops the mode to the umask's.
+    printf '#!/bin/bash\nprintf "%%s\\n" "$1" > %s/got\nprintf edited > "$1.t" && mv "$1.t" "$1"\n' \
+        "$ed" > "$ed/ed"
+    chmod +x "$ed/ed"
+    local f; f="$(find "$EPI_STORE" -name '*.md' | sort | head -1)"
+    chmod 600 "$f"
+    run env VISUAL="$ed/ed" EDITOR="$ed/ed" script -qec \
+        "$REPO_ROOT/bin/dejima-epitaph show 1 $EPI_WS" /dev/null
+    [ -f "$ed/got" ] || { echo "the editor was never run: $output"; return 1; }
+    [ "$(cat "$ed/got")" = "$f" ] || { echo "opened $(cat "$ed/got"), wanted $f"; return 1; }
+    [ "$(stat -c %a "$f")" = "600" ] \
+        || { echo "left at $(stat -c %a "$f") after the editor rewrote it"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS" "$ed"
+}
+
+@test "an unknown epitaph subcommand is refused" {
+    _epitaph_fixture
+    run "$REPO_ROOT/bin/dejima-epitaph" delete-everything "$EPI_WS"
+    [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+    grep -q 'usage:' <<< "$output" || { echo "$output"; return 1; }
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
 

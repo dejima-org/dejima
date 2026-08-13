@@ -581,6 +581,54 @@ means anything you left in it is readable by every session after the one you
 left it for. A credential dropped in there to get one job done, and then
 forgotten, is a credential you have handed to every session since.
 
+## Reading what a session left behind
+
+When a session compacts, the summary it writes is the only durable account of
+what a long session worked out - and it goes with the container. dejima keeps
+a copy host-side, in `[epitaph] dir`, from `bin/dejima`'s exit trap. That
+directory is never mounted into a container.
+
+Three commands read it, all defaulting to the repository you are standing in:
+
+```sh
+dejima-epitaph list                  # what is kept, oldest first
+dejima-epitaph search "dns proxy"    # which one was it
+dejima-epitaph show 12               # open it in $VISUAL or $EDITOR
+```
+
+`show` takes a position from the listing that `list` and `search` print, or
+an epitaph's filename, and defaults to the newest. It opens an editor when
+there is a terminal to open one on and writes to stdout when there is not, so
+`dejima-epitaph show | grep` behaves. `--all` widens `list` and `search` to
+every project on the machine, which is also how to see everything the store
+holds.
+
+**`list` says whether each session is still resumable.** Where it is, the
+transcript the summary came from is still on disk, and `claude --resume
+<session>` gives you the session itself rather than a summary of it. The
+epitaph is what remains after the harness ages that transcript out.
+
+**Nothing here hands an epitaph back to a session, and that is deliberate.**
+A session can write its own transcript, so it can author what its own epitaph
+says. Delivering that to a later session automatically would plant text in
+its premises as established background, which is the channel the
+never-mounted store exists to close. Reading one and deciding what to do with
+it is the operator's, which is why `show` opens an editor rather than
+injecting anything: the header it opens on records that this preserves what
+was written rather than vouching for it.
+
+**Kept until you delete them.** There is no rotation. Epitaphs are an
+archive, and a count-based cap would delete oldest-first - the entries most
+likely to hold reasoning nobody remembers. They are small (tens of KB each,
+against transcripts a hundred times that), so the store is a housekeeping
+question rather than a disk one: `[epitaph] dir` is a plain directory of
+plain markdown, and `rm` is the current answer.
+
+Setting `[epitaph] enabled = off` stops new ones being kept. It does not hide
+what is already there: `list`, `search` and `show` keep working, because
+turning the feature off is the point at which wanting to review and clear the
+store is most likely.
+
 ## Testing frontend changes
 
 Playwright (Chromium) is pre-installed at image build time, browser
