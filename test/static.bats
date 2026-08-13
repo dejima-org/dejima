@@ -2011,6 +2011,34 @@ EOF
     done
 }
 
+@test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
+    [ -f "$REPO_ROOT/docs/threat-model.md" ]
+    grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"
+    grep -q '(threat-model\.md)' "$REPO_ROOT/docs/security.md"
+}
+
+@test "the blast-radius table is identical in both places that carry it" {
+    # It is deliberately in two documents: security.md is where an operator
+    # already is, threat-model.md is where the reasoning around it lives.
+    # Two copies drift, and a table stating where a compromise stops is the
+    # worst kind to have two answers for - so neither may be edited alone.
+    local a b
+    a="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/security.md")"
+    b="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/threat-model.md")"
+    [ -n "$a" ] || { echo "no table in docs/security.md"; return 1; }
+    [ -n "$b" ] || { echo "no table in docs/threat-model.md"; return 1; }
+    [ "$a" = "$b" ] || { diff <(printf '%s' "$a") <(printf '%s' "$b"); return 1; }
+    # Every layer the two sister projects cover, so a row cannot quietly go
+    # missing and leave the chain looking shorter than it is.
+    local row
+    for row in 'Agent, not yet hostile' 'Container' \
+               'Devbox VM, unprivileged' 'Devbox VM, root' \
+               'CI, confined job' 'CI, confined job escaped' \
+               'CI, privileged job'; do
+        grep -qF "| $row |" <<< "$b" || { echo "no row for: $row"; return 1; }
+    done
+}
+
 @test "docs/ci.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/ci.md" ]
     grep -q 'docs/ci\.md' "$REPO_ROOT/README.md"
