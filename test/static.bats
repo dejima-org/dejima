@@ -2025,6 +2025,19 @@ EOF
 # every one it could still see belonged to some other session - and what
 # needs documenting now is its absence, so that removing detection stays a
 # stated decision rather than something a reader has to infer from silence.
+@test "the credential proxy is documented under its own heading" {
+    # It used to sit as a bullet inside a 500-line section titled "The
+    # exit-time audit", which is not where anyone looks for how the model
+    # credential is kept out of the container.
+    local sec
+    sec="$(sed -n '/^## The model API credential/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    grep -q 'dejima-anthropic-proxy' <<< "$sec" \
+        || { echo "the proxy is not documented under its own heading"; return 1; }
+    sec="$(sed -n '/^## The exit-time audit/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    run grep -c 'dejima-anthropic-proxy' <<< "$sec"
+    [ "$output" -eq 0 ] || { echo "the audit section has absorbed the proxy again"; return 1; }
+}
+
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'no longer a .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
