@@ -752,6 +752,28 @@ SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 
+# Names each host-side task in cleanup() as it starts. Between the container
+# exiting and the operator's shell prompt returning, dejima audits every
+# surface the session could have written to and reads back the transcripts it
+# left; on a real project that is seconds of nothing on screen, and a
+# terminal that prints nothing reads as one that has hung. The remedy an
+# operator reaches for then is Ctrl-C, which is precisely when the audit
+# must not be interrupted.
+#
+# Only once a snapshot exists, which is the same condition `dejima-audit
+# compare` uses to decide it has anything to do: an exit before the session
+# ever started is instant, and its last line is the error that caused it -
+# announcing work that is not happening would push that off the screen.
+#
+# stderr, like everything else this trap prints, and host-side only: none of
+# it is ever routed back into a session's context.
+exit_step() {
+    # `return 0` rather than letting the test be the last command: a nonzero
+    # status from anything in an EXIT trap replaces the script's own.
+    [ -s "${SANDBOX_AUDIT_STATE:-}" ] && printf 'dejima: %s...\n' "$1" >&2
+    return 0
+}
+
 cleanup() {
     # Every rm below is guarded with `|| true`: under set -e, a failing
     # command in an EXIT trap replaces the shell's own exit status, so none
@@ -795,6 +817,15 @@ cleanup() {
     # dejima-notify-watch's marker consumption.
     rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
         || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
+    exit_step "session ended - keeping what it compacted away"
+    # Keep whatever the session compacted away, into a store nothing mounts.
+    # `|| true` for the same reason every other line in this trap has it: a
+    # failure here must not replace the container's exit status.
+    #
+    # Ahead of the audit rather than after it, so the audit keeps the last
+    # word (see below): this prints a line of its own whenever it keeps
+    # something, and that line was landing under the verdict.
+    "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     # Last writer, structurally: the operator reads bottom-up from their
     # shell prompt, so anything printed after the verdict pushes it out of
     # view. The marker-directory warning above is the one line a session can
@@ -804,11 +835,8 @@ cleanup() {
     # STATE is dropped from the rm -f above and freed only after compare has
     # read it, so this function's own cleanup can't race the audit that
     # needs it - and its removal is guarded too, so it stays truly last.
+    exit_step "checking what changed on the host while it ran"
     DEJIMA_RW_MOUNTS="$DEJIMA_RW_MOUNTS" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
-    # Keep whatever the session compacted away, into a store nothing mounts.
-    # `|| true` for the same reason every other line in this trap has it: a
-    # failure here must not replace the container's exit status.
-    "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT

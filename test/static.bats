@@ -1418,13 +1418,44 @@ registered_commands() {
     audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     marker_line=$(grep -n 'could not remove the marker directory' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    epitaph_line=$(grep -n 'dejima-epitaph" save' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$marker_line" ]
+    [ -n "$epitaph_line" ]
     [ "$audit_line" -lt "$trap_line" ]
     # Not just "inside cleanup()" but after the one line in it a session can
     # deliberately provoke to print - the actual last-writer invariant.
     [ "$marker_line" -lt "$audit_line" ]
+    # Same invariant, for the other task in the trap that prints: epitaph
+    # announces every summary it keeps, so it goes before the verdict.
+    [ "$epitaph_line" -lt "$audit_line" ]
     run grep -c 'could not remove the marker directory' "$REPO_ROOT/bin/dejima"
     [ "$output" -eq 1 ]
+}
+
+@test "cleanup says what it is doing before each task that takes a while" {
+    # A silent terminal between the container exiting and the prompt
+    # returning reads as a hung one, and the operator's answer to that is
+    # Ctrl-C - during the audit, which is the worst moment for it.
+    local d="$REPO_ROOT/bin/dejima" start s1 epi s2 aud
+    # Absolute line numbers, so each announcement is checked to sit with the
+    # task it names rather than merely somewhere in the same function. The
+    # definition of exit_step() itself is above cleanup() and so is skipped.
+    start=$(grep -n '^cleanup() {' "$d" | cut -d: -f1)
+    epi=$(grep -n 'dejima-epitaph" save' "$d" | head -1 | cut -d: -f1)
+    aud=$(grep -n 'dejima-audit" compare' "$d" | head -1 | cut -d: -f1)
+    s1=$(awk -v s="$start" 'NR>s && /exit_step /{print NR; exit}' "$d")
+    s2=$(awk -v s="$epi" 'NR>s && /exit_step /{print NR; exit}' "$d")
+    [ -n "$s1" ] && [ -n "$s2" ] || { echo "no announcement before a task"; return 1; }
+    [ "$s1" -lt "$epi" ] || { echo "epitaph runs unannounced"; return 1; }
+    [ "$s2" -lt "$aud" ] || { echo "the audit runs unannounced"; return 1; }
+    # Gated on the snapshot, the same condition `compare` uses to decide it
+    # has work: an exit before the session started is instant, and its last
+    # line is the error that caused it - which announcements would bury.
+    run sed -n '/^exit_step() {/,/^}/p' "$REPO_ROOT/bin/dejima"
+    [ -n "$output" ] || { echo "exit_step is not defined"; return 1; }
+    grep -q 'SANDBOX_AUDIT_STATE' <<< "$output"
+    # A nonzero status from anything in an EXIT trap replaces the script's.
+    grep -q 'return 0' <<< "$output"
 }
 
 @test "credential proxy is on by default, gated only by credentials.proxy" {
