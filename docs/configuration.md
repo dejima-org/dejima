@@ -39,6 +39,9 @@ what a given launch will actually use.
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
+| `[epitaph] enabled` | `on` | keep the summary Claude Code writes when a session compacts |
+| `[epitaph] dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
+| `[epitaph] loki` | `off` | also push each epitaph to `[logging] loki_url`, host-side |
 | `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md |
 | `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
 | `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |

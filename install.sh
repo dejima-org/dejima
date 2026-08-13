@@ -182,6 +182,7 @@ link_bin dejima-project
 # the startup warning about unacknowledged CRITICAL findings tells the
 # operator to run `dejima-audit ack`, which is only true once it is on PATH.
 link_bin dejima-audit
+link_bin dejima-epitaph
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
 # without [remote-access] enabled = on - they refuse to run at all - so

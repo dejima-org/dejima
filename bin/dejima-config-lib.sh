@@ -55,6 +55,9 @@ credentials.proxy	bool	on
 credentials.transport	enum:tls|loopback	tls
 logging.loki_url	?url
 logging.conversation	bool	off
+epitaph.enabled	bool	on
+epitaph.dir	path	~/.local/share/dejima/epitaphs
+epitaph.loki	bool	off
 audit.dir	path	~/.local/share/dejima/audit
 audit.baselines_dir	path	~/.local/share/dejima/baselines
 audit.keep	int:1:1000	10
@@ -307,7 +310,7 @@ _config_extra_section_known() { return 1; }
 
 _config_section_known() {
     case "$1" in
-        core|github|mounts|credentials|logging|audit|remote-access) return 0 ;;
+        core|github|mounts|credentials|logging|audit|remote-access|epitaph) return 0 ;;
         *) _config_extra_section_known "$1" ;;
     esac
 }

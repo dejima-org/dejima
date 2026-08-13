@@ -1,0 +1,164 @@
+#!/bin/bash
+# Epitaph: what a session leaves behind when its context dies.
+#
+# Claude Code writes a summary each time a session is compacted. It is the
+# only durable account of what a long session worked out, and it goes with
+# the container. This keeps it.
+#
+# Runs entirely on the host, from bin/dejima's exit trap. Nothing in the
+# container writes here and the store is never mounted, so a session cannot
+# read what earlier sessions concluded or edit what this one is about to
+# record - the same arrangement as the audit store, and for the same reason
+# (#104: anything a session writes and a later one reads is a channel into
+# that later session's premises).
+#
+# The transcript IS session-writable, so a summary is only as honest as the
+# file it came from. This preserves what was recorded, it does not attest to
+# it.
+#
+# Usage: dejima-epitaph save <workspace> [transcripts-dir]
+set -uo pipefail
+
+# shellcheck source=dejima-provider-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
+# shellcheck source=dejima-slug-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
+config_validate || exit 1
+
+cmd="${1:-}"; ws_arg="${2:-}"; transcripts="${3:-}"
+
+[ "$(config_get epitaph enabled)" = "on" ] || exit 0
+STORE="$(config_get epitaph dir)"
+[ -n "$transcripts" ] || transcripts="$(config_get harness.claude-code projects_dir)"
+
+ws="$ws_arg"
+[ -n "$ws" ] || ws="$(pwd)"
+ws="$(cd "$ws" 2>/dev/null && pwd)" || exit 0
+
+case "$cmd" in
+    save) ;;
+    *) echo "usage: dejima-epitaph save <workspace> [transcripts-dir]" >&2; exit 2 ;;
+esac
+
+# One file per summary, named for the moment it was written, so a directory
+# listing is a timeline. Keyed on the summary record's own uuid: `save` runs
+# on every exit, and a session compacted three times has three epitaphs, two
+# of which an earlier run already wrote.
+mkdir -p "$STORE" 2>/dev/null || exit 0
+chmod 700 "$STORE" 2>/dev/null || true
+
+saved=0
+while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    dir="$transcripts/$slug"
+    [ -d "$dir" ] || continue
+    out="$STORE/$slug"
+    mkdir -p "$out" 2>/dev/null || continue
+    for f in "$dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        # python3 is already a hard dependency (install.sh refuses without
+        # it), and this is line-delimited JSON with embedded newlines in the
+        # payload - not something to take apart with sed.
+        n="$(python3 - "$f" "$out" <<'PY'
+import json, os, sys
+
+path, out = sys.argv[1], sys.argv[2]
+pending = None   # metadata from the compact_boundary that precedes a summary
+written = 0
+
+for line in open(path, errors="replace"):
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        continue
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+
+    if rec.get("subtype") == "compact_boundary":
+        pending = rec.get("compactMetadata") or {}
+        continue
+
+    if not rec.get("isCompactSummary"):
+        continue
+
+    body = rec.get("message", {}).get("content")
+    if isinstance(body, list):
+        body = "\n".join(p.get("text", "") for p in body if isinstance(p, dict))
+    if not isinstance(body, str) or not body.strip():
+        pending = None
+        continue
+
+    uid = rec.get("uuid") or ""
+    stamp = (rec.get("timestamp") or "").replace(":", "").replace("-", "")[:15]
+    name = "%s-%s.md" % (stamp or "unknown", uid[:8] or "nouuid")
+    dest = os.path.join(out, name)
+    if os.path.exists(dest):
+        pending = None
+        continue
+
+    meta = pending or {}
+    head = [
+        "# Epitaph",
+        "",
+        "- session: %s" % (rec.get("sessionId") or "unknown"),
+        "- at: %s" % (rec.get("timestamp") or "unknown"),
+        "- trigger: %s" % (meta.get("trigger") or "unknown"),
+    ]
+    if meta.get("preTokens") is not None:
+        head.append("- tokens: %s before, %s after"
+                    % (meta.get("preTokens"), meta.get("postTokens")))
+    head += [
+        "",
+        "Written by the session and preserved verbatim. The transcript it came",
+        "from is writable from inside the container, so this records what was",
+        "there rather than vouching for it.",
+        "", "---", "",
+    ]
+    tmp = dest + ".part"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(head) + body.rstrip() + "\n")
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, dest)
+    written += 1
+    pending = None
+
+print(written)
+PY
+)" || n=0
+        saved=$((saved + ${n:-0}))
+    done
+done < <(workspace_slugs_sorted "$ws")
+
+[ "$saved" -gt 0 ] || exit 0
+echo "dejima: wrote $saved epitaph(s) to $STORE" >&2
+
+# Optional, and off by default: the store is the durable copy, this is for
+# operators who already centralise session logs. Host-side rather than
+# through the container's log-shipper, so the same "never in the session's
+# reach" property holds for the shipping path too.
+[ "$(config_get epitaph loki)" = "on" ] || exit 0
+loki="$(config_get logging loki_url)"
+[ -n "$loki" ] || exit 0
+while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    for f in "$STORE/$slug"/*.md; do
+        [ -f "$f" ] && [ ! -f "$f.shipped" ] || continue
+        if python3 - "$loki" "$slug" "$f" <<'PY'
+import json, sys, time, urllib.request
+
+loki, slug, path = sys.argv[1], sys.argv[2], sys.argv[3]
+body = json.dumps({"streams": [{
+    "stream": {"job": "dejima-epitaph", "project": slug},
+    "values": [[str(time.time_ns()), open(path, errors="replace").read()]],
+}]}).encode()
+req = urllib.request.Request(loki.rstrip("/") + "/loki/api/v1/push", data=body,
+                             headers={"Content-Type": "application/json"})
+urllib.request.urlopen(req, timeout=10).read()
+PY
+        then
+            : > "$f.shipped"
+        fi
+    done
+done < <(workspace_slugs_sorted "$ws")
+exit 0
