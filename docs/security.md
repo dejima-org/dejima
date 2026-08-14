@@ -16,6 +16,29 @@ person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
 
+## Blast radius by layer
+
+Where each layer's compromise stops, with and without the thing arranged
+against it. The middle column is what the layer reaches if nothing is; the
+last is what remains once something is.
+
+| Layer | Reached by | Radius without | Bounded by | Radius with |
+| --- | --- | --- | --- | --- |
+| Agent, not yet hostile | ordinary operation | the workspace, its history, every mounted path, and the forge, at full speed | the session briefing and `.dejima.md`; the `PreToolUse` hooks | obvious destruction and out-of-remote pushes fail fast, and merging stays a human decision |
+| Container | ordinary operation | the operator's home directory, every credential in it, and the open internet | dejima | the workspace, allowlisted domains, and the forge token's scope |
+| Devbox VM, unprivileged | container escape | everything the account can read, and unrestricted egress to the internet and the LAN | `dejima-devbox-hardener` | the same VM, with LAN reach cut to what is declared; internet egress stays open, deliberately |
+| Devbox VM, root | escape plus local escalation, or misconfiguration | the whole VM, the same egress, and the model API credential | `dejima-devbox-hardener`, enforced outside the guest | the whole VM and no further: root cannot reach the rule set that holds the LAN boundary |
+| CI, confined job | a session opening a pull request | code execution on the runner, its network position, and the token the forge injects into every job | `dejima-ci-hardener`, confined tier | the allowlist, and nothing else on the LAN |
+| CI, confined job escaped | an escape from a confined job | root on the runner VM | the hypervisor firewall and a scheduled rollback | the privileged tier's position: the allowlist is gone, the LAN is not, and the loss expires |
+| CI, privileged job | `runs-on:` asking for it | root on the runner VM, by design and without any exploit | the same two controls, both external to the VM | the VM and its network position, until the next rebuild |
+
+Only the first row's control is advice: hooks and context tell an agent what
+not to do, and one that has stopped cooperating ignores them. Only the first
+two rows are dejima's own. The rest is why there are two sister repositories,
+and this table is the short form of
+**→ [threat-model.md](threat-model.md)**, which has the assumptions, the
+adversaries, and what none of this claims.
+
 ## CI: push access is code execution elsewhere
 
 The controls in this document bound what a session can reach *directly*. They
