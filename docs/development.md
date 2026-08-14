@@ -34,11 +34,13 @@ run them.
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
-| `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` to decide what to mount. Not on PATH |
+| `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. Run from `bin/dejima`'s exit trap |
+| `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
+| `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point: it resolves the project path,
@@ -110,6 +112,22 @@ this repository at all, it asserts on the CI runner executing it (the Docker
 socket withheld from the confined job, granted to the privileged job, and
 the egress each is allowed) - see [docs/ci.md](ci.md). It skips outright
 unless `DEJIMA_CI_TIER` is set, so it has nothing to say when run locally.
+
+### Branches
+
+Pull requests target `development`, which merges to `main` periodically, so
+`main` stays releasable while work lands quickly. `gitea-pr` defaults its
+base to the repository's default branch, so pass `--base development`.
+
+CI needs no change for this: `.gitea/workflows/tests.yml` triggers on
+`pull_request_target` with no branch filter, so it already runs whatever the
+base is.
+
+Nothing *enforces* the target. `git-push-guard.sh` blocks direct pushes to
+the branches a workflow names, and that list is workflow-wide rather than
+per-project - adding `development` would impose it on every dejima user,
+most of whom have no such branch. So this is a convention with a check
+attached: read what `gitea-pr` printed.
 
 ### Running the tests
 

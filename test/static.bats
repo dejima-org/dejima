@@ -1418,13 +1418,44 @@ registered_commands() {
     audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     marker_line=$(grep -n 'could not remove the marker directory' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    epitaph_line=$(grep -n 'dejima-epitaph" save' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$marker_line" ]
+    [ -n "$epitaph_line" ]
     [ "$audit_line" -lt "$trap_line" ]
     # Not just "inside cleanup()" but after the one line in it a session can
     # deliberately provoke to print - the actual last-writer invariant.
     [ "$marker_line" -lt "$audit_line" ]
+    # Same invariant, for the other task in the trap that prints: epitaph
+    # announces every summary it keeps, so it goes before the verdict.
+    [ "$epitaph_line" -lt "$audit_line" ]
     run grep -c 'could not remove the marker directory' "$REPO_ROOT/bin/dejima"
     [ "$output" -eq 1 ]
+}
+
+@test "cleanup says what it is doing before each task that takes a while" {
+    # A silent terminal between the container exiting and the prompt
+    # returning reads as a hung one, and the operator's answer to that is
+    # Ctrl-C - during the audit, which is the worst moment for it.
+    local d="$REPO_ROOT/bin/dejima" start s1 epi s2 aud
+    # Absolute line numbers, so each announcement is checked to sit with the
+    # task it names rather than merely somewhere in the same function. The
+    # definition of exit_step() itself is above cleanup() and so is skipped.
+    start=$(grep -n '^cleanup() {' "$d" | cut -d: -f1)
+    epi=$(grep -n 'dejima-epitaph" save' "$d" | head -1 | cut -d: -f1)
+    aud=$(grep -n 'dejima-audit" compare' "$d" | head -1 | cut -d: -f1)
+    s1=$(awk -v s="$start" 'NR>s && /exit_step /{print NR; exit}' "$d")
+    s2=$(awk -v s="$epi" 'NR>s && /exit_step /{print NR; exit}' "$d")
+    [ -n "$s1" ] && [ -n "$s2" ] || { echo "no announcement before a task"; return 1; }
+    [ "$s1" -lt "$epi" ] || { echo "epitaph runs unannounced"; return 1; }
+    [ "$s2" -lt "$aud" ] || { echo "the audit runs unannounced"; return 1; }
+    # Gated on the snapshot, the same condition `compare` uses to decide it
+    # has work: an exit before the session started is instant, and its last
+    # line is the error that caused it - which announcements would bury.
+    run sed -n '/^exit_step() {/,/^}/p' "$REPO_ROOT/bin/dejima"
+    [ -n "$output" ] || { echo "exit_step is not defined"; return 1; }
+    grep -q 'SANDBOX_AUDIT_STATE' <<< "$output"
+    # A nonzero status from anything in an EXIT trap replaces the script's.
+    grep -q 'return 0' <<< "$output"
 }
 
 @test "credential proxy is on by default, gated only by credentials.proxy" {
@@ -1994,6 +2025,19 @@ EOF
 # every one it could still see belonged to some other session - and what
 # needs documenting now is its absence, so that removing detection stays a
 # stated decision rather than something a reader has to infer from silence.
+@test "the credential proxy is documented under its own heading" {
+    # It used to sit as a bullet inside a 500-line section titled "The
+    # exit-time audit", which is not where anyone looks for how the model
+    # credential is kept out of the container.
+    local sec
+    sec="$(sed -n '/^## The model API credential/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    grep -q 'dejima-anthropic-proxy' <<< "$sec" \
+        || { echo "the proxy is not documented under its own heading"; return 1; }
+    sec="$(sed -n '/^## The exit-time audit/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    run grep -c 'dejima-anthropic-proxy' <<< "$sec"
+    [ "$output" -eq 0 ] || { echo "the audit section has absorbed the proxy again"; return 1; }
+}
+
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'no longer a .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
@@ -2008,6 +2052,34 @@ EOF
     for f in README.md docs/security.md; do
         grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
         grep -qi 'forge = none' "$REPO_ROOT/$f"
+    done
+}
+
+@test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
+    [ -f "$REPO_ROOT/docs/threat-model.md" ]
+    grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"
+    grep -q '(threat-model\.md)' "$REPO_ROOT/docs/security.md"
+}
+
+@test "the blast-radius table is identical in both places that carry it" {
+    # It is deliberately in two documents: security.md is where an operator
+    # already is, threat-model.md is where the reasoning around it lives.
+    # Two copies drift, and a table stating where a compromise stops is the
+    # worst kind to have two answers for - so neither may be edited alone.
+    local a b
+    a="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/security.md")"
+    b="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/threat-model.md")"
+    [ -n "$a" ] || { echo "no table in docs/security.md"; return 1; }
+    [ -n "$b" ] || { echo "no table in docs/threat-model.md"; return 1; }
+    [ "$a" = "$b" ] || { diff <(printf '%s' "$a") <(printf '%s' "$b"); return 1; }
+    # Every layer the two sister projects cover, so a row cannot quietly go
+    # missing and leave the chain looking shorter than it is.
+    local row
+    for row in 'Agent, not yet hostile' 'Container' \
+               'Devbox VM, unprivileged' 'Devbox VM, root' \
+               'CI, confined job' 'CI, confined job escaped' \
+               'CI, privileged job'; do
+        grep -qF "| $row |" <<< "$b" || { echo "no row for: $row"; return 1; }
     done
 }
 
@@ -2034,6 +2106,22 @@ EOF
 # its maintainer's, and saying so is the difference between disclosure and
 # letting a reader assume. Pinned because it is the kind of line that goes
 # quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README frames dejima as a development environment, not only a sandbox" {
+    grep -q 'sandboxed development environment' "$REPO_ROOT/README.md"
+    # The half that is not containment has to be visible as such. A reader
+    # who is shown only the boundary learns what dejima stops and not what
+    # it is for.
+    grep -q 'What it gives an agent to work with' "$REPO_ROOT/README.md"
+}
+
+@test "the README does not promise a default harness" {
+    # `[core] harness` has had no default since it became required - a launch
+    # is refused without it - but the opening paragraph still read "Claude
+    # Code by default", which is the promise that change exists to not make.
+    run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
 @test "the README says the prose is written by agents" {
     grep -q 'A note from the developer' "$REPO_ROOT/README.md"
     grep -q 'the words are written rapidly' "$REPO_ROOT/README.md"
@@ -2087,6 +2175,22 @@ EOF
     # rather than being the reason for it
     grep -q 'not the$\|reason for it' "$REPO_ROOT/docs/security.md"
     grep -q 'dont-point-it-at-repositories-you-dont-own' "$REPO_ROOT/docs/security.md"
+}
+
+# The branch convention is only a convention - nothing refuses a pull request
+# aimed at main - so the three places an agent or a contributor looks have to
+# agree, or the one that is stale becomes the instruction someone follows.
+@test "the development-branch convention is stated where it is looked for" {
+    local f
+    for f in .dejima.md CONTRIBUTING.md docs/development.md; do
+        grep -q 'development' "$REPO_ROOT/$f" || {
+            echo "$f does not mention the development branch" >&2
+            false
+        }
+    done
+    # and the one thing that is easy to get wrong: gitea-pr's default base
+    grep -q -- '--base development' "$REPO_ROOT/.dejima.md"
+    grep -q -- '--base development' "$REPO_ROOT/docs/development.md"
 }
 
 @test "docs/ci.md says a project with no CI is exposed too" {

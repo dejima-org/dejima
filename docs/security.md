@@ -16,6 +16,29 @@ person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
 
+## Blast radius by layer
+
+Where each layer's compromise stops, with and without the thing arranged
+against it. The middle column is what the layer reaches if nothing is; the
+last is what remains once something is.
+
+| Layer | Reached by | Radius without | Bounded by | Radius with |
+| --- | --- | --- | --- | --- |
+| Agent, not yet hostile | ordinary operation | the workspace, its history, every mounted path, and the forge, at full speed | the session briefing and `.dejima.md`; the `PreToolUse` hooks | obvious destruction and out-of-remote pushes fail fast, and merging stays a human decision |
+| Container | ordinary operation | the operator's home directory, every credential in it, and the open internet | dejima | the workspace, allowlisted domains, and the forge token's scope |
+| Devbox VM, unprivileged | container escape | everything the account can read, and unrestricted egress to the internet and the LAN | `dejima-devbox-hardener` | the same VM, with LAN reach cut to what is declared; internet egress stays open, deliberately |
+| Devbox VM, root | escape plus local escalation, or misconfiguration | the whole VM, the same egress, and the model API credential | `dejima-devbox-hardener`, enforced outside the guest | the whole VM and no further: root cannot reach the rule set that holds the LAN boundary |
+| CI, confined job | a session opening a pull request | code execution on the runner, its network position, and the token the forge injects into every job | `dejima-ci-hardener`, confined tier | the allowlist, and nothing else on the LAN |
+| CI, confined job escaped | an escape from a confined job | root on the runner VM | the hypervisor firewall and a scheduled rollback | the privileged tier's position: the allowlist is gone, the LAN is not, and the loss expires |
+| CI, privileged job | `runs-on:` asking for it | root on the runner VM, by design and without any exploit | the same two controls, both external to the VM | the VM and its network position, until the next rebuild |
+
+Only the first row's control is advice: hooks and context tell an agent what
+not to do, and one that has stopped cooperating ignores them. Only the first
+two rows are dejima's own. The rest is why there are two sister repositories,
+and this table is the short form of
+**→ [threat-model.md](threat-model.md)**, which has the assumptions, the
+adversaries, and what none of this claims.
+
 ## CI: push access is code execution elsewhere
 
 The controls in this document bound what a session can reach *directly*. They
@@ -75,7 +98,7 @@ Three specific consequences:
   requests as you, so requiring one approval means nobody can give it.
 - **The forge's audit trail cannot attribute.** "You pushed this" and "a
   session pushed this" are the same recorded event. This is the same shape as
-  the exit-time audit's time-window caveat above: a record of what happened,
+  the exit-time audit's time-window caveat below: a record of what happened,
   not of who caused it.
 - **It compounds the SSH agent's reach.** The agent already signs for any repo
   your key can reach (below); the identity is what makes the resulting action
@@ -173,6 +196,8 @@ to this repo's own checkout can change what the next launch composes and
 hands to whichever session starts against it. See
 [docs/providers.md](providers.md) for the full manifest contract.
 
+## The mounted project is fully writable
+
 - `--dangerously-skip-permissions` removes your chance to review tool calls
   before they run. Only point this at trusted repositories.
 - The mounted project itself has **no write protection**. `deny-dangerous-
@@ -204,7 +229,7 @@ hands to whichever session starts against it. See
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
-### The exit-time audit
+## The exit-time audit
 
 - `bin/dejima-audit` snapshots host-persistence surfaces before each
   run and diffs them after the container exits: `.git/config` (and worktree
@@ -369,6 +394,8 @@ hands to whichever session starts against it. See
   so the marker appearing is itself worth a look. The encoded form is what
   `ack` records, so what you acknowledge is the file on disk rather than a
   readable approximation of its name.
+## One project's session cannot reach another's
+
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted as a tree. A session gets the workspace's own slug
   directory plus one for each live git worktree nested under it,
@@ -423,28 +450,15 @@ hands to whichever session starts against it. See
   That costs undo history for that session if it is later resumed on the
   host, and it is the reason this cannot be scoped as completely as
   `projects/`, where the workspace's own slug is known at launch.
-- Allowing egress to a domain at all creates a channel for exfiltrating data
-  through *that service's own request surface* (query strings, lookups,
-  etc.), not just to a literal attacker-controlled destination. Domain-level
-  allowlisting closes off reaching somewhere new; it can't inspect or
-  restrict what gets sent to somewhere already trusted for normal operation
-  (installing packages, calling the model API). That's a structural limit of
-  allowlist-only firewalls in general, not something specific to this setup,
-  and nothing here addresses it.
-- This is container-level isolation (Linux namespaces plus a small
-  capability set), not VM-level isolation - no gVisor/Firecracker or
-  similar. It shares the host kernel, so a container-escape vulnerability
-  would defeat every other control described here at once.
-- Most of what this document asserts is re-checked by the `test/` suite on
-  every change, and `runtime.bats` asserts against a real running container
-  rather than a mock: IPv6 blocked, a non-allowlisted domain refused and a
-  non-allowlisted destination unreachable, `node` unable to re-run
-  `init-firewall.sh`, no working `sudo`. Coverage is not completeness: the
-  reasoning here is judgement, nothing tests it, and a property nobody wrote
-  a test for can regress quietly. A missing `ipset` dedup flag broke firewall
-  startup twice before anyone caught it; there is a test for that now, which
-  is the pattern to expect - each of these exists because something was got
-  wrong first.
+- Epitaphs - the summary a session leaves when its context is compacted away -
+  are kept host-side in `[epitaph] dir`, and that directory is never mounted. A session can neither read what earlier
+  sessions concluded nor edit what this one is about to record, which is the
+  same arrangement as the audit store and for the same reason. The transcript
+  they are extracted from *is* session-writable, so a summary records what was
+  there rather than vouching for it - and nothing loads one back into a later
+  session, deliberately: that would be the channel #104 closed, rebuilt.
+## The model API credential never enters the container
+
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
@@ -524,6 +538,8 @@ hands to whichever session starts against it. See
   real credential into the container. Rung one is a supported, tested mode,
   not an improvised workaround; if you reach the third, treat it as a
   temporary state rather than a new baseline.
+## What the container sees of `~/.claude`
+
 - `~/.claude` is **not** shared with the container as a whole. Its contents
   are enumerated in `docker-compose.yml`, in three classes, and anything not
   listed is container-local: writable during the session and gone with the
@@ -532,8 +548,8 @@ hands to whichever session starts against it. See
     `tasks/`, `plans/`, `sessions/`, plus the entries of `projects/` and
     `file-history/` that belong to this workspace. All directories, which is
     what makes them safe (see the detachment note below). The two trees are
-    not mounted whole: see the `projects/` note further down, and the
-    `file-history/` note below it.
+    not mounted whole: see
+    [One project's session cannot reach another's](#one-projects-session-cannot-reach-anothers).
   - **Read-only**: `plugins/`, `hooks/`, `skills/`, `commands/`, `agents/`,
     `output-styles/`, plus the symlink-target directories `dejima`
     discovers at launch. Those targets are discovered rather than
@@ -616,40 +632,6 @@ hands to whichever session starts against it. See
   nothing to persist. This also means multiple concurrent sandbox sessions
   never contend over the same file - each gets its own independent copy.
 
-  ### Throwaway ~/.claude.json: what doesn't carry over
-
-  Because nothing writes back, anything a *sandboxed* session would
-  normally have caused Claude Code to record into `~/.claude.json` is lost
-  when that session ends, instead of showing up in a later host-side
-  `claude` run. Concretely, as of the fields this file holds today:
-
-  - **Per-project trust/approval state** - `hasTrustDialogAccepted`,
-    `allowedTools`, `enabledMcpjsonServers`/`disabledMcpjsonServers` - for
-    any project directory opened only inside the sandbox. Opening that same
-    project on the host later re-prompts for whatever it would have
-    prompted for outside the sandbox too. Largely moot today since the
-    sandbox always runs `--dangerously-skip-permissions`, but the trust
-    dialog is a separate gate from tool-permission prompts.
-  - **`mcpServers` additions or edits** - the point of this fix, not an
-    incidental side effect. Nothing added or changed here during a
-    sandboxed session ever reaches the real file.
-  - **Session/usage telemetry** - `lastCost`, `lastDuration`,
-    `lastTotalInputTokens`/`lastTotalOutputTokens`, `lastModelUsage`,
-    `lastSessionId`, `mcpContextUris`, and similar per-project fields.
-    Sandbox activity won't show up in host-side usage totals or in
-    `claude --resume`'s "last session" metadata for that project.
-  - **Global counters and caches** - `numStartups`, `firstStartTime`,
-    `cachedGrowthBookFeatures`, `changelogLastFetched`,
-    `announcementImpressions`, `tipsHistory`, `feedbackSurveyState`, and
-    similar top-level bookkeeping. Purely cosmetic - these get refetched or
-    recomputed as needed; sandbox runs just don't contribute to the host's
-    copies of them.
-  - **`oauthAccount`/`userID`/`machineID`** are read fresh from the real
-    file at the start of every sandbox launch, so authentication carries in
-    normally each time; anything that changes about them *during* a
-    sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
-    re-checking if a future Claude Code version starts relying on that for
-    normal operation.
 - DNS resolution itself is allowlisted (see "DNS is allowlisted too" below),
   not just the IP connections made afterward, closing off exfiltration via
   encoding data into query names to an attacker-controlled domain - verified
@@ -739,7 +721,42 @@ hands to whichever session starts against it. See
   marked `assume-unchanged` or `skip-worktree`, is live code that runs on the
   next launch and appears nowhere in `git status`.
 
-### Declaration files are session-writable
+### Throwaway ~/.claude.json: what doesn't carry over
+
+Because nothing writes back, anything a *sandboxed* session would
+normally have caused Claude Code to record into `~/.claude.json` is lost
+when that session ends, instead of showing up in a later host-side
+`claude` run. Concretely, as of the fields this file holds today:
+
+- **Per-project trust/approval state** - `hasTrustDialogAccepted`,
+  `allowedTools`, `enabledMcpjsonServers`/`disabledMcpjsonServers` - for
+  any project directory opened only inside the sandbox. Opening that same
+  project on the host later re-prompts for whatever it would have
+  prompted for outside the sandbox too. Largely moot today since the
+  sandbox always runs `--dangerously-skip-permissions`, but the trust
+  dialog is a separate gate from tool-permission prompts.
+- **`mcpServers` additions or edits** - the point of this fix, not an
+  incidental side effect. Nothing added or changed here during a
+  sandboxed session ever reaches the real file.
+- **Session/usage telemetry** - `lastCost`, `lastDuration`,
+  `lastTotalInputTokens`/`lastTotalOutputTokens`, `lastModelUsage`,
+  `lastSessionId`, `mcpContextUris`, and similar per-project fields.
+  Sandbox activity won't show up in host-side usage totals or in
+  `claude --resume`'s "last session" metadata for that project.
+- **Global counters and caches** - `numStartups`, `firstStartTime`,
+  `cachedGrowthBookFeatures`, `changelogLastFetched`,
+  `announcementImpressions`, `tipsHistory`, `feedbackSurveyState`, and
+  similar top-level bookkeeping. Purely cosmetic - these get refetched or
+  recomputed as needed; sandbox runs just don't contribute to the host's
+  copies of them.
+- **`oauthAccount`/`userID`/`machineID`** are read fresh from the real
+  file at the start of every sandbox launch, so authentication carries in
+  normally each time; anything that changes about them *during* a
+  sandboxed session (e.g. a token refresh) doesn't carry back out. Worth
+  re-checking if a future Claude Code version starts relying on that for
+  normal operation.
+
+## Declaration files are session-writable
 
 A project's `.dejima/` declaration files sit inside the project mount, which
 is bind-mounted read-write. A compromised session can write them, and that is
@@ -1067,3 +1084,29 @@ that file exists) points git's github.com HTTPS credential helper at `gh`,
 which only ever holds whatever token that file provides: a write-scoped
 token there would make HTTPS push possible independent of
 `--allow-github-push`, so don't use one.
+
+
+## What none of this closes
+
+- Allowing egress to a domain at all creates a channel for exfiltrating data
+  through *that service's own request surface* (query strings, lookups,
+  etc.), not just to a literal attacker-controlled destination. Domain-level
+  allowlisting closes off reaching somewhere new; it can't inspect or
+  restrict what gets sent to somewhere already trusted for normal operation
+  (installing packages, calling the model API). That's a structural limit of
+  allowlist-only firewalls in general, not something specific to this setup,
+  and nothing here addresses it.
+- This is container-level isolation (Linux namespaces plus a small
+  capability set), not VM-level isolation - no gVisor/Firecracker or
+  similar. It shares the host kernel, so a container-escape vulnerability
+  would defeat every other control described here at once.
+- Most of what this document asserts is re-checked by the `test/` suite on
+  every change, and `runtime.bats` asserts against a real running container
+  rather than a mock: IPv6 blocked, a non-allowlisted domain refused and a
+  non-allowlisted destination unreachable, `node` unable to re-run
+  `init-firewall.sh`, no working `sudo`. Coverage is not completeness: the
+  reasoning here is judgement, nothing tests it, and a property nobody wrote
+  a test for can regress quietly. A missing `ipset` dedup flag broke firewall
+  startup twice before anyone caught it; there is a test for that now, which
+  is the pattern to expect - each of these exists because something was got
+  wrong first.
