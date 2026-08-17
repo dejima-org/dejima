@@ -27,6 +27,7 @@ what a given launch will actually use.
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
+| `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |

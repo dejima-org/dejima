@@ -1727,3 +1727,45 @@ _epitaph_transcript() {
     run grep -nE 'extra_mounts\+=.*epitaph' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
 }
+
+# --- harness plugins ------------------------------------------------------
+
+@test "a harness with a manifest but no plugin is refused" {
+    # Support is per harness and deliberate. A manifest alone would present
+    # as a supported harness while none of what dejima does for a harness
+    # had been written, which is the "thin drop-in manifest" this design
+    # exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A provider root of its own, via the DEJIMA_PROVIDER_ROOT test hook,
+    # rather than a directory added to the checkout: a suite that writes into
+    # the repository it is testing leaves litter when it aborts and collides
+    # with a concurrent run.
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    mkdir -p "$proot/harnesses/test-no-plugin"
+    printf 'command = true\n' > "$proot/harnesses/test-no-plugin/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = test-no-plugin'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"No harness plugin for 'test-no-plugin'"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "emit_mount refuses a harness state directory that overlaps a guarded store" {
+    # The reason the refusal lives in emit_mount rather than in each plugin.
+    # A harness's state paths are computed from config rather than written
+    # down, so this is exactly the shape that reaches a mount without anyone
+    # having looked at the value - the same blind spot as #15.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    audit_dir="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[audit]' "dir = $audit_dir" \
+                 '[harness.claude-code]' "projects_dir = $audit_dir/projects"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing harness state mount"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$audit_dir"
+}

@@ -220,13 +220,14 @@ Worked example, `harnesses/claude-code/harness.conf`:
 
 ```
 command        = claude
-keys           = projects_dir:path=~/.claude/projects statusline_path:path=~/.claude/statusline.sh
+keys           = projects_dir:path=~/.claude/projects file_history_dir:path=~/.claude/file-history statusline_path:path=~/.claude/statusline.sh
 resume_command = claude --resume {{session_id}}
 briefing       = briefing.md
 ```
 
 Reading it: the container's main process is `claude`; `[harness.claude-code]`
-gets `projects_dir` and `statusline_path`, both `path`-typed with defaults;
+gets `projects_dir`, `file_history_dir` and `statusline_path`, all `path`-typed
+with defaults;
 resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.

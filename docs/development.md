@@ -35,6 +35,8 @@ run them.
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. Run from `bin/dejima`'s exit trap |
+| `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
+| `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
@@ -208,6 +210,48 @@ operator gets everywhere else would be missing with no way to restore them,
 and "supported" would mean something different for that one harness than
 for every other. So it is not supported, and this is the reason.
 
+### Where a harness's support lives: three tiers
+
+| Tier | What | Rule |
+| --- | --- | --- |
+| **Core** | the mechanism, and every enforcement point | harness-agnostic, always |
+| **Manifest** | `harnesses/<name>/harness.conf` | data. Never sourced, never executed. Selects among named core mechanisms and supplies paths |
+| **Plugin** | `bin/harness/<name>.sh` | the harness-specific remainder, as code, in this repository |
+
+**A feature belongs in the manifest if it can be stated as a value.** It only
+moves to a plugin when it cannot. `projects_dir` and `file_history_dir` are
+both paths, so both are manifest keys; the rule that a *name* in the first
+selects an *entry* in the second is Claude Code's own and could not be
+written as a value, so that is the plugin. "Add a manifest key" is the
+answer until it demonstrably is not.
+
+**Plugins live under `bin/`, not beside the manifest.** `dejima-audit`'s
+`tcb_snapshot` covers `install.sh`, `bin/`, `hooks/`, `docker/` and `test/`,
+and not the provider directories. Host-side plugin code under `harnesses/`
+would be code that runs on the host and that a session could edit in
+dejima's own checkout without raising a CRITICAL - the exact class the audit
+exists to catch. Under `bin/` it is covered for free, and "manifests are
+data, never executed" stays true word for word.
+
+**Plugins are sourced, not invoked**, and are part of the trusted computing
+base. The risk worth designing against is not a careless plugin but three
+plugins implementing the security model three ways, so a plugin uses core's
+own primitives rather than re-deriving them. An invoked protocol would also
+put a new text parser on the launch path, and every parsing bug this
+repository has had is in that family.
+
+**A plugin computes; core enforces.** A plugin declares through `emit_mount`
+and `emit_env`, which validate at the point of declaration - `emit_mount`
+runs the guarded-store refusal there, so a harness state directory that
+overlapped the approval, audit or epitaph store is refused without each
+plugin having to remember. A plugin never touches `extra_mounts` itself, and
+a static test holds that. A plugin may *classify* an audit path; it may never
+suppress a finding.
+
+Every shipped harness has both a manifest and a plugin - a static test
+refuses one without the other, because a manifest alone would present as a
+supported harness while none of the work had been done.
+
 ### What the manifest already covers
 
 `harnesses/<name>/harness.conf`, and the full contract is in
@@ -254,7 +298,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Staged config | `settings.json`, `CLAUDE.md` and `statusline.sh` are staged read-only under `/etc/dejima-claude` and installed into place | `docker/entrypoint.sh`, `bin/dejima` |
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
-| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104) | `bin/dejima`, `bin/dejima-slug-lib.sh` |
+| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). Now in the plugin | `bin/harness/claude-code.sh` |
 | Transcript format | conversation logging transforms Claude Code's JSONL line by line | `docker/log-shipper.sh` |
 | Compaction format | epitaph keys on `isCompactSummary` records and the `compact_boundary` that precedes them | `bin/dejima-epitaph` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |

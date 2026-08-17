@@ -25,6 +25,8 @@ source "$SCRIPT_DIR/dejima-provider-lib.sh"
 source "$SCRIPT_DIR/dejima-color-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
 source "$SCRIPT_DIR/dejima-slug-lib.sh"
+# shellcheck source=dejima-harness-lib.sh
+source "$SCRIPT_DIR/dejima-harness-lib.sh"
 # fd 2: everything this script says for itself goes to stderr, so the
 # session's own stdout stays exactly what the container wrote.
 color_init 2
@@ -309,6 +311,13 @@ if [ -z "$DEJIMA_HARNESS_NAME" ]; then
     exit 1
 fi
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+# The selected harness's plugin: what dejima does for this harness that no
+# manifest value could state. Loaded once the selection is validated, and
+# before anything that calls a hook. A manifest without a plugin is refused
+# rather than treated as a lighter kind of support - see "Adding a new
+# harness" in docs/development.md.
+harness_plugin_load "$DEJIMA_HARNESS_NAME"
 
 # Whether GitHub is a push destination this session, which the briefing tells
 # the agent about. Two ways in: the per-launch flag, or a forge whose hosts
@@ -1082,34 +1091,14 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
-# ~/.claude/projects, one slug at a time: the tree is every project's
-# transcripts and memory, and memory is loaded into context at session start,
-# so a write into another slug is background a future session there believes
-# (#104). projects/ itself stays container-local, so an unmounted slug is
-# still writable and just does not survive - which is how Claude Code creates
-# a slug it does not find. Existing slugs only, apart from the workspace's
-# own, so a checkout full of worktrees does not litter the host with empty
-# directories for worktrees nothing has run in.
-mkdir -p "$HOME/.claude/projects/$(ws_slug "$WORKSPACE_DIR")"
-while IFS= read -r _slug; do
-    [ -n "$_slug" ] || continue
-    [ -d "$HOME/.claude/projects/$_slug" ] || continue
-    extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")
-done < <(workspace_slugs_sorted "$WORKSPACE_DIR")
-
-# ~/.claude/file-history, same shape, sharper reason: `<session>/<hash>@v1`
-# is a verbatim copy of an edited file, so the tree is other projects' source
-# rather than a record of it, and it was writable - tampering there puts
-# chosen content into a later restore. Keyed by session id, so there is no
-# slug to match on; workspace_session_ids resolves it through the transcript
-# names. The starting session's id cannot be known yet, so its directory is
-# container-local: undo history for it is lost if it is resumed on the host.
-mkdir -p "$HOME/.claude/file-history"
-while IFS= read -r _sid; do
-    [ -n "$_sid" ] || continue
-    [ -d "$HOME/.claude/file-history/$_sid" ] || continue
-    extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")
-done < <(workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR")
+# The state this harness keeps on the host, and which of it this workspace
+# is entitled to see. Harness-specific by nature - which directories exist,
+# and what decides that one of their entries belongs to this workspace, is a
+# fact about the harness rather than about dejima - so it lives in the
+# harness plugin, which declares each mount through emit_mount. The guarded-
+# store refusal runs there, at the point of declaration, rather than being
+# something each plugin has to remember. See bin/dejima-harness-lib.sh.
+harness_hook harness_state_mounts "$WORKSPACE_DIR"
 
 # statusline.sh is executed on the host by Claude Code (settings.json's
 # statusLine.command), so it is staged for entrypoint.sh to copy rather than

@@ -482,10 +482,15 @@ EOF
     }
 }
 
-@test "bin/dejima mounts ~/.claude/projects one slug at a time" {
-    grep -q 'workspace_slugs_sorted "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")' \
-        "$REPO_ROOT/bin/dejima"
+@test "the claude-code plugin mounts projects/ one slug at a time" {
+    # Moved out of bin/dejima into the harness plugin: which directories a
+    # harness keeps, and what decides an entry belongs to this workspace, is
+    # a fact about the harness. The property is unchanged - the tree is
+    # every project's transcripts and memory, and memory is read into
+    # context at session start (#104).
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'workspace_slugs_sorted "$ws"' "$p"
+    grep -q 'emit_mount "$projects/$slug"' "$p"
 }
 
 # Docker creates the parents of a mount point root-owned when they do not
@@ -510,10 +515,10 @@ EOF
     }
 }
 
-@test "bin/dejima mounts ~/.claude/file-history one session at a time" {
-    grep -q 'workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")' \
-        "$REPO_ROOT/bin/dejima"
+@test "the claude-code plugin mounts file-history one session at a time" {
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'workspace_session_ids "$projects" "$ws"' "$p"
+    grep -q 'emit_mount "$history/$sid"' "$p"
 }
 
 @test "the image pre-creates ~/.claude/file-history so the session mounts have a writable parent" {
@@ -2959,4 +2964,66 @@ q
     # (or bare + --container) does. Only the bare form can ever refuse on it.
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
+}
+
+# --- harness plugins: a plugin computes, core enforces ---
+
+@test "no harness plugin touches the mount list directly" {
+    # A plugin that appended to extra_mounts itself would skip the
+    # guarded-store refusal emit_mount runs at the point of declaration -
+    # and would skip it differently in each harness, which is how one
+    # security model becomes one per harness. The plugins are trusted code,
+    # so this is held at review time rather than by isolating them.
+    run grep -rn 'extra_mounts' "$REPO_ROOT/bin/harness"
+    [ "$status" -ne 0 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
+}
+
+@test "a harness plugin defines only hooks core actually calls" {
+    # A function named something core never calls looks wired up and is
+    # dead. Worse, a near-miss of a real hook name (harness_state_mount for
+    # harness_state_mounts) reads as implemented and silently does nothing.
+    local hooks f fn
+    hooks="$(sed -n 's/^DEJIMA_HARNESS_HOOKS="\(.*\)"$/\1/p' \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh")"
+    [ -n "$hooks" ] || { echo "the hook list is gone"; return 1; }
+    for f in "$REPO_ROOT"/bin/harness/*.sh; do
+        [ -f "$f" ] || continue
+        while IFS= read -r fn; do
+            [ -n "$fn" ] || continue
+            case " $hooks " in
+                *" $fn "*) ;;
+                *) echo "$(basename "$f") defines $fn, which core never calls"; return 1 ;;
+            esac
+        done < <(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$f" | sed 's/()$//')
+    done
+}
+
+@test "every shipped harness has both a manifest and a plugin" {
+    # Support is per harness and deliberate. A manifest with no plugin is a
+    # half-finished integration that would present as a supported harness.
+    local d name
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ -f "$d/harness.conf" ] || { echo "$name has no manifest"; return 1; }
+        [ -f "$REPO_ROOT/bin/harness/$name.sh" ] \
+            || { echo "$name has a manifest but no plugin"; return 1; }
+    done
+    for d in "$REPO_ROOT"/bin/harness/*.sh; do
+        [ -f "$d" ] || continue
+        name="$(basename "$d" .sh)"
+        [ -f "$REPO_ROOT/harnesses/$name/harness.conf" ] \
+            || { echo "$name has a plugin but no manifest"; return 1; }
+    done
+}
+
+@test "harness plugins are inside the trusted computing base the audit watches" {
+    # They run on the host, in the launch path. Under harnesses/ they would
+    # be host-executed code a session could edit in dejima's own checkout
+    # without raising a CRITICAL, because tcb_snapshot covers install.sh,
+    # bin/, hooks/, docker/ and test/ - and not the provider directories.
+    [ -d "$REPO_ROOT/bin/harness" ] || { echo "plugins are not under bin/"; return 1; }
+    run grep -rn 'harness_state_mounts\|harness_plugin_load' "$REPO_ROOT/harnesses"
+    [ "$status" -ne 0 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
+    sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" | grep -q 'for dir in bin '
 }
