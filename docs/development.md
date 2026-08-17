@@ -17,7 +17,7 @@ run them.
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
 | `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`); also ships session transcripts when conversation logging (`[logging] conversation`) is on |
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, then execs the session's command |
-| `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
+| `docker/harness-wrapper.sh` | Shadows the selected harness's command on `PATH` to add its no-confirm flags and dejima's settings layer. Named by no harness; `entrypoint.sh` links it into place |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
@@ -285,8 +285,8 @@ harness-specific path resolving to nothing is the honest answer.
 | Area | What is Claude Code specific | Where |
 | --- | --- | --- |
 | Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
-| Permission bypass | the wrapper that shadows `claude` and forces the flag | `docker/claude-wrapper.sh` |
-| Settings layering | sandbox overrides arrive as `--settings /etc/dejima-settings.json`, an extra layer rather than a mount over the operator's file (#47) | `docker/claude-wrapper.sh`, `bin/dejima` |
+| Permission bypass | the flag itself, now `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
+| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core; the flag that carries them is `settings_args` in the manifest | `harnesses/<name>/harness.conf` |
 | Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it | `docker/fixed-domains.sh` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |

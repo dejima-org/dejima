@@ -68,9 +68,18 @@ services:
       # just live at ~/.gitconfig directly.
       GIT_CONFIG_GLOBAL: ${HOME}/.gitconfig-sandbox/.gitconfig
       ALLOWED_DOMAINS: ${ALLOWED_DOMAINS:-}
-      # What actually runs as the sandbox user - defaults to bare `claude`.
-      # See entrypoint.sh and bin/dejima's SANDBOX_NVIM_CONFIG.
+      # What actually runs as the sandbox user - the selected harness's own
+      # command unless [core] command overrides it. See entrypoint.sh and
+      # bin/dejima's SANDBOX_NVIM_CONFIG.
       SANDBOX_CMD: ${SANDBOX_CMD:-claude}
+      # The selected harness's manifest, resolved host-side: which command
+      # the wrapper shadows, the real binary behind it, the flags that make
+      # the session unattended, and how this harness is told to read dejima's
+      # settings layer. Nothing about a harness is baked into the image.
+      SANDBOX_HARNESS_COMMAND: ${SANDBOX_HARNESS_COMMAND:-}
+      SANDBOX_HARNESS_REAL: ${SANDBOX_HARNESS_REAL:-}
+      SANDBOX_HARNESS_ARGS: ${SANDBOX_HARNESS_ARGS:-}
+      SANDBOX_HARNESS_SETTINGS: ${SANDBOX_HARNESS_SETTINGS:-}
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}
@@ -161,7 +170,7 @@ services:
       - ${HOME}/.claude/CLAUDE.md:/etc/dejima-claude/CLAUDE.md:ro
       # The sandbox's own settings overrides (sandbox.enabled off, plus the
       # remote-access notify hooks when that's on), generated per run by
-      # bin/dejima and reaching Claude Code as claude-wrapper.sh's
+      # bin/dejima and reaching the harness as harness-wrapper.sh's
       # --settings argument. A container-local path, like the staged config
       # above and for the same reason (#47) - and separate from that staging
       # directory because this file is generated per run rather than copied

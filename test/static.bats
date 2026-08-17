@@ -699,8 +699,13 @@ EOF
     # Which only takes effect if the flag is actually passed. It goes in the
     # wrapper rather than the entrypoint so it also covers invocations the
     # entrypoint never sees (an interactive shell, claudecode.nvim).
-    grep -qE -- '--settings /etc/dejima-settings\.json' "$SANDBOX_DIR/claude-wrapper.sh"
-    grep -qE -- '"\$\{settings\[@\]\}"' "$SANDBOX_DIR/claude-wrapper.sh"
+    # The flag itself is the harness's now, not the wrapper's: the wrapper
+    # is shared and a --settings it hardcoded would be handed to a harness
+    # that layers settings some other way.
+    grep -qE -- 'settings_args\s*=\s*--settings /etc/dejima-settings\.json' \
+        "$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -q 'SANDBOX_HARNESS_SETTINGS' "$SANDBOX_DIR/harness-wrapper.sh"
+    grep -qE -- '\$\{settings\[@\]\+"\$\{settings\[@\]\}"\}' "$SANDBOX_DIR/harness-wrapper.sh"
 }
 
 @test "bin/dejima pre-creates the ~/.claude config files so neither is mounted as a directory" {
@@ -3026,4 +3031,51 @@ q
     run grep -rn 'harness_state_mounts\|harness_plugin_load' "$REPO_ROOT/harnesses"
     [ "$status" -ne 0 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
     sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" | grep -q 'for dir in bin '
+}
+
+# --- the wrapper is the harness's, not Claude Code's ---
+
+@test "the wrapper names no harness, and the image installs it under a neutral name" {
+    # It is shadowed into place under the harness's own command by
+    # entrypoint.sh, because the image is shared across harnesses and the
+    # selection is per launch. A COPY to a fixed name would bake one
+    # harness's command into every image.
+    local w="$SANDBOX_DIR/harness-wrapper.sh"
+    [ -f "$w" ] || { echo "the generic wrapper is gone"; return 1; }
+    run grep -niE 'claude|anthropic' "$w"
+    [ "$status" -ne 0 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
+    grep -q 'COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper' \
+        "$SANDBOX_DIR/Dockerfile"
+    run grep -n 'COPY docker/claude-wrapper' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "the old fixed-name copy is back"; return 1; }
+}
+
+@test "the entrypoint refuses a harness command name that is not a bare name" {
+    # It becomes a path under /usr/local/bin. A value with a slash would
+    # write the symlink somewhere else entirely, and this one arrives from
+    # the host as an environment variable.
+    sed -n '/SANDBOX_HARNESS_COMMAND:-/,/^fi/p' "$SANDBOX_DIR/entrypoint.sh" \
+        | grep -q '\*/\*'
+}
+
+@test "the no-confirm flags come from the harness manifest" {
+    # R1 of the capability bar. The flag was hardcoded in the wrapper, which
+    # made unattended operation a property of the image rather than of the
+    # selected harness.
+    grep -qE -- 'no_confirm_args\s*=\s*--dangerously-skip-permissions' \
+        "$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -q 'no_confirm_args' "$REPO_ROOT/bin/dejima"
+    # And a harness that names none is refused rather than run asking for
+    # confirmation on every tool call, which presents as a hang.
+    grep -q 'declares no no_confirm_args' "$REPO_ROOT/bin/dejima"
+}
+
+@test "core's schema holds no harness's command as a default" {
+    # [core] command defaulted to the literal `claude`, so core carried one
+    # harness's command name while the manifest's own `command` key was read
+    # by nothing.
+    run grep -nE '^core\.command\s+identifier\s+claude' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    [ "$status" -ne 0 ] || { echo "core still defaults to a harness command"; return 1; }
+    grep -qE '^core\.command\s+\?identifier' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    grep -q 'SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"' "$REPO_ROOT/bin/dejima"
 }
