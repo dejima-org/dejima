@@ -459,6 +459,16 @@ hands to whichever session starts against it. See
   session, deliberately: that would be the channel #104 closed, rebuilt.
 ## The model API credential never enters the container
 
+**This assumes the host has one.** dejima authenticates nothing: the proxy
+holds a credential the harness wrote on the host, so a machine where the
+harness has never signed in has nothing for it to hold. The proxy then does
+not start, no credential is mounted, and the session comes up unable to
+reach the model - which reads as a dejima fault rather than a missing
+prerequisite. Sign in on the host first; see the README's
+[Sign in on the host first](../README.md#sign-in-on-the-host-first).
+Refreshing an expired credential is the same: on the host, not from inside a
+session, where the credential deliberately never goes.
+
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
@@ -1099,7 +1109,12 @@ token there would make HTTPS push possible independent of
 - This is container-level isolation (Linux namespaces plus a small
   capability set), not VM-level isolation - no gVisor/Firecracker or
   similar. It shares the host kernel, so a container-escape vulnerability
-  would defeat every other control described here at once.
+  would defeat every other control described here at once. What such an
+  escape then reaches is a layer dejima cannot bound, because dejima runs
+  inside it:
+  [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)
+  is the project for that, and [threat-model.md](threat-model.md) has the
+  row-by-row account of where each layer's compromise stops.
 - Most of what this document asserts is re-checked by the `test/` suite on
   every change, and `runtime.bats` asserts against a real running container
   rather than a mock: IPv6 blocked, a non-allowlisted domain refused and a

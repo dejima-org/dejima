@@ -179,6 +179,14 @@ It is that if this container is ever compromised at the kernel level,
 everything reachable from this host account should be treated as compromised
 with it, which is a very different thing to plan around than an ordinary bug.
 
+What "everything reachable from this host account" amounts to is not fixed,
+and it is the one part of this that can be narrowed from outside. Bounding
+what an escape spreads to - the machine's own network position, and what a
+compromise there can reach beyond it - is
+[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)'s
+whole subject. dejima cannot do it, because dejima runs inside the layer that
+would have to be bounded.
+
 ## dejima's security says nothing about your software's.
 
 These are different axes, not different degrees of the same thing. dejima's
