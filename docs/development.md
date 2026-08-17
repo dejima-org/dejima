@@ -158,19 +158,55 @@ has to supply, and where dejima has to stop assuming. Taken from a pass over
 the tree, so each row names the file to change rather than describing a
 sketch.
 
-### The precondition
+### What a harness must be able to do
 
-**The harness must have a way to run without asking permission per tool
-call.** Claude Code's is `--dangerously-skip-permissions`, forced by
-`docker/claude-wrapper.sh`, which shadows `claude` on `PATH` so an invocation
-dejima never sees - an interactive shell, an editor plugin - still gets it.
+Support is per harness and deliberate. A supported harness gets the same
+depth of integration Claude Code has - the same mounts, the same guards, the
+same audit surfaces - so a harness is not a manifest someone drops in. That
+is only possible if the harness can host what those protections need.
 
-This is the premise the whole project rests on, not a convenience. A harness
-that stops to ask is one an operator has to sit in front of, and the argument
-for accepting `--dangerously-skip-permissions` is that the container makes
-being unattended survivable. A harness with no such mode can still be run,
-but it is a different product and none of the reasoning in
-[threat-model.md](threat-model.md) is about it.
+These are the requirements. A harness that fails one of the first five
+cannot be supported, and that is a decision about the harness rather than a
+gap in dejima.
+
+| | Requirement | Why it is load-bearing |
+| --- | --- | --- |
+| **R1** | **Unattended execution.** A documented mode that runs tool calls without confirming each one. | The premise the project rests on. A harness that stops to ask is one an operator sits in front of, and the argument for accepting that mode is that the container makes being unattended survivable. |
+| **R2** | **Tool-call interception.** A supported mechanism to inspect a command before it runs and refuse it, without patching the harness. | The push guard, the merge guard and the dangerous-command denylist all live here. They are guards against an eager agent rather than a boundary against a hostile one, but a harness without them ships three protections short and the operator cannot add them back. |
+| **R3** | **Host-controlled context at session start.** A way to place text into the session's context at start, from a file the operator controls and the session cannot rewrite for the run in progress. | How the briefing and the project's `.dejima.md` arrive. It is also how the agent learns it is sandboxed, which is what makes it ask for a domain instead of working around the firewall. |
+| **R4** | **State dejima can locate or discard.** Per-project state must be computable on the host before launch, so it can be scoped per project - or safely discardable, so it can stay container-local. | #104. A store that is neither computable nor discardable cannot be scoped, and mounting it whole reintroduces cross-project context poisoning. |
+| **R5** | **A withholdable credential.** The model credential must live somewhere dejima can decline to mount, and the harness must accept a substitute: a staged fake, or an environment variable pointed at the host-side proxy. | The credential never entering the container is a headline property, not a nicety. |
+
+Three more are required, but may be declared absent in the manifest, in
+which case dejima says at launch what is not in force:
+
+| | Requirement | What is lost without it |
+| --- | --- | --- |
+| **D1** | Session lifecycle signals - something that fires when the agent wants attention and when it stops. | Remote access notifications. The session still runs and is still attachable. |
+| **D2** | A parseable record of the session. | Epitaph, and conversation logging. |
+| **D3** | An enumerable config directory whose extension points can be mounted read-only. | Config parity, and the read-only mounts that stop a session installing a persistent hook for the next one. |
+
+Declaring one absent is a real decision with a visible cost, not a
+formality. It is there so a harness can be supported honestly at a smaller
+guard set rather than shipped with three protections quietly missing.
+
+### Worked example: why aider is not supported
+
+aider clears R1 (`--yes-always`), R3 (`--read` places a file in context),
+R4 (its state is `.aider.*` inside the workspace, which is already mounted)
+and R5 (it takes an API key from the environment).
+
+It fails **R2**. aider has no hook or event system; the only occurrence of
+"hook" in its options is `--no-verify`, which controls git's own pre-commit
+hooks. There is no supported point at which a command can be inspected and
+refused, so `git-push-guard.sh`, `merge-guard.sh` and
+`deny-dangerous-bash.sh` have nowhere to live and no equivalent to be
+rebuilt from. It also fails D1.
+
+The container would still bound an aider session. But three guards an
+operator gets everywhere else would be missing with no way to restore them,
+and "supported" would mean something different for that one harness than
+for every other. So it is not supported, and this is the reason.
 
 ### What the manifest already covers
 

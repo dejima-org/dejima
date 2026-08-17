@@ -2053,14 +2053,33 @@ EOF
     grep -q '^harness_config_get()' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
-@test "the harness guide states the precondition a harness has to meet" {
-    # Running without a permission prompt per tool call is the premise the
-    # container makes survivable, not a detail of one harness. A guide that
-    # lists the integration points without it invites someone to start on a
-    # harness that cannot work this way.
+@test "the harness guide states the bar a harness has to clear" {
+    # Support is per harness and deliberate, at the depth Claude Code has.
+    # That only holds if the requirements are written down: without them
+    # each new harness is argued about rather than measured, and the first
+    # one that cannot host a guard gets waved through.
+    local sec r
     grep -q '^## Adding a new harness' "$REPO_ROOT/docs/development.md"
-    sed -n '/^## Adding a new harness/,$p' "$REPO_ROOT/docs/development.md" \
-        | grep -q 'dangerously-skip-permissions'
+    sec="$(sed -n '/^### What a harness must be able to do/,/^### What the manifest/p' \
+        "$REPO_ROOT/docs/development.md")"
+    [ -n "$sec" ] || { echo "the capability bar is gone"; return 1; }
+    for r in R1 R2 R3 R4 R5; do
+        grep -q "\*\*$r\*\*" <<< "$sec" || { echo "no $r in the bar"; return 1; }
+    done
+    # Unattended execution is the premise every other control is justified
+    # against, so it stays stated rather than assumed.
+    grep -qi 'without confirming each one' <<< "$sec"
+}
+
+@test "a harness dejima declines is declined against a stated requirement" {
+    # The reason has to point at a rule. Otherwise the bar is decoration and
+    # the next harness is decided on how much someone wants it.
+    local sec
+    sec="$(sed -n '/^### Worked example/,/^### What the manifest/p' \
+        "$REPO_ROOT/docs/development.md")"
+    [ -n "$sec" ] || { echo "no worked example of a refusal"; return 1; }
+    grep -q 'R2' <<< "$sec" \
+        || { echo "the refusal names no requirement it failed"; return 1; }
 }
 
 @test "docs/ci.md exists and is linked from the README and docs/security.md" {
