@@ -921,6 +921,42 @@ case "$SANDBOX_CMD" in
         ;;
 esac
 export SANDBOX_CMD
+
+# What the wrapper inside the container needs to shadow the harness's binary
+# and pin its flags, resolved here because the manifests are host-side data
+# the container never sees. Every value is the selected harness's own; none
+# of it is written down in the image.
+#
+# SANDBOX_HARNESS_COMMAND is the name to shadow, and is the manifest's rather
+# than [core] command: overriding the latter to `nvim` changes what dejima
+# launches, not which harness is wrapped, and an editor-driven session that
+# then runs the harness from a terminal must still get the flags.
+SANDBOX_HARNESS_COMMAND="$(manifest_get harness "$DEJIMA_HARNESS_NAME" command)"
+SANDBOX_HARNESS_REAL="$(manifest_get harness "$DEJIMA_HARNESS_NAME" command_path)"
+SANDBOX_HARNESS_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" no_confirm_args)"
+# Named in full rather than templated: the settings layer's container-side
+# path is dejima's own fixed contract (docker-compose.yml mounts it there),
+# not a value that varies per run, and {{...}} in a manifest belongs to the
+# briefing composer's substitution rather than to a second mechanism that
+# merely looks like it.
+SANDBOX_HARNESS_SETTINGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" settings_args)"
+# Unattended operation is R1 of the capability bar, and a harness whose
+# manifest names no way to ask for it would run asking for confirmation on
+# every tool call, against a container built on the premise that it does not.
+# That fails silently and looks like the harness hanging, so refuse instead.
+if [ -z "$SANDBOX_HARNESS_ARGS" ]; then
+    echo "Harness '$DEJIMA_HARNESS_NAME' declares no no_confirm_args." >&2
+    echo "dejima runs unattended; a harness that stops to ask cannot be run that" >&2
+    echo "way. See \"What a harness must be able to do\" in docs/development.md." >&2
+    exit 1
+fi
+export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
+    SANDBOX_HARNESS_SETTINGS
+
+# [core] command defaults to the selected harness's own command rather than
+# to a literal in core's schema, which is where `claude` used to sit.
+[ -n "$SANDBOX_CMD" ] || SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"
+export SANDBOX_CMD
 # docker-compose.yml/entrypoint.sh compare these against "1"/"0", not
 # "on"/"off" - config_get_bool is what produces that, config_get would pass
 # "on"/"off" straight through and (among other things) silently disable the

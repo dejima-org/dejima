@@ -141,6 +141,9 @@ EOF
             ;;
         harness) cat <<'EOF'
 command	identifier	claude
+command_path	?path
+no_confirm_args	?template
+settings_args	?template
 keys	?list:keyspec
 resume_command	?template
 briefing	?relpath

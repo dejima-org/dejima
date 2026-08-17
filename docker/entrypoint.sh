@@ -103,6 +103,30 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
+# Put the harness wrapper on PATH under the harness's own command name,
+# ahead of the real binary, so every invocation gets the no-confirm flags -
+# including the ones dejima never sees, an interactive shell or an editor
+# plugin's terminal. Linked here rather than COPYed at build time because
+# the image is shared across harnesses and the selection is per launch.
+#
+# Root-owned in a root-owned directory: the sandbox user must not be able to
+# replace the wrapper with something that drops the flags, or reinstate the
+# real binary's name ahead of it.
+#
+# Skipped when SANDBOX_HARNESS_COMMAND is unset, which is a container started
+# without bin/dejima (test/runtime.bats). Refused when it is set to anything
+# but a bare command name: it becomes a path under /usr/local/bin, and a
+# value with a slash in it would write somewhere else entirely.
+if [ -n "${SANDBOX_HARNESS_COMMAND:-}" ]; then
+    case "$SANDBOX_HARNESS_COMMAND" in
+        */*|.*|'')
+            echo "entrypoint: refusing harness command name: $SANDBOX_HARNESS_COMMAND" >&2
+            exit 1 ;;
+    esac
+    ln -sf /usr/local/bin/dejima-harness-wrapper \
+        "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
+fi
+
 # ~/.claude config files arrive staged read-only under /etc/dejima-claude
 # (see the mount inventory in docker-compose.yml) and get copied into place
 # here rather than bind-mounted at their real paths. A copy can't be
@@ -292,10 +316,8 @@ fi
 # sudo/setuid path back to root after this, so it can't re-run
 # init-firewall.sh itself to widen the allowlist mid-session.
 #
-# SANDBOX_CMD is what actually runs as that user - defaults to bare `claude`
-# (the wrapped binary on PATH, see claude-wrapper.sh) so a fresh clone of
-# this repo works with no editor setup at all. Override it (e.g. to `nvim`)
-# for a custom editor-driven workflow; pair with SANDBOX_NVIM_CONFIG (see
-# bin/dejima) to bring in a real config for it instead of running
-# unconfigured.
+# SANDBOX_CMD is what actually runs as that user - the selected harness's
+# own command unless [core] command overrides it (e.g. to `nvim`) for an
+# editor-driven workflow; pair that with SANDBOX_NVIM_CONFIG (see bin/dejima)
+# to bring in a real config for it instead of running unconfigured.
 exec gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"
