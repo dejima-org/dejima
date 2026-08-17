@@ -1816,3 +1816,55 @@ _epitaph_transcript() {
     [[ "$output" == *"unknown guard: push-gaurd"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace" "$proot"
 }
+
+@test "install.sh registers the selected harness's guards, gated on its declarations" {
+    # Which guards exist and how they are installed is the harness's, so a
+    # harness declaring fewer gets fewer - and dejima does not write a
+    # config belonging to a harness the operator did not choose.
+    local proot; proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    sed -i 's/^guards .*/guards          = bash-deny/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    run_install DEJIMA_PROVIDER_ROOT="$proot"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run jq -r '[.hooks.PreToolUse[]?.hooks[]?.command] | join(" ")' \
+        "$CONFIG_DIR/.claude/settings.json"
+    [[ "$output" == *"deny-dangerous-bash.sh"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"git-push-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $output"; return 1; }
+    [[ "$output" != *"merge-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $output"; return 1; }
+    rm -rf "$proot"
+}
+
+@test "install.sh registers every guard when the harness declares them all" {
+    # The shipped harness, unmodified: the behaviour this replaced, kept.
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local cmds
+    cmds="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command,
+                    .hooks.SessionStart[]?.hooks[]?.command] | join(" ")' \
+        "$CONFIG_DIR/.claude/settings.json")"
+    local h
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh deny-dangerous-bash.sh; do
+        [[ "$cmds" == *"$h"* ]] || { echo "$h not registered: $cmds"; return 1; }
+    done
+    # Linked for the read-only hooks mount, but registered per session by
+    # bin/dejima rather than here, where it would fire for host sessions too.
+    [ -L "$CONFIG_DIR/.claude/hooks/dejima-notify.sh" ]
+    [[ "$cmds" != *"dejima-notify.sh"* ]] \
+        || { echo "notify registered host-wide: $cmds"; return 1; }
+}
+
+@test "install.sh registers no guards when no harness is selected" {
+    # Writing one harness's config for an operator who has chosen another,
+    # or none, is the coupling this removed.
+    # A config that already exists is never overwritten, so this is how an
+    # operator upgrading from before [core] harness was required arrives.
+    printf '[core]\nforge = none\nworkflow = local-only\n' > "$CONFIG_DIR/config"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"No [core] harness is set"* ]] || { echo "$output"; return 1; }
+    [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
+        || { echo "wrote a harness config anyway"; return 1; }
+}

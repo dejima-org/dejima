@@ -2498,14 +2498,17 @@ nginx_blocks() {
 }
 
 @test "install.sh links the remote scripts and the notify hook, registers neither, and enables nothing" {
-    grep -q '^link_hook dejima-notify.sh$' "$REPO_ROOT/install.sh"
+    # The hook is linked by the harness plugin now - which file it is, and
+    # where the harness reads it from, is the harness's business - while the
+    # CLIs stay install.sh's, being dejima's own.
+    grep -q '_link_hook dejima-notify.sh' "$REPO_ROOT/bin/harness/claude-code.sh"
     grep -q '^link_bin dejima-attach$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-ttyd$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-notify-watch$' "$REPO_ROOT/install.sh"
     # The notify hook is registered per session by bin/dejima, into a
     # throwaway settings copy. Registered here it would fire for every
     # unsandboxed host session too.
-    run grep -nE 'register_hook.*dejima-notify' "$REPO_ROOT/install.sh"
+    run grep -nE '_register .*dejima-notify' "$REPO_ROOT/bin/harness/claude-code.sh"
     [ "$status" -ne 0 ]
     # Standing up a front door is an explicit operator decision. Nothing in
     # the installer may start, enable or even copy a unit. Code only - the

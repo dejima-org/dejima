@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -99,7 +99,11 @@ harness_report_guards() {
 harness_plugin_load() {
     local name="$1" plugin
     [ -n "$name" ] || return 0
-    plugin="$SCRIPT_DIR/harness/$name.sh"
+    # Resolved from this file's own location, not from a caller's SCRIPT_DIR:
+    # install.sh sets that to the repo root while bin/dejima sets it to bin/,
+    # and a library that only works for one of its callers is a trap for the
+    # next one.
+    plugin="$(cd "${BASH_SOURCE[0]%/*}" && pwd)/harness/$name.sh"
     if [ ! -f "$plugin" ]; then
         echo "No harness plugin for '$name' at $plugin." >&2
         echo "A supported harness has both a manifest and a plugin; see" >&2
