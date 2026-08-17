@@ -23,6 +23,8 @@ setup() {
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
     cat > "$CONFIG_DIR/config" <<EOF
+[core]
+harness = claude-code
 [harness.claude-code]
 projects_dir = $PROJDIR
 statusline_path = $DEJIMA_AUDIT_STATUSLINE
@@ -262,6 +264,24 @@ cmp_() { "$AUDIT" compare "$WS" "$STATE" 2>&1; }
     run cmp_
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
+}
+
+@test "says so when no harness is selected, rather than auditing a narrower surface in silence" {
+    # The statusline path comes from the selected harness, so with none
+    # selected there is nothing to watch and the compensating control for
+    # the symlink gap covers nothing. bin/dejima refuses to start without
+    # [core] harness, so this state means the audit was driven by hand - and
+    # a clean report over a surface that was never examined is worse than a
+    # noisy one.
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    cat > "$CONFIG_DIR/config" <<EOF
+[audit]
+dir = $AUDITDIR
+baselines_dir = $BASEDIR
+EOF
+    run "$AUDIT" snapshot "$WS" "$STATE"
+    [[ "$output" == *"no [core] harness is set"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"NOT checked"* ]] || { echo "$output"; return 1; }
 }
 
 @test "flags a plain regular-file statusline.sh replaced with different content" {

@@ -2042,17 +2042,15 @@ EOF
     done
 }
 
-@test "the harness-coupling audit still matches the tree" {
-    # docs/development.md lists every place core reads the harness config by
-    # literal name instead of by the selected harness. An audit nobody
-    # re-runs is a claim, so the count is checked: fixing one of these forces
-    # the row to go with it, and adding a new one forces a row to appear.
-    local n_code n_doc
-    n_code=$(cat "$REPO_ROOT"/bin/* | grep -c 'harness\.claude-code')
-    n_doc=$(sed -n '/^### Where core still says/,/^### /p' \
-        "$REPO_ROOT/docs/development.md" | grep -c '^| `bin/')
-    [ "$n_code" -eq "$n_doc" ] \
-        || { echo "bin/ has $n_code literal harness.claude-code reads, the audit lists $n_doc"; return 1; }
+@test "core never reads a harness's config by a literal harness name" {
+    # `keys` is declared per harness, so a fixed [harness.<name>] at a call
+    # site makes it a declaration only one harness can ever be read through:
+    # a second harness is selected, is validated, and is then handed the
+    # first one's paths with nothing erroring anywhere. A silent wrong
+    # answer, so it gets a test rather than a convention.
+    run grep -rn 'config_get["'"'"' ]*harness\.[a-z]' "$REPO_ROOT/bin"
+    [ "$status" -ne 0 ] || { echo "use harness_config_get instead:"; echo "$output"; return 1; }
+    grep -q '^harness_config_get()' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
 @test "the harness guide states the precondition a harness has to meet" {

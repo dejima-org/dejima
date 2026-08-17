@@ -184,22 +184,21 @@ but it is a different product and none of the reasoning in
 | `resume_command` | what the briefing tells a session to hand the operator |
 | `briefing` | this harness's fragment of the session briefing |
 
-### Where core still says `claude-code` out loud
+### Reading a harness's own config
 
-Five call sites read the harness config by literal name rather than by the
-selected harness, so `keys` is declared per harness but consumed as though
-there were only one. This is the first thing to fix, because until it is
-fixed a second harness silently gets Claude Code's paths:
+`harness_config_get <key>` resolves whichever harness `[core] harness`
+names. Use it; do not spell a `[harness.<name>]` section out at a call site.
 
-| File | Line reads |
-| --- | --- |
-| `bin/dejima` | `DEJIMA_AUDIT_STATUSLINE=[harness.claude-code] statusline_path` |
-| `bin/dejima` | `DEJIMA_AUDIT_PROJECTS_DIR=[harness.claude-code] projects_dir` |
-| `bin/dejima-audit` | `config_get harness.claude-code projects_dir` |
-| `bin/dejima-audit` | `config_get harness.claude-code statusline_path` |
-| `bin/dejima-epitaph` | `config_get harness.claude-code projects_dir` |
+`keys` is declared per harness, so a literal section name makes it a
+declaration only one harness can ever be read through - a second harness
+gets selected, gets validated, and is then handed the first one's paths with
+nothing erroring anywhere. Three call sites did exactly that, in
+`bin/dejima-audit` (twice) and `bin/dejima-epitaph`. A static test now holds
+the rule.
 
-`provider_keys` already resolves the selected harness; these predate it.
+It returns empty when no harness is selected. `bin/dejima` refuses to start
+in that state, so that is reachable only from the standalone tools, where a
+harness-specific path resolving to nothing is the honest answer.
 
 ### The inventory
 

@@ -21,7 +21,7 @@ config_validate || exit 1
 
 cmd="${1:-}"; ws_arg="${2:-}"; state="${3:-}"
 
-PROJECTS_DIR="$(config_get harness.claude-code projects_dir)"
+PROJECTS_DIR="$(harness_config_get projects_dir)"
 
 # The one top-level ~/.claude entry docker-compose.yml's read-only overlays
 # don't cover (settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/
@@ -31,7 +31,22 @@ PROJECTS_DIR="$(config_get harness.claude-code projects_dir)"
 # resolves the mount destination through the symlink; confirmed against a
 # live container, see test/runtime.bats). Detection here is the compensating
 # control for that gap. Overridable for tests.
-STATUSLINE_PATH="$(config_get harness.claude-code statusline_path)"
+STATUSLINE_PATH="$(harness_config_get statusline_path)"
+
+# With no harness selected there is no statusline path to watch, and the
+# compensating control above quietly covers nothing. bin/dejima refuses to
+# start without [core] harness, so a snapshot in this state means the audit
+# was driven by hand against a config dejima itself would reject - say so
+# rather than reporting a clean run over a surface that was never examined.
+# A silently narrower audit is worse than a noisy one.
+if [ -z "$STATUSLINE_PATH" ] && [ -z "$(config_get core harness)" ]; then
+    case "$cmd" in
+        snapshot|compare)
+            echo "dejima audit: no [core] harness is set, so harness-specific surfaces" >&2
+            echo "              (the statusline that runs on the host) are NOT checked." >&2
+            ;;
+    esac
+fi
 
 # This script's own repo root - the sandbox's trusted computing base (see
 # tcb_snapshot below) is only monitored when the workspace being audited IS

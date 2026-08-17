@@ -29,7 +29,7 @@ cmd="${1:-}"; ws_arg="${2:-}"; transcripts="${3:-}"
 
 [ "$(config_get epitaph enabled)" = "on" ] || exit 0
 STORE="$(config_get epitaph dir)"
-[ -n "$transcripts" ] || transcripts="$(config_get harness.claude-code projects_dir)"
+[ -n "$transcripts" ] || transcripts="$(harness_config_get projects_dir)"
 
 ws="$ws_arg"
 [ -n "$ws" ] || ws="$(pwd)"

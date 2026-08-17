@@ -426,6 +426,27 @@ _config_extra_spec() {
     return 1
 }
 
+# One key of the SELECTED harness, rather than of a harness named literally
+# at the call site.
+#
+# `keys` is declared per harness, so reading one through a fixed section name
+# makes it a declaration only one harness can ever be read through: a second
+# harness gets selected, gets validated, and is then handed the first one's
+# paths with nothing erroring anywhere. That is a silent wrong answer rather
+# than a failure, which is why it is worth a helper rather than a longer
+# expression at each site.
+#
+# Empty when no harness is selected. bin/dejima refuses to start in that
+# state (there is no default, deliberately - see [core] harness), so it is
+# reachable only from the standalone tools, where a harness-specific path
+# that resolves to nothing is the honest answer for "no harness chosen".
+harness_config_get() {
+    local name
+    name="$(config_get core harness)"
+    [ -n "$name" ] || return 0
+    config_get "harness.$name" "$1"
+}
+
 # Enumerates the keys of the SELECTED forge/harness (core.forge/core.harness,
 # falling back to their schema default when no config file exists yet to
 # read a selection from - e.g. an isolated call against a fresh checkout)
