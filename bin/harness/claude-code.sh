@@ -10,6 +10,32 @@
 # reason this is code is the pairing in the second block, which resolves one
 # directory tree through the filenames of another.
 
+# Registers the waiting/done notification handlers into dejima's settings
+# layer, in the shape Claude Code reads them.
+#
+# Claude Code merges hook entries across settings layers rather than letting
+# the higher one replace the lower, so these are added to whatever the
+# operator already has rather than displacing it. $HOME is left unexpanded
+# for Claude Code to resolve at hook-run time - inside the container, not
+# here - matching the convention install.sh already uses.
+#
+# Written through a temp file and renamed: the destination is the settings
+# layer bin/dejima is about to mount, and a jq that failed partway would
+# otherwise leave the session with a truncated one.
+harness_register_notify() {
+    local settings="$1" tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
+    if jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
+      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+        "$settings" > "$tmp"; then
+        mv "$tmp" "$settings"
+    else
+        rm -f "$tmp"
+        echo "warning: could not register the notification hooks; remote access" >&2
+        echo "will not be told when this session wants attention." >&2
+    fi
+}
+
 # The per-project and per-session state this harness keeps on the host, and
 # which parts of it this workspace is entitled to see.
 harness_state_mounts() {

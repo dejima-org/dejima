@@ -192,6 +192,19 @@ Declaring one absent is a real decision with a visible cost, not a
 formality. It is there so a harness can be supported honestly at a smaller
 guard set rather than shipped with three protections quietly missing.
 
+**The guard rails are declared in the manifest and reported at launch.**
+`guards` lists which of `bash-deny`, `push-guard`, `merge-guard` and
+`notify` the harness can host. A name outside that set is refused, because a
+typo would otherwise turn a guard off in silence. The ones a harness does
+not declare are named once at launch, with what each costs - and nothing is
+printed at all when it hosts them all, so the message stays a signal rather
+than a line to scroll past.
+
+Core gates the work on the declaration rather than on whether a plugin
+happens to define the hook: a harness that forgot to declare a guard but
+implemented it would otherwise get a protection the launch message has just
+told the operator it does not have.
+
 ### Worked example: why aider is not supported
 
 aider clears R1 (`--yes-always`), R3 (`--read` places a file in context),

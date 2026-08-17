@@ -142,6 +142,7 @@ EOF
         harness) cat <<'EOF'
 command	identifier	claude
 command_path	?path
+guards	?list:identifier
 no_confirm_args	?template
 settings_args	?template
 keys	?list:keyspec
@@ -450,6 +451,16 @@ harness_config_get() {
     config_get "harness.$name" "$1"
 }
 
+# Every guard rail dejima knows how to apply. A harness declares which of
+# them it can host, in its manifest's `guards`; the ones it cannot are named
+# at launch (see harness_report_guards) rather than quietly absent.
+#
+# Here rather than in dejima-harness-lib.sh because provider_validate_selection
+# rejects a name outside this set, and a constant the validation depends on
+# has to live where the validation does - providers.bats sources only this
+# file, and against an empty set every guard is unknown.
+DEJIMA_KNOWN_GUARDS="bash-deny push-guard merge-guard notify"
+
 # Enumerates the keys of the SELECTED forge/harness (core.forge/core.harness,
 # falling back to their schema default when no config file exists yet to
 # read a selection from - e.g. an isolated call against a fresh checkout)
@@ -488,6 +499,25 @@ provider_validate_selection() {
     manifest_validate forge "$forge" || return 1
     manifest_validate workflow "$workflow" || return 1
     manifest_validate harness "$harness" || return 1
+
+    # Every guard rail dejima knows how to apply. A harness declares which of
+    # them it can host; the ones it cannot are named at launch rather than
+    # quietly absent, because an operator who has them everywhere else would
+    # otherwise have to read a manifest to find out they are gone here.
+    #
+    # A name outside this set is a hard error rather than an unknown guard
+    # treated as absent: a typo would otherwise silently turn a guard off,
+    # which is the failure this whole declaration exists to prevent.
+    local guard
+    for guard in $(manifest_get harness "$harness" guards); do
+        case " $DEJIMA_KNOWN_GUARDS " in
+            *" $guard "*) ;;
+            *)
+                echo "harness '$harness' declares an unknown guard: $guard" >&2
+                echo "Known guards: $DEJIMA_KNOWN_GUARDS" >&2
+                return 1 ;;
+        esac
+    done
 
     caps="$(manifest_get forge "$forge" capabilities)"
     requires="$(manifest_get workflow "$workflow" requires)"

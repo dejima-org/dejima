@@ -40,7 +40,57 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify"
+
+# What an operator loses when a harness cannot host a given guard. The set
+# itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
+# manifest schema and the validation that rejects a name outside it: a
+# constant the validation depends on must live where the validation does, or
+# a caller that loads only provider-lib validates against an empty set and
+# rejects every guard there is.
+_guard_description() {
+    case "$1" in
+        bash-deny)   printf 'obviously destructive shell commands are not refused' ;;
+        push-guard)  printf 'pushes to hosts and branches outside the allowed set are not refused' ;;
+        merge-guard) printf 'the agent can merge its own pull requests' ;;
+        notify)      printf 'remote access gets no waiting/done notifications' ;;
+        *)           printf 'unknown guard' ;;
+    esac
+}
+
+# Whether the selected harness declared a given guard. Core gates the work
+# on this rather than on whether the plugin happens to define a hook: a
+# harness that forgot the declaration but implemented the hook would get a
+# guard the launch message has just told the operator it does not have.
+harness_has_guard() {
+    case " $(manifest_get harness "$DEJIMA_HARNESS_NAME" guards) " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Says which guards the selected harness cannot host. Silent when it hosts
+# them all, which is the common case and must not become noise an operator
+# learns to scroll past - the point is that the line only appears when
+# something really is missing.
+harness_report_guards() {
+    local harness="$1" declared guard missing=()
+    declared="$(manifest_get harness "$harness" guards)"
+    for guard in $DEJIMA_KNOWN_GUARDS; do
+        case " $declared " in
+            *" $guard "*) ;;
+            *) missing+=("$guard") ;;
+        esac
+    done
+    [ "${#missing[@]}" -gt 0 ] || return 0
+    printf '  %sharness %s does not support %s of dejima'"'"'s guards:%s\n' \
+        "$C_WARN" "$harness" "${#missing[@]}" "$C_RESET" >&2
+    for guard in "${missing[@]}"; do
+        printf '    %s%s%s - %s\n' "$C_KEY" "$guard" "$C_RESET" "$(_guard_description "$guard")" >&2
+    done
+    printf '  The container still bounds this session; these are the fast-fail\n' >&2
+    printf '  guards it does not get. See docs/development.md.\n' >&2
+}
 
 # Sources the selected harness's plugin. Hard error when it is missing:
 # support is per harness and deliberate (see "Adding a new harness" in

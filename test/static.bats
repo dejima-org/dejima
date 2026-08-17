@@ -3079,3 +3079,42 @@ q
     grep -qE '^core\.command\s+\?identifier' "$REPO_ROOT/bin/dejima-config-lib.sh"
     grep -q 'SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"' "$REPO_ROOT/bin/dejima"
 }
+
+# --- guards are declared, not assumed ---
+
+@test "every shipped harness declares which guards it can host" {
+    # An absent `guards` reads as "hosts none", which for a harness that
+    # hosts all four would tell the operator at every launch that four
+    # protections are missing. Silence is not a valid declaration here.
+    local d name g known
+    known="$(sed -n 's/^DEJIMA_KNOWN_GUARDS="\(.*\)"$/\1/p' "$REPO_ROOT/bin/dejima-provider-lib.sh")"
+    [ -n "$known" ] || { echo "the known-guard set is gone"; return 1; }
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -f "$d/harness.conf" ] || continue
+        name="$(basename "$d")"
+        grep -qE '^\s*guards\s*=' "$d/harness.conf" \
+            || { echo "$name declares no guards"; return 1; }
+        for g in $(sed -n 's/^\s*guards\s*=\s*//p' "$d/harness.conf"); do
+            case " $known " in
+                *" $g "*) ;;
+                *) echo "$name declares unknown guard: $g"; return 1 ;;
+            esac
+        done
+    done
+}
+
+@test "the guard set core knows lives with the validation that rejects a name" {
+    # It was in dejima-harness-lib.sh while provider_validate_selection read
+    # it from dejima-provider-lib.sh, so a caller loading only the latter -
+    # providers.bats does - validated against an empty set and rejected
+    # every guard there is.
+    grep -q '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    run grep -n '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    [ "$status" -ne 0 ] || { echo "the set is defined in two places"; return 1; }
+}
+
+@test "core gates guard work on the declaration, not on the plugin defining a hook" {
+    # A harness that forgot the declaration but implemented the hook would
+    # get a guard the launch message has just said it does not have.
+    grep -q 'harness_has_guard notify' "$REPO_ROOT/bin/dejima"
+}
