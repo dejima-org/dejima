@@ -1727,3 +1727,38 @@ _epitaph_transcript() {
     run grep -nE 'extra_mounts\+=.*epitaph' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
 }
+
+# The epitaph store holds every earlier session's own account of what it
+# worked out, in a directory nothing mounts - that is the whole design. It
+# was not in the guarded list, so an operator could name it in [mounts]
+# readonly and hand a session exactly what the store exists to withhold. The
+# audit and baseline stores live beside it and were guarded; this one was
+# added later and was not.
+@test "[mounts] readonly is refused when it names the epitaph store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    epi="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[epitaph]' "dir = $epi" \
+                 '[mounts]' "readonly = $epi"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$epi"
+}
+
+# Writable is the worse direction: a session could edit what an earlier one
+# recorded, or plant an epitaph for the operator to read as an earlier
+# session's own account.
+@test "[mounts] read_write is refused when it names the epitaph store" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    epi="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[epitaph]' "dir = $epi" \
+                 '[mounts]' "read_write = $epi"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing [mounts] read_write entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$epi"
+}
