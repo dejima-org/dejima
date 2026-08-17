@@ -1401,9 +1401,9 @@ key_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
     snap
     head -1 "$STATE" | grep -q '^### staging /'
     # The existing section ranges are anchored at ### gitconfig and
-    # ### statusline, so putting staging first must leave them untouched.
+    # ### hostexec, so putting staging first must leave them untouched.
     grep -q '^### gitconfig$' "$STATE"
-    grep -q '^### statusline$' "$STATE"
+    grep -q '^### hostexec$' "$STATE"
 }
 
 @test "denylisted surfaces are never staged, not even transiently" {
@@ -1929,4 +1929,44 @@ sidecar() { local r; r="$(find "$AUDITDIR" -name '*.txt' | sort | tail -1)"; r="
     printf 'curl evil\n' > "$WS/.git/hooks/pre-commit"
     run "$AUDIT" compare "$WS" "$STATE"
     [[ "$output" != *"writable"* ]]
+}
+
+@test "a host-execution finding still records the id existing baselines hold" {
+    # The id is what an approval is stored under. Generalising the mechanism
+    # must not rename it: every baseline an operator already has says
+    # "statusline:statusline.sh", and an id that no longer matches re-fires
+    # a CRITICAL they approved. The namespace and leaf come from the plugin
+    # for exactly this reason - they are the harness's to keep stable.
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    snap
+    printf '#!/bin/sh\necho changed\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    run cmp_
+    [[ "$output" == *"HOST-CODE-EXECUTION"* ]] || { echo "$output"; return 1; }
+    # Approve it, then confirm the baseline line is the historical id.
+    printf 'a\n' | "$AUDIT" ack "$WS" >/dev/null 2>&1 || true
+    run cat "$BASEDIR/$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    [[ "$output" == *"safe statusline:statusline.sh "* ]] \
+        || { echo "baseline id changed: $output"; return 1; }
+}
+
+@test "a harness declaring no host-execution surface is watched for none" {
+    # Not every harness runs something on the host from its own config. The
+    # absence must mean nothing is checked, not that the previous harness's
+    # path is.
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    snap
+    cat > "$CONFIG_DIR/config" <<EOF
+[core]
+harness = claude-code
+[harness.claude-code]
+projects_dir = $PROJDIR
+statusline_path =
+[audit]
+dir = $AUDITDIR
+baselines_dir = $BASEDIR
+EOF
+    printf '#!/bin/sh\necho changed\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    run cmp_
+    [[ "$output" != *"HOST-CODE-EXECUTION"* ]] \
+        || { echo "watched a surface the harness declares no path for: $output"; return 1; }
 }
