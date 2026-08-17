@@ -1769,3 +1769,50 @@ _epitaph_transcript() {
     [[ "$output" == *"Refusing harness state mount"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace" "$audit_dir"
 }
+
+@test "a harness that cannot host a guard says so at launch" {
+    # The capability bar allows a harness to be supported at a smaller guard
+    # set. What it does not allow is that being invisible: an operator who
+    # has these everywhere else would otherwise have to read a manifest to
+    # find out they are gone here.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    # Same harness, minus two guards, so the message is the only difference.
+    sed -i 's/^guards .*/guards          = bash-deny notify/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [[ "$output" == *"does not support 2 of dejima's guards"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"push-guard"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"merge the agent"* || "$output" == *"merge its own pull requests"* ]] \
+        || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "a harness hosting every guard says nothing about guards" {
+    # The message must not become a line an operator learns to scroll past.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" != *"guards"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a harness declaring a guard dejima does not know is refused" {
+    # A typo would otherwise turn a guard off silently, which is the failure
+    # the declaration exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    sed -i 's/^guards .*/guards          = bash-deny push-gaurd/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"unknown guard: push-gaurd"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}

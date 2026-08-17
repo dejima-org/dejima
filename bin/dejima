@@ -756,7 +756,6 @@ SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 # and SANDBOX_DERIVED_CONTEXT is one of the `rm -rf` arguments.
 DEJIMA_NOTIFY_DIR=""
 DEJIMA_SESSION_FILE=""
-SANDBOX_REMOTE_SETTINGS_TMP=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -814,7 +813,7 @@ cleanup() {
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
-    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
+    rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
     # out loud when it fails: the marker directory is bind-mounted
@@ -1376,24 +1375,23 @@ if remote_enabled; then
     # own ID.
     extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
 
-    # The notify hook is registered per session, into the override layer from
-    # above and nowhere else: registering it in the operator's real
-    # settings.json would run it for every sandbox and for the host's own
-    # Claude Code, which share that file, when it is only meaningful for a
-    # session that has a marker directory. $SANDBOX_SETTINGS_FILE is
-    # already a throwaway mktemp file, so this rewrite cannot reach the
-    # operator's real settings.json; it is mounted read-only, so the
-    # session cannot unregister itself either. Claude Code merges hooks
-    # across settings layers rather than letting the higher one replace the
-    # lower, so these are added to whatever the operator already has rather
-    # than displacing it. $HOME is left unexpanded for Claude Code to resolve
-    # at hook-run time - inside the container, not here - matching the
-    # convention install.sh already uses.
-    SANDBOX_REMOTE_SETTINGS_TMP="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
-    jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
-      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
-        "$SANDBOX_SETTINGS_FILE" > "$SANDBOX_REMOTE_SETTINGS_TMP"
-    mv "$SANDBOX_REMOTE_SETTINGS_TMP" "$SANDBOX_SETTINGS_FILE"
+    # Registered per session, into the override layer from above and nowhere
+    # else: putting it in the operator's real settings.json would run it for
+    # every sandbox and for the host's own agent, which share that file, when
+    # it is only meaningful for a session that has a marker directory.
+    # $SANDBOX_SETTINGS_FILE is already a throwaway mktemp file, so this
+    # rewrite cannot reach the operator's real settings; it is mounted
+    # read-only, so the session cannot unregister itself either.
+    #
+    # How a harness is told to run something on those two events is the
+    # harness's own business - Claude Code merges hook entries across
+    # settings layers, another harness may take a config key or an
+    # environment variable - so the writing is the plugin's. Whether it
+    # happens at all is core's, and is gated on the harness having declared
+    # the notify guard.
+    if harness_has_guard notify; then
+        harness_hook harness_register_notify "$SANDBOX_SETTINGS_FILE"
+    fi
 fi
 
 # Everything from here to the container's own first output is silent: the
@@ -1406,6 +1404,12 @@ fi
 printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
     "$C_DIM" "$C_RESET" >&2
+
+# Named here, once, at the moment the operator is choosing to proceed. Silent
+# when the harness hosts every guard, so this is not a line anyone learns to
+# scroll past - it appears only when a protection they have elsewhere is
+# genuinely not in force here.
+harness_report_guards "$DEJIMA_HARNESS_NAME"
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
