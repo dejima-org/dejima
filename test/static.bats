@@ -3166,3 +3166,23 @@ q
     grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
     grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
+
+@test "the provider directories are in the audit's TCB list" {
+    # They hold no code, which is why they were left out. What they hold
+    # decides what the next launch permits: a forge's fixed_hosts reaches
+    # DEJIMA_FORGE_HOSTS, which entrypoint.sh joins into the domains
+    # init-firewall.sh allowlists, so a manifest line widens the egress
+    # boundary on the next run. A briefing fragment is what the next session
+    # is told it may do.
+    local dirs
+    dirs="$(sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" \
+        | sed -n 's/.*for dir in \(.*\); do/\1/p')"
+    [ -n "$dirs" ] || { echo "the TCB directory list is gone"; return 1; }
+    local d
+    for d in bin hooks docker test forges workflows harnesses; do
+        case " $dirs " in
+            *" $d "*) ;;
+            *) echo "$d is not in the TCB list: $dirs"; return 1 ;;
+        esac
+    done
+}

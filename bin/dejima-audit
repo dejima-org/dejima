@@ -855,7 +855,25 @@ tcb_snapshot() {
         for p in install.sh; do
             [ -f "$ws/$p" ] && { stage_entry "tcb:$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
-        for dir in bin hooks docker test; do
+        # The provider directories are here for two reasons that are easy to
+        # miss because they are data, not code.
+        #
+        # A forge's `fixed_hosts` and a harness's paths are resolved on the
+        # host and handed to the container: fixed_hosts reaches
+        # DEJIMA_FORGE_HOSTS, which entrypoint.sh joins into extra_domains and
+        # init-firewall.sh allowlists. So a line added to a manifest widens the
+        # egress allowlist on the next launch - the boundary that bounds where
+        # a compromised session can send anything.
+        #
+        # And a briefing fragment is what the next session is told about where
+        # it is and what it may do, which docs/security.md already names as
+        # reachable from a session with write access to this checkout.
+        #
+        # Neither is code and neither is executed, which is why they were not
+        # here. Both decide what the next launch permits, which is what the
+        # TCB list is for. A visible edit stays a normal reviewable diff - the
+        # split above only reports what git cannot see.
+        for dir in bin hooks docker test forges workflows harnesses; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
                     stage_entry "tcb:${f#"$ws"/}" "$f"
