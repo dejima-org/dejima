@@ -445,6 +445,20 @@ EOF
     grep -qE 'chown -R \$SANDBOX_USER:\$SANDBOX_USER .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
 }
 
+
+# The config directories the selected harness declares, as "path<TAB>mode<TAB>scan"
+# lines. Runs the hook rather than grepping the plugin, so these assert what a
+# launch would actually mount.
+_declared_config_dirs() {
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME=/h
+        harness_plugin_load claude-code
+        harness_config_dirs_load
+        printf "%s\n" ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}
+    '
+}
 @test "~/.claude runtime state that has to survive the session is mounted read-write" {
     # Directories, which is what makes them safe: a directory bind mount
     # can't detach the way a file one does, because a rename replaces an
@@ -452,10 +466,12 @@ EOF
     # projects/ and file-history/ are not in this list: both are mounted an
     # entry at a time by bin/dejima, see the tests below. The rest is the
     # task/plan state skills write and the ~/.claude.json backups.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/backups:\$\{HOME\}/\.claude/backups\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/tasks:\$\{HOME\}/\.claude/tasks\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plans:\$\{HOME\}/\.claude/plans\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/sessions:\$\{HOME\}/\.claude/sessions\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    local dirs d
+    dirs="$(_declared_config_dirs)"
+    for d in backups tasks plans sessions; do
+        grep -qxF "/h/.claude/$d"$'\t'$'\t' <<< "$dirs" \
+            || { echo "$d is not declared read-write: $dirs"; return 1; }
+    done
 }
 
 # The whole tree carries every project's transcripts and agent memory, and
@@ -559,8 +575,10 @@ EOF
     # hook symlink and drop a plain malicious file in its place, which the
     # dynamic-mount logic in bin/dejima never sees (it only protects symlink
     # targets that resolve outside ~/.claude).
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/hooks:\$\{HOME\}/\.claude/hooks:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/plugins:\$\{HOME\}/\.claude/plugins:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    local dirs
+    dirs="$(_declared_config_dirs)"
+    grep -q "^/h/.claude/hooks"$'\t'"ro" <<< "$dirs" || { echo "$dirs"; return 1; }
+    grep -q "^/h/.claude/plugins"$'\t'"ro" <<< "$dirs" || { echo "$dirs"; return 1; }
 }
 
 @test "~/.claude.json is a throwaway per-session copy, not the real file mounted directly" {
@@ -1346,10 +1364,12 @@ registered_commands() {
     # prompts that a later unsandboxed host session would run or load.
     # Read-only, and pre-created by bin/dejima since existence is what lets
     # Docker mount them at all.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/skills:\$\{HOME\}/\.claude/skills:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/commands:\$\{HOME\}/\.claude/commands:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/agents:\$\{HOME\}/\.claude/agents:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/output-styles:\$\{HOME\}/\.claude/output-styles:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    local dirs d
+    dirs="$(_declared_config_dirs)"
+    for d in skills commands agents output-styles; do
+        grep -q "^/h/.claude/$d"$'\t'"ro" <<< "$dirs" \
+            || { echo "$d is not declared read-only: $dirs"; return 1; }
+    done
 }
 
 @test "bin/dejima pre-creates every enumerated ~/.claude mount source" {
@@ -1357,12 +1377,24 @@ registered_commands() {
     # in its place - on the host for the source, and at the destination for
     # the code-carrying dirs, which would leave a session with no skills or
     # hooks and junk on the host either way.
-    for dir in skills commands agents output-styles hooks plugins \
-        projects file-history backups tasks plans sessions; do
-        grep -q "\"\$HOME/.claude/$dir\"" "$REPO_ROOT/bin/dejima"
+    # Every declared config directory is created before its mount is set up,
+    # by one loop over the declarations rather than a list that could fall
+    # out of step with what is mounted.
+    grep -q 'mkdir -p "$_cdir"' "$REPO_ROOT/bin/dejima"
+    grep -q 'harness_config_dirs_load' "$REPO_ROOT/bin/dejima"
+    # And the two the state hook mounts an entry at a time, whose parents it
+    # creates itself.
+    grep -q 'mkdir -p "$projects/$(ws_slug "$ws")"' "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'mkdir -p "$history"' "$REPO_ROOT/bin/harness/claude-code.sh"
+    # The set itself, so a directory silently dropped from the declaration
+    # fails here rather than presenting as a missing skill in a session.
+    local dirs d
+    dirs="$(_declared_config_dirs)"
+    for d in skills commands agents output-styles hooks plugins \
+             backups tasks plans sessions; do
+        grep -q "^/h/.claude/$d"$'\t' <<< "$dirs" \
+            || { echo "$d is no longer declared: $dirs"; return 1; }
     done
-    grep -q 'mkdir -p "$HOME/.claude/skills"' "$REPO_ROOT/bin/dejima"
-    grep -q 'mkdir -p "$HOME/.claude/projects"' "$REPO_ROOT/bin/dejima"
 }
 
 @test "bin/dejima overlays the workspace .git/hooks read-only when .git is a real dir" {
@@ -1580,7 +1612,18 @@ registered_commands() {
     # and Docker resolves any symlink among them when it sets up that mount -
     # so scanning "." as well would mount a whole config checkout read-only
     # into the container for nothing.
-    grep -q 'for mounted_dir in hooks skills commands agents output-styles' "$REPO_ROOT/bin/dejima"
+    # The scan flag is per directory now, declared by the harness: an entry
+    # in hooks/ or skills/ is routinely a link into a dotfiles checkout,
+    # while plugins/ is bookkeeping the harness writes for itself.
+    local dirs d
+    dirs="$(_declared_config_dirs)"
+    for d in hooks skills commands agents output-styles; do
+        grep -q "^/h/.claude/$d"$'\t'"ro"$'\t'"scan" <<< "$dirs" \
+            || { echo "$d is not scanned for symlink targets: $dirs"; return 1; }
+    done
+    grep -q "^/h/.claude/plugins"$'\t'"ro"$'\t'"scan" <<< "$dirs" \
+        && { echo "plugins should not be scanned: $dirs"; return 1; }
+    grep -q 'mounted_scan' "$REPO_ROOT/bin/dejima"
 }
 
 @test "bin/dejima stages ~/.claude/statusline.sh for copying, when present" {

@@ -681,10 +681,13 @@ mkdir -p "$SANDBOX_SHARE_DIR"
 # root-owned *directory* at it. That would leave junk on the host and, for
 # the read-only config dirs, a writable gap instead of an overlay. Pre-create
 # them all: empty is fine, existence is what matters.
-mkdir -p "$HOME/.claude/skills" "$HOME/.claude/commands" "$HOME/.claude/agents" \
-    "$HOME/.claude/output-styles" "$HOME/.claude/hooks" "$HOME/.claude/plugins"
-mkdir -p "$HOME/.claude/projects" "$HOME/.claude/file-history" "$HOME/.claude/backups" \
-    "$HOME/.claude/tasks" "$HOME/.claude/plans" "$HOME/.claude/sessions"
+# Which directories those are is the harness's (harness_config_dirs); that
+# they must exist before the mount is set up is dejima's.
+harness_config_dirs_load
+for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
+    IFS=$'\t' read -r _cdir _cmode _cscan <<< "$_rec"
+    mkdir -p "$_cdir"
+done
 
 # Same for settings.json, which install.sh normally creates, and CLAUDE.md,
 # which many hosts don't have at all.
@@ -1022,9 +1025,15 @@ extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
 extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
 extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
 
+# The harness's own configuration, mounted at the mode it declared, and -
+# for the directories it marked scannable - the symlink targets that have to
+# come with it. Enumerated in docker-compose.yml until this moved: static
+# YAML can only ever name one harness's directories.
 mounted_dirs=""
-for mounted_dir in hooks skills commands agents output-styles; do
-    dir="$HOME/.claude/$mounted_dir"
+for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
+    IFS=$'\t' read -r dir mounted_mode mounted_scan <<< "$_rec"
+    emit_mount "$dir" "$mounted_mode"
+    [ "$mounted_scan" = scan ] || continue
     [ -d "$dir" ] || continue
     for entry in "$dir"/*; do
         [ -L "$entry" ] || continue
@@ -1035,8 +1044,10 @@ for mounted_dir in hooks skills commands agents output-styles; do
         target="$(readlink -f "$entry")" || continue
         [ -n "$target" ] || continue
         real_dir="$(dirname "$target")"
+        # A target inside the directory being scanned, or beside it, is
+        # already mounted by the loop itself.
         case "$real_dir" in
-            "$HOME/.claude"*) continue ;;
+            "$(dirname "$dir")"*) continue ;;
         esac
         case " $mounted_dirs " in
             *" $real_dir "*) continue ;;

@@ -318,7 +318,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. Now in the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
 | Briefing delivery | the briefing and the project's `.dejima.md` reach the session *through* the `SessionStart` hook. No hooks, no briefing | `hooks/sandbox-context.sh` |
 | Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
-| Config parity | every `~/.claude` subdirectory is enumerated and mounted by name: `plugins`, `hooks`, `skills`, `commands`, `agents`, `output-styles` read-only; `backups`, `tasks`, `plans`, `sessions` read-write | `docker/docker-compose.yml` |
+| Config parity | which directories carry over and at what mode. Declared by the plugin now, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
 | Staged config | `settings.json`, `CLAUDE.md` and `statusline.sh` are staged read-only under `/etc/dejima-claude` and installed into place | `docker/entrypoint.sh`, `bin/dejima` |
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |

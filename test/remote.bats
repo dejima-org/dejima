@@ -235,8 +235,13 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
 
     # The registry decides which pane an operator gets attached to. A session
     # able to write it could redirect them, so it is never mounted.
+    #
+    # Matched on the registry's own path, not on the bare word "sessions":
+    # the harness has a ~/.claude/sessions of its own, and once that mount
+    # moved from docker-compose.yml onto the command line this read as the
+    # registry being mounted when it was not.
     case "$line" in
-        *sessions*) false ;;
+        */dejima/sessions*) false ;;
     esac
     rm -rf "$PROJ"
 }

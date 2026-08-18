@@ -230,3 +230,34 @@ harness_host_exec_surfaces() {
     emit_host_exec statusline statusline.sh "$p" \
         "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "
 }
+
+# The operator's own Claude Code configuration, carried into the session.
+#
+# Three classes, and the difference is what a session may do to each:
+#
+#   read-write - state the session produces that has to outlive it. All
+#     directories, which is what makes them safe: a directory bind mount
+#     cannot detach the way a single-file one does, because a rename replaces
+#     an entry *within* the mounted directory rather than the mount point
+#     itself (#47, #48).
+#   read-only - anything that RUNS. A session that could write these would be
+#     installing a hook, skill or plugin for the next session on the host to
+#     execute, which is the persistence dejima closes everywhere else.
+#   read-only, scanned - the same, plus following symlinks out: an entry in
+#     hooks/ or skills/ is routinely a link into a dotfiles checkout, and the
+#     target has to be mounted for the link to resolve inside the container.
+#     bin/dejima refuses a target overlapping a guarded store (#15).
+#
+# projects/ and file-history/ are deliberately absent: they are mounted an
+# entry at a time by harness_state_mounts above, because the whole tree is
+# every project's (#104).
+harness_config_dirs() {
+    local d
+    for d in backups tasks plans sessions; do
+        emit_config_dir "$HOME/.claude/$d"
+    done
+    emit_config_dir "$HOME/.claude/plugins" ro
+    for d in hooks skills commands agents output-styles; do
+        emit_config_dir "$HOME/.claude/$d" ro scan
+    done
+}
