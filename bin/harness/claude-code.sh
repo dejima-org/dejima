@@ -209,3 +209,24 @@ harness_register_guards() {
     echo
     return 0
 }
+
+# What Claude Code causes to run on the HOST, unsandboxed.
+#
+# settings.json's statusLine.command names a script the host executes on
+# every session, so a session that can write that file has a path onto the
+# host that no container boundary sees. bin/dejima stages the file rather
+# than mounting over it, because a :ro mount landing on a symlink - the
+# common case - protects the target and leaves the link replaceable;
+# detecting a change here is the compensating control for that.
+#
+# The namespace and leaf together form the id a baseline stores
+# ("statusline:statusline.sh"), so neither may change while anyone has
+# approvals recorded. The label is the fixed prefix `ack` strips to recover
+# that id, which is why it lives here as a literal rather than in the
+# manifest - see the host-exec notes in bin/dejima-harness-lib.sh.
+harness_host_exec_surfaces() {
+    local p
+    p="$(harness_config_get statusline_path)"
+    emit_host_exec statusline statusline.sh "$p" \
+        "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "
+}

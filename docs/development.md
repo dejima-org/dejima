@@ -253,6 +253,17 @@ own primitives rather than re-deriving them. An invoked protocol would also
 put a new text parser on the launch path, and every parsing bug this
 repository has had is in that family.
 
+**The manifest may carry values that are only used as paths or compared as
+data. It must not carry text that becomes part of a parser's grammar, or the
+identity of a security surface.** `dejima-audit`'s `ack` recovers a finding's
+id by stripping a fixed label from the front of the finding text, anchored
+deliberately (#45). Those labels are grammar. Provider directories are not in
+`tcb_snapshot`'s list, so in the self-mount case a session can edit a
+manifest without raising a CRITICAL - which is why host-execution surfaces
+are a plugin hook (`harness_host_exec_surfaces`) rather than a manifest key.
+The label stays a literal in code the audit watches; it just lives with the
+harness that owns it.
+
 **A plugin computes; core enforces.** A plugin declares through `emit_mount`
 and `emit_env`, which validate at the point of declaration - `emit_mount`
 runs the guarded-store refusal there, so a harness state directory that
@@ -315,7 +326,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Transcript format | conversation logging transforms Claude Code's JSONL line by line | `docker/log-shipper.sh` |
 | Compaction format | epitaph keys on `isCompactSummary` records and the `compact_boundary` that precedes them | `bin/dejima-epitaph` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
-| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host** | `bin/dejima-audit`, `bin/dejima` |
+| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
 
 ### Two things worth deciding early
 

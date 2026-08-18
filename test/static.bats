@@ -1625,9 +1625,12 @@ registered_commands() {
     # coverage (snapshot/compare
     # against real fixtures, including the symlink-swap exploit) lives in
     # test/audit.bats; this just confirms the wiring exists.
-    grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'statusline_snapshot' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/dejima-audit"
+    # The path and its label are the harness plugin's now; the mechanism
+    # that snapshots and reports them is still the audit's.
+    grep -q 'host_exec_snapshot' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'statusline_path' "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
 
 @test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
@@ -3141,4 +3144,25 @@ q
         | grep -q 'BASH_SOURCE'
     run sed -n '/^harness_plugin_load()/,/^}/p' "$REPO_ROOT/bin/dejima-harness-lib.sh"
     [[ "$output" != *'$SCRIPT_DIR'* ]] || { echo "$output"; return 1; }
+}
+
+@test "a finding's label lives in trusted code, never in a manifest" {
+    # `ack` recovers an id by stripping a fixed label from the front of a
+    # finding. Those labels are a parser's grammar, and provider directories
+    # are not in tcb_snapshot's list - in the self-mount case a session can
+    # edit a manifest without raising a CRITICAL. So the label stays a
+    # literal in code the audit does watch, which is why host-exec surfaces
+    # are a plugin hook rather than a manifest key.
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -rn 'HOST-CODE-EXECUTION' "$REPO_ROOT/harnesses"
+    [ "$status" -ne 0 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
+    run grep -rniE 'host_exec_paths|host_exec_label' "$REPO_ROOT/harnesses" "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
+}
+
+@test "the audit resolves host-execution paths from the harness, not a hardcoded one" {
+    run grep -n 'STATUSLINE_PATH' "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
