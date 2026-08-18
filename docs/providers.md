@@ -211,7 +211,11 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | `identifier` | `claude` | The container's main process for this harness. |
+| `command` | `identifier` | `claude` | The container's main process for this harness, and the name the wrapper shadows on `PATH`. `[core] command` defaults to it. |
+| `command_path` | `?path` | (empty) | Where the real binary lives, behind the shadow. |
+| `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
+| `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
+| `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
 | `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. |
 | `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
@@ -219,14 +223,22 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 Worked example, `harnesses/claude-code/harness.conf`:
 
 ```
-command        = claude
-keys           = projects_dir:path=~/.claude/projects statusline_path:path=~/.claude/statusline.sh
-resume_command = claude --resume {{session_id}}
-briefing       = briefing.md
+command         = claude
+command_path    = /usr/local/share/npm-global/bin/claude
+guards          = bash-deny push-guard merge-guard notify
+no_confirm_args = --dangerously-skip-permissions
+settings_args   = --settings /etc/dejima-settings.json
+keys            = projects_dir:path=~/.claude/projects file_history_dir:path=~/.claude/file-history statusline_path:path=~/.claude/statusline.sh
+resume_command  = claude --resume {{session_id}}
+briefing        = briefing.md
 ```
 
-Reading it: the container's main process is `claude`; `[harness.claude-code]`
-gets `projects_dir` and `statusline_path`, both `path`-typed with defaults;
+Reading it: the container's main process is `claude`, wrapped on `PATH` in
+front of the real binary at `command_path` so that every invocation - not
+only the one the entrypoint makes - gets `--dangerously-skip-permissions`
+and dejima's settings layer; `[harness.claude-code]`
+gets `projects_dir`, `file_history_dir` and `statusline_path`, all `path`-typed
+with defaults;
 resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.

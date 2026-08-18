@@ -482,10 +482,15 @@ EOF
     }
 }
 
-@test "bin/dejima mounts ~/.claude/projects one slug at a time" {
-    grep -q 'workspace_slugs_sorted "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")' \
-        "$REPO_ROOT/bin/dejima"
+@test "the claude-code plugin mounts projects/ one slug at a time" {
+    # Moved out of bin/dejima into the harness plugin: which directories a
+    # harness keeps, and what decides an entry belongs to this workspace, is
+    # a fact about the harness. The property is unchanged - the tree is
+    # every project's transcripts and memory, and memory is read into
+    # context at session start (#104).
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'workspace_slugs_sorted "$ws"' "$p"
+    grep -q 'emit_mount "$projects/$slug"' "$p"
 }
 
 # Docker creates the parents of a mount point root-owned when they do not
@@ -510,10 +515,10 @@ EOF
     }
 }
 
-@test "bin/dejima mounts ~/.claude/file-history one session at a time" {
-    grep -q 'workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    grep -q 'extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")' \
-        "$REPO_ROOT/bin/dejima"
+@test "the claude-code plugin mounts file-history one session at a time" {
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'workspace_session_ids "$projects" "$ws"' "$p"
+    grep -q 'emit_mount "$history/$sid"' "$p"
 }
 
 @test "the image pre-creates ~/.claude/file-history so the session mounts have a writable parent" {
@@ -694,8 +699,13 @@ EOF
     # Which only takes effect if the flag is actually passed. It goes in the
     # wrapper rather than the entrypoint so it also covers invocations the
     # entrypoint never sees (an interactive shell, claudecode.nvim).
-    grep -qE -- '--settings /etc/dejima-settings\.json' "$SANDBOX_DIR/claude-wrapper.sh"
-    grep -qE -- '"\$\{settings\[@\]\}"' "$SANDBOX_DIR/claude-wrapper.sh"
+    # The flag itself is the harness's now, not the wrapper's: the wrapper
+    # is shared and a --settings it hardcoded would be handed to a harness
+    # that layers settings some other way.
+    grep -qE -- 'settings_args\s*=\s*--settings /etc/dejima-settings\.json' \
+        "$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -q 'SANDBOX_HARNESS_SETTINGS' "$SANDBOX_DIR/harness-wrapper.sh"
+    grep -qE -- '\$\{settings\[@\]\+"\$\{settings\[@\]\}"\}' "$SANDBOX_DIR/harness-wrapper.sh"
 }
 
 @test "bin/dejima pre-creates the ~/.claude config files so neither is mounted as a directory" {
@@ -1166,9 +1176,13 @@ cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
     [ "$status" -eq 0 ]
 }
 
-@test "install.sh links and registers the merge guard" {
-    grep -qx 'link_hook merge-guard.sh' "$REPO_ROOT/install.sh"
-    grep -q 'register_hook PreToolUse Bash merge-guard.sh' "$REPO_ROOT/install.sh"
+@test "the merge guard is linked and registered" {
+    # In the harness plugin now: which file a guard is and where a harness
+    # reads it from is the harness's, while whether it is installed at all
+    # is gated on the manifest declaring the guard.
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'harness_has_guard merge-guard && _link_hook merge-guard.sh' "$p"
+    grep -q '_register PreToolUse Bash merge-guard.sh' "$p"
 }
 
 # Runs install.sh against a throwaway HOME, with a stub `docker` on PATH so
@@ -1611,9 +1625,12 @@ registered_commands() {
     # coverage (snapshot/compare
     # against real fixtures, including the symlink-swap exploit) lives in
     # test/audit.bats; this just confirms the wiring exists.
-    grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'statusline_snapshot' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/dejima-audit"
+    # The path and its label are the harness plugin's now; the mechanism
+    # that snapshots and reports them is still the audit's.
+    grep -q 'host_exec_snapshot' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'statusline_path' "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
 
 @test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
@@ -2959,4 +2976,193 @@ q
     # (or bare + --container) does. Only the bare form can ever refuse on it.
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
+}
+
+# --- harness plugins: a plugin computes, core enforces ---
+
+@test "no harness plugin touches the mount list directly" {
+    # A plugin that appended to extra_mounts itself would skip the
+    # guarded-store refusal emit_mount runs at the point of declaration -
+    # and would skip it differently in each harness, which is how one
+    # security model becomes one per harness. The plugins are trusted code,
+    # so this is held at review time rather than by isolating them.
+    run grep -rn 'extra_mounts' "$REPO_ROOT/bin/harness"
+    [ "$status" -ne 0 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
+}
+
+@test "a harness plugin defines only hooks core actually calls" {
+    # A function named something core never calls looks wired up and is
+    # dead. Worse, a near-miss of a real hook name (harness_state_mount for
+    # harness_state_mounts) reads as implemented and silently does nothing.
+    local hooks f fn
+    hooks="$(sed -n 's/^DEJIMA_HARNESS_HOOKS="\(.*\)"$/\1/p' \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh")"
+    [ -n "$hooks" ] || { echo "the hook list is gone"; return 1; }
+    for f in "$REPO_ROOT"/bin/harness/*.sh; do
+        [ -f "$f" ] || continue
+        while IFS= read -r fn; do
+            [ -n "$fn" ] || continue
+            case " $hooks " in
+                *" $fn "*) ;;
+                *) echo "$(basename "$f") defines $fn, which core never calls"; return 1 ;;
+            esac
+        done < <(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$f" | sed 's/()$//')
+    done
+}
+
+@test "every shipped harness has both a manifest and a plugin" {
+    # Support is per harness and deliberate. A manifest with no plugin is a
+    # half-finished integration that would present as a supported harness.
+    local d name
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ -f "$d/harness.conf" ] || { echo "$name has no manifest"; return 1; }
+        [ -f "$REPO_ROOT/bin/harness/$name.sh" ] \
+            || { echo "$name has a manifest but no plugin"; return 1; }
+    done
+    for d in "$REPO_ROOT"/bin/harness/*.sh; do
+        [ -f "$d" ] || continue
+        name="$(basename "$d" .sh)"
+        [ -f "$REPO_ROOT/harnesses/$name/harness.conf" ] \
+            || { echo "$name has a plugin but no manifest"; return 1; }
+    done
+}
+
+@test "harness plugins are inside the trusted computing base the audit watches" {
+    # They run on the host, in the launch path. Under harnesses/ they would
+    # be host-executed code a session could edit in dejima's own checkout
+    # without raising a CRITICAL, because tcb_snapshot covers install.sh,
+    # bin/, hooks/, docker/ and test/ - and not the provider directories.
+    [ -d "$REPO_ROOT/bin/harness" ] || { echo "plugins are not under bin/"; return 1; }
+    run grep -rn 'harness_state_mounts\|harness_plugin_load' "$REPO_ROOT/harnesses"
+    [ "$status" -ne 0 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
+    sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" | grep -q 'for dir in bin '
+}
+
+# --- the wrapper is the harness's, not Claude Code's ---
+
+@test "the wrapper names no harness, and the image installs it under a neutral name" {
+    # It is shadowed into place under the harness's own command by
+    # entrypoint.sh, because the image is shared across harnesses and the
+    # selection is per launch. A COPY to a fixed name would bake one
+    # harness's command into every image.
+    local w="$SANDBOX_DIR/harness-wrapper.sh"
+    [ -f "$w" ] || { echo "the generic wrapper is gone"; return 1; }
+    run grep -niE 'claude|anthropic' "$w"
+    [ "$status" -ne 0 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
+    grep -q 'COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper' \
+        "$SANDBOX_DIR/Dockerfile"
+    run grep -n 'COPY docker/claude-wrapper' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "the old fixed-name copy is back"; return 1; }
+}
+
+@test "the entrypoint refuses a harness command name that is not a bare name" {
+    # It becomes a path under /usr/local/bin. A value with a slash would
+    # write the symlink somewhere else entirely, and this one arrives from
+    # the host as an environment variable.
+    sed -n '/SANDBOX_HARNESS_COMMAND:-/,/^fi/p' "$SANDBOX_DIR/entrypoint.sh" \
+        | grep -q '\*/\*'
+}
+
+@test "the no-confirm flags come from the harness manifest" {
+    # R1 of the capability bar. The flag was hardcoded in the wrapper, which
+    # made unattended operation a property of the image rather than of the
+    # selected harness.
+    grep -qE -- 'no_confirm_args\s*=\s*--dangerously-skip-permissions' \
+        "$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -q 'no_confirm_args' "$REPO_ROOT/bin/dejima"
+    # And a harness that names none is refused rather than run asking for
+    # confirmation on every tool call, which presents as a hang.
+    grep -q 'declares no no_confirm_args' "$REPO_ROOT/bin/dejima"
+}
+
+@test "core's schema holds no harness's command as a default" {
+    # [core] command defaulted to the literal `claude`, so core carried one
+    # harness's command name while the manifest's own `command` key was read
+    # by nothing.
+    run grep -nE '^core\.command\s+identifier\s+claude' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    [ "$status" -ne 0 ] || { echo "core still defaults to a harness command"; return 1; }
+    grep -qE '^core\.command\s+\?identifier' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    grep -q 'SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"' "$REPO_ROOT/bin/dejima"
+}
+
+# --- guards are declared, not assumed ---
+
+@test "every shipped harness declares which guards it can host" {
+    # An absent `guards` reads as "hosts none", which for a harness that
+    # hosts all four would tell the operator at every launch that four
+    # protections are missing. Silence is not a valid declaration here.
+    local d name g known
+    known="$(sed -n 's/^DEJIMA_KNOWN_GUARDS="\(.*\)"$/\1/p' "$REPO_ROOT/bin/dejima-provider-lib.sh")"
+    [ -n "$known" ] || { echo "the known-guard set is gone"; return 1; }
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -f "$d/harness.conf" ] || continue
+        name="$(basename "$d")"
+        grep -qE '^\s*guards\s*=' "$d/harness.conf" \
+            || { echo "$name declares no guards"; return 1; }
+        for g in $(sed -n 's/^\s*guards\s*=\s*//p' "$d/harness.conf"); do
+            case " $known " in
+                *" $g "*) ;;
+                *) echo "$name declares unknown guard: $g"; return 1 ;;
+            esac
+        done
+    done
+}
+
+@test "the guard set core knows lives with the validation that rejects a name" {
+    # It was in dejima-harness-lib.sh while provider_validate_selection read
+    # it from dejima-provider-lib.sh, so a caller loading only the latter -
+    # providers.bats does - validated against an empty set and rejected
+    # every guard there is.
+    grep -q '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    run grep -n '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    [ "$status" -ne 0 ] || { echo "the set is defined in two places"; return 1; }
+}
+
+@test "core gates guard work on the declaration, not on the plugin defining a hook" {
+    # A harness that forgot the declaration but implemented the hook would
+    # get a guard the launch message has just said it does not have.
+    grep -q 'harness_has_guard notify' "$REPO_ROOT/bin/dejima"
+}
+
+@test "install.sh installs no harness's hooks itself" {
+    # Where dejima's guards go, and in what shape, is the selected harness's
+    # business. install.sh knowing ~/.claude/settings.json's schema is the
+    # coupling; it delegates to the harness's plugin now.
+    run grep -nE '\.claude/(settings\.json|hooks)' "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
+    grep -q 'harness_register_guards' "$REPO_ROOT/install.sh"
+    grep -q '^harness_register_guards()' "$REPO_ROOT/bin/harness/claude-code.sh"
+}
+
+@test "the plugin loader does not depend on its caller's SCRIPT_DIR" {
+    # bin/dejima sets it to bin/ and install.sh sets it to the repo root. A
+    # library that resolves paths from one of those only works for one of
+    # its callers.
+    sed -n '/^harness_plugin_load()/,/^}/p' "$REPO_ROOT/bin/dejima-harness-lib.sh" \
+        | grep -q 'BASH_SOURCE'
+    run sed -n '/^harness_plugin_load()/,/^}/p' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    [[ "$output" != *'$SCRIPT_DIR'* ]] || { echo "$output"; return 1; }
+}
+
+@test "a finding's label lives in trusted code, never in a manifest" {
+    # `ack` recovers an id by stripping a fixed label from the front of a
+    # finding. Those labels are a parser's grammar, and provider directories
+    # are not in tcb_snapshot's list - in the self-mount case a session can
+    # edit a manifest without raising a CRITICAL. So the label stays a
+    # literal in code the audit does watch, which is why host-exec surfaces
+    # are a plugin hook rather than a manifest key.
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -rn 'HOST-CODE-EXECUTION' "$REPO_ROOT/harnesses"
+    [ "$status" -ne 0 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
+    run grep -rniE 'host_exec_paths|host_exec_label' "$REPO_ROOT/harnesses" "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
+}
+
+@test "the audit resolves host-execution paths from the harness, not a hardcoded one" {
+    run grep -n 'STATUSLINE_PATH' "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }

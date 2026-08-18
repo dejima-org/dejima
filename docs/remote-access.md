@@ -792,7 +792,8 @@ the next one is worth checking.
 2. **Is the hook registered?** The `Notification` and `Stop` entries live in
    the throwaway override layer, not in your real `settings.json`:
    `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 2.
-   That file is passed to Claude Code as `--settings` by `claude-wrapper.sh`;
+   That file is passed to the harness by `harness-wrapper.sh`, as whatever
+   its manifest's `settings_args` names (`--settings` for Claude Code);
    if it is missing entirely, this container was not started by `dejima`.
 3. **Does the marker reach the host?** This is the one to check first: it
    splits the chain cleanly in half. From inside the sandbox:

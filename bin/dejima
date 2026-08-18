@@ -25,6 +25,8 @@ source "$SCRIPT_DIR/dejima-provider-lib.sh"
 source "$SCRIPT_DIR/dejima-color-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
 source "$SCRIPT_DIR/dejima-slug-lib.sh"
+# shellcheck source=dejima-harness-lib.sh
+source "$SCRIPT_DIR/dejima-harness-lib.sh"
 # fd 2: everything this script says for itself goes to stderr, so the
 # session's own stdout stays exactly what the container wrote.
 color_init 2
@@ -309,6 +311,13 @@ if [ -z "$DEJIMA_HARNESS_NAME" ]; then
     exit 1
 fi
 provider_validate_selection "$DEJIMA_FORGE_NAME" "$DEJIMA_WORKFLOW_NAME" "$DEJIMA_HARNESS_NAME" || exit 1
+
+# The selected harness's plugin: what dejima does for this harness that no
+# manifest value could state. Loaded once the selection is validated, and
+# before anything that calls a hook. A manifest without a plugin is refused
+# rather than treated as a lighter kind of support - see "Adding a new
+# harness" in docs/development.md.
+harness_plugin_load "$DEJIMA_HARNESS_NAME"
 
 # Whether GitHub is a push destination this session, which the briefing tells
 # the agent about. Two ways in: the per-launch flag, or a forge whose hosts
@@ -747,7 +756,6 @@ SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 # and SANDBOX_DERIVED_CONTEXT is one of the `rm -rf` arguments.
 DEJIMA_NOTIFY_DIR=""
 DEJIMA_SESSION_FILE=""
-SANDBOX_REMOTE_SETTINGS_TMP=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -805,7 +813,7 @@ cleanup() {
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
-    rm -f "${DEJIMA_SESSION_FILE:-}" "${SANDBOX_REMOTE_SETTINGS_TMP:-}" || true
+    rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
     # out loud when it fails: the marker directory is bind-mounted
@@ -911,6 +919,42 @@ case "$SANDBOX_CMD" in
         exit 1
         ;;
 esac
+export SANDBOX_CMD
+
+# What the wrapper inside the container needs to shadow the harness's binary
+# and pin its flags, resolved here because the manifests are host-side data
+# the container never sees. Every value is the selected harness's own; none
+# of it is written down in the image.
+#
+# SANDBOX_HARNESS_COMMAND is the name to shadow, and is the manifest's rather
+# than [core] command: overriding the latter to `nvim` changes what dejima
+# launches, not which harness is wrapped, and an editor-driven session that
+# then runs the harness from a terminal must still get the flags.
+SANDBOX_HARNESS_COMMAND="$(manifest_get harness "$DEJIMA_HARNESS_NAME" command)"
+SANDBOX_HARNESS_REAL="$(manifest_get harness "$DEJIMA_HARNESS_NAME" command_path)"
+SANDBOX_HARNESS_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" no_confirm_args)"
+# Named in full rather than templated: the settings layer's container-side
+# path is dejima's own fixed contract (docker-compose.yml mounts it there),
+# not a value that varies per run, and {{...}} in a manifest belongs to the
+# briefing composer's substitution rather than to a second mechanism that
+# merely looks like it.
+SANDBOX_HARNESS_SETTINGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" settings_args)"
+# Unattended operation is R1 of the capability bar, and a harness whose
+# manifest names no way to ask for it would run asking for confirmation on
+# every tool call, against a container built on the premise that it does not.
+# That fails silently and looks like the harness hanging, so refuse instead.
+if [ -z "$SANDBOX_HARNESS_ARGS" ]; then
+    echo "Harness '$DEJIMA_HARNESS_NAME' declares no no_confirm_args." >&2
+    echo "dejima runs unattended; a harness that stops to ask cannot be run that" >&2
+    echo "way. See \"What a harness must be able to do\" in docs/development.md." >&2
+    exit 1
+fi
+export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
+    SANDBOX_HARNESS_SETTINGS
+
+# [core] command defaults to the selected harness's own command rather than
+# to a literal in core's schema, which is where `claude` used to sit.
+[ -n "$SANDBOX_CMD" ] || SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"
 export SANDBOX_CMD
 # docker-compose.yml/entrypoint.sh compare these against "1"/"0", not
 # "on"/"off" - config_get_bool is what produces that, config_get would pass
@@ -1082,34 +1126,14 @@ if [ -d "$WORKSPACE_DIR/.git/hooks" ]; then
     extra_mounts+=(-v "$WORKSPACE_DIR/.git/hooks:$WORKSPACE_DIR/.git/hooks:ro")
 fi
 
-# ~/.claude/projects, one slug at a time: the tree is every project's
-# transcripts and memory, and memory is loaded into context at session start,
-# so a write into another slug is background a future session there believes
-# (#104). projects/ itself stays container-local, so an unmounted slug is
-# still writable and just does not survive - which is how Claude Code creates
-# a slug it does not find. Existing slugs only, apart from the workspace's
-# own, so a checkout full of worktrees does not litter the host with empty
-# directories for worktrees nothing has run in.
-mkdir -p "$HOME/.claude/projects/$(ws_slug "$WORKSPACE_DIR")"
-while IFS= read -r _slug; do
-    [ -n "$_slug" ] || continue
-    [ -d "$HOME/.claude/projects/$_slug" ] || continue
-    extra_mounts+=(-v "$HOME/.claude/projects/$_slug:$HOME/.claude/projects/$_slug")
-done < <(workspace_slugs_sorted "$WORKSPACE_DIR")
-
-# ~/.claude/file-history, same shape, sharper reason: `<session>/<hash>@v1`
-# is a verbatim copy of an edited file, so the tree is other projects' source
-# rather than a record of it, and it was writable - tampering there puts
-# chosen content into a later restore. Keyed by session id, so there is no
-# slug to match on; workspace_session_ids resolves it through the transcript
-# names. The starting session's id cannot be known yet, so its directory is
-# container-local: undo history for it is lost if it is resumed on the host.
-mkdir -p "$HOME/.claude/file-history"
-while IFS= read -r _sid; do
-    [ -n "$_sid" ] || continue
-    [ -d "$HOME/.claude/file-history/$_sid" ] || continue
-    extra_mounts+=(-v "$HOME/.claude/file-history/$_sid:$HOME/.claude/file-history/$_sid")
-done < <(workspace_session_ids "$HOME/.claude/projects" "$WORKSPACE_DIR")
+# The state this harness keeps on the host, and which of it this workspace
+# is entitled to see. Harness-specific by nature - which directories exist,
+# and what decides that one of their entries belongs to this workspace, is a
+# fact about the harness rather than about dejima - so it lives in the
+# harness plugin, which declares each mount through emit_mount. The guarded-
+# store refusal runs there, at the point of declaration, rather than being
+# something each plugin has to remember. See bin/dejima-harness-lib.sh.
+harness_hook harness_state_mounts "$WORKSPACE_DIR"
 
 # statusline.sh is executed on the host by Claude Code (settings.json's
 # statusLine.command), so it is staged for entrypoint.sh to copy rather than
@@ -1351,24 +1375,23 @@ if remote_enabled; then
     # own ID.
     extra_mounts+=(-e "DEJIMA_RUN_ID=$DEJIMA_RUN_ID")
 
-    # The notify hook is registered per session, into the override layer from
-    # above and nowhere else: registering it in the operator's real
-    # settings.json would run it for every sandbox and for the host's own
-    # Claude Code, which share that file, when it is only meaningful for a
-    # session that has a marker directory. $SANDBOX_SETTINGS_FILE is
-    # already a throwaway mktemp file, so this rewrite cannot reach the
-    # operator's real settings.json; it is mounted read-only, so the
-    # session cannot unregister itself either. Claude Code merges hooks
-    # across settings layers rather than letting the higher one replace the
-    # lower, so these are added to whatever the operator already has rather
-    # than displacing it. $HOME is left unexpanded for Claude Code to resolve
-    # at hook-run time - inside the container, not here - matching the
-    # convention install.sh already uses.
-    SANDBOX_REMOTE_SETTINGS_TMP="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
-    jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
-      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
-        "$SANDBOX_SETTINGS_FILE" > "$SANDBOX_REMOTE_SETTINGS_TMP"
-    mv "$SANDBOX_REMOTE_SETTINGS_TMP" "$SANDBOX_SETTINGS_FILE"
+    # Registered per session, into the override layer from above and nowhere
+    # else: putting it in the operator's real settings.json would run it for
+    # every sandbox and for the host's own agent, which share that file, when
+    # it is only meaningful for a session that has a marker directory.
+    # $SANDBOX_SETTINGS_FILE is already a throwaway mktemp file, so this
+    # rewrite cannot reach the operator's real settings; it is mounted
+    # read-only, so the session cannot unregister itself either.
+    #
+    # How a harness is told to run something on those two events is the
+    # harness's own business - Claude Code merges hook entries across
+    # settings layers, another harness may take a config key or an
+    # environment variable - so the writing is the plugin's. Whether it
+    # happens at all is core's, and is gated on the harness having declared
+    # the notify guard.
+    if harness_has_guard notify; then
+        harness_hook harness_register_notify "$SANDBOX_SETTINGS_FILE"
+    fi
 fi
 
 # Everything from here to the container's own first output is silent: the
@@ -1381,6 +1404,12 @@ fi
 printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
     "$C_DIM" "$C_RESET" >&2
+
+# Named here, once, at the moment the operator is choosing to proceed. Silent
+# when the harness hosts every guard, so this is not a line anyone learns to
+# scroll past - it appears only when a protection they have elsewhere is
+# genuinely not in force here.
+harness_report_guards "$DEJIMA_HARNESS_NAME"
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).

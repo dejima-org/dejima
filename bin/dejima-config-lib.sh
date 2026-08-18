@@ -42,7 +42,7 @@ _config_table() {
 core.harness	provider:harness
 core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
-core.command	identifier	claude
+core.command	?identifier
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
