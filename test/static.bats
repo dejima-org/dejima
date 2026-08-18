@@ -561,11 +561,31 @@ _declared_config_dirs() {
     # A copy can't be detached by a host-side rename at all. entrypoint.sh
     # installs them root-owned and read-only; see its comment and the mount
     # inventory in docker-compose.yml.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/settings\.json:/etc/dejima-claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/CLAUDE\.md:/etc/dejima-claude/CLAUDE\.md:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
+    # Declared by the harness now, since which files these are is its own.
+    local staged
+    staged="$(bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME=/h
+        harness_plugin_load claude-code
+        harness_staged_config_load
+        printf "%s\n" ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}
+    ')"
+    local f
+    for f in settings.json CLAUDE.md statusline.sh; do
+        grep -qxF "/h/.claude/$f"$'\t'".claude/$f" <<< "$staged" \
+            || { echo "$f is not staged: $staged"; return 1; }
+    done
+    # And never mounted at their real paths, which is the property staging
+    # exists for: a single-file mount detaches on a host-side rename.
+    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md|statusline\.sh):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
-    grep -q 'install -o root -g root -m 444 "/etc/dejima-claude/\$staged"' "$SANDBOX_DIR/entrypoint.sh"
+    # The staging tree mirrors the destination, so entrypoint.sh names no
+    # harness's paths - it installs <rel> at $SANDBOX_HOME/<rel>.
+    grep -q 'rel="${staged#/etc/dejima-harness/}"' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'dest="$SANDBOX_HOME/$rel"' "$SANDBOX_DIR/entrypoint.sh"
+    run grep -n 'dejima-claude' "$SANDBOX_DIR/entrypoint.sh"
+    [ "$status" -ne 0 ] || { echo "entrypoint still names a harness path"; return 1; }
 }
 
 @test "~/.claude/hooks and plugins are mounted read-only" {
@@ -1640,8 +1660,15 @@ registered_commands() {
     # conditional on existence: not every host has a statusline, and mounting
     # a nonexistent source would make Docker create a root-owned directory at
     # the target instead.
-    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:/etc/dejima-claude/statusline\.sh:ro")' "$REPO_ROOT/bin/dejima"
-    grep -q 'install -o root -g root -m 555 /etc/dejima-claude/statusline\.sh' "$SANDBOX_DIR/entrypoint.sh"
+    # Declared by the harness with the rest of its staged config, and mounted
+    # into the staging tree by core.
+    grep -q 'emit_staged_config "$HOME/.claude/$f" ".claude/$f"' \
+        "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")' "$REPO_ROOT/bin/dejima"
+    # Executable staged files land executable; that distinction is what the
+    # 555 used to encode, and it is now read from the source rather than
+    # hardcoded per filename.
+    grep -q 'install -o root -g root -m 555' "$SANDBOX_DIR/entrypoint.sh"
     run grep -F 'extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
 }
@@ -1656,8 +1683,13 @@ registered_commands() {
     # the user. So this must be a hard, explicit error - same fail-loud
     # precedent as the credential proxy refusing to launch rather than
     # silently mounting the real OAuth credential.
-    grep -q 'if \[ -L "\$HOME/\.claude/statusline\.sh" \] && \[ ! -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/dejima"
+    # The check is core's, over every staged file the harness declares - a
+    # plugin filtering on existence itself would skip a dangling one silently,
+    # which is the case this refuses for.
+    grep -q 'if \[ -L "\$_ssrc" \] && \[ ! -e "\$_ssrc" \]' "$REPO_ROOT/bin/dejima"
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/dejima"
+    run grep -n '\[ -e "\$HOME/\.claude/\$f" \]' "$REPO_ROOT/bin/harness/claude-code.sh"
+    [ "$status" -ne 0 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
 }
 
 @test "bin/dejima-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {

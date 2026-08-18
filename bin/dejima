@@ -1177,15 +1177,22 @@ harness_hook harness_state_mounts "$WORKSPACE_DIR"
 # root-owned directory at the target. A dangling symlink is neither
 # mountable nor "exists", so it refuses rather than skipping the mount
 # (reopening the gap) or failing later with an opaque "mkdir: file exists".
-if [ -L "$HOME/.claude/statusline.sh" ] && [ ! -e "$HOME/.claude/statusline.sh" ]; then
-    echo "$HOME/.claude/statusline.sh is a symlink to a target that doesn't" >&2
-    echo "exist. Docker can't bind-mount a dangling symlink, and skipping the" >&2
-    echo "mount would leave the session with no statusline at all." >&2
-    echo "Fix or remove the symlink, then retry." >&2
-    exit 1
-elif [ -e "$HOME/.claude/statusline.sh" ]; then
-    extra_mounts+=(-v "$HOME/.claude/statusline.sh:/etc/dejima-claude/statusline.sh:ro")
-fi
+harness_staged_config_load
+for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
+    IFS=$'\t' read -r _ssrc _srel <<< "$_rec"
+    # A dangling symlink is neither mountable nor "exists", so it refuses
+    # rather than skipping the mount - which would reopen the gap staging
+    # closes - or failing later with an opaque "mkdir: file exists".
+    if [ -L "$_ssrc" ] && [ ! -e "$_ssrc" ]; then
+        echo "$_ssrc is a symlink to a target that doesn't exist." >&2
+        echo "Docker can't bind-mount a dangling symlink, and skipping the mount" >&2
+        echo "would leave the session without that file entirely." >&2
+        echo "Fix or remove the symlink, then retry." >&2
+        exit 1
+    fi
+    [ -e "$_ssrc" ] || continue
+    extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")
+done
 
 # The real Anthropic OAuth credential never enters the container: a host-side
 # proxy injects it per request (bin/dejima-anthropic-proxy, docs/security.md).

@@ -319,7 +319,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Briefing delivery | the briefing and the project's `.dejima.md` reach the session *through* the `SessionStart` hook. No hooks, no briefing | `hooks/sandbox-context.sh` |
 | Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
 | Config parity | which directories carry over and at what mode. Declared by the plugin now, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
-| Staged config | `settings.json`, `CLAUDE.md` and `statusline.sh` are staged read-only under `/etc/dejima-claude` and installed into place | `docker/entrypoint.sh`, `bin/dejima` |
+| Staged config | which files are copied rather than mounted. Declared by the plugin; the staging tree mirrors the destination, so `entrypoint.sh` names no harness's paths | `bin/harness/claude-code.sh` |
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
 | Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). Now in the plugin | `bin/harness/claude-code.sh` |

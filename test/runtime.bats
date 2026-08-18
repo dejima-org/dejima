@@ -688,7 +688,7 @@ dexec_node() {
 
 @test "a staged statusline.sh is copied in root-owned, and replacing it never reaches the host" {
     # Companion to the overlay-dirs test above, but for the config
-    # bin/dejima stages at /etc/dejima-claude for entrypoint.sh to copy into
+    # bin/dejima stages at /etc/dejima-harness for entrypoint.sh to copy into
     # ~/.claude (see its comment there) rather than mounting at its real
     # path. This test does NOT use bin/dejima or docker-compose.yml directly
     # - it builds the same shape by hand. This shared container isn't reused
@@ -709,7 +709,7 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
@@ -752,7 +752,7 @@ dexec_node() {
     #
     # Staging closes it outright, and for the opposite reason: source-side
     # symlink resolution is exactly what's wanted, so what lands at
-    # /etc/dejima-claude is the real content, and entrypoint.sh copies it to
+    # /etc/dejima-harness holds the real content, and entrypoint.sh copies it to
     # a path with no route back to the host at all. This test asserts the
     # replacement no longer reaches either the symlink or its target.
     local test_container="dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
@@ -772,7 +772,7 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"

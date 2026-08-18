@@ -261,3 +261,22 @@ harness_config_dirs() {
         emit_config_dir "$HOME/.claude/$d" ro scan
     done
 }
+
+# Config carried in as copies rather than mounts - see the staged-config
+# notes in bin/dejima-harness-lib.sh for why these three are not mounted at
+# their real paths.
+#
+# statusline.sh is here as well as in harness_host_exec_surfaces above, and
+# the two are the same file for opposite reasons: staging keeps a session
+# from reaching the host's copy, and the audit catches a change to it made
+# some other way.
+harness_staged_config() {
+    # Emitted whether or not the host has each one. Whether a file exists,
+    # and what a dangling symlink means, are core's to decide - filtering
+    # here would skip a dangling one silently, which is the case that must
+    # refuse rather than quietly leave the session without the file.
+    local f
+    for f in settings.json CLAUDE.md statusline.sh; do
+        emit_staged_config "$HOME/.claude/$f" ".claude/$f"
+    done
+}
