@@ -170,7 +170,18 @@ guarantee does not reach into the *next* session: a workflow's or harness's
 briefing fragment (e.g. `workflows/worktree-pr/briefing.md`) lives in the
 checkout itself and needs no symlink to edit, so a session with write access
 to this repo's own checkout can change what the next launch composes and
-hands to whichever session starts against it. See
+hands to whichever session starts against it.
+
+The provider directories are in the exit-time audit's TCB list for that
+reason, alongside `bin/`, `hooks/`, `docker/` and `test/`. They hold no code
+and nothing executes them, but what they hold decides what the next launch
+permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`, which
+`entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so a
+line added to a manifest widens the egress boundary on the next run. An
+ordinary edit is a diff you are about to read and is not reported; one git
+cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
+or `skip-worktree` - is a CRITICAL finding. It is still a change a session
+can make; it is no longer one nothing reports. See
 [docs/providers.md](providers.md) for the full manifest contract.
 
 - `--dangerously-skip-permissions` removes your chance to review tool calls
