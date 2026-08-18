@@ -142,10 +142,6 @@ services:
       # write into either reaches sessions elsewhere (#104). bin/dejima
       # mounts this workspace's own entries, one -v each; see
       # bin/dejima-slug-lib.sh for how that set is chosen.
-      - ${HOME}/.claude/backups:${HOME}/.claude/backups
-      - ${HOME}/.claude/tasks:${HOME}/.claude/tasks
-      - ${HOME}/.claude/plans:${HOME}/.claude/plans
-      - ${HOME}/.claude/sessions:${HOME}/.claude/sessions
       # Hook/plugin/skill *code*, and prompt text that a later host session
       # loads. Hooks run automatically with no approval gate, a skill can
       # ship an executable script, and a command/agent/output-style is text
@@ -156,12 +152,6 @@ services:
       # container-local directory rather than to the host's copy. They may
       # not exist on a given host at all - bin/dejima pre-creates them,
       # since existence is what lets Docker mount them.
-      - ${HOME}/.claude/plugins:${HOME}/.claude/plugins:ro
-      - ${HOME}/.claude/hooks:${HOME}/.claude/hooks:ro
-      - ${HOME}/.claude/skills:${HOME}/.claude/skills:ro
-      - ${HOME}/.claude/commands:${HOME}/.claude/commands:ro
-      - ${HOME}/.claude/agents:${HOME}/.claude/agents:ro
-      - ${HOME}/.claude/output-styles:${HOME}/.claude/output-styles:ro
       # Config *files* are staged here for entrypoint.sh to copy into
       # ~/.claude, rather than mounted at their real paths. A copy can't
       # detach at all, and it closes a gap no mount could: when

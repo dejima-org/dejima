@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -239,3 +239,41 @@ host_exec_path_for_id() {
 # decided: every one of these is CRITICAL, because the whole category is
 # "runs on the host, outside everything".
 host_exec_is_id() { host_exec_path_for_id "$1" >/dev/null; }
+
+# --- config parity -------------------------------------------------------
+#
+# The harness's own configuration directories, carried from the host so a
+# session has the operator's setup. Which directories exist, what each holds
+# and whether a session may write it are facts about the harness; that the
+# read-only ones are read-only, and that a discovered symlink target is
+# refused when it overlaps a guarded store, are dejima's.
+#
+# They were enumerated in docker/docker-compose.yml, which is static YAML and
+# so could only ever name one harness's.
+DEJIMA_CONFIG_DIRS=()
+
+# path, mode ("ro" or empty for read-write), and whether to follow symlinks
+# out of it ("scan", or empty).
+#
+# The scan flag is per directory rather than applied to every read-only one:
+# an entry in hooks/ or skills/ is routinely a symlink into a dotfiles
+# checkout, which has to be mounted for the link to resolve inside the
+# container, while plugins/ is bookkeeping a harness writes for itself.
+emit_config_dir() {
+    local path="$1" mode="${2:-}" scan="${3:-}"
+    [ -n "$path" ] || return 0
+    case "$mode" in
+        ''|ro) ;;
+        *) echo "Harness plugin emitted an invalid config-dir mode: $mode" >&2; exit 1 ;;
+    esac
+    case "$scan" in
+        ''|scan) ;;
+        *) echo "Harness plugin emitted an invalid config-dir flag: $scan" >&2; exit 1 ;;
+    esac
+    DEJIMA_CONFIG_DIRS+=("$path"$'\t'"$mode"$'\t'"$scan")
+}
+
+harness_config_dirs_load() {
+    DEJIMA_CONFIG_DIRS=()
+    harness_hook harness_config_dirs
+}
