@@ -61,13 +61,10 @@ ship_stream() {
     done
 }
 
-# Conversation shipping is NOT here. It reads the session's transcripts,
-# which are bind-mounted from the host rather than produced in the container,
-# so it runs host-side in bin/dejima-conversation-ship instead - the one
-# thing dejima did that observed a session from inside the boundary it was
-# observing, in a process the session shared a filesystem and a signal
-# namespace with. DNS and firewall logs stay here because those files only
-# exist in the container.
+# Only the logs that exist in this container: dnsmasq's queries and ulogd2's
+# output. Session transcripts are shipped host-side, by
+# bin/dejima-conversation-ship, because an oversight log of a session must
+# not run in a process that session can reach.
 
 if [ "${LOG_SHIPPER_LIB_ONLY:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0

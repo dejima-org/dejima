@@ -1035,8 +1035,7 @@ extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
 
 # The harness's own configuration, mounted at the mode it declared, and -
 # for the directories it marked scannable - the symlink targets that have to
-# come with it. Enumerated in docker-compose.yml until this moved: static
-# YAML can only ever name one harness's directories.
+# come with it.
 mounted_dirs=""
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r dir mounted_mode mounted_scan <<< "$_rec"

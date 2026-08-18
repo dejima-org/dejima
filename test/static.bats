@@ -3347,5 +3347,5 @@ _harness_proxied_domain() {
     # shipping went, which is worth keeping.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    grep -q 'no longer reads anything the session writes' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
 }

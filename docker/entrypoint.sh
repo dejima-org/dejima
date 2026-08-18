@@ -55,13 +55,8 @@ if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     # tamper-resistance that a security log needs and a best-effort netflow
     # counter does not.
     #
-    # It no longer reads anything the session writes. Conversation shipping
-    # moved to the host (bin/dejima-conversation-ship), so what remains here
-    # is dnsmasq's query log and ulogd2's output - both produced by root-owned
-    # daemons in this container, neither session-writable. That removes the
-    # one place this parsed attacker-influenceable content; it does not change
-    # why it runs as root, because a session that could kill this process
-    # would still be ending its own DNS and firewall logging.
+    # What it reads is dnsmasq's query log and ulogd2's output, both written
+    # by root-owned daemons here and neither session-writable.
     /usr/local/bin/log-shipper.sh &
 fi
 

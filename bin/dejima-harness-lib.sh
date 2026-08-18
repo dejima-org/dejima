@@ -247,9 +247,6 @@ host_exec_is_id() { host_exec_path_for_id "$1" >/dev/null; }
 # and whether a session may write it are facts about the harness; that the
 # read-only ones are read-only, and that a discovered symlink target is
 # refused when it overlaps a guarded store, are dejima's.
-#
-# They were enumerated in docker/docker-compose.yml, which is static YAML and
-# so could only ever name one harness's.
 DEJIMA_CONFIG_DIRS=()
 
 # path, mode ("ro" or empty for read-write), and whether to follow symlinks

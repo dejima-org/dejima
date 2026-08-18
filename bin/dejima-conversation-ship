@@ -1,21 +1,17 @@
 #!/bin/bash
 # Ships a session's conversation to Loki, from the host.
 #
-# This used to run inside the container, in docker/log-shipper.sh. It is the
-# only thing dejima did that observed a session from within the boundary it
-# was observing: the shipper read the transcripts, applied the transform and
-# held the Loki URL, all in a process the session shared a filesystem and a
-# signal namespace with. A session that killed it stopped its own logging,
-# and nothing on the host would have noticed.
+# Host-side, because this is an oversight log of the session it watches: a
+# shipper the session shares a filesystem and a signal namespace with is one
+# it can silence. The transcripts are bind-mounted from the host rather than
+# produced in the container, so reading them here costs nothing.
 #
-# The transcripts are on the host already - they are bind-mounted in, not
-# produced in the container - so reading them here costs nothing and removes
-# the session from the path entirely. What it cannot remove is that the
-# transcript is session-writable: this ships what was recorded, it does not
-# attest to it, the same caveat epitaph carries.
+# What that does not buy is trust in the content. The transcript is
+# session-writable, so this ships what was recorded without attesting to it -
+# the same caveat epitaph carries.
 #
-# DNS and firewall logs still ship from inside, because those files only
-# exist in the container.
+# DNS and firewall logs ship from inside instead (docker/log-shipper.sh):
+# those files only exist in the container.
 #
 # Usage: dejima-conversation-ship <workspace>
 set -uo pipefail   # not -e: a torn line or a Loki hiccup must not kill the tailer
@@ -62,14 +58,13 @@ push() {
         -XPOST "$LOKI_URL/loki/api/v1/push" -d "$payload" || true
 }
 
-# Which transcript files belong to this workspace, resolved through
-# dejima-slug-lib rather than by matching a slug prefix.
+# Which transcript files belong to this workspace.
 #
-# The in-container version globbed "<key>-*" to pick up worktrees, which also
-# matches a SIBLING project whose directory name merely extends this one's -
-# the #105 bug, in the shipper. It was harmless there only because the
-# container is handed this workspace's slugs and nothing else, so a sibling's
-# directory did not exist to match. On the host every project's does.
+# Through dejima-slug-lib, never by matching a slug prefix: slugs cannot
+# distinguish a worktree under this workspace from a SIBLING project whose
+# directory name merely extends its own, so a "<slug>-*" glob ships the
+# neighbour's conversation too (#105). Every project's directory is present
+# here, so nothing else would catch it.
 transcript_files() {
     local slug f
     while IFS= read -r slug; do
