@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -314,3 +314,18 @@ harness_staged_config_load() {
     DEJIMA_STAGED_CONFIG=()
     harness_hook harness_staged_config
 }
+
+# --- epitaphs ------------------------------------------------------------
+#
+# What a session leaves when its context is compacted away. Where the store
+# is, that nothing mounts it, that each file is 0600 under a 0700 directory,
+# and that a directory appears only once something is kept in it are dejima's
+# (see bin/dejima-epitaph). What a compaction looks like in a transcript, and
+# which fields describe it, are the harness's.
+#
+# The note below is dejima's promise about the artefact rather than the
+# harness's, so it is defined here and handed to the plugin to write, not
+# left for each harness to phrase its own way.
+DEJIMA_EPITAPH_NOTE="Written by the session and preserved verbatim. The transcript it came
+from is writable from inside the container, so this records what was
+there rather than vouching for it."

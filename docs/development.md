@@ -324,7 +324,7 @@ harness-specific path resolving to nothing is the honest answer.
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
 | Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). Now in the plugin | `bin/harness/claude-code.sh` |
 | Transcript format | conversation logging transforms Claude Code's JSONL line by line | `docker/log-shipper.sh` |
-| Compaction format | epitaph keys on `isCompactSummary` records and the `compact_boundary` that precedes them | `bin/dejima-epitaph` |
+| Compaction format | what a compaction looks like in a transcript. In the plugin; the store, its modes and the provenance note stay core's | `bin/harness/claude-code.sh` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
 | Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
 

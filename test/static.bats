@@ -3290,3 +3290,17 @@ _harness_proxied_domain() {
         esac
     done
 }
+
+@test "the transcript format is the harness's, the store is dejima's" {
+    # What a compaction looks like in a transcript is a fact about the
+    # harness; where the summary is kept, that nothing mounts it, and what
+    # the file promises about its own provenance are dejima's.
+    grep -q 'isCompactSummary' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -n 'isCompactSummary\|compact_boundary\|\.jsonl' "$REPO_ROOT/bin/dejima-epitaph"
+    [ "$status" -ne 0 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
+    # The provenance note is dejima's promise about the artefact, so it is
+    # defined once rather than phrased per harness.
+    grep -q '^DEJIMA_EPITAPH_NOTE=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    run grep -c 'preserved verbatim' "$REPO_ROOT/bin/harness/claude-code.sh"
+    [ "$output" -eq 0 ] || { echo "a plugin phrases the provenance note itself"; return 1; }
+}
