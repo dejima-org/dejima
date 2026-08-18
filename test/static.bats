@@ -2977,3 +2977,28 @@ q
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
 }
+
+@test "the docs say the harness must be signed in on the host first" {
+    # dejima authenticates nothing: the proxy holds a credential the harness
+    # wrote on the host. Without one, a session starts normally and then
+    # cannot reach the model, which reads as a dejima fault. Nothing enforces
+    # the prerequisite, so it has to be stated where someone setting up will
+    # meet it.
+    grep -q '^## Sign in on the host first' "$REPO_ROOT/README.md"
+    sed -n '/^### Core (required)/,/^That is enough to run/p' "$REPO_ROOT/README.md" \
+        | grep -qi 'sign in to it there'
+    grep -q 'Sign in on the host first' "$REPO_ROOT/docs/security.md"
+}
+
+@test "every statement that an escape defeats everything says what bounds the next layer" {
+    # True as far as it goes, and it used to stop there. What an escape
+    # reaches is a layer dejima cannot bound because it runs inside it, and
+    # a reader left at "defeats all of it" has no idea there is a project
+    # for exactly that.
+    local f
+    for f in README.md SECURITY.md docs/security.md docs/responsible-use.md; do
+        grep -qi 'escape' "$REPO_ROOT/$f" || continue
+        grep -q 'dejima-devbox-hardener' "$REPO_ROOT/$f" \
+            || { echo "$f describes an escape without naming what bounds it"; return 1; }
+    done
+}
