@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -99,7 +99,11 @@ harness_report_guards() {
 harness_plugin_load() {
     local name="$1" plugin
     [ -n "$name" ] || return 0
-    plugin="$SCRIPT_DIR/harness/$name.sh"
+    # Resolved from this file's own location, not from a caller's SCRIPT_DIR:
+    # install.sh sets that to the repo root while bin/dejima sets it to bin/,
+    # and a library that only works for one of its callers is a trap for the
+    # next one.
+    plugin="$(cd "${BASH_SOURCE[0]%/*}" && pwd)/harness/$name.sh"
     if [ ! -f "$plugin" ]; then
         echo "No harness plugin for '$name' at $plugin." >&2
         echo "A supported harness has both a manifest and a plugin; see" >&2
@@ -163,3 +167,75 @@ emit_env() {
     esac
     extra_mounts+=(-e "$name=$value")
 }
+
+# --- host-execution surfaces ---------------------------------------------
+#
+# Paths a harness causes to run ON THE HOST, unsandboxed, from configuration
+# a session can reach. Claude Code's statusline is the instance that exists:
+# settings.json's statusLine.command names a script the host runs, so a
+# session that can write that file has a way onto the host that no container
+# boundary sees.
+#
+# Declared by the plugin rather than by the manifest, and the reason is a
+# trust boundary rather than convenience. dejima-audit's `ack` derives a
+# finding's id by stripping a FIXED label from the front of the finding text
+# - anchored deliberately, because an unanchored match lets chosen text
+# derive an id in the wrong namespace and baseline an approval that never
+# matches while the real finding is counted as acknowledged (#45). Those
+# labels are therefore part of a parser's grammar. Manifests are data, and
+# provider directories are NOT in tcb_snapshot's list, so in the self-mount
+# case a session can edit one without raising a CRITICAL. A plugin is under
+# bin/, which the audit does watch. The label stays a literal in trusted
+# code; it just lives with the harness that owns it.
+#
+# Each surface carries its own namespace, so ids stay stable per harness and
+# no rename is forced on anyone's baseline.
+DEJIMA_HOST_EXEC=()
+
+# namespace, leaf, path, label. The id is "<namespace>:<leaf>", which is what
+# a baseline stores, so neither may change for a harness already in use.
+emit_host_exec() {
+    local ns="$1" leaf="$2" path="$3" label="$4"
+    [ -n "$path" ] || return 0
+    case "$ns" in
+        ''|*[!a-z0-9-]*)
+            echo "Harness plugin emitted an invalid host-exec namespace: $ns" >&2
+            exit 1 ;;
+    esac
+    # The leaf lands in an id, which is compared against baseline entries and
+    # written into a report; a tab or newline in either would split a record.
+    case "$leaf$label" in
+        *$'\t'*|*$'\n'*)
+            echo "Harness plugin emitted a host-exec leaf or label containing a tab or newline" >&2
+            exit 1 ;;
+    esac
+    [ -n "$leaf" ] && [ -n "$label" ] || {
+        echo "Harness plugin emitted a host-exec surface with no leaf or label" >&2
+        exit 1
+    }
+    DEJIMA_HOST_EXEC+=("$ns"$'\t'"$leaf"$'\t'"$path"$'\t'"$label")
+}
+
+# Asks the loaded plugin for its surfaces. Empty when no harness is selected
+# or the harness has none, which is a normal state rather than an error.
+host_exec_load() {
+    DEJIMA_HOST_EXEC=()
+    harness_hook harness_host_exec_surfaces
+}
+
+# The host path behind an id, or nothing if that id is not a host-exec one.
+host_exec_path_for_id() {
+    local id="$1" rec ns leaf path label
+    for rec in ${DEJIMA_HOST_EXEC[@]+"${DEJIMA_HOST_EXEC[@]}"}; do
+        IFS=$'\t' read -r ns leaf path label <<< "$rec"
+        [ "$id" = "$ns:$leaf" ] || continue
+        printf '%s' "$path"
+        return 0
+    done
+    return 1
+}
+
+# Whether an id names a host-execution surface. Used where severity is
+# decided: every one of these is CRITICAL, because the whole category is
+# "runs on the host, outside everything".
+host_exec_is_id() { host_exec_path_for_id "$1" >/dev/null; }

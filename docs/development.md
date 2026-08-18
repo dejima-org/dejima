@@ -253,6 +253,17 @@ own primitives rather than re-deriving them. An invoked protocol would also
 put a new text parser on the launch path, and every parsing bug this
 repository has had is in that family.
 
+**The manifest may carry values that are only used as paths or compared as
+data. It must not carry text that becomes part of a parser's grammar, or the
+identity of a security surface.** `dejima-audit`'s `ack` recovers a finding's
+id by stripping a fixed label from the front of the finding text, anchored
+deliberately (#45). Those labels are grammar. Provider directories are not in
+`tcb_snapshot`'s list, so in the self-mount case a session can edit a
+manifest without raising a CRITICAL - which is why host-execution surfaces
+are a plugin hook (`harness_host_exec_surfaces`) rather than a manifest key.
+The label stays a literal in code the audit watches; it just lives with the
+harness that owns it.
+
 **A plugin computes; core enforces.** A plugin declares through `emit_mount`
 and `emit_env`, which validate at the point of declaration - `emit_mount`
 runs the guarded-store refusal there, so a harness state directory that
@@ -304,7 +315,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it | `docker/fixed-domains.sh` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
-| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash` | `install.sh` |
+| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. Now in the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
 | Briefing delivery | the briefing and the project's `.dejima.md` reach the session *through* the `SessionStart` hook. No hooks, no briefing | `hooks/sandbox-context.sh` |
 | Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
 | Config parity | every `~/.claude` subdirectory is enumerated and mounted by name: `plugins`, `hooks`, `skills`, `commands`, `agents`, `output-styles` read-only; `backups`, `tasks`, `plans`, `sessions` read-write | `docker/docker-compose.yml` |
@@ -315,7 +326,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Transcript format | conversation logging transforms Claude Code's JSONL line by line | `docker/log-shipper.sh` |
 | Compaction format | epitaph keys on `isCompactSummary` records and the `compact_boundary` that precedes them | `bin/dejima-epitaph` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
-| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host** | `bin/dejima-audit`, `bin/dejima` |
+| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
 
 ### Two things worth deciding early
 

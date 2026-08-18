@@ -81,3 +81,152 @@ harness_state_mounts() {
         emit_mount "$history/$sid"
     done < <(workspace_session_ids "$projects" "$ws")
 }
+
+# Puts dejima's guard hooks where Claude Code will find them: symlinked into
+# ~/.claude/hooks, and registered in ~/.claude/settings.json. Run by
+# install.sh, not at launch - this writes the operator's own config, and the
+# operator is who decides to install.
+#
+# $1 is the repo root, $2 the directory to move a displaced file into. Every
+# change is printed as it happens, because it is someone's real config.
+#
+# Each guard is gated on the harness having declared it: a harness declares
+# what it can host (see `guards` in its manifest), and registering something
+# it did not declare would contradict the launch message that says so.
+harness_register_guards() {
+    local repo="$1" backup="$2" settings="$HOME/.claude/settings.json"
+
+    mkdir -p "$HOME/.claude/hooks"
+
+    _link_hook() {
+        local name="$1" src="$repo/hooks/$1" dest="$HOME/.claude/hooks/$1"
+        if [ -L "$dest" ] && [ "$(readlink -f "$dest")" = "$(readlink -f "$src")" ]; then
+            echo "Skipping: $name already linked to this repo's copy"
+            return
+        fi
+        if [ -e "$dest" ] || [ -L "$dest" ]; then
+            mkdir -p "$backup"
+            echo "Moving: existing ~/.claude/hooks/$name to $backup/$name"
+            mv "$dest" "$backup/$name"
+        fi
+        echo "Linking: $name ($src -> $dest)"
+        ln -s "$src" "$dest"
+    }
+
+    # Not a guard: this is R3, the briefing's delivery mechanism, and a
+    # session without it does not know it is in a sandbox.
+    _link_hook sandbox-context.sh
+    harness_has_guard push-guard  && _link_hook git-push-guard.sh
+    harness_has_guard merge-guard && _link_hook merge-guard.sh
+
+    # Symlink from before the gitea-merge-guard.sh -> merge-guard.sh rename
+    # points at a hooks/ path that no longer exists. Only remove it if it is
+    # actually dangling, so an operator's own file at this name is left alone.
+    local old_merge_guard="$HOME/.claude/hooks/gitea-merge-guard.sh"
+    if [ -L "$old_merge_guard" ] && [ ! -e "$old_merge_guard" ]; then
+        echo "Removing: dangling pre-rename symlink $old_merge_guard"
+        rm -f "$old_merge_guard"
+    fi
+
+    # Linked so it exists at a stable path for the read-only ~/.claude/hooks
+    # mount, but deliberately NOT registered below: bin/dejima registers it
+    # per session, into a throwaway settings copy, and only when remote
+    # access is configured. Registering it here would fire it for every
+    # unsandboxed host session too, where it has no marker directory to
+    # write to.
+    harness_has_guard notify && _link_hook dejima-notify.sh
+
+    # deny-dangerous-bash.sh is the one hook that is NOT sandbox-gated: it
+    # has no DEJIMA check, so it applies to the operator's own host sessions
+    # as well. That is deliberate, and it is why it may already be owned by
+    # another install (dotfiles, say) - only claim it if nothing else
+    # provides it, so this repo works standalone without clobbering an
+    # existing setup.
+    if harness_has_guard bash-deny; then
+        local deny_dest="$HOME/.claude/hooks/deny-dangerous-bash.sh"
+        if [ -e "$deny_dest" ] || [ -L "$deny_dest" ]; then
+            echo "Skipping: deny-dangerous-bash.sh already present at $deny_dest (leaving it as-is)"
+        else
+            echo "Linking: deny-dangerous-bash.sh ($repo/hooks/deny-dangerous-bash.sh -> $deny_dest)"
+            ln -s "$repo/hooks/deny-dangerous-bash.sh" "$deny_dest"
+        fi
+    fi
+    echo
+
+    if [ ! -f "$settings" ]; then
+        echo "Creating $settings"
+        echo '{}' > "$settings"
+    fi
+
+    # The registration that went with the symlink removed above. Two things
+    # depend on it going: Claude Code reports a missing hook command on every
+    # session start while it points at a path that no longer exists, and -
+    # until the dedupe below stopped matching it - it also stood in for the
+    # registration it was renamed from, so `_register merge-guard.sh` skipped
+    # and the merge guard was registered nowhere at all. Dropped only when
+    # the path it names is gone, so an operator's own file at that name keeps
+    # its registration, matching the symlink check above.
+    if [ ! -e "$old_merge_guard" ] && jq -e --arg s "/gitea-merge-guard.sh" \
+        '[.hooks.PreToolUse[]?.hooks[]?.command // empty] | any(endswith($s))' \
+        "$settings" >/dev/null 2>&1; then
+        echo "Removing: stale pre-rename gitea-merge-guard.sh registration from $settings"
+        local stale_tmp; stale_tmp=$(mktemp)
+        jq --arg s "/gitea-merge-guard.sh" \
+            '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
+                | map(.hooks = ((.hooks // []) | map(select((.command // "") | endswith($s) | not))))
+                | map(select((.hooks | length) > 0)))' \
+            "$settings" > "$stale_tmp" && mv "$stale_tmp" "$settings"
+    fi
+
+    _register() {
+        local event="$1" matcher="$2" script_name="$3" description="$4"
+        # endswith on the leading slash, not test(): test() is an unanchored
+        # regex, so a hook whose name merely ends in another's - which is what
+        # a rename like gitea-merge-guard.sh -> merge-guard.sh produces - read
+        # as already registered, and the new hook was silently never added.
+        if jq -e --arg s "/$script_name" \
+            "[.hooks.${event}[]?.hooks[]?.command // empty] | any(endswith(\$s))" \
+            "$settings" >/dev/null 2>&1; then
+            echo "Skipping: $script_name already registered as a $event hook"
+            return
+        fi
+        echo "Registering $script_name as a $event hook in $settings ($description)"
+        local tmp
+        tmp=$(mktemp)
+        jq --arg matcher "$matcher" --arg cmd "\$HOME/.claude/hooks/$script_name" \
+            ".hooks.${event} = ((.hooks.${event} // []) + [{\"matcher\": \$matcher, \"hooks\": [{\"type\": \"command\", \"command\": \$cmd}]}])" \
+            "$settings" > "$tmp" && mv "$tmp" "$settings"
+    }
+
+    _register SessionStart "startup|resume|clear|compact" sandbox-context.sh \
+        "injects sandbox context on session start"
+    harness_has_guard push-guard && _register PreToolUse Bash git-push-guard.sh \
+        "blocks pushes outside the allowed host(s)/branches"
+    harness_has_guard merge-guard && _register PreToolUse Bash merge-guard.sh \
+        "blocks the configured forge's merge command inside the sandbox"
+    harness_has_guard bash-deny && _register PreToolUse Bash deny-dangerous-bash.sh \
+        "blocks obviously destructive Bash commands"
+    echo
+    return 0
+}
+
+# What Claude Code causes to run on the HOST, unsandboxed.
+#
+# settings.json's statusLine.command names a script the host executes on
+# every session, so a session that can write that file has a path onto the
+# host that no container boundary sees. bin/dejima stages the file rather
+# than mounting over it, because a :ro mount landing on a symlink - the
+# common case - protects the target and leaves the link replaceable;
+# detecting a change here is the compensating control for that.
+#
+# The namespace and leaf together form the id a baseline stores
+# ("statusline:statusline.sh"), so neither may change while anyone has
+# approvals recorded. The label is the fixed prefix `ack` strips to recover
+# that id, which is why it lives here as a literal rather than in the
+# manifest - see the host-exec notes in bin/dejima-harness-lib.sh.
+harness_host_exec_surfaces() {
+    local p
+    p="$(harness_config_get statusline_path)"
+    emit_host_exec statusline statusline.sh "$p" \
+        "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "
+}

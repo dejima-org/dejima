@@ -1176,9 +1176,13 @@ cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
     [ "$status" -eq 0 ]
 }
 
-@test "install.sh links and registers the merge guard" {
-    grep -qx 'link_hook merge-guard.sh' "$REPO_ROOT/install.sh"
-    grep -q 'register_hook PreToolUse Bash merge-guard.sh' "$REPO_ROOT/install.sh"
+@test "the merge guard is linked and registered" {
+    # In the harness plugin now: which file a guard is and where a harness
+    # reads it from is the harness's, while whether it is installed at all
+    # is gated on the manifest declaring the guard.
+    local p="$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'harness_has_guard merge-guard && _link_hook merge-guard.sh' "$p"
+    grep -q '_register PreToolUse Bash merge-guard.sh' "$p"
 }
 
 # Runs install.sh against a throwaway HOME, with a stub `docker` on PATH so
@@ -1621,9 +1625,12 @@ registered_commands() {
     # coverage (snapshot/compare
     # against real fixtures, including the symlink-swap exploit) lives in
     # test/audit.bats; this just confirms the wiring exists.
-    grep -q 'STATUSLINE_PATH=' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'statusline_snapshot' "$REPO_ROOT/bin/dejima-audit"
-    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/dejima-audit"
+    # The path and its label are the harness plugin's now; the mechanism
+    # that snapshots and reports them is still the audit's.
+    grep -q 'host_exec_snapshot' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q 'statusline_path' "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
 
 @test "Dockerfile installs the sandbox clipboard fallback into nvim's VIMRUNTIME plugin dir" {
@@ -3117,4 +3124,45 @@ q
     # A harness that forgot the declaration but implemented the hook would
     # get a guard the launch message has just said it does not have.
     grep -q 'harness_has_guard notify' "$REPO_ROOT/bin/dejima"
+}
+
+@test "install.sh installs no harness's hooks itself" {
+    # Where dejima's guards go, and in what shape, is the selected harness's
+    # business. install.sh knowing ~/.claude/settings.json's schema is the
+    # coupling; it delegates to the harness's plugin now.
+    run grep -nE '\.claude/(settings\.json|hooks)' "$REPO_ROOT/install.sh"
+    [ "$status" -ne 0 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
+    grep -q 'harness_register_guards' "$REPO_ROOT/install.sh"
+    grep -q '^harness_register_guards()' "$REPO_ROOT/bin/harness/claude-code.sh"
+}
+
+@test "the plugin loader does not depend on its caller's SCRIPT_DIR" {
+    # bin/dejima sets it to bin/ and install.sh sets it to the repo root. A
+    # library that resolves paths from one of those only works for one of
+    # its callers.
+    sed -n '/^harness_plugin_load()/,/^}/p' "$REPO_ROOT/bin/dejima-harness-lib.sh" \
+        | grep -q 'BASH_SOURCE'
+    run sed -n '/^harness_plugin_load()/,/^}/p' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    [[ "$output" != *'$SCRIPT_DIR'* ]] || { echo "$output"; return 1; }
+}
+
+@test "a finding's label lives in trusted code, never in a manifest" {
+    # `ack` recovers an id by stripping a fixed label from the front of a
+    # finding. Those labels are a parser's grammar, and provider directories
+    # are not in tcb_snapshot's list - in the self-mount case a session can
+    # edit a manifest without raising a CRITICAL. So the label stays a
+    # literal in code the audit does watch, which is why host-exec surfaces
+    # are a plugin hook rather than a manifest key.
+    grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -rn 'HOST-CODE-EXECUTION' "$REPO_ROOT/harnesses"
+    [ "$status" -ne 0 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
+    run grep -rniE 'host_exec_paths|host_exec_label' "$REPO_ROOT/harnesses" "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
+}
+
+@test "the audit resolves host-execution paths from the harness, not a hardcoded one" {
+    run grep -n 'STATUSLINE_PATH' "$REPO_ROOT/bin/dejima-audit"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
+    grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
