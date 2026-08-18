@@ -901,10 +901,13 @@ so that restriction is unaffected.
 One gap remains: allowing an *internal* hostname (one that resolves to an
 RFC1918 address) mid-session doesn't work. dnsmasq's `stop-dns-rebind`
 rejects private answers for any domain not exempted at startup, and that
-exemption list can only be extended by restarting dnsmasq. Internal hosts
-named before the container starts (`[forge.gitea] ssh_host`, `api`,
-`[logging] loki_url`, and any globally or per-project approved domain) are
-already exempted and unaffected by this.
+exemption list can only be extended by restarting dnsmasq. `dejima-allow`
+re-asks the container's upstream resolver when a name fails to resolve, so it
+names this case and the relaunch that fixes it rather than reporting the host
+as unresolvable and sending you to look at a DNS server that is working.
+Internal hosts named before the container starts (`[forge.gitea] ssh_host`,
+`api`, `[logging] loki_url`, and any globally or per-project approved domain)
+are already exempted and unaffected by this.
 
 The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
