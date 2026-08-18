@@ -2689,7 +2689,7 @@ q
 # .dejima/allowed-domains line. Adding one back here means arguing that the
 # sandbox itself needs it.
 @test "no language package host is built into the allowlist" {
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     for d in pypi.org files.pythonhosted.org proxy.golang.org sum.golang.org \
              crates.io static.crates.io rubygems.org gitlab.com; do
@@ -2698,6 +2698,33 @@ q
             false
         }
     done
+}
+
+# The two values below come from the harness manifest rather than being
+# written here, so these assert the wiring - a manifest that stopped
+# declaring them would fail this rather than quietly allowlisting nothing.
+_harness_api_domains() {
+    sed -n 's/^api_domains *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
+}
+_harness_proxied_domain() {
+    sed -n 's/^proxied_api_domain *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
+}
+
+@test "the selected harness's own domains are in the fixed list, not built into the image" {
+    # platform.claude.com was written into fixed-domains.sh, where a second
+    # harness would have inherited it and still lacked its own.
+    [ -n "$(_harness_api_domains)" ] || { echo "the harness declares no api_domains"; return 1; }
+    # Non-comment lines only: the comment there explains that these used to
+    # be built in, which is worth keeping and is not a value.
+    run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/fixed-domains.sh' | grep -n 'platform\.claude\.com\|api\.anthropic\.com'"
+    [ "$status" -ne 0 ] || { echo "a harness's domain is still built in:"; echo "$output"; return 1; }
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
+    # And a harness declaring none gets none, rather than the last one's.
+    run bash -c "set -u; SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS=''; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    [ "$status" -eq 0 ]
+    ! grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
 }
 
 @test "api.anthropic.com is in the fixed domains only when the proxy is off" {
@@ -2709,18 +2736,20 @@ q
     # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
     # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
     # non-fatal when it fails to resolve.
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    local pd; pd="$(_harness_proxied_domain)"
+    [ -n "$pd" ] || { echo "the harness declares no proxied_api_domain"; return 1; }
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'api.anthropic.com' <<< "$output"
 
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
     # Under `set -u`, as both consumers run, so that dropping the `:-` default
     # fails here rather than at container start.
-    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 

@@ -142,6 +142,8 @@ EOF
         harness) cat <<'EOF'
 command	identifier	claude
 command_path	?path
+api_domains	?list:hostname
+proxied_api_domain	?hostname
 guards	?list:identifier
 no_confirm_args	?template
 settings_args	?template

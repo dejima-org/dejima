@@ -106,6 +106,13 @@ wait_ready() {
 #
 # One container start, three files, compared by content rather than by any
 # claim about how the image was produced.
+# One value from the selected harness's manifest. bin/dejima resolves these
+# and passes them into the container; a container started here has to do the
+# same or it is testing an arrangement that never occurs.
+harness_manifest_value() {
+    sed -n "s/^$1 *= *//p" "$SANDBOX_DIR/../harnesses/claude-code/harness.conf"
+}
+
 assert_image_matches_checkout() {
     local expected actual
     expected=$(cd "$SANDBOX_DIR" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
@@ -159,6 +166,11 @@ setup_file() {
     # Locally it's usually unset and expands empty, which both init-firewall
     # and entrypoint treat exactly as absent - so the no-token path stays the
     # default here and only CI, where the volume is, passes a real one.
+    # The harness's own domains, which bin/dejima resolves from the manifest
+    # and passes in - the image no longer names any harness's endpoints, so a
+    # container started without these gets none of them. Read from the
+    # manifest rather than written here, so this fixture cannot drift from
+    # what a real launch supplies.
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$network" \
@@ -166,6 +178,8 @@ setup_file() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
+        -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
+        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 

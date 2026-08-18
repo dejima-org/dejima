@@ -2,8 +2,16 @@
 # dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
 #
 # What belongs here is what the sandbox's own machinery cannot run without -
-# the harness and its updates, and the release CDN the tools baked into the
-# image fetch binaries from. Nothing else.
+# the release CDN the tools baked into the image fetch binaries from, the npm
+# registry those tools update through, and whatever the SELECTED HARNESS
+# declared it needs (api_domains in its manifest, arriving as
+# SANDBOX_HARNESS_DOMAINS). Nothing else.
+#
+# The harness's names are not written here because they are the harness's:
+# platform.claude.com was, and a second harness would have inherited it while
+# still lacking its own. registry.npmjs.org stays, because it is not only the
+# harness's - nvim's mason fetches language servers through it, and
+# [core] command = nvim is a supported way to run a session.
 #
 # Language ecosystems and editor tooling deliberately do not: a Python, Go or
 # Rust project reaches its own package host through an approval, either
@@ -15,22 +23,30 @@
 # being built in is a name nobody ever reviewed.
 FIXED_DOMAINS=(
     "registry.npmjs.org"
-    "platform.claude.com"
     "release-assets.githubusercontent.com"
 )
+for _d in ${SANDBOX_HARNESS_DOMAINS:-}; do
+    FIXED_DOMAINS+=("$_d")
+done
 
-# api.anthropic.com is allowlisted only when this session has no credential
-# proxy (kill switch or API-key auth), where DNS is the only path to the API.
-# With the proxy on, the session reaches the API through the forwarder rather
-# than by resolving this name (under the tls transport, via entrypoint.sh's
-# /etc/hosts pin), so leaving it unresolvable defeats a bypass that looks the
-# name up by DNS. It is not a route block: the API's address stays reachable as an IP
-# literal for as long as platform.claude.com above resolves to the same one.
+# The harness's API endpoint is allowlisted only when this session has no
+# credential proxy (kill switch or API-key auth), where DNS is the only path
+# to it. With the proxy on, the session reaches the API through the forwarder
+# rather than by resolving this name (under the tls transport, via
+# entrypoint.sh's /etc/hosts pin), so leaving it unresolvable defeats a bypass
+# that looks the name up by DNS. It is not a route block: the API's address
+# stays reachable as an IP literal for as long as another allowlisted name
+# resolves to the same one.
+#
 # Appended here rather than to EXTRA_ALLOWED_DOMAINS because it is a public
 # SaaS name: dns-proxy.sh exempts the extra list from stop-dns-rebind, and
 # init-firewall.sh downgrades a failed lookup there to a warning.
-if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
-    FIXED_DOMAINS+=("api.anthropic.com")
+#
+# Which name this is comes from the harness (proxied_api_domain); the rule
+# about when to allowlist it is dejima's, and stays here.
+if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ] \
+    && [ -n "${SANDBOX_HARNESS_PROXIED_DOMAIN:-}" ]; then
+    FIXED_DOMAINS+=("$SANDBOX_HARNESS_PROXIED_DOMAIN")
 fi
 
 # GitHub itself is allowlisted by IP range (see github-domains ipset,

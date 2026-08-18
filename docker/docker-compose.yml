@@ -80,6 +80,10 @@ services:
       SANDBOX_HARNESS_REAL: ${SANDBOX_HARNESS_REAL:-}
       SANDBOX_HARNESS_ARGS: ${SANDBOX_HARNESS_ARGS:-}
       SANDBOX_HARNESS_SETTINGS: ${SANDBOX_HARNESS_SETTINGS:-}
+      # The names this harness needs reachable, and the one its credential
+      # proxy stands in front of - see docker/fixed-domains.sh.
+      SANDBOX_HARNESS_DOMAINS: ${SANDBOX_HARNESS_DOMAINS:-}
+      SANDBOX_HARNESS_PROXIED_DOMAIN: ${SANDBOX_HARNESS_PROXIED_DOMAIN:-}
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}
