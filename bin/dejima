@@ -762,6 +762,7 @@ DEJIMA_SESSION_FILE=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
+SANDBOX_CONVERSATION_SHIP_PID=""
 
 # Names each host-side task in cleanup() as it starts. Between the container
 # exiting and the operator's shell prompt returning, dejima audits every
@@ -803,6 +804,14 @@ cleanup() {
     # comments, and a failed `VAR="$(mktemp -d)"` still binds VAR to the
     # empty string before set -e fires), so this is the invariant every other
     # name here already keeps, not a live fix - see the static test.
+    # Stopped before the audit below, so the last lines a session produced
+    # are shipped rather than left in a batch this kill discards. Reaped for
+    # the same reason the proxy is: an unreaped child reparents to PID 1 and
+    # stays a zombie wherever PID 1 does not reap.
+    if [ -n "${SANDBOX_CONVERSATION_SHIP_PID:-}" ]; then
+        kill "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
+        wait "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
+    fi
     if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
         kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
         # Reaped, not just signalled. Without this the proxy stays a zombie
@@ -980,7 +989,6 @@ export SANDBOX_CMD
 # "on"/"off" straight through and (among other things) silently disable the
 # firewall by default.
 export ENABLE_FIREWALL="$(config_get_bool core firewall)"
-export SANDBOX_LOG_CONVERSATION="$(config_get_bool logging conversation)"
 export LOKI_URL="$(config_get logging loki_url)"
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
@@ -1579,6 +1587,17 @@ if [ -n "$pending_crit" ] && [ ! -t 0 ]; then
 fi
 
 compose_status=0
+# Conversation shipping, host-side: it reads transcripts that are on the host
+# already, so it never needed to be in the container - and being there put it
+# in a process the session shared a filesystem and a signal namespace with.
+# Started here rather than earlier so it does not run during a launch that
+# refuses, and stopped in cleanup() before the audit.
+#
+# `|| true` and a backgrounded start: shipping is a bonus on top of the
+# session, so a shipper that cannot start must not stop the session running.
+"$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
+SANDBOX_CONVERSATION_SHIP_PID=$!
+
 docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2

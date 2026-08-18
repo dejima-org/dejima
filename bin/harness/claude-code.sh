@@ -368,3 +368,37 @@ PY
     done
     printf '%s' "$total"
 }
+
+# Transcript lines in, conversation log lines out. Reads stdin, writes stdout.
+#
+# Ships prompts, assistant text, and tool *invocations* (name and input) -
+# never tool outputs or thinking blocks, which dominate volume and were not
+# asked for. `fromjson?` so a torn or garbage line is skipped rather than
+# killing the stream. The session id stays inside the line rather than
+# becoming a Loki label, because a per-session label would blow up
+# cardinality.
+harness_transform_transcript() {
+    jq -Rc '
+        def clip(n): if length > n then .[:n] + "...[truncated]" else . end;
+        fromjson?
+        | select(.isMeta != true)
+        | .sessionId as $s
+        | if .type == "user" then
+            (.message.content
+                | if type == "string" then .
+                  else ([.[]? | select(.type == "text") | .text] | join("\n"))
+                  end)
+            | select(length > 0)
+            | {session: $s, role: "user", text: clip(16000)}
+          elif .type == "assistant" then
+            (.message.content[]?
+                | if .type == "text" then
+                    {session: $s, role: "assistant", text: (.text | clip(16000))}
+                  elif .type == "tool_use" then
+                    {session: $s, role: "tool", tool: .name, input: (.input | tojson | clip(2000))}
+                  else empty
+                  end)
+          else empty
+          end
+    ' 2>/dev/null
+}
