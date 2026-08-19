@@ -138,20 +138,75 @@ harness_hook() {
 # is precisely the kind of thing whose paths are computed rather than
 # written down.
 emit_mount() {
-    local path="$1" mode="${2:-}"
-    [ -n "$path" ] || return 0
-    case "$path" in
+    emit_mount_at "$1" "$1" "${2:-}"
+}
+
+# Whether two absolute paths are the same or one contains the other. Here
+# rather than in bin/dejima because the mount checks below are its only
+# non-trivial user, and a check that cannot be exercised without starting a
+# launch is one nothing exercises.
+_paths_overlap() {
+    local a="${1%/}" b="${2%/}"
+    # Stripping a trailing slash turns the filesystem root into the empty
+    # string, and root contains every path there is - which the prefix
+    # comparisons below cannot say, because "//" is not a prefix of "/usr".
+    # Without this, "/" overlapped nothing: `[mounts] readonly = /` passed the
+    # guarded-store refusal and mounted every store at once.
+    if [ -z "$a" ] || [ -z "$b" ]; then return 0; fi
+    [ "$a" = "$b" ] && return 0
+    case "$a/" in "$b"/*) return 0 ;; esac
+    case "$b/" in "$a"/*) return 0 ;; esac
+    return 1
+}
+
+# Container paths dejima itself relies on. A mount landing on one of these
+# replaces something the sandbox needs: the wrapper that pins the no-confirm
+# flags, the settings layer the guards are registered in, the briefing, the
+# marker directory remote access watches. A plugin is trusted code, but the
+# whole point of declaring through here is that core is the one checking.
+DEJIMA_CONTAINER_PATHS="/usr/local/bin /etc/dejima /etc/dejima-harness /etc/dejima-settings.json /run/dejima-notify"
+
+# A host path mounted at a DIFFERENT path in the container. $3 is the mode
+# ("ro", or empty for read-write).
+#
+# The two paths differ when a harness keys its own state somewhere dejima
+# cannot safely follow. opencode derives its storage directory from the git
+# remote, which lives in the mounted workspace and a session can rewrite in
+# one command - so a mount computed from it is a mount whose destination the
+# session chooses. Keeping the SOURCE keyed by dejima's own workspace slug
+# and letting only the TARGET follow the harness makes that fail safe: a
+# session that rewrites the remote sends the harness looking at a container
+# path nothing is mounted at, which is empty rather than someone else's.
+emit_mount_at() {
+    local src="$1" target="$2" mode="${3:-}" guarded
+    [ -n "$src" ] && [ -n "$target" ] || return 0
+    case "$src$target" in
         *:*)
-            echo "Harness plugin emitted a mount path containing a colon: $path" >&2
+            echo "Harness plugin emitted a mount path containing a colon: $src:$target" >&2
             exit 1 ;;
     esac
+    case "$target" in
+        /*) ;;
+        *)  echo "Harness plugin emitted a relative mount target: $target" >&2
+            exit 1 ;;
+    esac
+    # The source is a host path, so it gets the store refusal. The target is
+    # a container path and cannot expose a host store - what it can do is
+    # shadow something the sandbox needs.
     _guarded_stores
-    _refuse_guarded_mount "harness state mount" "$path" \
+    _refuse_guarded_mount "harness state mount" "$src" \
         ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"}
+    for guarded in $DEJIMA_CONTAINER_PATHS; do
+        if _paths_overlap "$(readlink -m "$target")" "$guarded"; then
+            echo "Refusing harness mount at $target: it overlaps $guarded," >&2
+            echo "which the sandbox needs in place inside the container." >&2
+            exit 1
+        fi
+    done
     if [ -n "$mode" ]; then
-        extra_mounts+=(-v "$path:$path:$mode")
+        extra_mounts+=(-v "$src:$target:$mode")
     else
-        extra_mounts+=(-v "$path:$path")
+        extra_mounts+=(-v "$src:$target")
     fi
 }
 

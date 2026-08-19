@@ -3365,3 +3365,50 @@ _harness_proxied_domain() {
     grep -qi 'exception' <<< "$sec" \
         || { echo "the rename/shim exception is gone"; return 1; }
 }
+
+# emit_mount_at is exercised directly rather than through a launch: the two
+# checks below are pure path logic, and a plugin that emitted a bad target
+# could only be introduced by writing one into the checkout.
+_emit_mount_at() {
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        extra_mounts=()
+        _guarded_stores() { GUARDED_STORES=(); }
+        _refuse_guarded_mount() { :; }
+        emit_mount_at "$@" || exit $?
+        printf "%s\n" "${extra_mounts[@]}"
+    ' _ "$@"
+}
+
+@test "a harness mount may name a container path different from its source" {
+    # For a harness whose own keying dejima cannot safely follow: the source
+    # stays keyed by something the session cannot change, and only the target
+    # follows the harness.
+    run _emit_mount_at /host/state /container/state
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"/host/state:/container/state"* ]] || { echo "$output"; return 1; }
+    run _emit_mount_at /host/state /container/state ro
+    [[ "$output" == *"/host/state:/container/state:ro"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a harness mount is refused when its target shadows something the sandbox needs" {
+    # The wrapper that pins the no-confirm flags, the settings layer the
+    # guards are registered in, the briefing, the marker directory: a mount
+    # landing on any of them replaces it.
+    local p
+    for p in /usr/local/bin /usr/local/bin/claude /etc/dejima-harness \
+             /etc/dejima-settings.json /run/dejima-notify /; do
+        run _emit_mount_at /host/state "$p"
+        [ "$status" -ne 0 ] || { echo "accepted a mount over $p: $output"; return 1; }
+        [[ "$output" == *"Refusing harness mount"* ]] || { echo "$p: $output"; return 1; }
+    done
+}
+
+@test "a harness mount target must be absolute and free of the mount separator" {
+    run _emit_mount_at /host/state relative/path
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"relative mount target"* ]] || { echo "$output"; return 1; }
+    run _emit_mount_at /host/state "/has:colon"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
+}

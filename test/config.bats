@@ -1868,3 +1868,16 @@ _epitaph_transcript() {
     [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
         || { echo "wrote a harness config anyway"; return 1; }
 }
+
+@test "[mounts] readonly is refused when it names the filesystem root" {
+    # Root contains every guarded store, so mounting it hands the session all
+    # of them at once - the approval store, the audit reports, the epitaphs.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "readonly = /"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
