@@ -151,8 +151,6 @@ _config_keys() {
     _config_extra_keys
 }
 
-# Moved here from dejima-project-lib.sh so this file has no dependencies and
-# can be the layer that one sources, rather than the other way round.
 config_root() {
     printf '%s' "${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}"
 }
@@ -164,16 +162,14 @@ config_path() {
 # ---------------------------------------------------------------------------
 # Value validation
 #
-# Deliberately narrow, for the same reason the old remote.conf validator was:
-# these values reach a dnsmasq server= line, a curl -H header, a docker -v argument
+# Deliberately narrow: these values reach a dnsmasq server= line, a curl -H header, a docker -v argument
 # and a URL handed to a phone. Anything shell-active, any whitespace, and
 # anything that could split a header must not survive validation.
 # ---------------------------------------------------------------------------
 
-# Moved here from dejima-project-lib.sh, unchanged: a declared domain has to
-# survive being written into a dnsmasq server=/domain/ line. Defining it here
-# rather than in both files keeps one definition, which is what stops the two
-# drifting apart.
+# A declared domain has to survive being written into a dnsmasq
+# server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
+# there is one definition and no pair of them to drift apart.
 valid_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
 }
@@ -261,8 +257,8 @@ _config_valid_value() {
             valid_domain "$value"
             ;;
         url)
-            # The same character set the old remote.conf validator used, plus a
-            # required http(s) scheme. Deliberately narrower than RFC 3986: these values
+            # A restricted character set plus a required http(s) scheme.
+            # Deliberately narrower than RFC 3986: these values
             # reach a curl -H header, an nginx comparison, a firewall
             # allowlist and prose an agent reads, so ";", "&", "$", backticks
             # and parentheses must not survive even though a URL may legally

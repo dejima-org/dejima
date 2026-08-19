@@ -100,15 +100,12 @@ class Credentials:
         # can see, and keeps the rename below same-filesystem (a subdirectory
         # of the same parent) so atomicity is unaffected.
         #
-        # This used to lean on bin/dejima masking both paths with bind mounts,
-        # on the reasoning that "what the container's own bind mount shows is
-        # irrelevant to a host-side rename". That was backwards, and it was
-        # #50: the rename is unaffected by the container's mount, but the
-        # container's mount is destroyed by the rename. Replacing the file
-        # unlinks the dentry the mask was pinned to, so the mask detached and
-        # the sandbox saw the real token from the first refresh on. ~/.claude
-        # is no longer bind-mounted as a whole, so neither this directory nor
-        # the credential reaches the container and there is nothing to mask.
+        # A bind mount over the credential would not make this safe: the
+        # rename below is unaffected by the container's mount, but the
+        # container's mount is destroyed by the rename, which unlinks the
+        # dentry it is pinned to. ~/.claude is not mounted whole, so neither
+        # this directory nor the credential has a path into the container
+        # (#50, docs/security.md).
         directory = os.path.join(os.path.dirname(self.path) or ".", ".credentials-proxy-tmp")
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory)

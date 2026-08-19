@@ -7,9 +7,9 @@
 # declared it needs (api_domains in its manifest, arriving as
 # SANDBOX_HARNESS_DOMAINS). Nothing else.
 #
-# The harness's names are not written here because they are the harness's:
-# platform.claude.com was, and a second harness would have inherited it while
-# still lacking its own. registry.npmjs.org stays, because it is not only the
+# The harness's names are not written here because they are the harness's: a
+# name built in is inherited by every harness while a second one still lacks
+# its own. registry.npmjs.org stays, because it is not only the
 # harness's - nvim's mason fetches language servers through it, and
 # [core] command = nvim is a supported way to run a session.
 #

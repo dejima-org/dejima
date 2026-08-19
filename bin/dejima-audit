@@ -1233,12 +1233,11 @@ case "$cmd" in
                           finding_ids+=("gitconfig:$key") ;;
                 esac
             else
-                # Suppressible and id-bearing like the CRITICAL arms above.
-                # Both were previously neither, which left this the one tier
-                # of finding with no way to curate it: keys some tools
-                # rewrite on every run (branch.<name>.merge on each push,
-                # submodule.*) re-fired every session and pushed real
-                # WARNINGs out of the capped list (#45).
+                # Suppressible and id-bearing like the CRITICAL arms above:
+                # without an id, keys some tools rewrite on every run
+                # (branch.<name>.merge on each push, submodule.*) re-fire
+                # every session and push real WARNINGs out of the capped
+                # list (#45).
                 #
                 # Safe by construction rather than by care taken here:
                 # id_severity already calls an exec key or any alias CRITICAL
@@ -1283,17 +1282,15 @@ case "$cmd" in
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
-        # There is deliberately no cross-project finding here any more. It
-        # reported a write to another project's ~/.claude/projects slug, and
-        # a session could once make one: the whole tree was mounted. Since
-        # #104 it gets its own slugs and nothing else, so the only writes this
-        # could still see are other host or dejima sessions doing their own
-        # legitimate work - and with several sessions running it reported all
+        # Deliberately no cross-project finding: since #104 a session gets
+        # its own ~/.claude/projects slugs and nothing else, so the only
+        # writes visible here are other host or dejima sessions doing their
+        # own legitimate work - and with several running it would report all
         # of them, on every report, drowning the findings that mattered.
         #
-        # Detection that cannot observe the thing it was built for, and fires
-        # constantly on the thing it was not, is worse than no detection: it
-        # trains the operator to skim. The mount is the control now, and
+        # Detection that cannot observe what it exists for, and fires
+        # constantly on what it does not, is worse than no detection: it
+        # trains the operator to skim. The mount is the control, and
         # static.bats pins it.
 
         # tcb diffs: any change under the sandbox's own trusted computing

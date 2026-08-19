@@ -22,8 +22,9 @@ discipline the config file itself gets (unknown key is fatal, every value is
 type-checked, a line count cap), and a briefing fragment is prose that gets
 substituted into and handed to the agent, never interpreted as code. The one
 thing a provider ships that *does* run is a forge's `bin/` - copied into the
-Docker image at build time (`docker/Dockerfile`: `COPY forges/`, then every
-file under a `*/bin/` is installed) as an ordinary program the agent invokes
+Docker image at build time (`docker/Dockerfile`: `COPY forges/`, then
+`docker/install-forge-bins.sh` installs exactly what the manifests declare)
+as an ordinary program the agent invokes
 on `PATH`, the same as `git` or `curl`. That program never feeds back into a
 decision dejima itself makes; it's just a CLI the image happens to carry.
 
@@ -297,8 +298,7 @@ itself:
   `GITEA_SSH_HOST`, `GITEA_TOKEN`).
 
 `hooks/git-push-guard.sh` reads `DEJIMA_PUSH_HOSTS` and
-`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` (renamed from
-`gitea-merge-guard.sh` in this phase) reads `DEJIMA_MERGE_BLOCK` as a
+`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as a
 regex-escaped literal command prefix. Two different failure directions,
 both deliberate:
 

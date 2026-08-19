@@ -5,7 +5,7 @@
 **Off by default, and nothing here starts itself.** Remote access is one
 config switch plus work you do by hand: two systemd user units to install,
 a reverse proxy to write, an SSH key to authorise. Until you have done all
-of it, `dejima` behaves exactly as it did before this feature existed. See
+of it, `dejima` runs with no remote-access behaviour at all. See
 ["What `off` means"](#what-off-means) for the specifics.
 
 ## What it is
@@ -211,8 +211,8 @@ opens new ones regardless.
 
 ### What `off` means
 
-With `[remote-access] enabled` off (the default), `dejima` builds exactly
-the `docker compose` invocation it built before this feature existed: no
+With `[remote-access] enabled` off (the default), `dejima` builds a
+`docker compose` invocation with nothing remote-access in it: no
 session state is written, no marker directory is created or mounted, and no
 notification hook is registered. `dejima-attach`, `dejima-ttyd` and
 `dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
@@ -334,9 +334,7 @@ confirming both after you add the line.
 
 ## Web front door
 
-Needs `ttyd` **1.7.4 or newer**. `-W`/`--writable` arrived in 1.7.4, which
-inverted the old default (before it, the terminal was writable unless you
-passed `--readonly`), so an older build rejects the flag and
+Needs `ttyd` **1.7.4 or newer**. `-W`/`--writable` arrived in 1.7.4, so an older build rejects the flag and
 `dejima-ttyd` fails at every start. Your distro's package may well be
 too old: Debian bookworm's is 1.7.3 and Ubuntu 22.04's is 1.6.3, neither of
 which has the flag - Ubuntu 24.04's 1.7.4 does. Check with `ttyd --version`,
@@ -482,15 +480,16 @@ can rescue.
 | One-finger drag, `DRAG` on | A real mouse drag: press, move, release |
 | Long press ~0.4s, then drag | Selects text; releasing copies it to the phone's clipboard |
 
-`DRAG` is a toolbar toggle rather than something inferred, so the default
-behaviour is unchanged and a finger drag inside a mouse-aware application does
-not start doing something else the moment you meant to scroll. Two-finger
+`DRAG` is a toolbar toggle rather than something inferred, so with it off a
+finger drag inside a mouse-aware application never starts doing something
+else the moment you meant to scroll. Two-finger
 scrolling works in both states, so a `DRAG` you forgot to turn off can never
 leave you without a way to scroll.
 
 With `DRAG` on, dragging a tmux pane border resizes the pane and dragging an
 nvim split separator resizes the split. Neither needs any server-side
-configuration - they are stock behaviour that had never been reachable.
+configuration - they are stock tmux and nvim behaviour; the page's only
+contribution is delivering the drag.
 
 ### Toolbar
 
@@ -528,7 +527,7 @@ SSH front door behaves identically - honouring the sequence here closes a gap
 between the two front doors rather than opening one.
 
 The toolbar and the gestures appear only for a coarse pointer, so a desktop
-browser gets a plain terminal and behaves exactly as it did before.
+browser gets a plain terminal.
 `?toolbar=0` and `?toolbar=1` on the URL override that either way without
 touching any config - useful for a screenshot, or for driving the page from a
 desktop browser deliberately.
@@ -631,13 +630,10 @@ suggestions need a dictionary you download yourself, so a fresh install has
 nothing to autocorrect with, and Ctrl, Alt, Esc, Tab, the arrows and the
 function keys are all real keys, reached by swiping a key toward the corner
 the symbol is printed in. Android's keyboard switcher makes it a per-session
-choice rather than a replacement for the keyboard you use for everything else.
-
-The second half of that used to be the stronger reason - without Ctrl there is
-no tmux prefix, and Esc and the arrows are hard to do without in anything
-interactive. The toolbar now carries all of those, so a third-party keyboard is
-no longer the price of admission; it is the fix for the autocorrect bug and
-nothing more.
+choice rather than a replacement for the keyboard you use for everything
+else. The toolbar carries Ctrl, Esc, Tab and the arrows, so a third-party
+keyboard is not the price of admission here; it is the fix for the
+autocorrect bug and nothing more.
 
 Turning autocorrect off in the keyboard you already have fixes it too, at the
 cost of losing the correction everywhere else.

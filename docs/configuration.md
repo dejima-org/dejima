@@ -37,7 +37,7 @@ what a given launch will actually use.
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
-| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly, as before this feature |
+| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
 | `[epitaph] enabled` | `on` | keep the summary Claude Code writes when a session compacts |

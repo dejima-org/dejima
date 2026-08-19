@@ -2434,12 +2434,12 @@ nginx_blocks() {
     [[ "$output" =~ [0-9]+[hd]$ ]]
 }
 
-@test "the terminal page carries the viewport meta the proxy used to inject" {
+@test "the terminal page ships its own viewport meta" {
     # ttyd serves no <meta name="viewport"> - not in 1.7.7, not on main - so a
     # phone lays the page out at a virtual desktop width and scales it down,
-    # which no font size can undo and which zooming cannot reflow. The nginx
-    # example used to supply the missing tag with sub_filter. The page now
-    # ships its own, so the property has moved rather than gone away.
+    # which no font size can undo and which zooming cannot reflow. The page
+    # supplies the tag itself, so the layout does not depend on the reverse
+    # proxy in front of it rewriting the body.
     local page="$REPO_ROOT/web/index.html"
     [ -f "$page" ]
     grep -qE '<meta name="viewport"[^>]*width=device-width' "$page"

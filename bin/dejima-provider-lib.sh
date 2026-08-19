@@ -638,10 +638,9 @@ provider_validate_selection() {
     esac
 
     # Rule 3: a workflow that pushes needs a forge that resolves to somewhere
-    # to push to. Deferred through Phase 2 because refusing an unconfigured
-    # forge had no correct alternative to offer - `forge = none` now exists,
-    # so an operator who genuinely pushes nowhere has an honest way to say it
-    # and this stops being a refusal with no remedy.
+    # to push to. `forge = none` is how an operator who genuinely pushes
+    # nowhere says so, which is what keeps this from being a refusal with no
+    # remedy.
     if [ "$push" = "on" ] && [ -z "$(forge_hosts "$forge")" ]; then
         if [ -z "$(manifest_get forge "$forge" keys)" ]; then
             # A forge with no keys at all has nothing to configure - "set
@@ -683,10 +682,9 @@ provider_validate_selection() {
             missing="${missing:+$missing }$key"
         fi
     done
-    # Rule 5: a partly configured forge is a typo, not a choice. Refused rather
-    # than warned now that `forge = none` exists: previously the only way to
-    # say "I don't use a forge" was to leave one half-filled, so refusing would
-    # have broken a supported state. Still scoped to PARTIAL configuration -
+    # Rule 5: a partly configured forge is a typo, not a choice. Refused, not
+    # warned: `forge = none` is the way to say no forge, so a half-filled
+    # section has no legitimate reading left. Still scoped to PARTIAL configuration -
     # nothing set at all is rule 3's case above, and carries its own message -
     # and, like rule 3, only when the workflow actually pushes: a non-pushing
     # workflow never invokes the forge at all, so a partially filled-in forge

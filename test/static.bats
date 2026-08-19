@@ -2176,13 +2176,11 @@ EOF
     grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
 }
 
-# Was: that the cross-session false-positive case is documented. The finding
-# itself is gone - a session can no longer write another project's slug, so
-# every one it could still see belonged to some other session - and what
-# needs documenting now is its absence, so that removing detection stays a
-# stated decision rather than something a reader has to infer from silence.
+# The absence of a finding needs documenting as much as a finding does, so
+# that not detecting something stays a stated decision rather than something
+# a reader has to infer from silence.
 @test "docs/security.md says why there is no cross-project finding" {
-    grep -q 'no longer a .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
+    grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
     [ "$status" -ne 0 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
 }
@@ -2850,11 +2848,12 @@ _harness_proxied_domain() {
 }
 
 @test "the selected harness's own domains are in the fixed list, not built into the image" {
-    # platform.claude.com was written into fixed-domains.sh, where a second
-    # harness would have inherited it and still lacked its own.
+    # A harness's own api_domains reach the fixed list through its manifest.
+    # A name built into fixed-domains.sh instead would be inherited by every
+    # harness while a second one still lacked its own.
     [ -n "$(_harness_api_domains)" ] || { echo "the harness declares no api_domains"; return 1; }
-    # Non-comment lines only: the comment there explains that these used to
-    # be built in, which is worth keeping and is not a value.
+    # Non-comment lines only: the comment there names the harness's domains
+    # to explain why they are not written in, which is prose, not a value.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/fixed-domains.sh' | grep -n 'platform\.claude\.com\|api\.anthropic\.com'"
     [ "$status" -ne 0 ] || { echo "a harness's domain is still built in:"; echo "$output"; return 1; }
     run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""

@@ -394,7 +394,7 @@ make_cert() {
     [[ "$output" == *"ALPN protocol: http/1.1"* ]]
 }
 
-@test "forwarder loopback mode is unchanged: plaintext http on the old port" {
+@test "forwarder loopback mode serves plaintext http on the port it is given" {
     start_proxy
     start_forwarder loopback 18445
     run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
