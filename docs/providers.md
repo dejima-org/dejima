@@ -125,7 +125,7 @@ operator can set, resolved the same way as any other config key
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
 | `hosts_allowlisted_by_core` | `bool` | `off` | `on` means this forge's hosts are ones core already allowlists in its own right - GitHub's published ranges, which every session can read from over 443 whatever forge is selected. Core then keeps them out of `DEJIMA_FORGE_HOSTS` (the extra-domains path, which resolves a name into the port-unrestricted `allowed-domains` ipset and exempts it from DNS-rebind protection - right for an internal self-hosted host, a silent widening for a public one) and, when the workflow pushes, opens core's own GitHub push grant to them instead: port 22 to those same ranges, logged and verified by the firewall's startup self-check. They still reach `DEJIMA_PUSH_HOSTS`, so `git-push-guard.sh` permits the push. Name-free in core, but GitHub-specific in effect: this key means "core already allowlists these hosts in its own right", which today is only true of GitHub's ranges, so a future forge whose hosts are not among those must leave it `off` - setting it `on` for anything else grants no firewall allowance at all plus an irrelevant GitHub push grant. |
-| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into the image - the only manifest key naming something that actually gets copied and executed. |
+| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into `/usr/local/bin` of the image - the only manifest key naming something that actually gets copied and executed. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build both when a declared file is missing and when a forge ships a file under its `bin/` that it does not declare. A forge with `install =` empty therefore puts nothing executable in the image. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
 Worked example, `forges/gitea/forge.conf`:
@@ -150,8 +150,8 @@ config keys (`ssh_host`, `api`, `token_file`) from `keys`; an operator is
 expected to set all three (`requires`); `ssh_host` is a literal hostname and
 `api` is a URL, both of which end up in the firewall allowlist and the push
 guard's host list; `install` names the executables under its own `bin/`
-subdirectory (`gitea-pr`, `gitea-issue` and `gitea-actions`), which is what
-the Dockerfile copies into the image; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
+subdirectory (`gitea-pr`, `gitea-issue` and `gitea-actions`), and those three
+are exactly what the image build installs; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
 and `GITEA_TOKEN` (the *contents* of the file at `token_file`, not its path)
 as environment variables.
 

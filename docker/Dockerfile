@@ -292,8 +292,9 @@ USER root
 # its API URL and token, and an image that is identical regardless of which
 # forge is configured is one less thing for the exit audit to explain.
 COPY forges/ /tmp/forges/
-RUN find /tmp/forges -type f -path '*/bin/*' -exec install -m 755 {} /usr/local/bin/ \; \
-    && rm -rf /tmp/forges
+COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
+RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/bin \
+    && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh

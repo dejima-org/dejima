@@ -1176,11 +1176,53 @@ cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
     grep -q 'COPY forges/' "$SANDBOX_DIR/Dockerfile"
-    # install -m 755, not a plain cp, so the executable bit surviving isn't
-    # a separate chmod line that can fall out of sync.
-    grep -q -- '-exec install -m 755' "$SANDBOX_DIR/Dockerfile"
+    # Through the manifest's install list, not a find over the directory
+    # layout - see "what ships into the image is what a manifest declares".
+    grep -q 'install-forge-bins.sh' "$SANDBOX_DIR/Dockerfile"
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
+}
+
+# forges/ is inside the audit's TCB, so `install =` in a forge manifest is a
+# claim an operator is entitled to read as "this forge puts nothing else
+# executable in the image". The image build enforces it, but that is the slow
+# tier and only runs where Docker does; this catches a file added under a
+# forge's bin/ without a declaration at the same time as the rest of the
+# static checks, which is when someone is still looking at the change.
+@test "what ships into the image is what a manifest declares, both ways" {
+    local dest
+    dest="$(mktemp -d)"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
+    # Nothing under any forge's bin/ was skipped, and nothing else appeared.
+    local shipped declared
+    shipped="$(cd "$dest" && ls | sort)"
+    declared="$(find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n' | sort)"
+    rm -rf "$dest"
+    [ "$shipped" = "$declared" ] || {
+        echo "installed:"; echo "$shipped"; echo "present under a bin/:"; echo "$declared"; return 1; }
+}
+
+@test "an undeclared file under a forge's bin/ fails the image build" {
+    local fake dest
+    fake="$(mktemp -d)"; dest="$(mktemp -d)"
+    cp -r "$REPO_ROOT"/forges/. "$fake/"
+    mkdir -p "$fake/github/bin"
+    printf '#!/bin/sh\necho hi\n' > "$fake/github/bin/undeclared"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    [ "$status" -ne 0 ] || { echo "an undeclared CLI installed anyway"; rm -rf "$fake" "$dest"; return 1; }
+    [ ! -e "$dest/undeclared" ]
+    rm -rf "$fake" "$dest"
+}
+
+@test "a declared file a forge does not ship fails the image build" {
+    local fake dest
+    fake="$(mktemp -d)"; dest="$(mktemp -d)"
+    cp -r "$REPO_ROOT"/forges/. "$fake/"
+    rm "$fake/gitea/bin/gitea-pr"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    [ "$status" -ne 0 ] || { echo "a missing declared CLI passed"; rm -rf "$fake" "$dest"; return 1; }
+    rm -rf "$fake" "$dest"
 }
 
 @test "merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
