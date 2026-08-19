@@ -3412,3 +3412,17 @@ _emit_mount_at() {
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
 }
+
+@test "every supported harness is available to a session working on dejima" {
+    # A harness dejima claims to support and cannot run here is one whose
+    # guards are asserted rather than observed. claude-code is installed in
+    # the image; the rest are declared as dependencies of this project.
+    local d name
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ "$name" = "claude-code" ] && continue
+        grep -qE "^[a-z]+:.*$name" "$REPO_ROOT/.dejima/dependencies" \
+            || { echo "$name is supported but not declared in .dejima/dependencies"; return 1; }
+    done
+}

@@ -350,6 +350,16 @@ whole today.
 
 ### Testing a new harness
 
+**Every supported harness is a dependency of this project**, declared in
+`.dejima/dependencies`, so a session working on dejima can run the one it is
+integrating rather than reason about it. A harness dejima claims to support
+and cannot exercise here is one whose guards are asserted rather than
+observed - and an untested guard is worse than a declared-absent one,
+because absent is visible to the operator and broken is not.
+
+`claude-code` is the exception, installed in `docker/Dockerfile` as the
+harness the image is built around.
+
 `providers.bats` covers the manifest contract itself and is where a new
 `harness.conf` gets its parsing and validation tests. The suites that assert
 on Claude Code paths by name - `config.bats`, `audit.bats`, `static.bats`,
