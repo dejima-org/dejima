@@ -537,6 +537,9 @@ EOF
 # $4 is the launch timestamp, defaulting to now. It matters to anything that
 # prunes: dejima-attach holds off on an entry too young to have a container
 # yet, so a test about pruning has to write one that is old enough.
+# $5 is the launcher pid. Omitted by default, which writes the pre-pid entry
+# shape - so every existing caller keeps exercising the upgrade fallback, and
+# a test that means to exercise the liveness check says which pid it means.
 write_entry() {
     mkdir -p "$RUNTIME_DIR/dejima/sessions"
     cat > "$RUNTIME_DIR/dejima/sessions/$1" <<EOF
@@ -545,6 +548,18 @@ pane=$2
 label=$3
 started=${4:-$(date +%s)}
 EOF
+    [ -z "${5:-}" ] || printf 'pid=%s\n' "$5" >> "$RUNTIME_DIR/dejima/sessions/$1"
+}
+
+# A pid that is certain to be dead: spawn a process and reap it, so the number
+# is one the kernel has genuinely finished with rather than one picked out of
+# the air and hoped to be free.
+dead_pid() {
+    local p
+    ( exit 0 ) &
+    p=$!
+    wait "$p" 2>/dev/null || true
+    printf '%s' "$p"
 }
 
 @test "dejima-attach refuses an id that is not a run id" {
@@ -915,12 +930,12 @@ EOF
 
 @test "a marker directory the sandbox made undeletable does not kill the listing" {
     # /run/dejima-notify is bind-mounted read-write, so a compromised session
-    # can chmod its own marker directory on the way out and make the next
-    # prune's rm -rf fail. Aborting there would blank the picker - a sandbox
-    # must not be able to deny the operator the front door.
+    # can chmod its own marker directory on the way out. Nothing in the prune
+    # tries to remove it, but a sandbox must not be able to deny the operator
+    # the front door by making a directory awkward, so this stays pinned.
     write_remote_config
     stub_docker_run_id 0123456789abcdef
-    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0000000000000000 '%1' 'work:1' 0999999999
     write_entry 0123456789abcdef '%1' 'work:2'
     mkdir -p "$RUNTIME_DIR/dejima/notify/0000000000000000/waiting-dir"
     chmod 500 "$RUNTIME_DIR/dejima/notify/0000000000000000"
@@ -928,6 +943,57 @@ EOF
     chmod 700 "$RUNTIME_DIR/dejima/notify/0000000000000000"
     [ "$status" -eq 0 ]
     [[ "$output" == *"0123456789abcdef"* ]]
+}
+
+# The marker directory is the bind source of a mount bin/dejima declares, and
+# its lifetime belongs to that process's EXIT trap. A second owner in the
+# prune can only race it, and losing that race does not leave a tidy host: it
+# leaves Docker recreating the bind source root-owned, dejima-notify.sh
+# failing on every Notification and Stop for the rest of the run, and no code
+# anywhere that rewrites the registry entry to make the session visible again.
+@test "pruning a dead entry leaves the marker directory alone" {
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    write_entry 0123456789abcdef '%1' 'work:2' 0999999999 "$(dead_pid)"
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ] \
+        || { echo "the registry entry survived a dead launcher"; return 1; }
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ] \
+        || { echo "the prune deleted a marker directory it does not own"; return 1; }
+}
+
+# The failure this replaced: a cold first build outran STARTUP_GRACE, the
+# operator opened the front door to check on it, and the session was
+# unregistered mid-launch. A build takes as long as it takes; whether the
+# process that registered the entry is still running does not.
+@test "a launch still building is not pruned however long it has taken" {
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    # started= far enough back that any guessed window has long since passed.
+    write_entry 0123456789abcdef '%1' 'work:2' 0999999999 $$
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+    [[ "$output" == *"starting"* ]]
+    [ -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ]
+}
+
+@test "an entry whose pid is not a plain number is refused, not signalled" {
+    # pid reaches `kill`, which accepts a job spec and a negative pgid as well
+    # as a process. Neither may be reachable from a state file.
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    for bad in '%1' '-1' 'x[$(id)]' ' 1'; do
+        write_entry 0123456789abcdef '%1' 'work:2' 0999999999 "$bad"
+        run "$REPO_ROOT/bin/dejima-attach" --list
+        [ "$status" -eq 0 ] || { echo "pid '$bad' broke the listing: $output"; return 1; }
+        [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ] \
+            || { echo "pid '$bad' was treated as a live launcher"; return 1; }
+    done
 }
 
 # Waits for the grouped session an attach should have created, then prints

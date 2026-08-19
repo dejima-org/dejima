@@ -39,20 +39,49 @@
     return new Uint8Array(out);
   }
 
+  // A yank is a selection, not a stream. Past this the payload is either a
+  // bug or a session making the page do work on its behalf, and it is refused
+  // before base64Decode walks it, so the cost of refusing does not scale with
+  // what was sent.
+  var MAX_CLIPBOARD_BYTES = 100 * 1024;
+  var MAX_BASE64_LENGTH = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4;
+
   // data is everything after "OSC 52;" - a selection name, a semicolon, then
-  // base64. Returns null for anything there is nothing to copy from: a "?"
-  // query (a read request, which this page does not answer), a clear, or a
-  // payload that does not decode.
-  function decodeOsc52(data) {
+  // base64. Returns the base64 alone, or null when there is nothing to copy
+  // from: a "?" query (a read request, which this page does not answer) or a
+  // clear. One place parses the shape, so decodeOsc52 and oversize below
+  // cannot disagree about where the payload starts.
+  function osc52Payload(data) {
     if (typeof data !== 'string') return null;
     var sep = data.indexOf(';');
     if (sep < 0) return null;
     var payload = data.slice(sep + 1);
     if (payload === '' || payload === '?') return null;
+    return payload;
+  }
+
+  // Null for anything there is nothing to copy from, anything over the cap,
+  // and anything that does not decode.
+  function decodeOsc52(data) {
+    var payload = osc52Payload(data);
+    if (payload === null || payload.length > MAX_BASE64_LENGTH) return null;
     var bytes = base64Decode(payload);
     if (bytes === null || bytes.length === 0) return null;
     return new TextDecoder().decode(bytes);
   }
 
-  D.osc52 = { base64Decode: base64Decode, decodeOsc52: decodeOsc52 };
+  // Distinguishes "too big" from "malformed", both of which decodeOsc52
+  // reports as null - the caller says so out loud rather than dropping a
+  // legitimate oversized yank in silence.
+  function oversize(data) {
+    var payload = osc52Payload(data);
+    return payload !== null && payload.length > MAX_BASE64_LENGTH;
+  }
+
+  D.osc52 = {
+    base64Decode: base64Decode,
+    decodeOsc52: decodeOsc52,
+    oversize: oversize,
+    MAX_CLIPBOARD_BYTES: MAX_CLIPBOARD_BYTES
+  };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));

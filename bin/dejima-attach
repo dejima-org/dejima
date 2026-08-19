@@ -86,20 +86,12 @@ state_color() {
     esac
 }
 
-# How long after its own started= a registered session may still have no
-# container, before the prune in list_sessions treats that as "gone".
-#
-# Sized against what holds a launch up: the registry entry is written before
-# an unconditional `docker compose build`, plus up to two derived image
-# builds, and a cold base build fetches apt and npm layers - minutes. A warm
-# run never comes near this window.
-#
-# Generous because the errors are not symmetric. Too long leaves a dead
-# session listed until the window passes. Too short deletes the entry of a
-# session about to start: bin/dejima never rewrites it, so the session is
-# permanently absent from both front doors, and the marker directory removed
-# with it is a bind source the imminent `compose run` declares.
-STARTUP_GRACE=900
+# Only for a registry entry written before pid= existed, i.e. a session that
+# outlived an upgrade: how long after its own started= it may still have no
+# container before the prune treats it as gone. Sized against a cold first
+# build, which fetches apt and npm layers and can run to minutes. Everything
+# written since carries a pid and is asked directly - see launcher_alive.
+PRE_PID_STARTUP_GRACE=900
 
 # Parsed, never sourced: this file is host-written, but treating state files
 # as code is the habit this repo doesn't have. Returns nonzero for an entry
@@ -107,7 +99,7 @@ STARTUP_GRACE=900
 # since one bad entry must not hide every other live session.
 read_entry() {
     local file="$1" line
-    entry_workspace=""; entry_pane=""; entry_label=""; entry_started=""
+    entry_workspace=""; entry_pane=""; entry_label=""; entry_started=""; entry_pid=""
     [ -r "$file" ] || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
@@ -115,8 +107,15 @@ read_entry() {
             pane=*)      entry_pane="${line#*=}" ;;
             label=*)     entry_label="${line#*=}" ;;
             started=*)   entry_started="${line#*=}" ;;
+            pid=*)       entry_pid="${line#*=}" ;;
         esac
     done < "$file" || return 1
+    # pid reaches `kill`, which takes a job spec as well as a number: "%1" or
+    # a negative value would signal something other than the launcher this
+    # claims to be. Digits only, and empty is legal - see launcher_alive.
+    case "$entry_pid" in
+        *[!0-9]*) return 1 ;;
+    esac
     # started is the one field that reaches an arithmetic context, where a
     # non-numeric value is evaluated as a *variable name* - so "started=x[$(cmd)]"
     # executes cmd, and set -u doesn't catch it when the name is already bound.
@@ -168,16 +167,33 @@ group_holds_pane() {
     tmux list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null | grep -qxF "$2"
 }
 
-# True while an entry is young enough that its container may simply not exist
-# YET - see STARTUP_GRACE. Judged against the entry's own started=, since
-# nothing else records when the launch began. An entry that doesn't parse has
-# no age to judge and is not covered: it is pruned as before. read_entry is
-# called again by the caller afterwards; re-reading four lines costs less
-# than restructuring the loop around this one field.
-starting_up() {
+# Whether the bin/dejima that registered this run is still running. Asked
+# instead of guessing how long a launch takes: a cold first build (base image
+# plus derived dependency images over a slow link) has no bound worth
+# guessing, and the errors are not symmetric. Too long leaves a dead session
+# listed. Too short unregisters a session about to start, and bin/dejima never
+# rewrites its entry, so that session is permanently absent from both front
+# doors.
+#
+# A recycled pid reads as alive and leaves an entry listed longer than it
+# should be. That is the harmless direction, and the only one available: there
+# is nothing to compare a pid against that a dead process still answers.
+#
+# An entry with no pid= was written by a bin/dejima from before this field
+# existed, which can only be a session that outlived an upgrade. Those fall
+# back to the window below, since pruning them on sight is the failure this
+# replaced. An entry that does not parse has nothing to judge and is not
+# covered: it is pruned, as before. read_entry is called again by the caller
+# afterwards; re-reading five lines costs less than restructuring the loop
+# around this one field.
+launcher_alive() {
     local now="$2"
     read_entry "$1" || return 1
-    [ "$(( now - 10#$entry_started ))" -lt "$STARTUP_GRACE" ]
+    if [ -n "$entry_pid" ]; then
+        kill -0 "$entry_pid" 2>/dev/null
+        return
+    fi
+    [ "$(( now - 10#$entry_started ))" -lt "$PRE_PID_STARTUP_GRACE" ]
 }
 
 # The registry is a hint, not truth: bin/dejima's EXIT trap doesn't run under
@@ -195,7 +211,7 @@ list_sessions() {
         valid_run_id "$run_id" || continue
         rc=0
         container="$(container_for "$run_id")" || rc=$?
-        if [ "$rc" -eq 1 ] && starting_up "$file" "$now"; then
+        if [ "$rc" -eq 1 ] && launcher_alive "$file" "$now"; then
             # Registered, but bin/dejima is still building - "not started yet"
             # is a third answer, and pruning on it would unregister a session
             # that is about to exist. Listed with the container column saying
@@ -210,12 +226,14 @@ list_sessions() {
             # the rm above and unlike the rm -rf below: the debounce
             # directory is host-owned and is never mounted into a sandbox.
             rm -f "$STATE_DIR/debounce/$run_id-waiting" "$STATE_DIR/debounce/$run_id-done"
-            # Non-fatal: the marker directory is bind-mounted read-write into
-            # the sandbox, so a compromised session can chmod it such that this
-            # rm fails - and a failure here under set -e would abort the whole
-            # listing, letting that session deny the operator the front door.
-            rm -rf "${STATE_DIR:?}/notify/$run_id" \
-                || echo "warning: could not remove the marker directory for $run_id" >&2
+            # The marker directory is deliberately NOT removed here. It is the
+            # bind source of a mount bin/dejima declares, and its lifetime
+            # belongs to that process's EXIT trap; a second owner here can only
+            # ever race it. Removing it under a live session is not a leak
+            # being tidied but a session being broken - Docker recreates the
+            # bind source root-owned, hooks/dejima-notify.sh then fails on
+            # every Notification and Stop for the rest of the run, and nothing
+            # rewrites the registry entry to make the session visible again.
             continue
         elif [ "$rc" -ne 0 ]; then
             # An unanswerable question is never a "no": the entry stays, and

@@ -1403,11 +1403,19 @@ if remote_enabled; then
 
     # Flat key=value, like the rest of the host-side store: no jq dependency
     # here, and nothing that reads it ever sources it.
+    #
+    # pid is this process, and it is what dejima-attach asks about instead of
+    # guessing how long a launch takes: "is the thing that registered this
+    # still running" is observable, and a cold build that outruns any guessed
+    # window is the case a guess gets wrong. Written before the container
+    # exists, so it covers the whole build, and it stops being true at exactly
+    # the moment the EXIT trap below stops being able to run.
     {
         printf 'workspace=%s\n' "$WORKSPACE_DIR"
         printf 'pane=%s\n' "${TMUX_PANE:-}"
         printf 'label=%s\n' "$dejima_tmux_label"
         printf 'started=%s\n' "$(date +%s)"
+        printf 'pid=%s\n' "$$"
     } > "$DEJIMA_SESSION_FILE"
 
     # This run's OWN marker directory is the only thing mounted in - never
