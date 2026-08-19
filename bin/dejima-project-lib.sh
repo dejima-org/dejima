@@ -530,28 +530,26 @@ generate_derived_dockerfile() {
 # ---------------------------------------------------------------------------
 # Remote access (opt-in). See docs/remote-access.md.
 #
-# The switch used to be the mere existence of remote.conf. It is now a
-# non-empty [remote-access] base_url in the single config file: same
+# The switch is a non-empty [remote-access] base_url in the single config
+# file: same
 # "unset means every code path this feature adds is skipped" property, one
 # fewer file. An old remote.conf on disk grants nothing - install.sh reports
 # it as no longer read rather than deleting it.
 # ---------------------------------------------------------------------------
 
-# The switch is an explicit boolean, not a URL. remote.conf's mere existence
-# used to be the switch; consolidation removes that trick, and overloading
-# base_url in its place would have quietly dropped a supported setup - ntfy
-# alone is a complete configuration, with base_url unset, and the old suite
-# pinned it.
+# The switch is an explicit boolean, not a URL. Overloading base_url as the
+# switch would quietly drop a supported setup: ntfy alone is a complete
+# configuration, with base_url unset.
 #
 # Deliberately NOT routed through config_get, which validates the whole file
 # on every read. dejima-attach reads no VALUE out of the config - to it remote
 # access is simply on or off - and refusing it over a typo in an unrelated
 # section would take away the terminal an operator would fix that typo from.
-# That exemption was a deliberate, commented property of the old code, and the
-# blast radius only grew with consolidation: one file now holds 33 keys across
-# nine sections instead of remote.conf's four. Everything that consumes an
-# actual value still goes through config_get and still refuses on a malformed
-# file, which is the contrast the README draws.
+# The blast radius is the reason it matters here: one file holds 33 keys
+# across nine sections, so a typo anywhere in it would otherwise take the
+# front door down. Everything that consumes an actual value still goes
+# through config_get and still refuses on a malformed file, which is the
+# contrast the README draws.
 remote_enabled() {
     local line section="" key value="" cur
     config_exists || return 1

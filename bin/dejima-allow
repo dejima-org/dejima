@@ -91,10 +91,9 @@ fi
 # reporting on containers the caller did not ask about. --container is the
 # explicit opt-in to doing both.
 #
-# This is the only thing that decides. A DEJIMA_ALLOW_SKIP_SESSION env var
-# used to sit alongside it as a test-only escape hatch; session_wanted made it
-# redundant, and a firewall CLI with an environment-triggered no-op path is
-# not something to keep for no reason.
+# This is the only thing that decides. Deliberately not an environment
+# variable as well: a firewall CLI with an environment-triggered no-op path
+# is one an env var can silently disarm.
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0

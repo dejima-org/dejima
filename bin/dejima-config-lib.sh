@@ -10,8 +10,7 @@
 # mounts; executing it would make a typo a shell injection and would put the
 # config on the same footing as code.
 #
-# Every read validates the WHOLE file, not just the requested key - the same
-# stance the old remote.conf accessor took before this replaced it. A config
+# Every read validates the WHOLE file, not just the requested key. A config
 # that does not parse means the operator got something wrong, and the alternative to
 # refusing is launching a sandbox configured differently from what they
 # believe they configured. A launch performs on the order of thirty reads and
@@ -324,11 +323,10 @@ _config_trim() {
 
 # The same trim, in place, into the named variable. Identical semantics; the
 # difference is that it costs nothing. `$(_config_trim ...)` forks a subshell
-# per call, and the parser calls it twice per line - so on a thirty-line
-# config that was sixty forks per pass, and the file used to be walked twice
-# for every single config_get. printf -v is a builtin, so this forks not at
-# all. _config_trim is kept because it is a published shape other scripts and
-# tests call.
+# per call and the parser calls it twice per line, which is sixty forks per
+# pass over a thirty-line config. printf -v is a builtin, so this forks not
+# at all. _config_trim is kept because it is a published shape other scripts
+# and tests call.
 _config_trim_into() {
     local _s="${2-}"
     _s="${_s#"${_s%%[![:space:]]*}"}"
@@ -339,13 +337,13 @@ _config_trim_into() {
 # Validates the whole file. Returns 1 and explains the FIRST problem found -
 # reporting one actionable line beats a list the operator has to read
 # bottom-up.
-# Parsed once per process, into _CFG_VAL/_CFG_SEEN. Every read used to walk
-# the whole file twice - once to validate it and once to find the key - so a
-# launch's ~30 reads meant ~60 passes over the same unchanged bytes, each
-# forking twice per line. Parsing once preserves the property the header
-# describes exactly: every read still sees a fully validated file, and no read
-# can succeed against a file another read would reject, because within a
-# process there is now only one parse for them all to agree with.
+# Parsed once per process, into _CFG_VAL/_CFG_SEEN. A read that walked the
+# file itself would validate it and then search it - two passes over the same
+# unchanged bytes per read, forking twice per line, against a launch's ~30
+# reads. Parsing once preserves the property the header describes: every read
+# sees a fully validated file, and no read can succeed against a file another
+# read would reject, because within a process there is one parse for them all
+# to agree with.
 #
 # Keyed on the config path so a test that repoints DEJIMA_CONFIG_DIR mid-
 # process re-parses rather than answering from the previous file's cache.

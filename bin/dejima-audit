@@ -151,10 +151,10 @@ resolve_ws() {
     fi
     for c in "$top" "$main" "$PWD"; do
         [ -n "$c" ] || continue
-        # A bare slug directory is no longer proof of a report - `snapshot`
-        # now creates one's .staging/ subdir for every workspace it runs
-        # against, report or not. Only an actual report is evidence of which
-        # path bin/dejima was invoked with.
+        # A bare slug directory is not proof of a report: `snapshot` creates
+        # one's .staging/ subdir for every workspace it runs against, report
+        # or not. Only an actual report is evidence of which path bin/dejima
+        # was invoked with.
         select_report "$AUDIT_DIR/$(ws_slug "$c")" >/dev/null 2>&1 || continue
         printf '%s' "$c"
         return
@@ -221,9 +221,7 @@ store_reachable() {
     local d rws rd
     # Canonicalised, not raw: symlinks and `..` in either side would otherwise
     # never match the "$rws"/* pattern below and would stage straight into the
-    # container's read-write mount. (A *relative* store used to be the sharper
-    # case here; the config's "path" type now refuses one outright, so it
-    # cannot reach this function at all.) `-m`, not
+    # container's read-write mount. `-m`, not
     # `-f`: `$AUDIT_DIR` routinely doesn't exist yet on a fresh install (its
     # parent tree is only ever mkdir -p'd on a real finding or by `ack`), and
     # `-f` requires every component but the last to exist - it would fail
@@ -1739,8 +1737,8 @@ case "$cmd" in
             # is the whole difference between the two that record something
             # and it was not visible: approve pins this exact content and
             # re-fires on any other, ignore blankets the surface whatever it
-            # later contains. The WARNING prompt used to say a bare
-            # "approve", which read as the same thing as "always ignore".
+            # later contains. A bare "approve" reads as the same thing as
+            # "always ignore", which is the confusion these words avoid.
             #
             # "file" is wrong for a git config key, and naming the wrong kind
             # of thing in the sentence that offers a permanent mute is worth

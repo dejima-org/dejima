@@ -3328,24 +3328,40 @@ _harness_proxied_domain() {
 }
 
 @test "conversation shipping resolves transcripts by slug, not by matching a prefix" {
-    # The in-container version globbed "<key>-*" to pick up worktrees, which
-    # also matches a SIBLING project whose directory name merely extends this
-    # one's - the #105 bug. It was harmless there only because the container
-    # is handed this workspace's slugs and nothing else, so a sibling's
-    # directory did not exist to match. On the host every project's does.
+    # A "<slug>-*" glob picks up this workspace's worktrees and also a
+    # SIBLING project whose directory name merely extends its own (#105).
+    # Every project's directory is present on the host, so nothing else
+    # would catch the neighbour's conversation being shipped.
     grep -q 'workspace_slugs_sorted "$ws"' "$REPO_ROOT/bin/dejima-conversation-ship"
     run grep -nE '\$key-\*|\$\{key\}-\*' "$REPO_ROOT/bin/dejima-conversation-ship"
     [ "$status" -ne 0 ] || { echo "prefix matching is back:"; echo "$output"; return 1; }
 }
 
-@test "the container's log shipper no longer reads anything the session writes" {
-    # It runs as root, and the justification for that is tamper-resistance
-    # for an oversight log. It used to also parse session-written
-    # transcripts, which is attacker-influenceable input handled with root
-    # privileges; what remains is produced by root-owned daemons.
+@test "the container's log shipper reads nothing the session writes" {
+    # It runs as root, for tamper-resistance: an oversight log the surveilled
+    # user owns is one they can edit. That privilege is only safe while what
+    # it parses is not session-writable, which is what this holds - dnsmasq
+    # and ulogd2 output, both written by root-owned daemons.
     # Non-comment lines only: the comment there says where conversation
     # shipping went, which is worth keeping.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test ".dejima.md says to cut what the code replaced, not just how it was found" {
+    # "Cut how you found it" is about the discovery - which CI run, how many
+    # attempts. Describing the arrangement a change replaced is a different
+    # habit, and the "keep why it is shaped this way" rule invites it: a
+    # previous shape is the easiest answer to that question. Both have to be
+    # written down or the second keeps coming back.
+    local sec
+    sec="$(sed -n '/^## Write the comment that prevents the bug/,/^## /p' "$REPO_ROOT/.dejima.md")"
+    grep -q 'Cut how you found it' <<< "$sec"
+    grep -q 'Cut what the code replaced' <<< "$sec" \
+        || { echo "the rule about a previous arrangement is gone"; return 1; }
+    # And the exception, or the next pass strips the comments that exist
+    # only to explain code whose purpose is the past.
+    grep -qi 'exception' <<< "$sec" \
+        || { echo "the rename/shim exception is gone"; return 1; }
 }
