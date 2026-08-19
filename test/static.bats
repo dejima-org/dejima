@@ -1715,18 +1715,40 @@ registered_commands() {
     grep -q 'COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua' "$SANDBOX_DIR/Dockerfile"
 }
 
-@test "log-shipper conversation shipping is opt-in and off by default" {
-    grep -q 'SANDBOX_LOG_CONVERSATION' "$SANDBOX_DIR/log-shipper.sh"
-    grep -qE 'SANDBOX_LOG_CONVERSATION: \$\{SANDBOX_LOG_CONVERSATION:-0\}' "$SANDBOX_DIR/docker-compose.yml"
+@test "conversation shipping is opt-in, and runs on the host rather than in the session" {
+    # It reads transcripts that are bind-mounted from the host, so it never
+    # needed to be inside - and being inside put it in a process the session
+    # shared a filesystem and a signal namespace with, where killing it
+    # ended its own logging with nothing on the host noticing.
+    grep -q 'config_get_bool logging conversation' "$REPO_ROOT/bin/dejima-conversation-ship"
+    grep -q 'exit 0' "$REPO_ROOT/bin/dejima-conversation-ship"
+    # Gone from the container entirely: the shipper there no longer reads
+    # anything the session writes.
+    run grep -n 'SANDBOX_LOG_CONVERSATION\|watch_transcripts\|transform_transcript' \
+        "$SANDBOX_DIR/log-shipper.sh" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "conversation shipping is still in the container:"; echo "$output"; return 1; }
+    # And stopped before the exit-time audit, so the last lines a session
+    # produced are shipped rather than discarded with the batch.
+    local ship_line audit_line
+    ship_line=$(grep -n 'SANDBOX_CONVERSATION_SHIP_PID' "$REPO_ROOT/bin/dejima" | sed -n '2p' | cut -d: -f1)
+    audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ "$ship_line" -lt "$audit_line" ]
 }
 
-@test "log-shipper transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
+@test "the transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
     fixtures='{"type":"user","sessionId":"s1","isMeta":null,"message":{"role":"user","content":"fix the login bug"}}
 {"type":"user","sessionId":"s1","isMeta":true,"message":{"role":"user","content":"meta noise"}}
 {"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","content":"tool output secret"}]}}
 {"type":"assistant","sessionId":"s1","message":{"content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"done, deployed the fix"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
 this line is not json'
-    run bash -c "LOG_SHIPPER_LIB_ONLY=1 source '$SANDBOX_DIR/log-shipper.sh'; transform_transcript_line <<< \"\$1\"" _ "$fixtures"
+    # The transform is the harness's - it is a fact about that harness's
+    # transcript format - so it lives in the plugin now. What it must and
+    # must not ship is unchanged.
+    run bash -c "
+        source '$REPO_ROOT/bin/dejima-provider-lib.sh'
+        source '$REPO_ROOT/bin/dejima-harness-lib.sh'
+        harness_plugin_load claude-code
+        harness_transform_transcript <<< \"\$1\"" _ "$fixtures"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"role":"user"'* ]]
     [[ "$output" == *"fix the login bug"* ]]
@@ -3289,4 +3311,41 @@ _harness_proxied_domain() {
             *) echo "$d is not in the TCB list: $dirs"; return 1 ;;
         esac
     done
+}
+
+@test "the transcript format is the harness's, the store is dejima's" {
+    # What a compaction looks like in a transcript is a fact about the
+    # harness; where the summary is kept, that nothing mounts it, and what
+    # the file promises about its own provenance are dejima's.
+    grep -q 'isCompactSummary' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -n 'isCompactSummary\|compact_boundary\|\.jsonl' "$REPO_ROOT/bin/dejima-epitaph"
+    [ "$status" -ne 0 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
+    # The provenance note is dejima's promise about the artefact, so it is
+    # defined once rather than phrased per harness.
+    grep -q '^DEJIMA_EPITAPH_NOTE=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    run grep -c 'preserved verbatim' "$REPO_ROOT/bin/harness/claude-code.sh"
+    [ "$output" -eq 0 ] || { echo "a plugin phrases the provenance note itself"; return 1; }
+}
+
+@test "conversation shipping resolves transcripts by slug, not by matching a prefix" {
+    # The in-container version globbed "<key>-*" to pick up worktrees, which
+    # also matches a SIBLING project whose directory name merely extends this
+    # one's - the #105 bug. It was harmless there only because the container
+    # is handed this workspace's slugs and nothing else, so a sibling's
+    # directory did not exist to match. On the host every project's does.
+    grep -q 'workspace_slugs_sorted "$ws"' "$REPO_ROOT/bin/dejima-conversation-ship"
+    run grep -nE '\$key-\*|\$\{key\}-\*' "$REPO_ROOT/bin/dejima-conversation-ship"
+    [ "$status" -ne 0 ] || { echo "prefix matching is back:"; echo "$output"; return 1; }
+}
+
+@test "the container's log shipper no longer reads anything the session writes" {
+    # It runs as root, and the justification for that is tamper-resistance
+    # for an oversight log. It used to also parse session-written
+    # transcripts, which is attacker-influenceable input handled with root
+    # privileges; what remains is produced by root-owned daemons.
+    # Non-comment lines only: the comment there says where conversation
+    # shipping went, which is worth keeping.
+    run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
 }

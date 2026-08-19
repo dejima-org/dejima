@@ -930,10 +930,23 @@ input - never tool outputs). Lines are JSON with the session ID inside
 (`{session, role, text}` / `{session, role: "tool", tool, input}`).
 
 Off by default - conversation content is a different sensitivity class
-than DNS names and firewall verdicts, so it never leaves the container
-unless you opt in. Transcripts of every session under the mounted
-workspace (including worktrees and subagent sessions) are shipped while
-the sandbox runs.
+than DNS names and firewall verdicts, so nothing is shipped unless you
+opt in. Transcripts of every session under the mounted workspace
+(including worktrees and subagent sessions) are shipped while the sandbox
+runs.
+
+**It ships from the host, not from inside the session.** The transcripts
+are bind-mounted from the host rather than produced in the container, so
+`bin/dejima-conversation-ship` reads them where they already are. That
+matters because this is an oversight log of the session it is watching:
+run inside, it was a process the session shared a filesystem and a signal
+namespace with, and a session that killed it ended its own logging with
+nothing on the host noticing. DNS and firewall logs still ship from
+inside, because those files only exist in the container.
+
+What that does **not** change is that the transcript is session-writable.
+This ships what was recorded; it does not attest to it - the same caveat
+[epitaph](configuration.md#reading-what-a-session-left-behind) carries.
 
 ### Viewing logs in Grafana
 

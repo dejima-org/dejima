@@ -1,0 +1,112 @@
+#!/bin/bash
+# Ships a session's conversation to Loki, from the host.
+#
+# Host-side, because this is an oversight log of the session it watches: a
+# shipper the session shares a filesystem and a signal namespace with is one
+# it can silence. The transcripts are bind-mounted from the host rather than
+# produced in the container, so reading them here costs nothing.
+#
+# What that does not buy is trust in the content. The transcript is
+# session-writable, so this ships what was recorded without attesting to it -
+# the same caveat epitaph carries.
+#
+# DNS and firewall logs ship from inside instead (docker/log-shipper.sh):
+# those files only exist in the container.
+#
+# Usage: dejima-conversation-ship <workspace>
+set -uo pipefail   # not -e: a torn line or a Loki hiccup must not kill the tailer
+
+# shellcheck source=dejima-provider-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
+# shellcheck source=dejima-slug-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
+# shellcheck source=dejima-harness-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-harness-lib.sh"
+config_validate || exit 1
+
+ws="${1:-}"
+[ -n "$ws" ] || { echo "usage: dejima-conversation-ship <workspace>" >&2; exit 2; }
+ws="$(cd "$ws" 2>/dev/null && pwd)" || exit 0
+
+# Opt-in on top of loki_url: prompts, responses and tool commands are session
+# content, a different sensitivity class from DNS names and firewall verdicts.
+[ "$(config_get_bool logging conversation)" = "1" ] || exit 0
+LOKI_URL="$(config_get logging loki_url)"
+[ -n "$LOKI_URL" ] || exit 0
+
+harness_plugin_load "$(config_get core harness)"
+declare -F harness_transform_transcript >/dev/null 2>&1 || exit 0
+
+TRANSCRIPTS="$(harness_config_get projects_dir)"
+[ -n "$TRANSCRIPTS" ] || exit 0
+
+BATCH_MAX_LINES=20
+BATCH_MAX_SECONDS=2
+POLL_SECONDS=3
+
+push() {
+    # $1 is a newline-terminated block of "<ns timestamp>\t<line>" records.
+    local raw="$1" values payload
+    [ -n "$raw" ] || return 0
+    values="$(printf '%s' "$raw" | jq -R -s '
+        split("\n") | map(select(length > 0))
+        | map(split("\t") | [.[0], (.[1:] | join("\t"))])
+    ')" || return 0
+    payload="$(jq -n --argjson values "$values" \
+        '{streams: [{stream: {job: "dejima-conversation", source: "dejima"}, values: $values}]}')" || return 0
+    curl -s -o /dev/null --max-time 5 -H "Content-Type: application/json" \
+        -XPOST "$LOKI_URL/loki/api/v1/push" -d "$payload" || true
+}
+
+# Which transcript files belong to this workspace.
+#
+# Through dejima-slug-lib, never by matching a slug prefix: slugs cannot
+# distinguish a worktree under this workspace from a SIBLING project whose
+# directory name merely extends its own, so a "<slug>-*" glob ships the
+# neighbour's conversation too (#105). Every project's directory is present
+# here, so nothing else would catch it.
+transcript_files() {
+    local slug f
+    while IFS= read -r slug; do
+        [ -n "$slug" ] || continue
+        for f in "$TRANSCRIPTS/$slug"/*.jsonl; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done
+    done < <(workspace_slugs_sorted "$ws")
+}
+
+declare -A offset
+batch=""
+batch_lines=0
+last_flush="$(date +%s)"
+
+# Byte offsets per file rather than `tail -F`: transcripts appear during a
+# session (a new session, /clear, a subagent), and only whole lines are
+# consumed - one still mid-write is picked up complete on a later pass
+# instead of being shipped torn.
+while :; do
+    LC_ALL=C   # byte-accurate ${#...} for the offset arithmetic below
+    while IFS= read -r f; do
+        size="$(stat -c %s "$f" 2>/dev/null)" || continue
+        cur="${offset[$f]:-0}"
+        [ "$size" -gt "$cur" ] || continue
+        chunk="$(tail -c "+$((cur + 1))" "$f" | head -c "$((size - cur))"; printf x)"
+        chunk="${chunk%x}"
+        complete="${chunk%"${chunk##*$'\n'}"}"
+        [ -n "$complete" ] || continue
+        offset[$f]=$((cur + ${#complete}))
+        while IFS= read -r out; do
+            [ -n "$out" ] || continue
+            batch+="$(date +%s%N)"$'\t'"$out"$'\n'
+            batch_lines=$((batch_lines + 1))
+        done < <(printf '%s' "$complete" | harness_transform_transcript)
+    done < <(transcript_files)
+
+    now="$(date +%s)"
+    if [ "$batch_lines" -ge "$BATCH_MAX_LINES" ] \
+        || { [ "$batch_lines" -gt 0 ] && [ $((now - last_flush)) -ge "$BATCH_MAX_SECONDS" ]; }; then
+        push "$batch"
+        batch=""; batch_lines=0; last_flush="$now"
+    fi
+    sleep "$POLL_SECONDS"
+done

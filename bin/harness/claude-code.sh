@@ -280,3 +280,125 @@ harness_staged_config() {
         emit_staged_config "$HOME/.claude/$f" ".claude/$f"
     done
 }
+
+# Compaction summaries out of this harness's transcripts.
+#
+# Claude Code writes line-delimited JSON, one record per line, with the
+# summary carried on a record flagged isCompactSummary and the metadata about
+# the compaction on a compact_boundary record immediately before it. python3
+# rather than sed: the payload contains embedded newlines, and it is already
+# a hard dependency (install.sh refuses without it).
+#
+# $1 is the directory of transcripts for one project, $2 where to write. The
+# count written goes to stdout; bin/dejima-epitaph owns everything around
+# this - the store, which slugs belong to the workspace, the 0700 directory,
+# and clearing one that stayed empty.
+#
+# Keyed on the summary record's own uuid: `save` runs on every exit, and a
+# session compacted three times has three epitaphs, two of which an earlier
+# run already wrote. The name is the timestamp first so a directory listing
+# reads as a timeline.
+harness_extract_epitaphs() {
+    local dir="$1" out="$2" f total=0 n
+    for f in "$dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        n="$(python3 - "$f" "$out" "$DEJIMA_EPITAPH_NOTE" <<'PY'
+import json, os, sys
+
+path, out, note = sys.argv[1], sys.argv[2], sys.argv[3]
+pending = None   # metadata from the compact_boundary that precedes a summary
+written = 0
+
+for line in open(path, errors="replace"):
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        continue
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+
+    if rec.get("subtype") == "compact_boundary":
+        pending = rec.get("compactMetadata") or {}
+        continue
+
+    if not rec.get("isCompactSummary"):
+        continue
+
+    body = rec.get("message", {}).get("content")
+    if isinstance(body, list):
+        body = "\n".join(p.get("text", "") for p in body if isinstance(p, dict))
+    if not isinstance(body, str) or not body.strip():
+        pending = None
+        continue
+
+    uid = rec.get("uuid") or ""
+    stamp = (rec.get("timestamp") or "").replace(":", "").replace("-", "")[:15]
+    name = "%s-%s.md" % (stamp or "unknown", uid[:8] or "nouuid")
+    dest = os.path.join(out, name)
+    if os.path.exists(dest):
+        pending = None
+        continue
+
+    meta = pending or {}
+    head = [
+        "# Epitaph",
+        "",
+        "- session: %s" % (rec.get("sessionId") or "unknown"),
+        "- at: %s" % (rec.get("timestamp") or "unknown"),
+        "- trigger: %s" % (meta.get("trigger") or "unknown"),
+    ]
+    if meta.get("preTokens") is not None:
+        head.append("- tokens: %s before, %s after"
+                    % (meta.get("preTokens"), meta.get("postTokens")))
+    head += ["", note, "", "---", ""]
+    tmp = dest + ".part"
+    os.makedirs(out, exist_ok=True)
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(head) + body.rstrip() + "\n")
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, dest)
+    written += 1
+    pending = None
+
+print(written)
+PY
+)" || n=0
+        total=$((total + ${n:-0}))
+    done
+    printf '%s' "$total"
+}
+
+# Transcript lines in, conversation log lines out. Reads stdin, writes stdout.
+#
+# Ships prompts, assistant text, and tool *invocations* (name and input) -
+# never tool outputs or thinking blocks, which dominate volume and were not
+# asked for. `fromjson?` so a torn or garbage line is skipped rather than
+# killing the stream. The session id stays inside the line rather than
+# becoming a Loki label, because a per-session label would blow up
+# cardinality.
+harness_transform_transcript() {
+    jq -Rc '
+        def clip(n): if length > n then .[:n] + "...[truncated]" else . end;
+        fromjson?
+        | select(.isMeta != true)
+        | .sessionId as $s
+        | if .type == "user" then
+            (.message.content
+                | if type == "string" then .
+                  else ([.[]? | select(.type == "text") | .text] | join("\n"))
+                  end)
+            | select(length > 0)
+            | {session: $s, role: "user", text: clip(16000)}
+          elif .type == "assistant" then
+            (.message.content[]?
+                | if .type == "text" then
+                    {session: $s, role: "assistant", text: (.text | clip(16000))}
+                  elif .type == "tool_use" then
+                    {session: $s, role: "tool", tool: .name, input: (.input | tojson | clip(2000))}
+                  else empty
+                  end)
+          else empty
+          end
+    ' 2>/dev/null
+}
