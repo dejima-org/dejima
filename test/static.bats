@@ -3258,3 +3258,20 @@ _harness_proxied_domain() {
         esac
     done
 }
+
+@test ".dejima.md says to cut what the code replaced, not just how it was found" {
+    # "Cut how you found it" is about the discovery - which CI run, how many
+    # attempts. Describing the arrangement a change replaced is a different
+    # habit, and the "keep why it is shaped this way" rule invites it: a
+    # previous shape is the easiest answer to that question. Both have to be
+    # written down or the second keeps coming back.
+    local sec
+    sec="$(sed -n '/^## Write the comment that prevents the bug/,/^## /p' "$REPO_ROOT/.dejima.md")"
+    grep -q 'Cut how you found it' <<< "$sec"
+    grep -q 'Cut what the code replaced' <<< "$sec" \
+        || { echo "the rule about a previous arrangement is gone"; return 1; }
+    # And the exception, or the next pass strips the comments that exist
+    # only to explain code whose purpose is the past.
+    grep -qi 'exception' <<< "$sec" \
+        || { echo "the rename/shim exception is gone"; return 1; }
+}

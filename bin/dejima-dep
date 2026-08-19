@@ -133,7 +133,7 @@ case "$action" in
             # `add --project` writes a declaration; this deliberately does not
             # take one back, since withdrawing one machine's approval is not
             # the same decision as editing a file the whole team shares. That
-            # asymmetry used to be invisible and self-undoing: the entry goes
+            # asymmetry, left silent, is self-undoing: the entry goes
             # back to `pending`, the session briefing reports it missing, and
             # the next `dejima-project approve` re-approves it - so say where
             # the durable copy is rather than letting the removal look final.
