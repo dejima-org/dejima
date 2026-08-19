@@ -576,8 +576,9 @@ can make; it is no longer one nothing reports. See
     directory that already exists, and without pre-creation a compromised
     session could create and populate one itself.
   - **Copied in, not mounted**: `settings.json`, `CLAUDE.md`, and
-    `statusline.sh` are mounted read-only at `/etc/dejima-claude/` and
-    installed into `~/.claude` by `entrypoint.sh` as root-owned, unwritable
+    `statusline.sh` are mounted read-only under `/etc/dejima-harness/`,
+    at the path they are installed to, and copied into place by
+    `entrypoint.sh` as root-owned, unwritable
     files. A session can still unlink and replace them - `~/.claude` belongs
     to it - but only its own copy, which is why they are read-only.
 

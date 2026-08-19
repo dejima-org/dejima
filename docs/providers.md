@@ -264,7 +264,7 @@ opposite of "providers are data, never sourced." In reading order:
 Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
-`session_id`, `resume_command`, `writable_mounts`) - an unrecognized one is a
+`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is

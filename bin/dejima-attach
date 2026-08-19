@@ -204,10 +204,10 @@ list_sessions() {
             container="starting"
         elif [ "$rc" -eq 1 ]; then
             rm -f "$file"
-            # dejima-notify-watch keys its debounce stamps by run id too, and
-            # nothing else ever removes them - without this, every session
-            # leaves two behind for the life of the login session. Unguarded,
-            # like the rm above and unlike the rm -rf below: the debounce
+            # The stamps for a run whose registry entry outlived it -
+            # bin/dejima's own cleanup() removes both together on a normal
+            # exit, so this covers the exit that ran no trap. Unguarded, like
+            # the rm above and unlike the rm -rf below: the debounce
             # directory is host-owned and is never mounted into a sandbox.
             rm -f "$STATE_DIR/debounce/$run_id-waiting" "$STATE_DIR/debounce/$run_id-done"
             # Non-fatal: the marker directory is bind-mounted read-write into

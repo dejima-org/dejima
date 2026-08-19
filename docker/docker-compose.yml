@@ -92,10 +92,6 @@ services:
       # automatically firewall-allowlisted (see entrypoint.sh). Optional -
       # logging is skipped entirely if unset.
       LOKI_URL: ${LOKI_URL:-}
-      # Opt-in (default off): also ship session prompts, assistant
-      # responses, and tool invocations to Loki as the
-      # dejima-conversation job. Content only leaves the container
-      # if LOKI_URL is also set. See docs/security.md "Network request logging".
       SSH_AUTH_SOCK: /ssh-agent
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-1}
       # Docker's own tty allocation defaults to a generic TERM (e.g. plain
@@ -141,24 +137,10 @@ services:
       # write into either reaches sessions elsewhere (#104). bin/dejima
       # mounts this workspace's own entries, one -v each; see
       # bin/dejima-slug-lib.sh for how that set is chosen.
-      # Hook/plugin/skill *code*, and prompt text that a later host session
-      # loads. Hooks run automatically with no approval gate, a skill can
-      # ship an executable script, and a command/agent/output-style is text
-      # loaded into an unsandboxed host session's context - so a compromised
-      # session writing to any of these plants something that then runs on
-      # the host. Read-only, and no longer nested inside a writable parent:
-      # if one of these ever did detach, the path falls through to an empty
-      # container-local directory rather than to the host's copy. They may
-      # not exist on a given host at all - bin/dejima pre-creates them,
-      # since existence is what lets Docker mount them.
-      # Config *files* are staged here for entrypoint.sh to copy into
-      # ~/.claude, rather than mounted at their real paths. A copy can't
-      # detach at all, and it closes a gap no mount could: when
-      # statusline.sh is itself a symlink (the common case, into whatever
-      # config checkout the host keeps it in), bind-mount destination
-      # resolution follows it, so a :ro mount landed on the target and left
-      # the symlink itself replaceable.
-      # statusline.sh is staged by bin/dejima, since not every host has one.
+      # The harness's own configuration directories and staged files are not
+      # here: which those are is a fact about the harness, so its plugin
+      # declares them and bin/dejima mounts them. See harness_config_dirs
+      # and harness_staged_config in bin/harness/<name>.sh.
       # The sandbox's own settings overrides (sandbox.enabled off, plus the
       # remote-access notify hooks when that's on), generated per run by
       # bin/dejima and reaching the harness as harness-wrapper.sh's

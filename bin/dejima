@@ -820,6 +820,17 @@ cleanup() {
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
+    # dejima-notify-watch keys its debounce stamps by run id. Removed here,
+    # with the registry entry, because this is the only exit both of them are
+    # guaranteed to reach: dejima-attach's prune also removes them, but that
+    # branch needs a registry entry still present for a container that is
+    # gone, which a normal exit has just made impossible. Unguarded, unlike
+    # the marker directory below: the debounce directory is host-owned and
+    # never mounted into a sandbox.
+    if [ -n "${DEJIMA_RUN_ID:-}" ] && [ -n "${DEJIMA_STATE_DIR:-}" ]; then
+        rm -f "$DEJIMA_STATE_DIR/debounce/$DEJIMA_RUN_ID-waiting" \
+              "$DEJIMA_STATE_DIR/debounce/$DEJIMA_RUN_ID-done" || true
+    fi
     # Unlike the silent `|| true` guards above, this removal (and, before
     # the audit below was moved in, the last command of an EXIT trap) warns
     # out loud when it fails: the marker directory is bind-mounted

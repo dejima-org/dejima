@@ -3444,3 +3444,30 @@ _emit_mount_at() {
     grep -qx 'a.example.com' <<< "$output" || { echo "$output"; return 1; }
     grep -qx 'b.example.com' <<< "$output" || { echo "$output"; return 1; }
 }
+
+@test "the docs name the staging path the entrypoint actually uses" {
+    # A static test already holds entrypoint.sh to the current name; nothing
+    # held the docs, so they kept the old one after the rename.
+    run grep -rn 'dejima-claude' "$REPO_ROOT/docs" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'etc/dejima-harness' "$REPO_ROOT/docs/security.md"
+}
+
+@test "docs/providers.md lists the whole briefing placeholder whitelist" {
+    # The list is what a fragment author checks a placeholder against, so one
+    # missing name reads as "not available" for something that is.
+    local ph
+    for ph in $(sed -n 's/^_BRIEFING_WHITELIST="\(.*\)"$/\1/p' \
+                "$REPO_ROOT/bin/dejima-provider-lib.sh"); do
+        grep -q "\`$ph\`" "$REPO_ROOT/docs/providers.md" \
+            || { echo "$ph is in the whitelist but not documented"; return 1; }
+    done
+}
+
+@test "the tmux prefix the config accepts is one the page can parse" {
+    # `C-space` passed the schema and was then rejected on the page, which
+    # fell back to C-b silently - the outcome refusing at launch exists to
+    # prevent. Both sides accept a named key in any case now.
+    grep -qE "charAt\(0\)\.toUpperCase" "$REPO_ROOT/web/src/keys.js"
+    grep -q 'Ss.pace' "$REPO_ROOT/bin/dejima-config-lib.sh"
+}
