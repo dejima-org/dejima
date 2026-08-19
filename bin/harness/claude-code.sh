@@ -403,17 +403,35 @@ harness_transform_transcript() {
     ' 2>/dev/null
 }
 
-# Whether this harness will actually run dejima's hooks, or has simply never
-# been told to. install.sh registers them into the operator's settings.json,
-# gated on [core] harness - so an operator who set that key without re-running
-# install.sh gets a session with no briefing and no guards, silently and
-# every time. R3 is how the agent learns it is in a sandbox at all.
+# Which of the hooks install.sh registers are actually in the operator's
+# settings, and which are not. Prints the missing ones, one per line, and
+# returns 1 if there are any - so the launch can name what is not in force
+# rather than assert that nothing is.
 #
-# Reads the operator's real settings rather than dejima's own layer: the
-# layer is composed fresh each launch and always looks right.
+# Every hook this harness would install is checked, not just the briefing:
+# the realistic failure (install.sh never run with a harness set) is
+# all-or-nothing, but a hand-edited settings.json missing one guard is a
+# session quietly running without it, which is the case worth catching.
+#
+# dejima-notify.sh is deliberately absent: bin/dejima registers it per
+# session into a throwaway layer, and it is never in the operator's file.
+#
+# Reads the operator's real settings rather than dejima's own layer, which
+# is composed fresh each launch and always looks right.
 harness_guards_registered() {
-    local settings="$HOME/.claude/settings.json"
-    [ -f "$settings" ] || return 1
-    jq -e '[.hooks.SessionStart[]?.hooks[]?.command // empty]
-           | any(endswith("/sandbox-context.sh"))' "$settings" >/dev/null 2>&1
+    local settings="$HOME/.claude/settings.json" missing=0
+    _registered() {
+        [ -f "$settings" ] || return 1
+        jq -e --arg s "/$2" "[.hooks.$1[]?.hooks[]?.command // empty]
+               | any(endswith(\$s))" "$settings" >/dev/null 2>&1
+    }
+    _registered SessionStart sandbox-context.sh \
+        || { printf 'the session briefing\n'; missing=1; }
+    harness_has_guard push-guard && { _registered PreToolUse git-push-guard.sh \
+        || { printf 'push-guard\n'; missing=1; }; }
+    harness_has_guard merge-guard && { _registered PreToolUse merge-guard.sh \
+        || { printf 'merge-guard\n'; missing=1; }; }
+    harness_has_guard bash-deny && { _registered PreToolUse deny-dangerous-bash.sh \
+        || { printf 'bash-deny\n'; missing=1; }; }
+    return "$missing"
 }

@@ -120,21 +120,29 @@ if [ -n "${SANDBOX_HARNESS_COMMAND:-}" ]; then
             echo "entrypoint: refusing harness command name: $SANDBOX_HARNESS_COMMAND" >&2
             exit 1 ;;
     esac
-    # Refuse a name that already exists, unless it is this symlink from an
-    # earlier start. /usr/local/bin holds dejima's own scripts and gosu, and
-    # the manifest's `identifier` type permits any bare name - a harness
-    # declaring `command = gosu` would otherwise have the exec below run it
-    # as root. The manifest is trusted, so this turns a bad one into a clean
-    # refusal rather than closing a hole.
-    _wrapper_link="/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
-    if [ -e "$_wrapper_link" ] || [ -L "$_wrapper_link" ]; then
-        if [ "$(readlink -f "$_wrapper_link" 2>/dev/null)" \
-             != /usr/local/bin/dejima-harness-wrapper ]; then
-            echo "entrypoint: refusing to shadow existing /usr/local/bin/$SANDBOX_HARNESS_COMMAND" >&2
+    # Refuse a name that already resolves to something else on PATH. The
+    # manifest's `identifier` type permits any bare name, and the wrapper is
+    # linked into /usr/local/bin, which comes first - so a harness declaring
+    # `command = gosu`, or `find`, or `install`, would shadow a binary the
+    # rest of this script then invokes as root. Resolved through PATH rather
+    # than by checking one directory, because those are what the entrypoint
+    # actually calls.
+    #
+    # Two resolutions are legitimate: the real binary being shadowed, and the
+    # wrapper itself from an earlier start. The manifest is trusted, so this
+    # turns a bad one into a clean refusal rather than closing a hole.
+    _wrapper=/usr/local/bin/dejima-harness-wrapper
+    _existing="$(command -v "$SANDBOX_HARNESS_COMMAND" 2>/dev/null || true)"
+    if [ -n "$_existing" ]; then
+        _existing_real="$(readlink -f "$_existing" 2>/dev/null || printf '%s' "$_existing")"
+        if [ "$_existing_real" != "$_wrapper" ] \
+           && [ "$_existing_real" != "$(readlink -f "${SANDBOX_HARNESS_REAL:-}" 2>/dev/null)" ]; then
+            echo "entrypoint: refusing harness command '$SANDBOX_HARNESS_COMMAND':" >&2
+            echo "it already resolves to $_existing_real, which is not this harness." >&2
             exit 1
         fi
     fi
-    ln -sf /usr/local/bin/dejima-harness-wrapper "$_wrapper_link"
+    ln -sf "$_wrapper" "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
 fi
 
 # The harness's config arrives staged read-only under /etc/dejima-harness

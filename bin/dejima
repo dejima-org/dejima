@@ -945,16 +945,17 @@ SANDBOX_HARNESS_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" no_confirm_a
 # briefing composer's substitution rather than to a second mechanism that
 # merely looks like it.
 SANDBOX_HARNESS_SETTINGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" settings_args)"
+# Refused here rather than as the wrapper's exit 127 inside a container that
+# has already started.
+if [ -z "$SANDBOX_HARNESS_REAL" ]; then
+    echo "Harness '$DEJIMA_HARNESS_NAME' declares no command_path." >&2
+    echo "Without it the wrapper has no binary to shadow." >&2
+    exit 1
+fi
 # Unattended operation is R1 of the capability bar, and a harness whose
 # manifest names no way to ask for it would run asking for confirmation on
 # every tool call, against a container built on the premise that it does not.
 # That fails silently and looks like the harness hanging, so refuse instead.
-if [ -z "$SANDBOX_HARNESS_REAL" ]; then
-    echo "Harness '$DEJIMA_HARNESS_NAME' declares no command_path." >&2
-    echo "Without it the wrapper has no binary to shadow, which fails inside a" >&2
-    echo "container that has already started rather than here." >&2
-    exit 1
-fi
 if [ -z "$SANDBOX_HARNESS_ARGS" ]; then
     echo "Harness '$DEJIMA_HARNESS_NAME' declares no no_confirm_args." >&2
     echo "dejima runs unattended; a harness that stops to ask cannot be run that" >&2
@@ -1457,12 +1458,13 @@ harness_report_guards "$DEJIMA_HARNESS_NAME"
 # so setting that key and not re-running install.sh leaves every launch
 # after it with no briefing and no guards, and nothing said so. The project's
 # own standard is that a silently narrower run is worse than a noisy one.
-if ! harness_guards_wired; then
-    printf '  %sdejima'"'"'s hooks are not registered for %s.%s\n' \
+if ! _unwired="$(harness_guards_wired)"; then
+    printf '  %snot registered for %s, so not in force this session:%s\n' \
         "$C_WARN" "$DEJIMA_HARNESS_NAME" "$C_RESET" >&2
-    printf '  This session gets no briefing - it will not know it is sandboxed -\n' >&2
-    printf '  and none of the guards it declares. Run %s./install.sh%s to register them.\n' \
-        "$C_KEY" "$C_RESET" >&2
+    printf '%s\n' "$_unwired" | while IFS= read -r _u; do
+        [ -n "$_u" ] && printf '    %s%s%s\n' "$C_KEY" "$_u" "$C_RESET" >&2
+    done
+    printf '  Run %s./install.sh%s to register them.\n' "$C_KEY" "$C_RESET" >&2
 fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report

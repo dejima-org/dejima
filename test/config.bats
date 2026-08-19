@@ -1895,19 +1895,45 @@ _epitaph_transcript() {
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
     # _rw_setup writes a settings.json with no hooks in it at all.
     _rw_launch "$workspace"
-    [[ "$output" == *"hooks are not registered"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"not know it is sandboxed"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"not in force this session"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"the session briefing"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch names the one guard a hand-edited config dropped" {
+    # The realistic failure is all-or-nothing, so a check on the briefing
+    # alone would pass here - and a session would run without the merge
+    # guard, silently, which is what the report exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"the session briefing"* ]] \
+        || { echo "named something that is registered: $output"; return 1; }
     rm -rf "$workspace"
 }
 
 @test "a launch stays quiet when the harness's hooks are registered" {
     _rw_setup
     workspace="$(mktemp -d)"
-    jq -n '{hooks: {SessionStart: [{matcher: "startup", hooks: [{type: "command",
-        command: "$HOME/.claude/hooks/sandbox-context.sh"}]}]}}' \
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/merge-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
         > "$RW_HOME/.claude/settings.json"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
     _rw_launch "$workspace"
-    [[ "$output" != *"hooks are not registered"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"not in force this session"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
