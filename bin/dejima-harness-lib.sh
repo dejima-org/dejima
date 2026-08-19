@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -247,9 +247,6 @@ host_exec_is_id() { host_exec_path_for_id "$1" >/dev/null; }
 # and whether a session may write it are facts about the harness; that the
 # read-only ones are read-only, and that a discovered symlink target is
 # refused when it overlaps a guarded store, are dejima's.
-#
-# They were enumerated in docker/docker-compose.yml, which is static YAML and
-# so could only ever name one harness's.
 DEJIMA_CONFIG_DIRS=()
 
 # path, mode ("ro" or empty for read-write), and whether to follow symlinks
@@ -277,3 +274,55 @@ harness_config_dirs_load() {
     DEJIMA_CONFIG_DIRS=()
     harness_hook harness_config_dirs
 }
+
+# --- staged config -------------------------------------------------------
+#
+# Config files carried from the host as COPIES rather than mounts. A
+# single-file bind mount is pinned to the dentry at its path, so a host-side
+# rename unlinks it and the mount silently detaches (#47, #48); and a mount
+# landing on a symlink resolves through it, protecting the target while
+# leaving the link replaceable. Staging closes both: Docker resolves the path
+# once, setting up the staging mount, and entrypoint.sh installs a root-owned
+# copy the session cannot write back through.
+#
+# The staging tree MIRRORS the destination, so no mapping has to be passed
+# into the container and parsed there: /etc/dejima-harness/<rel> is installed
+# at $HOME/<rel>. The mode comes from whether the source is executable, which
+# is the distinction that already existed - a statusline is run, a settings
+# file is read.
+DEJIMA_STAGED_CONFIG=()
+
+# host path, and the path under $HOME it is installed at.
+emit_staged_config() {
+    local src="$1" rel="$2"
+    [ -n "$src" ] && [ -n "$rel" ] || return 0
+    # The relative path becomes a location under $HOME inside the container.
+    # Anything that could climb out of it, or that is not relative at all, is
+    # a plugin bug rather than something to normalise quietly.
+    case "$rel" in
+        /*|*..*|*$'\t'*|*$'\n'*)
+            echo "Harness plugin emitted an invalid staged-config path: $rel" >&2
+            exit 1 ;;
+    esac
+    DEJIMA_STAGED_CONFIG+=("$src"$'\t'"$rel")
+}
+
+harness_staged_config_load() {
+    DEJIMA_STAGED_CONFIG=()
+    harness_hook harness_staged_config
+}
+
+# --- epitaphs ------------------------------------------------------------
+#
+# What a session leaves when its context is compacted away. Where the store
+# is, that nothing mounts it, that each file is 0600 under a 0700 directory,
+# and that a directory appears only once something is kept in it are dejima's
+# (see bin/dejima-epitaph). What a compaction looks like in a transcript, and
+# which fields describe it, are the harness's.
+#
+# The note below is dejima's promise about the artefact rather than the
+# harness's, so it is defined here and handed to the plugin to write, not
+# left for each harness to phrase its own way.
+DEJIMA_EPITAPH_NOTE="Written by the session and preserved verbatim. The transcript it came
+from is writable from inside the container, so this records what was
+there rather than vouching for it."

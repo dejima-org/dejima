@@ -561,11 +561,31 @@ _declared_config_dirs() {
     # A copy can't be detached by a host-side rename at all. entrypoint.sh
     # installs them root-owned and read-only; see its comment and the mount
     # inventory in docker-compose.yml.
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/settings\.json:/etc/dejima-claude/settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*-\s*\$\{HOME\}/\.claude/CLAUDE\.md:/etc/dejima-claude/CLAUDE\.md:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
+    # Declared by the harness now, since which files these are is its own.
+    local staged
+    staged="$(bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME=/h
+        harness_plugin_load claude-code
+        harness_staged_config_load
+        printf "%s\n" ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}
+    ')"
+    local f
+    for f in settings.json CLAUDE.md statusline.sh; do
+        grep -qxF "/h/.claude/$f"$'\t'".claude/$f" <<< "$staged" \
+            || { echo "$f is not staged: $staged"; return 1; }
+    done
+    # And never mounted at their real paths, which is the property staging
+    # exists for: a single-file mount detaches on a host-side rename.
+    run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md|statusline\.sh):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
-    grep -q 'install -o root -g root -m 444 "/etc/dejima-claude/\$staged"' "$SANDBOX_DIR/entrypoint.sh"
+    # The staging tree mirrors the destination, so entrypoint.sh names no
+    # harness's paths - it installs <rel> at $SANDBOX_HOME/<rel>.
+    grep -q 'rel="${staged#/etc/dejima-harness/}"' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'dest="$SANDBOX_HOME/$rel"' "$SANDBOX_DIR/entrypoint.sh"
+    run grep -n 'dejima-claude' "$SANDBOX_DIR/entrypoint.sh"
+    [ "$status" -ne 0 ] || { echo "entrypoint still names a harness path"; return 1; }
 }
 
 @test "~/.claude/hooks and plugins are mounted read-only" {
@@ -1640,8 +1660,15 @@ registered_commands() {
     # conditional on existence: not every host has a statusline, and mounting
     # a nonexistent source would make Docker create a root-owned directory at
     # the target instead.
-    grep -q 'extra_mounts+=(-v "\$HOME/\.claude/statusline\.sh:/etc/dejima-claude/statusline\.sh:ro")' "$REPO_ROOT/bin/dejima"
-    grep -q 'install -o root -g root -m 555 /etc/dejima-claude/statusline\.sh' "$SANDBOX_DIR/entrypoint.sh"
+    # Declared by the harness with the rest of its staged config, and mounted
+    # into the staging tree by core.
+    grep -q 'emit_staged_config "$HOME/.claude/$f" ".claude/$f"' \
+        "$REPO_ROOT/bin/harness/claude-code.sh"
+    grep -q 'extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")' "$REPO_ROOT/bin/dejima"
+    # Executable staged files land executable; that distinction is what the
+    # 555 used to encode, and it is now read from the source rather than
+    # hardcoded per filename.
+    grep -q 'install -o root -g root -m 555' "$SANDBOX_DIR/entrypoint.sh"
     run grep -F 'extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
 }
@@ -1656,8 +1683,13 @@ registered_commands() {
     # the user. So this must be a hard, explicit error - same fail-loud
     # precedent as the credential proxy refusing to launch rather than
     # silently mounting the real OAuth credential.
-    grep -q 'if \[ -L "\$HOME/\.claude/statusline\.sh" \] && \[ ! -e "\$HOME/\.claude/statusline\.sh" \]' "$REPO_ROOT/bin/dejima"
+    # The check is core's, over every staged file the harness declares - a
+    # plugin filtering on existence itself would skip a dangling one silently,
+    # which is the case this refuses for.
+    grep -q 'if \[ -L "\$_ssrc" \] && \[ ! -e "\$_ssrc" \]' "$REPO_ROOT/bin/dejima"
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/dejima"
+    run grep -n '\[ -e "\$HOME/\.claude/\$f" \]' "$REPO_ROOT/bin/harness/claude-code.sh"
+    [ "$status" -ne 0 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
 }
 
 @test "bin/dejima-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
@@ -1683,18 +1715,40 @@ registered_commands() {
     grep -q 'COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua' "$SANDBOX_DIR/Dockerfile"
 }
 
-@test "log-shipper conversation shipping is opt-in and off by default" {
-    grep -q 'SANDBOX_LOG_CONVERSATION' "$SANDBOX_DIR/log-shipper.sh"
-    grep -qE 'SANDBOX_LOG_CONVERSATION: \$\{SANDBOX_LOG_CONVERSATION:-0\}' "$SANDBOX_DIR/docker-compose.yml"
+@test "conversation shipping is opt-in, and runs on the host rather than in the session" {
+    # It reads transcripts that are bind-mounted from the host, so it never
+    # needed to be inside - and being inside put it in a process the session
+    # shared a filesystem and a signal namespace with, where killing it
+    # ended its own logging with nothing on the host noticing.
+    grep -q 'config_get_bool logging conversation' "$REPO_ROOT/bin/dejima-conversation-ship"
+    grep -q 'exit 0' "$REPO_ROOT/bin/dejima-conversation-ship"
+    # Gone from the container entirely: the shipper there no longer reads
+    # anything the session writes.
+    run grep -n 'SANDBOX_LOG_CONVERSATION\|watch_transcripts\|transform_transcript' \
+        "$SANDBOX_DIR/log-shipper.sh" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "conversation shipping is still in the container:"; echo "$output"; return 1; }
+    # And stopped before the exit-time audit, so the last lines a session
+    # produced are shipped rather than discarded with the batch.
+    local ship_line audit_line
+    ship_line=$(grep -n 'SANDBOX_CONVERSATION_SHIP_PID' "$REPO_ROOT/bin/dejima" | sed -n '2p' | cut -d: -f1)
+    audit_line=$(grep -n 'dejima-audit" compare' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
+    [ "$ship_line" -lt "$audit_line" ]
 }
 
-@test "log-shipper transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
+@test "the transcript transform ships prompts/responses/tool commands, skips results/meta/thinking" {
     fixtures='{"type":"user","sessionId":"s1","isMeta":null,"message":{"role":"user","content":"fix the login bug"}}
 {"type":"user","sessionId":"s1","isMeta":true,"message":{"role":"user","content":"meta noise"}}
 {"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","content":"tool output secret"}]}}
 {"type":"assistant","sessionId":"s1","message":{"content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"done, deployed the fix"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
 this line is not json'
-    run bash -c "LOG_SHIPPER_LIB_ONLY=1 source '$SANDBOX_DIR/log-shipper.sh'; transform_transcript_line <<< \"\$1\"" _ "$fixtures"
+    # The transform is the harness's - it is a fact about that harness's
+    # transcript format - so it lives in the plugin now. What it must and
+    # must not ship is unchanged.
+    run bash -c "
+        source '$REPO_ROOT/bin/dejima-provider-lib.sh'
+        source '$REPO_ROOT/bin/dejima-harness-lib.sh'
+        harness_plugin_load claude-code
+        harness_transform_transcript <<< \"\$1\"" _ "$fixtures"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"role":"user"'* ]]
     [[ "$output" == *"fix the login bug"* ]]
@@ -3257,6 +3311,42 @@ _harness_proxied_domain() {
             *) echo "$d is not in the TCB list: $dirs"; return 1 ;;
         esac
     done
+}
+
+@test "the transcript format is the harness's, the store is dejima's" {
+    # What a compaction looks like in a transcript is a fact about the
+    # harness; where the summary is kept, that nothing mounts it, and what
+    # the file promises about its own provenance are dejima's.
+    grep -q 'isCompactSummary' "$REPO_ROOT/bin/harness/claude-code.sh"
+    run grep -n 'isCompactSummary\|compact_boundary\|\.jsonl' "$REPO_ROOT/bin/dejima-epitaph"
+    [ "$status" -ne 0 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
+    # The provenance note is dejima's promise about the artefact, so it is
+    # defined once rather than phrased per harness.
+    grep -q '^DEJIMA_EPITAPH_NOTE=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
+    run grep -c 'preserved verbatim' "$REPO_ROOT/bin/harness/claude-code.sh"
+    [ "$output" -eq 0 ] || { echo "a plugin phrases the provenance note itself"; return 1; }
+}
+
+@test "conversation shipping resolves transcripts by slug, not by matching a prefix" {
+    # A "<slug>-*" glob picks up this workspace's worktrees and also a
+    # SIBLING project whose directory name merely extends its own (#105).
+    # Every project's directory is present on the host, so nothing else
+    # would catch the neighbour's conversation being shipped.
+    grep -q 'workspace_slugs_sorted "$ws"' "$REPO_ROOT/bin/dejima-conversation-ship"
+    run grep -nE '\$key-\*|\$\{key\}-\*' "$REPO_ROOT/bin/dejima-conversation-ship"
+    [ "$status" -ne 0 ] || { echo "prefix matching is back:"; echo "$output"; return 1; }
+}
+
+@test "the container's log shipper reads nothing the session writes" {
+    # It runs as root, for tamper-resistance: an oversight log the surveilled
+    # user owns is one they can edit. That privilege is only safe while what
+    # it parses is not session-writable, which is what this holds - dnsmasq
+    # and ulogd2 output, both written by root-owned daemons.
+    # Non-comment lines only: the comment there says where conversation
+    # shipping went, which is worth keeping.
+    run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test ".dejima.md says to cut what the code replaced, not just how it was found" {

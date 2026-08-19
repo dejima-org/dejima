@@ -49,17 +49,14 @@ if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
         echo "WARNING: ulogd2 failed to start - connection logging will be unavailable (see /var/log/ulogd.log)" >&2
     fi
     # Unlike ulogd2 above, this one stays root - deliberately, not an
-    # oversight. It now also tails session transcripts (see
-    # SANDBOX_LOG_CONVERSATION) that the sandboxed session itself writes, so
-    # it is parsing attacker-influenceable content the same way ulogd2 parses
-    # attacker-influenceable packets. But what it produces here is itself an
-    # oversight/audit log of that same session - letting the sandbox user
-    # (the thing being surveilled) also own the shipper would let a
-    # compromised session tamper with or kill its own logging; root buys
+    # oversight. What it ships is an oversight log of the session running
+    # beside it, and letting the sandbox user own the shipper would let a
+    # compromised session tamper with or kill its own logging. Root buys
     # tamper-resistance that a security log needs and a best-effort netflow
-    # counter doesn't. The variables it handles are quoted and no `eval` is
-    # used, so a crafted transcript can influence what gets shipped, not
-    # execute anything here.
+    # counter does not.
+    #
+    # What it reads is dnsmasq's query log and ulogd2's output, both written
+    # by root-owned daemons here and neither session-writable.
     /usr/local/bin/log-shipper.sh &
 fi
 
@@ -127,28 +124,37 @@ if [ -n "${SANDBOX_HARNESS_COMMAND:-}" ]; then
         "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
 fi
 
-# ~/.claude config files arrive staged read-only under /etc/dejima-claude
-# (see the mount inventory in docker-compose.yml) and get copied into place
-# here rather than bind-mounted at their real paths. A copy can't be
-# detached by a host-side rename the way a single-file mount can (#47, #48),
-# and it closes the one case no mount could: a statusline.sh that is a
-# symlink into a dotfiles checkout. Docker resolves the symlink when it sets
-# up the staging mount, so what lands here is already the real content.
+# The harness's config arrives staged read-only under /etc/dejima-harness
+# and is copied into place here rather than bind-mounted at its real path. A
+# copy can't be detached by a host-side rename the way a single-file mount
+# can (#47, #48), and it closes the one case no mount could: a file that is
+# a symlink into a dotfiles checkout. Docker resolves the symlink when it
+# sets up the staging mount, so what lands here is already the real content.
 #
-# Root-owned and read-only, so the `#` memory shortcut and /memory keep
-# failing visibly against ~/.claude/CLAUDE.md instead of appearing to
-# succeed. A compromised session can still unlink and replace them - they
-# sit in a directory it owns - but that change is now container-local and
-# can't reach the host, which is the whole reason these were read-only.
-if [ -d /etc/dejima-claude ]; then
-    for staged in settings.json CLAUDE.md; do
-        if [ -f "/etc/dejima-claude/$staged" ]; then
-            install -o root -g root -m 444 "/etc/dejima-claude/$staged" "$SANDBOX_HOME/.claude/$staged"
+# The staging tree mirrors the destination - /etc/dejima-harness/<rel> is
+# installed at $SANDBOX_HOME/<rel> - so nothing about any one harness's paths
+# is written here, and no mapping has to be passed in and parsed.
+#
+# Root-owned and read-only, so a harness's own attempts to rewrite them keep
+# failing visibly rather than appearing to succeed. A compromised session can
+# still unlink and replace them - they sit in a directory it owns - but that
+# change is now container-local and can't reach the host, which is the whole
+# reason these are read-only.
+#
+# Mode from the source: an executable one is something the harness runs (a
+# statusline), a plain one is something it reads. -type f skips symlinks, so
+# nothing here follows a link out of the staging tree.
+if [ -d /etc/dejima-harness ]; then
+    while IFS= read -r -d '' staged; do
+        rel="${staged#/etc/dejima-harness/}"
+        dest="$SANDBOX_HOME/$rel"
+        mkdir -p "$(dirname "$dest")"
+        if [ -x "$staged" ]; then
+            install -o root -g root -m 555 "$staged" "$dest"
+        else
+            install -o root -g root -m 444 "$staged" "$dest"
         fi
-    done
-    if [ -f /etc/dejima-claude/statusline.sh ]; then
-        install -o root -g root -m 555 /etc/dejima-claude/statusline.sh "$SANDBOX_HOME/.claude/statusline.sh"
-    fi
+    done < <(find /etc/dejima-harness -type f -print0)
 fi
 
 # The real OAuth credential no longer enters the container at all - ~/.claude

@@ -96,7 +96,6 @@ services:
       # responses, and tool invocations to Loki as the
       # dejima-conversation job. Content only leaves the container
       # if LOKI_URL is also set. See docs/security.md "Network request logging".
-      SANDBOX_LOG_CONVERSATION: ${SANDBOX_LOG_CONVERSATION:-0}
       SSH_AUTH_SOCK: /ssh-agent
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-1}
       # Docker's own tty allocation defaults to a generic TERM (e.g. plain
@@ -160,8 +159,6 @@ services:
       # resolution follows it, so a :ro mount landed on the target and left
       # the symlink itself replaceable.
       # statusline.sh is staged by bin/dejima, since not every host has one.
-      - ${HOME}/.claude/settings.json:/etc/dejima-claude/settings.json:ro
-      - ${HOME}/.claude/CLAUDE.md:/etc/dejima-claude/CLAUDE.md:ro
       # The sandbox's own settings overrides (sandbox.enabled off, plus the
       # remote-access notify hooks when that's on), generated per run by
       # bin/dejima and reaching the harness as harness-wrapper.sh's
