@@ -25,9 +25,18 @@ FIXED_DOMAINS=(
     "registry.npmjs.org"
     "release-assets.githubusercontent.com"
 )
-for _d in ${SANDBOX_HARNESS_DOMAINS:-}; do
-    FIXED_DOMAINS+=("$_d")
-done
+# Split on spaces explicitly, not on whatever IFS the caller happens to have.
+# init-firewall.sh sources this file with IFS=$'\n\t' set, dns-proxy.sh with
+# the default - so an unquoted expansion gives the two consumers different
+# lists from the same value, which is the drift this shared file exists to
+# prevent. A harness declaring two api_domains would reach init-firewall as
+# one glued element and fail its DNS check fatally, refusing to start.
+# init-firewall.sh already restores IFS=' ' around its own extra-domains loop
+# for exactly this reason.
+if [ -n "${SANDBOX_HARNESS_DOMAINS:-}" ]; then
+    IFS=' ' read -ra _dejima_harness_domains <<< "$SANDBOX_HARNESS_DOMAINS"
+    FIXED_DOMAINS+=(${_dejima_harness_domains[@]+"${_dejima_harness_domains[@]}"})
+fi
 
 # The harness's API endpoint is allowlisted only when this session has no
 # credential proxy (kill switch or API-key auth), where DNS is the only path

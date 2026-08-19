@@ -3423,3 +3423,24 @@ _emit_mount_at() {
     # And it does not outlive a bin/dejima that was SIGKILLed.
     grep -q 'kill -0 "$PARENT_PID"' "$REPO_ROOT/bin/dejima-conversation-ship"
 }
+
+@test "the harness domain list splits the same for both consumers of it" {
+    # init-firewall.sh sources fixed-domains.sh with IFS=$'\n\t' and
+    # dns-proxy.sh with the default, so an unquoted expansion hands them
+    # different lists from one value - the drift that shared file exists to
+    # prevent. The single-domain real manifest cannot show it, which is why
+    # this uses two and reproduces init-firewall's IFS.
+    local two="a.example.com b.example.com" n_fw n_dns
+    n_fw="$(bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
+    n_dns="$(bash -c "SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
+    [ "$n_fw" = "$n_dns" ] \
+        || { echo "firewall sees $n_fw entries, dns proxy sees $n_dns"; return 1; }
+    # And both as separate names, not one glued element that fails the
+    # firewall's DNS check fatally.
+    run bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    grep -qx 'a.example.com' <<< "$output" || { echo "$output"; return 1; }
+    grep -qx 'b.example.com' <<< "$output" || { echo "$output"; return 1; }
+}
