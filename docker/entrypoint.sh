@@ -120,8 +120,21 @@ if [ -n "${SANDBOX_HARNESS_COMMAND:-}" ]; then
             echo "entrypoint: refusing harness command name: $SANDBOX_HARNESS_COMMAND" >&2
             exit 1 ;;
     esac
-    ln -sf /usr/local/bin/dejima-harness-wrapper \
-        "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
+    # Refuse a name that already exists, unless it is this symlink from an
+    # earlier start. /usr/local/bin holds dejima's own scripts and gosu, and
+    # the manifest's `identifier` type permits any bare name - a harness
+    # declaring `command = gosu` would otherwise have the exec below run it
+    # as root. The manifest is trusted, so this turns a bad one into a clean
+    # refusal rather than closing a hole.
+    _wrapper_link="/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
+    if [ -e "$_wrapper_link" ] || [ -L "$_wrapper_link" ]; then
+        if [ "$(readlink -f "$_wrapper_link" 2>/dev/null)" \
+             != /usr/local/bin/dejima-harness-wrapper ]; then
+            echo "entrypoint: refusing to shadow existing /usr/local/bin/$SANDBOX_HARNESS_COMMAND" >&2
+            exit 1
+        fi
+    fi
+    ln -sf /usr/local/bin/dejima-harness-wrapper "$_wrapper_link"
 fi
 
 # The harness's config arrives staged read-only under /etc/dejima-harness

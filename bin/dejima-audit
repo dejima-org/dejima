@@ -389,10 +389,10 @@ withhold() { printf '%s\n' "$2" > "$1" 2>/dev/null || true; }
 existed_before() {
     local rid="$1" range enc
     if host_exec_is_id "$rid"; then
-        range='/^### hostexec/,$p'; enc="$(enc_id "${rid#*:}")"
+        range="/^$(_hostexec_boundary "$state")/,\$p"; enc="$(enc_id "${rid#*:}")"
     else
     case "$rid" in
-        tcb:*)        range='/^### tcb/,/^### hostexec/p';    enc="$(enc_id "${rid#tcb:}")" ;;
+        tcb:*)        range="/^### tcb/,/^$(_hostexec_boundary "$state")/p"; enc="$(enc_id "${rid#tcb:}")" ;;
         *)            range='/^### paths/,/^### projects/p';   enc="$(enc_id "$rid")" ;;
     esac
     fi
@@ -1099,6 +1099,18 @@ render_finding() {
     return 0
 }
 
+# The boundary that ends the tcb section and begins host-execution entries.
+# A state file written before that section was renamed says "### statusline";
+# reading it with "### hostexec" alone would run the tcb range to the end of
+# the file, turning that old entry into a spurious "TCB modified, INVISIBLE
+# to git" CRITICAL and firing a host-exec finding for a surface nothing
+# changed. Only a comparison spanning a checkout update sees this, which is
+# exactly the case the section boundaries exist to survive.
+_hostexec_boundary() {
+    grep -q '^### hostexec$' "$1" 2>/dev/null && { printf '### hostexec'; return; }
+    printf '### statusline'
+}
+
 host_exec_snapshot() {
     # leaf<TAB>sha for every host-execution surface the harness declared, or
     # nothing where the host has none. One line per surface, keyed by the
@@ -1314,8 +1326,8 @@ case "$cmd" in
             fi
             crit+=("TCB (sandbox self) modified, INVISIBLE to git: $line")
             finding_ids+=("$tid")
-        done < <(comm -3 <(sed -n '/^### tcb/,/^### hostexec/p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### tcb/,/^### hostexec/p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n "/^### tcb/,/^$(_hostexec_boundary "$state")/p" "$state" | grep -v '^### ') \
+                         <(sed -n "/^### tcb/,/^$(_hostexec_boundary "$new")/p"   "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
         if [ "$tcb_visible" -gt 0 ]; then
             info+=("$tcb_visible change(s) under the sandbox's own bin/, hooks/, docker/, test/ - this workspace IS dejima; review them with git")
@@ -1345,8 +1357,8 @@ case "$cmd" in
             baseline_suppresses "$sid" "$ssha" && continue
             crit+=("$_hl$(enc_id "$line")")
             finding_ids+=("$sid")
-        done < <(comm -3 <(sed -n '/^### hostexec/,$p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### hostexec/,$p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n "/^$(_hostexec_boundary "$state")/,\$p" "$state" | grep -v '^### ') \
+                         <(sed -n "/^$(_hostexec_boundary "$new")/,\$p" "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"

@@ -402,3 +402,18 @@ harness_transform_transcript() {
           end
     ' 2>/dev/null
 }
+
+# Whether this harness will actually run dejima's hooks, or has simply never
+# been told to. install.sh registers them into the operator's settings.json,
+# gated on [core] harness - so an operator who set that key without re-running
+# install.sh gets a session with no briefing and no guards, silently and
+# every time. R3 is how the agent learns it is in a sandbox at all.
+#
+# Reads the operator's real settings rather than dejima's own layer: the
+# layer is composed fresh each launch and always looks right.
+harness_guards_registered() {
+    local settings="$HOME/.claude/settings.json"
+    [ -f "$settings" ] || return 1
+    jq -e '[.hooks.SessionStart[]?.hooks[]?.command // empty]
+           | any(endswith("/sandbox-context.sh"))' "$settings" >/dev/null 2>&1
+}

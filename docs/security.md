@@ -948,6 +948,15 @@ What that does **not** change is that the transcript is session-writable.
 This ships what was recorded; it does not attest to it - the same caveat
 [epitaph](configuration.md#reading-what-a-session-left-behind) carries.
 
+**And it moves a parser across the boundary.** The transform is `jq`, and it
+now reads session-controlled bytes on the host as your user, where before it
+read them in the container as root. That is the trade, not a free win: what
+is gained is that a session can no longer silence or edit its own oversight
+log, and what is accepted is that `jq` is load-bearing against hostile input
+outside the container. It is the same bet epitaph already makes with
+`python3`, and the reason the parser is a plugin's rather than something a
+manifest could supply.
+
 ### Viewing logs in Grafana
 
 Nothing sandbox-specific needed on the Grafana side beyond a Loki data

@@ -1791,13 +1791,17 @@ _epitaph_transcript() {
     rm -rf "$workspace" "$proot"
 }
 
-@test "a harness hosting every guard says nothing about guards" {
+@test "a harness hosting every guard says nothing about missing ones" {
     # The message must not become a line an operator learns to scroll past.
+    # Matched on the report's own wording rather than the bare word "guards":
+    # the not-registered warning is a different message about a different
+    # problem, and this once failed on it.
     _rw_setup
     workspace="$(mktemp -d)"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
     _rw_launch "$workspace"
-    [[ "$output" != *"guards"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"does not support"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"of dejima's guards"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
 
@@ -1879,5 +1883,31 @@ _epitaph_transcript() {
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
     [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch says so when the harness's hooks were never registered" {
+    # install.sh registers them gated on [core] harness. An operator who set
+    # that key without re-running it gets no briefing and no guards, on every
+    # launch, with nothing saying why.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    # _rw_setup writes a settings.json with no hooks in it at all.
+    _rw_launch "$workspace"
+    [[ "$output" == *"hooks are not registered"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"not know it is sandboxed"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch stays quiet when the harness's hooks are registered" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {SessionStart: [{matcher: "startup", hooks: [{type: "command",
+        command: "$HOME/.claude/hooks/sandbox-context.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" != *"hooks are not registered"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }

@@ -3412,3 +3412,14 @@ _emit_mount_at() {
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
 }
+
+@test "the conversation shipper flushes what it has before exiting" {
+    # bin/dejima kills it the moment the container exits. Without a trap that
+    # discards the in-memory batch and everything written since the last
+    # poll - the agent's final answer, usually - while the comment at the
+    # kill site claimed the opposite.
+    grep -q "trap 'final_flush; exit 0' TERM INT" "$REPO_ROOT/bin/dejima-conversation-ship"
+    grep -q '^final_flush()' "$REPO_ROOT/bin/dejima-conversation-ship"
+    # And it does not outlive a bin/dejima that was SIGKILLed.
+    grep -q 'kill -0 "$PARENT_PID"' "$REPO_ROOT/bin/dejima-conversation-ship"
+}

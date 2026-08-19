@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript"
+DEJIMA_HARNESS_HOOKS="harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -67,6 +67,15 @@ harness_has_guard() {
         *" $1 "*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Whether the harness is actually wired to run dejima's hooks. A harness that
+# cannot answer is assumed wired: absence of a check is not evidence of a
+# problem, and refusing on it would break every harness that has no such
+# concept.
+harness_guards_wired() {
+    declare -F harness_guards_registered >/dev/null 2>&1 || return 0
+    harness_guards_registered
 }
 
 # Says which guards the selected harness cannot host. Silent when it hosts
@@ -164,7 +173,7 @@ _paths_overlap() {
 # flags, the settings layer the guards are registered in, the briefing, the
 # marker directory remote access watches. A plugin is trusted code, but the
 # whole point of declaring through here is that core is the one checking.
-DEJIMA_CONTAINER_PATHS="/usr/local/bin /etc/dejima /etc/dejima-harness /etc/dejima-settings.json /run/dejima-notify"
+DEJIMA_CONTAINER_PATHS="/usr/local/bin /etc/dejima /etc/dejima-harness /etc/dejima-settings.json /run/dejima-notify /etc/resolv.conf /etc/hosts"
 
 # A host path mounted at a DIFFERENT path in the container. $3 is the mode
 # ("ro", or empty for read-write).

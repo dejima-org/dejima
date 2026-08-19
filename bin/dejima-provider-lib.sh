@@ -145,8 +145,8 @@ command_path	?path
 api_domains	?list:hostname
 proxied_api_domain	?hostname
 guards	?list:identifier
-no_confirm_args	?template
-settings_args	?template
+no_confirm_args	?args
+settings_args	?args
 keys	?list:keyspec
 resume_command	?template
 briefing	?relpath
@@ -212,6 +212,14 @@ _provider_valid_value() {
             # file at that config key" and is how a token reaches the container
             # without the path being mistaken for the secret.
             [[ "$value" =~ ^[A-Z][A-Z0-9_]*=@?[a-z][a-z0-9_]*$ ]]
+            ;;
+        args)
+            # Same charset as template, and deliberately a separate type:
+            # these are passed to the harness as arguments and never go
+            # through briefing composition, so a {{...}} in one would ship
+            # literally rather than being substituted. Naming it template
+            # promised a substitution that does not happen.
+            _provider_valid_value template "$value"
             ;;
         template)
             # Prose with {{placeholders}}; the placeholder names themselves are
