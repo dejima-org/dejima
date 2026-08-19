@@ -13,9 +13,9 @@
 # Every read validates the WHOLE file, not just the requested key. A config
 # that does not parse means the operator got something wrong, and the alternative to
 # refusing is launching a sandbox configured differently from what they
-# believe they configured. A launch performs on the order of thirty reads and
-# so re-parses thirty times; the file is tens of lines, and the cost buys the
-# property that no read can succeed against a file another read would reject.
+# believe they configured. The file is parsed once per process and every read
+# is answered from that parse, so a launch's thirty-odd reads cost one pass
+# and no read can succeed against a file another read would reject.
 
 # ---------------------------------------------------------------------------
 # Schema
