@@ -374,13 +374,6 @@ SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
 # XDG_DATA_HOME pointing somewhere surprising). This is a deliberate line in a
 # hand-edited config with an obvious alternative, so refusing costs nothing
 # and removes the "saw the warning, continued anyway" path.
-_paths_overlap() {
-    local a="$1" b="$2"
-    [ "$a" = "$b" ] && return 0
-    case "$a/" in "$b"/*) return 0 ;; esac
-    case "$b/" in "$a"/*) return 0 ;; esac
-    return 1
-}
 
 # The stores that decide what a session may do next, and the record of what
 # it did. Read-only is not enough to make mounting them harmless: the
