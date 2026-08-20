@@ -161,6 +161,7 @@ briefing	?relpath
 EOF
             ;;
         harness) cat <<'EOF'
+install	?depspec
 command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
@@ -243,6 +244,13 @@ _provider_valid_value() {
             # Joined to a provider directory, so no absolute paths and no
             # traversal - a manifest may only name a file it ships.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$value" != *".."* ]]
+            ;;
+        depspec)
+            # The same grammar an operator's approved dependency goes through,
+            # checked by the same function - see dejima-config-lib.sh. What a
+            # harness declares here is interpolated into a Dockerfile RUN line
+            # that runs at build time, so nothing shell-active may survive it.
+            valid_dep_spec "$value"
             ;;
         export)
             # NAME=key or NAME=@key. The "@" form means "the contents of the

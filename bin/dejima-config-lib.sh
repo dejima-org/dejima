@@ -160,6 +160,75 @@ config_path() {
 }
 
 # ---------------------------------------------------------------------------
+# Dependency specs
+#
+# Here rather than in dejima-project-lib.sh so this base layer sources
+# nothing, and so dejima-provider-lib.sh - which validates manifests and sits
+# below project-lib - can reach them. A harness declares what installs it as
+# one of these, and it is the same grammar an operator's approved dependency
+# goes through, checked by the same function.
+# ---------------------------------------------------------------------------
+
+# <ecosystem>:<name>. The character class is deliberately narrow: an
+# approved spec gets interpolated into a generated Dockerfile RUN line, so
+# anything shell-active here would be a root-context injection at build.
+# The name must start with an alphanumeric - without that, a leading dash
+# (e.g. "--allow-unauthenticated") validates as a name and lands in the
+# generated RUN line as an option instead, quietly weakening apt/pip/npm/
+# cargo's own signature/lockfile checks.
+valid_dep_spec() {
+    [[ "$1" =~ ^(apt|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && return 0
+    # npm additionally allows a leading @scope/ and a trailing @version, which
+    # between them cover most of the registry. Neither `@` nor `/` is
+    # shell-active, so this widens what may be named without widening what a
+    # RUN line can be made to do.
+    [[ "$1" =~ ^npm:(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]] && return 0
+    valid_tarball_spec "$1"
+}
+
+# tarball:<name>@<sha256>:<url> - a release archive unpacked into the image,
+# for a toolchain no package ecosystem ships in a usable version.
+#
+# The digest is mandatory and is what makes this an approval at all. Without
+# it the operator would be approving a *name* whose contents the other end can
+# change afterwards, which is not a decision anyone can make once; with it,
+# what was approved is a specific archive and nothing else can take its place.
+# The generated build verifies it before unpacking, not after.
+#
+# The character classes are narrower than the URL grammar allows, for the same
+# reason as above: this string is interpolated into a Dockerfile RUN line that
+# runs as root. Everything shell-active is excluded rather than quoted around
+# - no $, backtick, quote, backslash, whitespace, or ;|&<>() - so there is no
+# quoting to get wrong later. https only: the digest already provides
+# integrity, but there is no reason to also accept a plaintext fetch.
+DEJIMA_MAX_TARBALL_URL=512
+valid_tarball_spec() {
+    local spec="$1" rest name sha url
+    [[ "$spec" == tarball:* ]] || return 1
+    rest="${spec#tarball:}"
+
+    name="${rest%%@*}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    # Becomes a directory under /opt/dejima; a name that walks out of it, or
+    # that is a relative-path token, is not a name.
+    case "$name" in .|..) return 1 ;; esac
+
+    rest="${rest#"$name"}"
+    [[ "$rest" == @* ]] || return 1
+    rest="${rest#@}"
+
+    sha="${rest%%:*}"
+    [[ "$sha" =~ ^[a-f0-9]{64}$ ]] || return 1
+
+    url="${rest#"$sha"}"
+    [[ "$url" == :* ]] || return 1
+    url="${url#:}"
+    [ ${#url} -le "$DEJIMA_MAX_TARBALL_URL" ] || return 1
+    [[ "$url" =~ ^https://[A-Za-z0-9._~/?=+%-]+$ ]] || return 1
+}
+
+
+# ---------------------------------------------------------------------------
 # Value validation
 #
 # Deliberately narrow: these values reach a dnsmasq server= line, a curl -H header, a docker -v argument

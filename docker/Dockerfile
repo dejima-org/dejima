@@ -15,8 +15,6 @@ FROM node:22
 ARG TZ
 ENV TZ="$TZ"
 
-ARG CLAUDE_CODE_VERSION=latest
-
 # Install basic development tools, iptables/ipset (for the egress firewall),
 # openssh-client (for git-over-ssh and agent forwarding), and the toolchain a
 # typical nvim plugin set (telescope/treesitter/mason) expects, since
@@ -238,9 +236,12 @@ RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
   -x && \
   rm /tmp/zsh-in-docker.sh
 
-# Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
-
+# No harness here. The image is shared by every project on the host, and
+# baking one harness into it means every sandbox carries it whether or not it
+# is the one selected - and a second harness could only ever be added to the
+# same shared image, never chosen between. The selected harness installs into
+# a layer on top instead, from the `install` spec in its own manifest, the
+# same way an approved dependency does (bin/dejima, build_harness_layer).
 # Install the tree-sitter CLI, which nvim-treesitter (plugins/treesitter.lua)
 # needs to install/update parsers. Pinned below latest: newer tree-sitter-cli
 # prebuilds require glibc >=2.39, which this (Debian 12 bookworm) image

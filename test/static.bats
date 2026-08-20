@@ -3925,3 +3925,54 @@ _emit_mount_at() {
             || { echo "$name is supported but not declared in .dejima/dependencies"; return 1; }
     done
 }
+
+# The base image is shared by every project on the host. A harness baked into
+# it is carried by every sandbox whether or not it is the one selected, and a
+# second harness could only ever be added alongside the first rather than
+# chosen between.
+@test "the base image installs no harness" {
+    run grep -nE 'npm install -g .*(claude-code|opencode|aider)' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
+    # And no build arg pinning one, which is the shape it had.
+    run grep -nE '^ARG .*(CLAUDE|HARNESS).*VERSION' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    # The Dockerfile says where the harness went, so the absence reads as a
+    # decision rather than as something dropped.
+    grep -qi 'harness' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "the harness layer is keyed on the harness, and built under the dependency layers" {
+    local f="$REPO_ROOT/bin/dejima"
+    # Keyed on the name: switching [core] harness has to switch images, not
+    # add to one.
+    grep -q 'dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}' "$f" \
+        || { echo "the harness layer's tag does not name the harness"; return 1; }
+    # Below the dependency layers, so a project's own packages sit on top of
+    # the harness rather than being invalidated whenever it changes.
+    local harness_at global_at
+    harness_at=$(grep -n 'SANDBOX_USER}-harness-' "$f" | head -1 | cut -d: -f1)
+    global_at=$(grep -n 'build_dep_layer "dejima:${SANDBOX_USER}-global"' "$f" | head -1 | cut -d: -f1)
+    [ -n "$harness_at" ] && [ -n "$global_at" ] || { echo "could not locate both layers"; return 1; }
+    [ "$harness_at" -lt "$global_at" ] \
+        || { echo "the harness layer is built after the dependency layers"; return 1; }
+}
+
+@test "the harness install spec is validated before it reaches a RUN line" {
+    # It is manifest data and the manifest is dejima's own, but the provider
+    # directories are session-writable when dejima sandboxes its own checkout,
+    # and this string is interpolated into a Dockerfile built on the host.
+    #
+    # The schema types it, so every read goes through the validator - which is
+    # why bin/dejima does not check it a second time. Pinned as the type,
+    # since a manifest key that quietly became a bare string would still read
+    # correctly at every call site.
+    run bash -c 'source "$1"; _manifest_type harness install' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -eq 0 ] || { echo "the harness schema has no install key"; return 1; }
+    [ "$output" = "?depspec" ] \
+        || { echo "install is typed '$output', not a dependency spec"; return 1; }
+    # And that the type actually delegates to the shared validator, rather
+    # than growing a second grammar that could drift from the approval one.
+    grep -A 6 'depspec)' "$REPO_ROOT/bin/dejima-provider-lib.sh" | grep -q 'valid_dep_spec' \
+        || { echo "the depspec type does not use valid_dep_spec"; return 1; }
+}

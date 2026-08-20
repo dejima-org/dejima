@@ -70,6 +70,7 @@ value never does:
 | --- | --- |
 | `command` | Space-separated words (a bare name or a multi-word one like `gh pr`) - lands in prose an agent runs, so nothing shell-active is legal. |
 | `relpath` | A path relative to the provider's own directory, no leading `/` and no `..` - a manifest may only name a file it ships. |
+| `depspec` | A dependency spec: `apt:`/`npm:`/`pip:`/`cargo:` plus a package name, or `tarball:<name>@<sha256>:<url>`. Validated by `valid_dep_spec`, the same function an operator's approved dependency goes through, because it ends up in the same place - a Dockerfile `RUN` line built on the host. |
 | `export` | `NAME=key` or `NAME=@key` for the `env_export` forge key - see [Forge](#forge) below. |
 | `template` | Prose that may contain `{{placeholder}}` markers; the placeholder names are checked against the briefing whitelist at composition time, not here. |
 | `keyspec` | One element of a `keys` list - see [The `keys` field](#the-keys-field-a-providers-own-config-schema) below. |
@@ -212,6 +213,7 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `install` | `?depspec` | (empty) | What installs this harness into the image, as a dependency spec (`npm:`, `apt:`, `pip:`, `cargo:` or `tarball:`) - the same grammar and the same validator an operator's approved dependency goes through. The base image carries no harness: the selected one installs into a layer of its own on top of it, keyed on its name, so switching `[core] harness` switches images rather than accumulating every harness into the one every project shares. Empty means "already present", which is only true of something the base image installs for another reason. |
 | `command` | `identifier` | `claude` | The container's main process for this harness, and the name the wrapper shadows on `PATH`. `[core] command` defaults to it. |
 | `command_path` | `?path` | (empty) | Where the real binary lives, behind the shadow. |
 | `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the *fixed* allowlist rather than the extra one, which `dns-proxy.sh` exempts from stop-dns-rebind and `init-firewall.sh` treats as non-fatal when it fails to resolve. |

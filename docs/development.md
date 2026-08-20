@@ -325,6 +325,7 @@ harness-specific path resolving to nothing is the honest answer.
 | --- | --- | --- |
 | Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
 | Permission bypass | the flag itself, now `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
+| Harness installation | that the image carries the SELECTED harness and no other, that it is a layer keyed on the harness's name rather than part of the shared base, and that what installs it is validated before it reaches a `RUN` line, are core's. Which package it is, is the manifest's `install` | `harnesses/<name>/harness.conf`, `bin/dejima` |
 | Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
 | Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
 | Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
