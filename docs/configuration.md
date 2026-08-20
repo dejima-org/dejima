@@ -190,6 +190,8 @@ also patch a running session immediately, but only when it is run bare or
 with `--container` - approving here (`--project`/`--global`, with no
 `--container`) never touches one; see
 [Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
+A domain that resolves to a private address has no live patch at all - an
+internally-routed host can only be approved and picked up at the next launch.
 Approved dependencies are baked into a derived image built `FROM` the shared
 base - first `dejima:<username>-global`, if the global store has any
 dependency approved, then `dejima:<username>-<slug>` on top of that,

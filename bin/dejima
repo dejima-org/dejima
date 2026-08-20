@@ -382,10 +382,20 @@ SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
 # approval store discloses every project's approved domains and
 # dependencies, and the audit baselines say which findings have already been
 # waved through. Refusing beats mounting and hoping the mode holds (#15).
+#
+# The epitaph store is here for the same reason and a sharper one: it holds
+# each earlier session's own account of what it worked out, and a session
+# that can read those can read what every previous session in this project
+# concluded. Never mounting it is the entire design, and a static test
+# checks that nothing here mounts it - but that test cannot see a path an
+# operator names in [mounts] readonly, which is computed at run time. Listed
+# whatever [epitaph] enabled says: turning the feature off stops new
+# epitaphs being written, it does not empty the store.
 GUARDED_STORES=()
 _guarded_stores() {
     [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
-    GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR")
+    GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
+                    "$(config_get epitaph dir)")
 }
 
 # Refuse $2 if it overlaps any of the paths in $3.., in either direction: an
@@ -431,7 +441,13 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
         # below are between canonical paths rather than whatever spelling the
         # config happened to use.
         rw_real="$(readlink -m "$path")"
-        for guarded in "$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
+        # The shared list plus this path's own extras, rather than a second
+        # copy of the stores: the two lists having drifted is what let the
+        # epitaph store be mountable from here after it was added to one of
+        # them. A store added to _guarded_stores is now guarded on both
+        # paths without anyone remembering to do it twice.
+        _guarded_stores
+        for guarded in ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"} \
             "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
             guarded_real="$(readlink -m "$guarded")"
             _paths_overlap "$rw_real" "$guarded_real" || continue

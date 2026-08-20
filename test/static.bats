@@ -2359,6 +2359,24 @@ EOF
     grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
 }
 
+# Was: that the cross-session false-positive case is documented. The finding
+# itself is gone - a session can no longer write another project's slug, so
+# every one it could still see belonged to some other session - and what
+# needs documenting now is its absence, so that removing detection stays a
+# stated decision rather than something a reader has to infer from silence.
+@test "the credential proxy is documented under its own heading" {
+    # It sits under its own heading rather than as a bullet inside the
+    # 500-line "The exit-time audit" section, which is not where anyone looks
+    # for how the model credential is kept out of the container.
+    local sec
+    sec="$(sed -n '/^## The model API credential/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    grep -q 'dejima-anthropic-proxy' <<< "$sec" \
+        || { echo "the proxy is not documented under its own heading"; return 1; }
+    sec="$(sed -n '/^## The exit-time audit/,/^## /p' "$REPO_ROOT/docs/security.md")"
+    run grep -c 'dejima-anthropic-proxy' <<< "$sec"
+    [ "$output" -eq 0 ] || { echo "the audit section has absorbed the proxy again"; return 1; }
+}
+
 # The absence of a finding needs documenting as much as a finding does, so
 # that not detecting something stays a stated decision rather than something
 # a reader has to infer from silence.
@@ -2376,6 +2394,34 @@ EOF
     for f in README.md docs/security.md; do
         grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
         grep -qi 'forge = none' "$REPO_ROOT/$f"
+    done
+}
+
+@test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
+    [ -f "$REPO_ROOT/docs/threat-model.md" ]
+    grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"
+    grep -q '(threat-model\.md)' "$REPO_ROOT/docs/security.md"
+}
+
+@test "the blast-radius table is identical in both places that carry it" {
+    # It is deliberately in two documents: security.md is where an operator
+    # already is, threat-model.md is where the reasoning around it lives.
+    # Two copies drift, and a table stating where a compromise stops is the
+    # worst kind to have two answers for - so neither may be edited alone.
+    local a b
+    a="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/security.md")"
+    b="$(sed -n '/^| Layer | Reached by/,/^$/p' "$REPO_ROOT/docs/threat-model.md")"
+    [ -n "$a" ] || { echo "no table in docs/security.md"; return 1; }
+    [ -n "$b" ] || { echo "no table in docs/threat-model.md"; return 1; }
+    [ "$a" = "$b" ] || { diff <(printf '%s' "$a") <(printf '%s' "$b"); return 1; }
+    # Every layer the two sister projects cover, so a row cannot quietly go
+    # missing and leave the chain looking shorter than it is.
+    local row
+    for row in 'Agent, not yet hostile' 'Container' \
+               'Devbox VM, unprivileged' 'Devbox VM, root' \
+               'CI, confined job' 'CI, confined job escaped' \
+               'CI, privileged job'; do
+        grep -qF "| $row |" <<< "$b" || { echo "no row for: $row"; return 1; }
     done
 }
 
@@ -2442,6 +2488,22 @@ EOF
 # its maintainer's, and saying so is the difference between disclosure and
 # letting a reader assume. Pinned because it is the kind of line that goes
 # quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README frames dejima as a development environment, not only a sandbox" {
+    grep -q 'sandboxed development environment' "$REPO_ROOT/README.md"
+    # The half that is not containment has to be visible as such. A reader
+    # who is shown only the boundary learns what dejima stops and not what
+    # it is for.
+    grep -q 'What it gives an agent to work with' "$REPO_ROOT/README.md"
+}
+
+@test "the README does not promise a default harness" {
+    # `[core] harness` has had no default since it became required - a launch
+    # is refused without it - but the opening paragraph still read "Claude
+    # Code by default", which is the promise that change exists to not make.
+    run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
 @test "the README says the prose is written by agents" {
     grep -q 'A note from the developer' "$REPO_ROOT/README.md"
     grep -q 'the words are written rapidly' "$REPO_ROOT/README.md"
@@ -3342,6 +3404,31 @@ _harness_proxied_domain() {
     # (or bare + --container) does. Only the bare form can ever refuse on it.
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
+}
+
+@test "the docs say the harness must be signed in on the host first" {
+    # dejima authenticates nothing: the proxy holds a credential the harness
+    # wrote on the host. Without one, a session starts normally and then
+    # cannot reach the model, which reads as a dejima fault. Nothing enforces
+    # the prerequisite, so it has to be stated where someone setting up will
+    # meet it.
+    grep -q '^## Sign in on the host first' "$REPO_ROOT/README.md"
+    sed -n '/^### Core (required)/,/^That is enough to run/p' "$REPO_ROOT/README.md" \
+        | grep -qi 'sign in to it there'
+    grep -q 'Sign in on the host first' "$REPO_ROOT/docs/security.md"
+}
+
+@test "every statement that an escape defeats everything says what bounds the next layer" {
+    # True as far as it goes, and it used to stop there. What an escape
+    # reaches is a layer dejima cannot bound because it runs inside it, and
+    # a reader left at "defeats all of it" has no idea there is a project
+    # for exactly that.
+    local f
+    for f in README.md SECURITY.md docs/security.md docs/responsible-use.md; do
+        grep -qi 'escape' "$REPO_ROOT/$f" || continue
+        grep -q 'dejima-devbox-hardener' "$REPO_ROOT/$f" \
+            || { echo "$f describes an escape without naming what bounds it"; return 1; }
+    done
 }
 
 # --- harness plugins: a plugin computes, core enforces ---
