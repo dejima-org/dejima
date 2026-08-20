@@ -238,6 +238,8 @@ _config_valid_value() {
             case "$value" in
                 *:*|*$'\n'*) return 1 ;;
             esac
+            # A literal tilde is what is being matched, not expanded.
+            # shellcheck disable=SC2088
             [[ "$value" == /* || "$value" == "~/"* || "$value" == "~" ]]
             ;;
         list:*)

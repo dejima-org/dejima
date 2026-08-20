@@ -426,22 +426,8 @@ manifest_get() {
 # never a forge action; every other field still gets a full manifest_validate
 # before anything consequential reads it.
 #
-# Cached per axis+name for this command substitution only. bash forks a new
-# subshell per config_get, so it dedupes the keys of one section against each
-# other rather than across a launch: a cheap partial win, not a cross-process
-# cache this file has no way to invalidate.
-declare -gA _PROVIDER_KEYS_CACHE
-_provider_keys_cached() {
-    local axis="$1" name="$2" cache_key="$axis:$name"
-    if [ -z "${_PROVIDER_KEYS_CACHE[$cache_key]+set}" ]; then
-        _PROVIDER_KEYS_CACHE[$cache_key]="$(_provider_keys_field "$axis" "$name")" || return 1
-    fi
-    printf '%s' "${_PROVIDER_KEYS_CACHE[$cache_key]}"
-}
-
 # Reads and validates only the `keys = ...` line of a forge/harness manifest
-# - see _provider_keys_cached above for why this bypasses manifest_get's
-# full-manifest validation. Trimming is inlined (_config_trim's own logic,
+# - see above for why this bypasses manifest_get's full-manifest validation. Trimming is inlined (_config_trim's own logic,
 # not a call to it) and the line count uses bash's own read loop instead of
 # `wc -l`, both to avoid a subshell/external-process fork per manifest line:
 # this runs once per key in a [forge.<name>]/[harness.<name>] section, on
@@ -500,11 +486,11 @@ _config_extra_spec() {
     name="${rest%%.*}"
     key="${rest#*.}"
     [ "$key" != "$rest" ] || return 1
-    # No separate provider_dir check here - _provider_keys_cached (via
-    # _provider_keys_field) already refuses when the directory doesn't exist,
-    # and this runs often enough (see _provider_keys_field's comment) that a
-    # second containment check per call is real, avoidable cost.
-    for spec in $(_provider_keys_cached "$axis" "$name"); do
+    # No separate provider_dir check here - _provider_keys_field already
+    # refuses when the directory doesn't exist, and this runs often enough
+    # (see its comment) that a second containment check per call is real,
+    # avoidable cost.
+    for spec in $(_provider_keys_field "$axis" "$name"); do
         pname="${spec%%:*}"
         [ "$pname" = "$key" ] || continue
         IFS=$'\t' read -r pname ptype pdefault <<< "$(_provider_keyspec_parse "$spec")"
@@ -565,7 +551,7 @@ _config_extra_keys() {
 
 _config_extra_keys_for() {
     local axis="$1" name="$2" spec
-    for spec in $(_provider_keys_cached "$axis" "$name"); do
+    for spec in $(_provider_keys_field "$axis" "$name"); do
         printf '%s.%s.%s\n' "$axis" "$name" "${spec%%:*}"
     done
 }

@@ -349,6 +349,7 @@ attach() {
     # The name is baked in here rather than read at exit: $group is local, and
     # a trap body runs after the function's locals are gone, where set -u
     # would abort it and leak the session it exists to remove.
+    # shellcheck disable=SC2064
     trap "tmux kill-session -t '=$group' 2>/dev/null || true" EXIT
     if ! group_holds_pane "$group" "$entry_pane"; then
         echo "Session $run_id is stale - the tmux session holding its pane went away." >&2
@@ -410,7 +411,11 @@ picker() {
     # far better than arrow keys, and this is the phone's entry point.
     printf '\n  %sattach to%s %s[1-%d, q to quit]%s: ' \
         "$C_MUTED" "$C_OFF" "$C_TEXT" "${#ids[@]}" "$C_OFF"
-    read -r choice
+    # `|| exit 0`, because a read that cannot happen is not a refusal: with no
+    # controlling terminal (`ssh -T`, or an SSH app that requests no pty) this
+    # returns nonzero immediately, and exiting 1 with nothing printed reads as
+    # a broken front door. attach() reasons about the same case explicitly.
+    read -r choice || exit 0
     case "$choice" in
         q|Q|'') exit 0 ;;
         *[!0-9]*) echo "Not a number." >&2; exit 1 ;;
