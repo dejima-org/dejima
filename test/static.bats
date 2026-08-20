@@ -3976,3 +3976,52 @@ _emit_mount_at() {
     grep -A 6 'depspec)' "$REPO_ROOT/bin/dejima-provider-lib.sh" | grep -q 'valid_dep_spec' \
         || { echo "the depspec type does not use valid_dep_spec"; return 1; }
 }
+
+# docs/development.md's inventory is the document a second harness is built
+# from, so a row that has stopped being true is worse than a missing one: it
+# sends someone to a file to change something that is not there. These pin the
+# claims that this branch made false once already.
+@test "the harness inventory does not describe an install the Dockerfile stopped doing" {
+    local doc="$REPO_ROOT/docs/development.md"
+    # The inventory named a RUN line and a build arg, both gone.
+    run grep -nE 'npm install -g .*claude-code|CLAUDE_CODE_VERSION' "$doc"
+    [ "$status" -ne 0 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
+    # And the file list said the base image carries the harness.
+    run grep -nE '^\| `docker/Dockerfile` \|.*[Cc]laude' "$doc"
+    [ "$status" -ne 0 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
+}
+
+@test "every Claude Code path the base image still names has an inventory row" {
+    # The inventory claims to be complete. Two things in the Dockerfile are
+    # written against this harness by name; if a third appears, it needs a row
+    # rather than passing unnoticed because the table looks thorough.
+    local doc="$REPO_ROOT/docs/development.md"
+    local dockerfile="$SANDBOX_DIR/Dockerfile"
+    # Lines of actual instruction, not comments.
+    local hits
+    hits="$(grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile" | grep -vc '^$' || true)"
+    [ "$hits" -gt 0 ] || { echo "no harness paths in the Dockerfile - update this test"; return 1; }
+    # Each of the two the inventory names.
+    grep -q 'State directories' "$doc" || { echo "no inventory row for the .claude directories"; return 1; }
+    grep -q 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' "$doc" \
+        || { echo "no inventory row for the telemetry variable"; return 1; }
+    grep -q 'Fallback command' "$doc" \
+        || { echo "no inventory row for entrypoint.sh's default command"; return 1; }
+}
+
+@test "every file the docs' file list names exists, and the libraries are all in it" {
+    local doc="$REPO_ROOT/docs/development.md" f missing=""
+    # The Files table only - the manifest key tables further down use the same
+    # row shape for things that are not paths.
+    while IFS= read -r f; do
+        case "$f" in */|*'<'*|*'*'*) continue ;; esac
+        [ -e "$REPO_ROOT/$f" ] || missing="$missing $f"
+    done < <(sed -n '/^## Files/,/^## /p' "$doc" | grep -oP '(?<=^\| `)[^`]+')
+    [ -z "$missing" ] || { echo "the file list names files that do not exist:$missing"; return 1; }
+    # And the other direction for the shared libraries, which are the entries
+    # most easily forgotten because nothing puts them on PATH.
+    for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
+             bin/dejima-harness-lib.sh docker/install-forge-bins.sh; do
+        grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
+    done
+}

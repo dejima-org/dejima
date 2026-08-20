@@ -10,7 +10,8 @@ run them.
 
 | File | Purpose |
 | --- | --- |
-| `docker/Dockerfile` | Base image, dev tools, nvim, Claude Code + wrapper, `gitea-pr`/`gitea-issue` |
+| `docker/Dockerfile` | Base image: dev tools, nvim, Playwright, the sandbox user. Carries **no harness** - the selected one installs into a layer above it, from its manifest's `install` |
+| `docker/install-forge-bins.sh` | Installs each forge's CLIs into the image from its manifest's `install` list, and fails the build on a file that is shipped but not declared, or declared but not shipped |
 | `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
@@ -28,6 +29,7 @@ run them.
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
+| `bin/dejima-config-lib.sh` | The config file's schema, parser and value validators, plus the dependency-spec grammar. The base layer: it sources nothing, so everything else can source it. Not on PATH |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH: see [docs/providers.md](providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
@@ -38,6 +40,7 @@ run them.
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. Run from `bin/dejima`'s exit trap |
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
+| `bin/dejima-color-lib.sh` | The colour and terminal-detection helpers the CLIs share. Not on PATH |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
@@ -168,12 +171,14 @@ obscurely partway through; the file says why each is needed.
 
 ## Adding a new harness
 
-`[core] harness` picks a directory under `harnesses/`, and a harness manifest
-declares four things. Everything else dejima does for Claude Code is written
-against Claude Code, and this is the inventory of it: what a second harness
-has to supply, and where dejima has to stop assuming. Taken from a pass over
-the tree, so each row names the file to change rather than describing a
-sketch.
+`[core] harness` picks a directory under `harnesses/`, and that harness's
+manifest declares eleven keys (see [providers.md](providers.md)). The
+inventory below is everything dejima does that is shaped by *which* harness is
+selected: which parts are the manifest's, which are the plugin's, and
+which are still written against Claude Code by name. Taken from a pass over
+the tree, so each row names the file rather than describing a sketch - and a
+row that says "in the plugin" is one a second harness supplies rather than one
+it has to argue about.
 
 ### What a harness must be able to do
 
@@ -312,7 +317,7 @@ names. Use it; do not spell a `[harness.<name>]` section out at a call site.
 declaration only one harness can ever be read through - a second harness
 gets selected, gets validated, and is then handed the first one's paths with
 nothing erroring anywhere. Three call sites did exactly that, in
-`bin/dejima-audit` (twice) and `bin/dejima-epitaph`. A static test now holds
+`bin/dejima-audit` (twice) and `bin/dejima-epitaph`. A static test holds
 the rule.
 
 It returns empty when no harness is selected. `bin/dejima` refuses to start
@@ -323,13 +328,14 @@ harness-specific path resolving to nothing is the honest answer.
 
 | Area | What is Claude Code specific | Where |
 | --- | --- | --- |
-| Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
-| Permission bypass | the flag itself, now `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
-| Harness installation | that the image carries the SELECTED harness and no other, that it is a layer keyed on the harness's name rather than part of the shared base, and that what installs it is validated before it reaches a `RUN` line, are core's. Which package it is, is the manifest's `install` | `harnesses/<name>/harness.conf`, `bin/dejima` |
+| Install | which package installs the harness is the manifest's `install`, a dependency spec. That the image carries the selected harness **and no other**, that it is a layer keyed on the harness's name rather than part of the shared base, and that the spec is validated before it reaches a `RUN` line, are core's | `harnesses/<name>/harness.conf`, `bin/dejima` |
+| Permission bypass | the flag itself, `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
 | Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
 | Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
-| Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
-| Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. Now `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
+| State directories | the base image pre-creates `~/.claude`, `~/.claude/projects` and `~/.claude/file-history` **by name**, owned by the sandbox user, so Docker does not create them root-owned as the parents of the mounts that land inside them. Still written against Claude Code, and one of two things left in the Dockerfile that is | `docker/Dockerfile` |
+| Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, set for every session whatever harness is selected. The other one | `docker/Dockerfile` |
+| Fallback command | `exec gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude}` names this harness as the default for a container started without `bin/dejima`. A real launch always sets `SANDBOX_CMD` from the manifest, so the fallback is reachable only by hand - and it names a binary the image may not contain | `docker/entrypoint.sh` |
+| Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
 | Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. In the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
@@ -373,8 +379,9 @@ and cannot exercise here is one whose guards are asserted rather than
 observed - and an untested guard is worse than a declared-absent one,
 because absent is visible to the operator and broken is not.
 
-`claude-code` is the exception, installed in `docker/Dockerfile` as the
-harness the image is built around.
+`claude-code` is no exception to that: it is declared by its own manifest and
+built into its own layer like any other. What the base image still carries for
+it is the two rows the inventory above ends on.
 
 `providers.bats` covers the manifest contract itself and is where a new
 `harness.conf` gets its parsing and validation tests. The suites that assert
