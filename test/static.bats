@@ -704,26 +704,87 @@ _declared_config_dirs() {
     grep -q 'extra_mounts+=(-v "\$path:\$path:ro")' "$REPO_ROOT/bin/dejima"
 }
 
-@test "bin/dejima forces sandbox.enabled to false in the generated override layer" {
+# A HOME with the ~/.claude a harness plugin expects, for exercising
+# harness_prepare_config without touching the operator's real one.
+_settings_home() {
+    local h
+    h="$(mktemp -d "$BATS_TEST_TMPDIR/settings-home.XXXXXX")"
+    mkdir -p "$h/.claude"
+    printf '%s' "$h"
+}
+
+@test "the override layer forces sandbox.enabled to false" {
     # Claude Code's own internal per-command sandboxing is redundant on top
     # of this container and can't actually function inside it (bwrap can't
     # create a namespace here) - a session can't be trusted to turn it off
-    # itself, so this has to happen in the generation step on the host,
-    # before the container starts.
-    grep -qE 'jq -n .\{sandbox: \{enabled: false\}\}' "$REPO_ROOT/bin/dejima"
+    # itself, so this has to happen on the host, before the container starts.
+    #
+    # Asserted on what the plugin writes rather than on the line that writes
+    # it: the content is the property, and a refactor of how it is produced
+    # should not read as this being switched off.
+    local overlay
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$(_settings_home)"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -f "$overlay"; return 1; }
+    run jq -r '.sandbox.enabled' "$overlay"
+    rm -f "$overlay"
+    [ "$output" = "false" ] || { echo "the overlay does not disable it: $output"; return 1; }
 }
 
-@test "the generated override layer is a delta, not a copy of the operator's settings" {
-    # jq -n reads no input: what ships is only what the sandbox overrides,
-    # and everything else still comes from the operator's real settings.json
-    # through Claude Code's own layering. A copy would go stale the moment
-    # the host edited the original, and would duplicate every hook it
-    # carried across two layers that get merged.
-    grep -qE '^jq -n .* > "\$SANDBOX_SETTINGS_FILE"$' "$REPO_ROOT/bin/dejima"
-    # The operator's settings.json is read only to check that it parses. It
-    # must never become an input to the override layer.
-    run grep -E 'HOME/\.claude/settings\.json.*SANDBOX_SETTINGS_FILE' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+@test "the override layer is a delta, not a copy of the operator's settings" {
+    # What ships is only what the sandbox overrides; everything else still
+    # comes from the operator's real settings.json through Claude Code's own
+    # layering. A copy would go stale the moment the host edited the original,
+    # and would duplicate every hook it carried across two merged layers.
+    local home overlay
+    home="$(_settings_home)"
+    # A setting nothing in the sandbox overrides, which must not appear.
+    printf '{"env":{"OPERATOR_ONLY":"1"},"sandbox":{"enabled":true}}\n' \
+        > "$home/.claude/settings.json"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -f "$overlay"; return 1; }
+    run grep -c OPERATOR_ONLY "$overlay"
+    rm -f "$overlay"
+    [ "$output" = "0" ] || { echo "the operator's settings were copied into the overlay"; return 1; }
+}
+
+@test "an unparseable settings.json stops the launch instead of being ignored" {
+    # Claude Code ignores a settings.json it cannot parse, wholesale and with
+    # a startup warning only - so the session would run without the
+    # permissions, hooks and plugins the operator configured, and the first
+    # symptom is an unrelated-looking bypass-mode warning.
+    local home overlay
+    home="$(_settings_home)"
+    printf '{"permissions": [oops\n' > "$home/.claude/settings.json"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -ne 0 ] || { echo "a broken settings.json was accepted"; return 1; }
+    [[ "$output" == *"not valid JSON"* ]] || { echo "$output"; return 1; }
+}
+
+@test "core names no harness config file of its own" {
+    # The three that used to live in bin/dejima - creating settings.json and
+    # CLAUDE.md by name, parsing settings.json, and generating Claude Code's
+    # own settings schema - are the plugin's now. Core creates the file and
+    # decides where it is mounted; what goes in it is the harness's.
+    run grep -nE '\$HOME/\.claude/(settings\.json|CLAUDE\.md)' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
+    run grep -n 'sandbox: {enabled' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] || { echo "core still generates the harness's settings schema"; return 1; }
 }
 
 @test "the override layer is mounted outside ~/.claude and passed as --settings" {
@@ -746,12 +807,49 @@ _declared_config_dirs() {
     grep -qE -- '\$\{settings\[@\]\+"\$\{settings\[@\]\}"\}' "$SANDBOX_DIR/harness-wrapper.sh"
 }
 
-@test "bin/dejima pre-creates the ~/.claude config files so neither is mounted as a directory" {
-    # Docker creates a missing bind source as a directory - without this, a
-    # host that has never run install.sh gets a junk directory at
-    # ~/.claude/settings.json and a session with no settings at all.
-    grep -qE '\[ -f "\$HOME/\.claude/settings\.json" \] \|\| echo' "$REPO_ROOT/bin/dejima"
-    grep -qE '\[ -f "\$HOME/\.claude/CLAUDE\.md" \] \|\|' "$REPO_ROOT/bin/dejima"
+@test "the harness's config files are created if absent, so neither is staged missing" {
+    # A host that has never run install.sh has no settings.json, and many have
+    # no CLAUDE.md at all. Core skips staging a file that does not exist, so
+    # without this the session starts with neither - silently.
+    local home overlay
+    home="$(_settings_home)"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$home/.claude/settings.json" ] || { echo "settings.json was not created"; return 1; }
+    [ -f "$home/.claude/CLAUDE.md" ] || { echo "CLAUDE.md was not created"; return 1; }
+    # Valid JSON, not an empty file: an empty settings.json is one Claude Code
+    # would refuse to parse, which is the condition the check exists for.
+    run jq -e . "$home/.claude/settings.json"
+    [ "$status" -eq 0 ] || { echo "the seeded settings.json does not parse"; return 1; }
+    # statusline.sh is deliberately NOT among them. It is staged executable
+    # and named by settings.json's statusLine.command, so an empty one
+    # created here would be a status line that runs and does nothing, in
+    # place of the harness simply having none.
+    [ ! -e "$home/.claude/statusline.sh" ] \
+        || { echo "an empty statusline.sh was created and would be staged"; return 1; }
+}
+
+@test "an existing config file is left exactly as the operator wrote it" {
+    local home overlay
+    home="$(_settings_home)"
+    printf '{"env":{"KEEP":"me"}}\n' > "$home/.claude/settings.json"
+    printf 'operator prose\n' > "$home/.claude/CLAUDE.md"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '"KEEP"' "$home/.claude/settings.json" || { echo "settings.json was overwritten"; return 1; }
+    grep -q 'operator prose' "$home/.claude/CLAUDE.md" || { echo "CLAUDE.md was overwritten"; return 1; }
 }
 
 @test "Dockerfile never installs bubblewrap or socat" {

@@ -35,6 +35,19 @@ STORE="$(config_get epitaph dir)"
 
 harness_plugin_load "$(config_get core harness)"
 
+# With no harness selected nothing knows what a compaction looks like, so
+# there is nothing to extract and `save` would exit 0 having kept nothing.
+# bin/dejima refuses to start without [core] harness, so reaching here in that
+# state means this was driven by hand against a config dejima itself would
+# reject. Said out loud, for the reason dejima-audit gives for the identical
+# condition: silence here is indistinguishable from a session that simply
+# never compacted.
+if [ -z "$(config_get core harness)" ]; then
+    echo "dejima epitaph: no [core] harness is set, so nothing knows how to read" >&2
+    echo "                a compaction out of a transcript. Nothing was kept." >&2
+    exit 0
+fi
+
 ws="$ws_arg"
 [ -n "$ws" ] || ws="$(pwd)"
 ws="$(cd "$ws" 2>/dev/null && pwd)" || exit 0
