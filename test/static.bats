@@ -2046,6 +2046,18 @@ this line is not json'
     create=$(grep -n 'docker network create' "$rt" | head -1 | cut -d: -f1)
     [ "$sweep" -lt "$create" ] \
         || { echo "the sweep at line $sweep runs after the create at line $create"; return 1; }
+    # A network still attached is either this suite's abandoned leftover or a
+    # concurrent run's live one, and nothing distinguishes them by inspection.
+    # Age does, so the reap has to be guarded by it - without that, a run on
+    # the same host gets its container pulled out from under it.
+    grep -q 'REAP_AFTER' "$rt" \
+        || { echo "attached networks are reaped with no age guard"; return 1; }
+    # And the guard has to be longer than a real run of this file.
+    local reap
+    reap=$(sed -n 's/^REAP_AFTER=\$((\(.*\)))$/\1/p' "$rt")
+    [ -n "$reap" ] || { echo "REAP_AFTER is not a plain arithmetic constant"; return 1; }
+    [ "$((reap))" -ge 3600 ] \
+        || { echo "REAP_AFTER is $((reap))s, short enough to hit a live run"; return 1; }
 }
 
 @test "every container runtime.bats starts is attached to a user-defined network" {

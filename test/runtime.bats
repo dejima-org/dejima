@@ -39,6 +39,13 @@ bats_require_minimum_version 1.5.0
 
 IMAGE=dejima:latest
 
+# How old a leftover network of this suite's must be before setup_file will
+# reap it along with whatever is still attached. Hours, not minutes: the only
+# thing it has to be longer than is a real run of this file, and the only
+# thing it has to be shorter than is an operator's patience with a runner
+# filling up with dead containers.
+REAP_AFTER=$((6 * 60 * 60))
+
 container_name() { echo "dejima-test-$(basename "$BATS_RUN_TMPDIR")"; }
 network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 
@@ -164,18 +171,34 @@ setup_file() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
 
-    # A run that was killed between `network create` and teardown_file leaves
-    # the network behind with its container still attached, and an attached
-    # network cannot be removed - so the `|| true` above passes over it and
-    # `network create` below fails on the name. The privileged runner is a
-    # long-lived host, so that state persists until someone clears it by hand.
+    # A run killed between `network create` and teardown_file leaves its
+    # network behind with its container still attached, and an attached
+    # network cannot be removed - so the `|| true` above passes over it. Names
+    # are unique per run, so that no longer blocks the next run the way the
+    # old constant names did; it accumulates instead, one dead container and
+    # network per killed run, on a long-lived privileged runner.
     #
-    # Swept rather than tolerated: an orphan is removed here, and one still in
-    # use refuses removal, which is what keeps a concurrent run's network safe.
-    # Scoped to this suite's own `dejima-test-net-` prefix.
-    local stale
+    # So this reaps them, scoped to this suite's own `dejima-test-net-` prefix
+    # and to networks older than REAP_AFTER. An unattached one goes on sight.
+    # An attached one is only ever this suite's own leftovers, but a live run
+    # elsewhere on the host has one too, and there is no way to tell "abandoned"
+    # from "in use" by inspection - so age is the discriminator, set far longer
+    # than any run of this suite takes. A concurrent run's network is minutes
+    # old and is never touched.
+    local stale age container
     while IFS= read -r stale; do
         [ -n "$stale" ] || continue
+        [ "$stale" != "$network" ] || continue
+        docker network rm "$stale" >/dev/null 2>&1 && continue
+        # Still attached. Reap only if it is old enough to be abandoned.
+        age="$(docker network inspect -f '{{.Created}}' "$stale" 2>/dev/null)" || continue
+        age="$(date -d "$age" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - age ))" -gt "$REAP_AFTER" ] || continue
+        while IFS= read -r container; do
+            [ -n "$container" ] || continue
+            docker rm -f "$container" >/dev/null 2>&1 || true
+        done < <(docker network inspect -f '{{range .Containers}}{{.Name}}
+{{end}}' "$stale" 2>/dev/null)
         docker network rm "$stale" >/dev/null 2>&1 || true
     done < <(docker network ls --filter name=^dejima-test-net- --format '{{.Name}}' 2>/dev/null)
 
