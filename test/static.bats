@@ -2031,6 +2031,57 @@ this line is not json'
     }
 }
 
+# The sweep in setup_file runs between `container=$(container_name)` and the
+# `docker run --name "$container"` that uses it. A loop variable named
+# `container` there leaves $container holding the last endpoint the sweep saw,
+# and every container this file starts is then named after someone else's
+# leftover - a failure that appears only once there is something to reap,
+# which is to say only when the sweep matters.
+#
+# Run against a fake docker that reports a stale attached network, because
+# that is the branch where the assignment happens; a clean host never enters
+# it and the bug stays invisible.
+@test "runtime.bats' cleanup sweep does not clobber the names setup_file built" {
+    local rt="$REPO_ROOT/test/runtime.bats" d
+    d="$BATS_TEST_TMPDIR/sweep"
+    mkdir -p "$d/stub"
+    cat > "$d/stub/docker" <<'STUB'
+#!/bin/bash
+case "$1 $2" in
+    "network ls")      echo dejima-test-net-abandoned ;;
+    "network rm")      exit 1 ;;
+    "network inspect")
+        case "$*" in
+            *Created*)    echo "2020-01-01T00:00:00Z" ;;
+            *Containers*) printf 'dejima-test-abandoned\n' ;;
+        esac ;;
+    "inspect -f")      echo "2020-01-01T00:00:00Z" ;;
+    "ps -a")           echo dejima-test-abandoned ;;
+esac
+exit 0
+STUB
+    chmod +x "$d/stub/docker"
+
+    # The sweep exactly as it appears in setup_file, with the surrounding
+    # values it depends on supplied.
+    sed -n '/^    local _stale _age _endpoint _dead _created$/,/--format .{{.Names}}. 2>\/dev\/null)$/p' \
+        "$rt" | sed 's/^    //' > "$d/sweep.sh"
+    [ -s "$d/sweep.sh" ] || { echo "could not extract the sweep from setup_file"; return 1; }
+
+    run env PATH="$d/stub:$PATH" bash -c '
+        container="the-name-setup_file-built"
+        network="dejima-test-net-mine"
+        REAP_AFTER=1
+        source "$1"
+        printf "container=%s\n" "$container"
+        printf "network=%s\n" "$network"' _ "$d/sweep.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"container=the-name-setup_file-built"* ]] || {
+        echo "the sweep clobbered \$container:" >&2; echo "$output" >&2; return 1; }
+    [[ "$output" == *"network=dejima-test-net-mine"* ]] || {
+        echo "the sweep clobbered \$network:" >&2; echo "$output" >&2; return 1; }
+}
+
 # A network left behind by a killed run keeps its container attached, so
 # `docker network rm` cannot remove it and `docker network create` then fails
 # on the name - on a long-lived privileged runner, for every run afterwards.

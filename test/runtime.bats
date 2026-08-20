@@ -185,22 +185,53 @@ setup_file() {
     # from "in use" by inspection - so age is the discriminator, set far longer
     # than any run of this suite takes. A concurrent run's network is minutes
     # old and is never touched.
-    local stale age container
-    while IFS= read -r stale; do
-        [ -n "$stale" ] || continue
-        [ "$stale" != "$network" ] || continue
-        docker network rm "$stale" >/dev/null 2>&1 && continue
+    # Every name here is _-prefixed and used nowhere else in this file. The
+    # loop variables of a sweep must not be the plain nouns the rest of
+    # setup_file uses: `while read -r container` would leave $container
+    # holding the last endpoint it saw, and every `docker run --name
+    # "$container"` below would then use that instead - a failure that only
+    # appears once there is something to reap, which is to say only when this
+    # code matters.
+    local _stale _age _endpoint _dead _created
+    while IFS= read -r _stale; do
+        [ -n "$_stale" ] || continue
+        [ "$_stale" != "$network" ] || continue
+        docker network rm "$_stale" >/dev/null 2>&1 && continue
         # Still attached. Reap only if it is old enough to be abandoned.
-        age="$(docker network inspect -f '{{.Created}}' "$stale" 2>/dev/null)" || continue
-        age="$(date -d "$age" +%s 2>/dev/null)" || continue
-        [ "$(( $(date +%s) - age ))" -gt "$REAP_AFTER" ] || continue
-        while IFS= read -r container; do
-            [ -n "$container" ] || continue
-            docker rm -f "$container" >/dev/null 2>&1 || true
+        _age="$(docker network inspect -f '{{.Created}}' "$_stale" 2>/dev/null)" || continue
+        _age="$(date -d "$_age" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _age ))" -gt "$REAP_AFTER" ] || continue
+        while IFS= read -r _endpoint; do
+            [ -n "$_endpoint" ] || continue
+            docker rm -f "$_endpoint" >/dev/null 2>&1 || true
+            # An endpoint can outlive the container that owned it, which is
+            # what an unclean daemon stop - a host reboot, most often - leaves
+            # behind: nothing is running, `network rm` still reports active
+            # endpoints, and removing containers does not help. Forcing the
+            # disconnect is the way out of that state.
+            docker network disconnect -f "$_stale" "$_endpoint" >/dev/null 2>&1 || true
         done < <(docker network inspect -f '{{range .Containers}}{{.Name}}
-{{end}}' "$stale" 2>/dev/null)
-        docker network rm "$stale" >/dev/null 2>&1 || true
+{{end}}' "$_stale" 2>/dev/null)
+        docker network rm "$_stale" >/dev/null 2>&1 || true
     done < <(docker network ls --filter name=^dejima-test-net- --format '{{.Name}}' 2>/dev/null)
+
+    # And this suite's own containers, which the loop above only reaches while
+    # they are still attached to a network it is reclaiming. A reboot stops
+    # them and releases their endpoints, so the network goes on sight and the
+    # containers are never seen again - accumulating for the life of the host.
+    #
+    # Same age guard. A stopped container of this suite's is already strong
+    # evidence of abandonment, since every one it starts is `docker run -d`
+    # and running, but the guard costs nothing and keeps one rule here.
+    while IFS= read -r _dead; do
+        [ -n "$_dead" ] || continue
+        [ "$_dead" != "$container" ] || continue
+        _created="$(docker inspect -f '{{.Created}}' "$_dead" 2>/dev/null)" || continue
+        _created="$(date -d "$_created" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _created ))" -gt "$REAP_AFTER" ] || continue
+        docker rm -f "$_dead" >/dev/null 2>&1 || true
+    done < <(docker ps -a --filter name=^dejima-test- --filter status=exited \
+                 --filter status=created --format '{{.Names}}' 2>/dev/null)
 
     docker network create "$network" >/dev/null
 
