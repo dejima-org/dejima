@@ -103,8 +103,8 @@ report() {
                 ;;
         esac
     done < <(read_declared "$decl_dir/$kind" "$validator")
-    # Approvals with no declaration behind them - the previously invisible case.
-    # seen accumulates here too, or an entry approved in both stores (global
+    # Approvals with no declaration behind them - reported so an approval
+    # nothing declares is still visible. seen accumulates here too, or an entry approved in both stores (global
     # and project) and undeclared in either would print once per store.
     while read -r tag e; do
         [ -n "$e" ] || continue
@@ -168,9 +168,7 @@ case "$action" in
         # and still exit 0, because the approval is what grants and it is
         # already written by then. What a failure MEANS is the
         # other half: the approval itself did not happen, so neither report
-        # below may repeat the old "approved, but not applied to a running
-        # session" line, which would call an entry approved when nothing was
-        # recorded.
+        # below may call an entry approved when nothing was recorded.
         dep_failed=""
         dep_approved=0
         for spec in $pending_deps; do

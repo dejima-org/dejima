@@ -50,11 +50,10 @@ esac
 global="$dj_global"
 [ "$dj_project_set" -eq 0 ] || project="${dj_project:-$PWD}"
 
-# The shared parser knows --container because dejima-allow needs it. Before
-# that parser existed this CLI answered "Unknown option" here, and silently
-# accepting the flag now would be worse than the duplication it replaced: a
-# caller who believes they scoped an approval to one session would get project
-# scope - a persistent grant - and a zero exit telling them they were right.
+# The shared parser knows --container because dejima-allow needs it;
+# accepting it silently here would give project scope - a persistent grant -
+# to a caller who believes they scoped an approval to one session, with a
+# zero exit telling them they were right.
 if [ -n "$dj_container" ]; then
     echo "dejima-dep has no --container scope: a dependency needs an image" >&2
     echo "rebuild, so there is nothing to patch in a live session." >&2
@@ -133,7 +132,7 @@ case "$action" in
             # `add --project` writes a declaration; this deliberately does not
             # take one back, since withdrawing one machine's approval is not
             # the same decision as editing a file the whole team shares. That
-            # asymmetry used to be invisible and self-undoing: the entry goes
+            # asymmetry, left silent, is self-undoing: the entry goes
             # back to `pending`, the session briefing reports it missing, and
             # the next `dejima-project approve` re-approves it - so say where
             # the durable copy is rather than letting the removal look final.

@@ -797,8 +797,8 @@ EOF
 }
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
-    # Finding 1 regression: forge_env_exports used to emit `GH_TOKEN=` (empty)
-    # whenever push_token_file was unset, and `-e GH_TOKEN=` on `docker
+    # forge_env_exports must not emit `GH_TOKEN=` (empty) when
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker
     # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
     # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
     # [github] token_file value every session is supposed to get regardless
@@ -1726,4 +1726,214 @@ _epitaph_transcript() {
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     run grep -nE 'extra_mounts\+=.*epitaph' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
+# --- harness plugins ------------------------------------------------------
+
+@test "a harness with a manifest but no plugin is refused" {
+    # Support is per harness and deliberate. A manifest alone would present
+    # as a supported harness while none of what dejima does for a harness
+    # had been written, which is the "thin drop-in manifest" this design
+    # exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A provider root of its own, via the DEJIMA_PROVIDER_ROOT test hook,
+    # rather than a directory added to the checkout: a suite that writes into
+    # the repository it is testing leaves litter when it aborts and collides
+    # with a concurrent run.
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    mkdir -p "$proot/harnesses/test-no-plugin"
+    printf 'command = true\n' > "$proot/harnesses/test-no-plugin/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = test-no-plugin'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"No harness plugin for 'test-no-plugin'"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "emit_mount refuses a harness state directory that overlaps a guarded store" {
+    # The reason the refusal lives in emit_mount rather than in each plugin.
+    # A harness's state paths are computed from config rather than written
+    # down, so this is exactly the shape that reaches a mount without anyone
+    # having looked at the value - the same blind spot as #15.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    audit_dir="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[audit]' "dir = $audit_dir" \
+                 '[harness.claude-code]' "projects_dir = $audit_dir/projects"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing harness state mount"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$audit_dir"
+}
+
+@test "a harness that cannot host a guard says so at launch" {
+    # The capability bar allows a harness to be supported at a smaller guard
+    # set. What it does not allow is that being invisible: an operator who
+    # has these everywhere else would otherwise have to read a manifest to
+    # find out they are gone here.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    # Same harness, minus two guards, so the message is the only difference.
+    sed -i 's/^guards .*/guards          = bash-deny notify/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [[ "$output" == *"does not support 2 of dejima's guards"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"push-guard"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"merge the agent"* || "$output" == *"merge its own pull requests"* ]] \
+        || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "a harness hosting every guard says nothing about missing ones" {
+    # The message must not become a line an operator learns to scroll past.
+    # Matched on the report's own wording rather than the bare word "guards":
+    # the not-registered warning is a different message about a different
+    # problem, and this once failed on it.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" != *"does not support"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"of dejima's guards"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a harness declaring a guard dejima does not know is refused" {
+    # A typo would otherwise turn a guard off silently, which is the failure
+    # the declaration exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    sed -i 's/^guards .*/guards          = bash-deny push-gaurd/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"unknown guard: push-gaurd"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "install.sh registers the selected harness's guards, gated on its declarations" {
+    # Which guards exist and how they are installed is the harness's, so a
+    # harness declaring fewer gets fewer - and dejima does not write a
+    # config belonging to a harness the operator did not choose.
+    local proot; proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    sed -i 's/^guards .*/guards          = bash-deny/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    run_install DEJIMA_PROVIDER_ROOT="$proot"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run jq -r '[.hooks.PreToolUse[]?.hooks[]?.command] | join(" ")' \
+        "$CONFIG_DIR/.claude/settings.json"
+    [[ "$output" == *"deny-dangerous-bash.sh"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"git-push-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $output"; return 1; }
+    [[ "$output" != *"merge-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $output"; return 1; }
+    rm -rf "$proot"
+}
+
+@test "install.sh registers every guard when the harness declares them all" {
+    # The shipped harness, unmodified: the behaviour this replaced, kept.
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local cmds
+    cmds="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command,
+                    .hooks.SessionStart[]?.hooks[]?.command] | join(" ")' \
+        "$CONFIG_DIR/.claude/settings.json")"
+    local h
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh deny-dangerous-bash.sh; do
+        [[ "$cmds" == *"$h"* ]] || { echo "$h not registered: $cmds"; return 1; }
+    done
+    # Linked for the read-only hooks mount, but registered per session by
+    # bin/dejima rather than here, where it would fire for host sessions too.
+    [ -L "$CONFIG_DIR/.claude/hooks/dejima-notify.sh" ]
+    [[ "$cmds" != *"dejima-notify.sh"* ]] \
+        || { echo "notify registered host-wide: $cmds"; return 1; }
+}
+
+@test "install.sh registers no guards when no harness is selected" {
+    # Writing one harness's config for an operator who has chosen another,
+    # or none, is the coupling this removed.
+    # A config that already exists is never overwritten, so this is how an
+    # operator upgrading from before [core] harness was required arrives.
+    printf '[core]\nforge = none\nworkflow = local-only\n' > "$CONFIG_DIR/config"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"No [core] harness is set"* ]] || { echo "$output"; return 1; }
+    [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
+        || { echo "wrote a harness config anyway"; return 1; }
+}
+
+@test "[mounts] readonly is refused when it names the filesystem root" {
+    # Root contains every guarded store, so mounting it hands the session all
+    # of them at once - the approval store, the audit reports, the epitaphs.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "readonly = /"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
+    [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch says so when the harness's hooks were never registered" {
+    # install.sh registers them gated on [core] harness. An operator who set
+    # that key without re-running it gets no briefing and no guards, on every
+    # launch, with nothing saying why.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    # _rw_setup writes a settings.json with no hooks in it at all.
+    _rw_launch "$workspace"
+    [[ "$output" == *"not in force this session"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"the session briefing"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch names the one guard a hand-edited config dropped" {
+    # The realistic failure is all-or-nothing, so a check on the briefing
+    # alone would pass here - and a session would run without the merge
+    # guard, silently, which is what the report exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"the session briefing"* ]] \
+        || { echo "named something that is registered: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch stays quiet when the harness's hooks are registered" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/merge-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" != *"not in force this session"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
 }

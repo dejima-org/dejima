@@ -22,8 +22,9 @@ discipline the config file itself gets (unknown key is fatal, every value is
 type-checked, a line count cap), and a briefing fragment is prose that gets
 substituted into and handed to the agent, never interpreted as code. The one
 thing a provider ships that *does* run is a forge's `bin/` - copied into the
-Docker image at build time (`docker/Dockerfile`: `COPY forges/`, then every
-file under a `*/bin/` is installed) as an ordinary program the agent invokes
+Docker image at build time (`docker/Dockerfile`: `COPY forges/`, then
+`docker/install-forge-bins.sh` installs exactly what the manifests declare)
+as an ordinary program the agent invokes
 on `PATH`, the same as `git` or `curl`. That program never feeds back into a
 decision dejima itself makes; it's just a CLI the image happens to carry.
 
@@ -125,7 +126,7 @@ operator can set, resolved the same way as any other config key
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
 | `hosts_allowlisted_by_core` | `bool` | `off` | `on` means this forge's hosts are ones core already allowlists in its own right - GitHub's published ranges, which every session can read from over 443 whatever forge is selected. Core then keeps them out of `DEJIMA_FORGE_HOSTS` (the extra-domains path, which resolves a name into the port-unrestricted `allowed-domains` ipset and exempts it from DNS-rebind protection - right for an internal self-hosted host, a silent widening for a public one) and, when the workflow pushes, opens core's own GitHub push grant to them instead: port 22 to those same ranges, logged and verified by the firewall's startup self-check. They still reach `DEJIMA_PUSH_HOSTS`, so `git-push-guard.sh` permits the push. Name-free in core, but GitHub-specific in effect: this key means "core already allowlists these hosts in its own right", which today is only true of GitHub's ranges, so a future forge whose hosts are not among those must leave it `off` - setting it `on` for anything else grants no firewall allowance at all plus an irrelevant GitHub push grant. |
-| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into the image - the only manifest key naming something that actually gets copied and executed. |
+| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into `/usr/local/bin` of the image - the only manifest key naming something that actually gets copied and executed. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build both when a declared file is missing and when a forge ships a file under its `bin/` that it does not declare. A forge with `install =` empty therefore puts nothing executable in the image. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
 Worked example, `forges/gitea/forge.conf`:
@@ -150,8 +151,8 @@ config keys (`ssh_host`, `api`, `token_file`) from `keys`; an operator is
 expected to set all three (`requires`); `ssh_host` is a literal hostname and
 `api` is a URL, both of which end up in the firewall allowlist and the push
 guard's host list; `install` names the executables under its own `bin/`
-subdirectory (`gitea-pr`, `gitea-issue` and `gitea-actions`), which is what
-the Dockerfile copies into the image; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
+subdirectory (`gitea-pr`, `gitea-issue` and `gitea-actions`), and those three
+are exactly what the image build installs; and the container gets `GITEA_API`, `GITEA_SSH_HOST`,
 and `GITEA_TOKEN` (the *contents* of the file at `token_file`, not its path)
 as environment variables.
 
@@ -211,7 +212,13 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | `identifier` | `claude` | The container's main process for this harness. |
+| `command` | `identifier` | `claude` | The container's main process for this harness, and the name the wrapper shadows on `PATH`. `[core] command` defaults to it. |
+| `command_path` | `?path` | (empty) | Where the real binary lives, behind the shadow. |
+| `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the *fixed* allowlist rather than the extra one, which `dns-proxy.sh` exempts from stop-dns-rebind and `init-firewall.sh` treats as non-fatal when it fails to resolve. |
+| `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
+| `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
+| `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
+| `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
 | `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. |
 | `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
@@ -219,14 +226,22 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 Worked example, `harnesses/claude-code/harness.conf`:
 
 ```
-command        = claude
-keys           = projects_dir:path=~/.claude/projects statusline_path:path=~/.claude/statusline.sh
-resume_command = claude --resume {{session_id}}
-briefing       = briefing.md
+command         = claude
+command_path    = /usr/local/share/npm-global/bin/claude
+guards          = bash-deny push-guard merge-guard notify
+no_confirm_args = --dangerously-skip-permissions
+settings_args   = --settings /etc/dejima-settings.json
+keys            = projects_dir:path=~/.claude/projects file_history_dir:path=~/.claude/file-history statusline_path:path=~/.claude/statusline.sh
+resume_command  = claude --resume {{session_id}}
+briefing        = briefing.md
 ```
 
-Reading it: the container's main process is `claude`; `[harness.claude-code]`
-gets `projects_dir` and `statusline_path`, both `path`-typed with defaults;
+Reading it: the container's main process is `claude`, wrapped on `PATH` in
+front of the real binary at `command_path` so that every invocation - not
+only the one the entrypoint makes - gets `--dangerously-skip-permissions`
+and dejima's settings layer; `[harness.claude-code]`
+gets `projects_dir`, `file_history_dir` and `statusline_path`, all `path`-typed
+with defaults;
 resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.
@@ -250,7 +265,7 @@ opposite of "providers are data, never sourced." In reading order:
 Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
-`session_id`, `resume_command`, `writable_mounts`) - an unrecognized one is a
+`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
@@ -283,8 +298,7 @@ itself:
   `GITEA_SSH_HOST`, `GITEA_TOKEN`).
 
 `hooks/git-push-guard.sh` reads `DEJIMA_PUSH_HOSTS` and
-`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` (renamed from
-`gitea-merge-guard.sh` in this phase) reads `DEJIMA_MERGE_BLOCK` as a
+`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as a
 regex-escaped literal command prefix. Two different failure directions,
 both deliberate:
 

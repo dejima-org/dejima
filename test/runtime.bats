@@ -106,6 +106,13 @@ wait_ready() {
 #
 # One container start, three files, compared by content rather than by any
 # claim about how the image was produced.
+# One value from the selected harness's manifest. bin/dejima resolves these
+# and passes them into the container; a container started here has to do the
+# same or it is testing an arrangement that never occurs.
+harness_manifest_value() {
+    sed -n "s/^$1 *= *//p" "$SANDBOX_DIR/../harnesses/claude-code/harness.conf"
+}
+
 assert_image_matches_checkout() {
     local expected actual
     expected=$(cd "$SANDBOX_DIR" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
@@ -159,6 +166,11 @@ setup_file() {
     # Locally it's usually unset and expands empty, which both init-firewall
     # and entrypoint treat exactly as absent - so the no-token path stays the
     # default here and only CI, where the volume is, passes a real one.
+    # The harness's own domains, which bin/dejima resolves from the manifest
+    # and passes in - the image no longer names any harness's endpoints, so a
+    # container started without these gets none of them. Read from the
+    # manifest rather than written here, so this fixture cannot drift from
+    # what a real launch supplies.
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$network" \
@@ -166,6 +178,8 @@ setup_file() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
+        -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
+        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
 
@@ -674,7 +688,7 @@ dexec_node() {
 
 @test "a staged statusline.sh is copied in root-owned, and replacing it never reaches the host" {
     # Companion to the overlay-dirs test above, but for the config
-    # bin/dejima stages at /etc/dejima-claude for entrypoint.sh to copy into
+    # bin/dejima stages at /etc/dejima-harness for entrypoint.sh to copy into
     # ~/.claude (see its comment there) rather than mounting at its real
     # path. This test does NOT use bin/dejima or docker-compose.yml directly
     # - it builds the same shape by hand. This shared container isn't reused
@@ -695,7 +709,7 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"
@@ -723,22 +737,22 @@ dexec_node() {
     rm -rf "$dotclaude"
 }
 
-@test "staging also protects a symlinked statusline.sh, which the old read-only mount did not (Finding 1)" {
+@test "staging protects a symlinked statusline.sh, which a read-only mount does not" {
     # Same shape as the plain-regular-file test above, except statusline.sh
     # on the host is a symlink into a separate directory - the common real
     # setup (~/.claude/statusline.sh -> a config checkout elsewhere). That
-    # case used to be a CONFIRMED, documented gap: statusline.sh was mounted
+    # case is the one a :ro mount cannot cover: with statusline.sh mounted
     # read-only back onto its own path inside a read-write ~/.claude mount,
-    # the parent mount was established first so the destination already had
+    # the parent mount is established first, so the destination already has
     # the symlink sitting on it, and bind-mount destination resolution
-    # (runc's SecureJoin) followed it - the :ro mount landed on the target
-    # and the symlink dentry itself stayed an ordinary writable entry that a
-    # session could unlink and replace. Detection (bin/dejima-audit hashing
-    # the target string) was the only compensating control.
+    # (runc's SecureJoin) follows it - the :ro mount lands on the target
+    # and the symlink dentry itself stays an ordinary writable entry that a
+    # session can unlink and replace, leaving detection (bin/dejima-audit
+    # hashing the target string) as the only compensating control.
     #
     # Staging closes it outright, and for the opposite reason: source-side
     # symlink resolution is exactly what's wanted, so what lands at
-    # /etc/dejima-claude is the real content, and entrypoint.sh copies it to
+    # /etc/dejima-harness holds the real content, and entrypoint.sh copies it to
     # a path with no route back to the host at all. This test asserts the
     # replacement no longer reaches either the symlink or its target.
     local test_container="dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
@@ -758,7 +772,7 @@ dexec_node() {
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-claude/statusline.sh:ro" \
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
     wait_ready "$test_container"

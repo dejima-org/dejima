@@ -14,6 +14,8 @@ source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
+# shellcheck source=dejima-harness-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-harness-lib.sh"
 # Defined empty here so every interpolation below is safe before a surface
 # picks its stream; compare (stderr) and ack (stdout) each re-init for theirs.
 color_init 1
@@ -21,17 +23,36 @@ config_validate || exit 1
 
 cmd="${1:-}"; ws_arg="${2:-}"; state="${3:-}"
 
-PROJECTS_DIR="$(config_get harness.claude-code projects_dir)"
+PROJECTS_DIR="$(harness_config_get projects_dir)"
 
-# The one top-level ~/.claude entry docker-compose.yml's read-only overlays
-# don't cover (settings.json/CLAUDE.md/plugins/hooks/skills/commands/agents/
-# output-styles all are) - settings.json's statusLine.command runs it on the
-# HOST, unsandboxed, and bin/dejima's own read-only mount onto it
-# doesn't reliably protect it when it's a symlink (the common case - runc
-# resolves the mount destination through the symlink; confirmed against a
-# live container, see test/runtime.bats). Detection here is the compensating
-# control for that gap. Overridable for tests.
-STATUSLINE_PATH="$(config_get harness.claude-code statusline_path)"
+# The paths the selected harness causes to run ON THE HOST, unsandboxed,
+# from configuration a session can reach - Claude Code's statusline is the
+# instance that exists. Each is watched on its own rather than folded into
+# hash_paths, because bin/dejima's read-only mount does not reliably protect
+# one that is a symlink (the common case - runc resolves the mount
+# destination through the link; confirmed against a live container, see
+# test/runtime.bats), so detection here is the compensating control.
+#
+# Declared by the harness's plugin, not by its manifest: the labels below
+# are the fixed prefixes `ack` strips to recover an id, which makes them
+# part of a parser's grammar rather than data. See bin/dejima-harness-lib.sh.
+harness_plugin_load "$(config_get core harness)"
+host_exec_load
+
+# With no harness selected there is no statusline path to watch, and the
+# compensating control above quietly covers nothing. bin/dejima refuses to
+# start without [core] harness, so a snapshot in this state means the audit
+# was driven by hand against a config dejima itself would reject - say so
+# rather than reporting a clean run over a surface that was never examined.
+# A silently narrower audit is worse than a noisy one.
+if [ "${#DEJIMA_HOST_EXEC[@]}" -eq 0 ] && [ -z "$(config_get core harness)" ]; then
+    case "$cmd" in
+        snapshot|compare)
+            echo "dejima audit: no [core] harness is set, so harness-specific surfaces" >&2
+            echo "              (whatever this harness runs on the host) are NOT checked." >&2
+            ;;
+    esac
+fi
 
 # This script's own repo root - the sandbox's trusted computing base (see
 # tcb_snapshot below) is only monitored when the workspace being audited IS
@@ -130,10 +151,10 @@ resolve_ws() {
     fi
     for c in "$top" "$main" "$PWD"; do
         [ -n "$c" ] || continue
-        # A bare slug directory is no longer proof of a report - `snapshot`
-        # now creates one's .staging/ subdir for every workspace it runs
-        # against, report or not. Only an actual report is evidence of which
-        # path bin/dejima was invoked with.
+        # A bare slug directory is not proof of a report: `snapshot` creates
+        # one's .staging/ subdir for every workspace it runs against, report
+        # or not. Only an actual report is evidence of which path bin/dejima
+        # was invoked with.
         select_report "$AUDIT_DIR/$(ws_slug "$c")" >/dev/null 2>&1 || continue
         printf '%s' "$c"
         return
@@ -200,9 +221,7 @@ store_reachable() {
     local d rws rd
     # Canonicalised, not raw: symlinks and `..` in either side would otherwise
     # never match the "$rws"/* pattern below and would stage straight into the
-    # container's read-write mount. (A *relative* store used to be the sharper
-    # case here; the config's "path" type now refuses one outright, so it
-    # cannot reach this function at all.) `-m`, not
+    # container's read-write mount. `-m`, not
     # `-f`: `$AUDIT_DIR` routinely doesn't exist yet on a fresh install (its
     # parent tree is only ever mkdir -p'd on a real finding or by `ack`), and
     # `-f` requires every component but the last to exist - it would fail
@@ -369,11 +388,14 @@ withhold() { printf '%s\n' "$2" > "$1" 2>/dev/null || true; }
 # compare against.
 existed_before() {
     local rid="$1" range enc
+    if host_exec_is_id "$rid"; then
+        range="/^$(_hostexec_boundary "$state")/,\$p"; enc="$(enc_id "${rid#*:}")"
+    else
     case "$rid" in
-        statusline:*) range='/^### statusline/,$p';           enc="$(enc_id "${rid#statusline:}")" ;;
-        tcb:*)        range='/^### tcb/,/^### statusline/p';   enc="$(enc_id "${rid#tcb:}")" ;;
+        tcb:*)        range="/^### tcb/,/^$(_hostexec_boundary "$state")/p"; enc="$(enc_id "${rid#tcb:}")" ;;
         *)            range='/^### paths/,/^### projects/p';   enc="$(enc_id "$rid")" ;;
     esac
+    fi
     sed -n "$range" "$state" | grep -v '^### ' | cut -f1 | grep -qxF -- "$enc"
 }
 
@@ -518,11 +540,15 @@ promote_finding() {
     # Mirrors current_content_for_id's dispatch; gitconfig ids never reach
     # here (promote_gitconfig returned above), and stat does not follow a
     # symlink, whose rendering is its target string rather than its content.
+    # A host-execution surface's path comes from the harness plugin that
+    # declared it, not from the workspace.
+    local _hp
+    if _hp="$(host_exec_path_for_id "$rid")"; then src="$_hp"; else
     case "$rid" in
-        statusline:*) src="$STATUSLINE_PATH" ;;
         tcb:*)        src="$ws/${rid#tcb:}" ;;
         *)            src="$ws/$rid" ;;
     esac
+    fi
     csz="$(stat -c %s "$src" 2>/dev/null)" || csz=0
     if [ "$csz" -gt "$STAGE_FILE_CAP" ]; then
         withhold "$sc/$key.withheld" "change too large to retain - compare by hand"
@@ -661,7 +687,7 @@ id_severity() {
         gitconfig:*) k="${1#gitconfig:}"; k="${k#worktree:}"
                      is_exec_key "$k" && { echo CRITICAL; return; }
                      case "$k" in alias.*) echo CRITICAL ;; *) echo WARNING ;; esac ;;
-        statusline:*|tcb:*) echo CRITICAL ;;
+        tcb:*) echo CRITICAL ;;
         *) path_severity "$1" ;;
     esac
 }
@@ -824,10 +850,31 @@ tcb_snapshot() {
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
+        # A one-row table, not a loop that happens to run once: the shape is
+        # what lets a second path be added as a line rather than a branch.
+        # shellcheck disable=SC2043
         for p in install.sh; do
             [ -f "$ws/$p" ] && { stage_entry "tcb:$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
-        for dir in bin hooks docker test; do
+        # The provider directories are here for two reasons that are easy to
+        # miss because they are data, not code.
+        #
+        # A forge's `fixed_hosts` and a harness's paths are resolved on the
+        # host and handed to the container: fixed_hosts reaches
+        # DEJIMA_FORGE_HOSTS, which entrypoint.sh joins into extra_domains and
+        # init-firewall.sh allowlists. So a line added to a manifest widens the
+        # egress allowlist on the next launch - the boundary that bounds where
+        # a compromised session can send anything.
+        #
+        # And a briefing fragment is what the next session is told about where
+        # it is and what it may do, which docs/security.md already names as
+        # reachable from a session with write access to this checkout.
+        #
+        # Neither is code and neither is executed, which is why they were not
+        # here. Both decide what the next launch permits, which is what the
+        # TCB list is for. A visible edit stays a normal reviewable diff - the
+        # split above only reports what git cannot see.
+        for dir in bin hooks docker test forges workflows harnesses; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
                     stage_entry "tcb:${f#"$ws"/}" "$f"
@@ -897,13 +944,14 @@ gitconfig_sha_for_key() {
 # that namespace, so the id/sha pair ack records is exactly what
 # baseline_suppresses will later compare against.
 current_sha_for_id() {
-    local id="$1" f
+    local id="$1" f _hp
+    if _hp="$(host_exec_path_for_id "$id")"; then f="$_hp"; else
     case "$id" in
         gitconfig:*)  gitconfig_sha_for_key "$ws" "${id#gitconfig:}"; return ;;
-        statusline:*) f="$STATUSLINE_PATH" ;;
         tcb:*)        f="$ws/${id#tcb:}" ;;
         *)            f="$ws/$id" ;;
     esac
+    fi
     # -e alone follows a symlink and misses one whose target is gone - but a
     # dangling symlink is exactly what hash_entry() below can still hash (the
     # link's target string, never the target's content), so excluding it here
@@ -924,13 +972,14 @@ DISPLAY_LINE_CAP=40
 # as their target, because that is what hash_entry() hashes for them - the
 # link's own content is not what changed.
 current_content_for_id() {
-    local id="$1" f
+    local id="$1" f _hp
+    if _hp="$(host_exec_path_for_id "$id")"; then f="$_hp"; else
     case "$id" in
         gitconfig:*)  gitconfig_value_for_key "$ws" "${id#gitconfig:}" ;;
-        statusline:*) f="$STATUSLINE_PATH" ;;
         tcb:*)        f="$ws/${id#tcb:}" ;;
         *)            f="$ws/$id" ;;
     esac
+    fi
     case "$id" in gitconfig:*) return ;; esac
     [ -e "$f" ] || [ -L "$f" ] || return 1
     if [ -L "$f" ]; then
@@ -999,10 +1048,13 @@ show_capped() {
 # Never sanitized through a path that would make it unfindable: it is the
 # audit's OWN text about a location, not workspace-controlled content.
 source_hint() {
-    local id="$1"
+    local id="$1" _hp
+    if _hp="$(host_exec_path_for_id "$id")"; then
+        printf '%s\n' "    (full text: $(sanitize "$_hp"))"
+        return
+    fi
     case "$id" in
         gitconfig:*)  printf '%s\n' "    (full value: git -C $ws config --get $(sanitize "${id#gitconfig:}"))" ;;
-        statusline:*) printf '%s\n' "    (full text: $STATUSLINE_PATH)" ;;
         tcb:*)        printf '%s\n' "    (full text: $ws/$(sanitize "${id#tcb:}"))" ;;
         *)            printf '%s\n' "    (full text: $ws/$(sanitize "$id"))" ;;
     esac
@@ -1050,20 +1102,45 @@ render_finding() {
     return 0
 }
 
-statusline_snapshot() {
-    # path<TAB>sha for $HOME/.claude/statusline.sh, or nothing if this host
-    # has none - see STATUSLINE_PATH above for why this one path is
-    # monitored on its own rather than as part of hash_paths.
-    local f="$1"
-    [ -e "$f" ] || return 0
-    stage_entry "statusline:statusline.sh" "$f"
-    printf 'statusline.sh\t%s\n' "$(hash_entry "$f")"
+# The boundary that ends the tcb section and begins host-execution entries.
+# A state file written before that section was renamed says "### statusline";
+# reading it with "### hostexec" alone would run the tcb range to the end of
+# the file, turning that old entry into a spurious "TCB modified, INVISIBLE
+# to git" CRITICAL and firing a host-exec finding for a surface nothing
+# changed. Only a comparison spanning a checkout update sees this, which is
+# exactly the case the section boundaries exist to survive.
+_hostexec_boundary() {
+    grep -q '^### hostexec$' "$1" 2>/dev/null && { printf '### hostexec'; return; }
+    printf '### statusline'
+}
+
+host_exec_snapshot() {
+    # leaf<TAB>sha for every host-execution surface the harness declared, or
+    # nothing where the host has none. One line per surface, keyed by the
+    # leaf so the id a baseline stores ("<namespace>:<leaf>") is unchanged
+    # for a harness already in use.
+    local rec ns leaf path label
+    for rec in ${DEJIMA_HOST_EXEC[@]+"${DEJIMA_HOST_EXEC[@]}"}; do
+        IFS=$'\t' read -r ns leaf path label <<< "$rec"
+        [ -n "$path" ] && [ -e "$path" ] || continue
+        stage_entry "$ns:$leaf" "$path"
+        printf '%s\t%s\n' "$leaf" "$(hash_entry "$path")"
+    done
 }
 
 case "$cmd" in
     --print-paths)
-        printf 'projects_dir=%s\nstatusline_path=%s\naudit_dir=%s\nbaselines_dir=%s\nkeep=%s\n' \
-            "$PROJECTS_DIR" "$STATUSLINE_PATH" "$AUDIT_DIR" "$BASELINE_DIR" "$AUDIT_KEEP"
+        # statusline_path is still named, because it is the surface this
+        # harness declares and existing callers read it by that name. It
+        # comes from the declaration now rather than from a global of its
+        # own, so a harness declaring none prints an empty value and one
+        # declaring several prints a line each.
+        printf 'projects_dir=%s\naudit_dir=%s\nbaselines_dir=%s\nkeep=%s\n' \
+            "$PROJECTS_DIR" "$AUDIT_DIR" "$BASELINE_DIR" "$AUDIT_KEEP"
+        for _rec in ${DEJIMA_HOST_EXEC[@]+"${DEJIMA_HOST_EXEC[@]}"}; do
+            IFS=$'\t' read -r _ns _leaf _path _label <<< "$_rec"
+            printf '%s_path=%s\n' "$_ns" "$_path"
+        done
         exit 0
         ;;
     snapshot)
@@ -1081,7 +1158,7 @@ case "$cmd" in
           # version unparseable by the other across an upgrade mid-session.
           echo "### projects";
           echo "### tcb";       tcb_snapshot "$ws";
-          echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$state" 2>/dev/null || true
+          echo "### hostexec"; host_exec_snapshot; } > "$state" 2>/dev/null || true
         exit 0
         ;;
     compare)
@@ -1120,7 +1197,7 @@ case "$cmd" in
                            echo "### paths";     hash_paths "$ws";
                            echo "### projects";
                            echo "### tcb";       tcb_snapshot "$ws";
-                           echo "### statusline"; statusline_snapshot "$STATUSLINE_PATH"; } > "$new" 2>/dev/null || {
+                           echo "### hostexec"; host_exec_snapshot; } > "$new" 2>/dev/null || {
             echo "dejima audit: could not complete, skipping." >&2; rm -f "$new"; exit 0; }
 
         # One raw namespaced id per finding whose surface has retainable
@@ -1159,12 +1236,11 @@ case "$cmd" in
                           finding_ids+=("gitconfig:$key") ;;
                 esac
             else
-                # Suppressible and id-bearing like the CRITICAL arms above.
-                # Both were previously neither, which left this the one tier
-                # of finding with no way to curate it: keys some tools
-                # rewrite on every run (branch.<name>.merge on each push,
-                # submodule.*) re-fired every session and pushed real
-                # WARNINGs out of the capped list (#45).
+                # Suppressible and id-bearing like the CRITICAL arms above:
+                # without an id, keys some tools rewrite on every run
+                # (branch.<name>.merge on each push, submodule.*) re-fire
+                # every session and push real WARNINGs out of the capped
+                # list (#45).
                 #
                 # Safe by construction rather than by care taken here:
                 # id_severity already calls an exec key or any alias CRITICAL
@@ -1209,23 +1285,21 @@ case "$cmd" in
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
-        # There is deliberately no cross-project finding here any more. It
-        # reported a write to another project's ~/.claude/projects slug, and
-        # a session could once make one: the whole tree was mounted. Since
-        # #104 it gets its own slugs and nothing else, so the only writes this
-        # could still see are other host or dejima sessions doing their own
-        # legitimate work - and with several sessions running it reported all
+        # Deliberately no cross-project finding: since #104 a session gets
+        # its own ~/.claude/projects slugs and nothing else, so the only
+        # writes visible here are other host or dejima sessions doing their
+        # own legitimate work - and with several running it would report all
         # of them, on every report, drowning the findings that mattered.
         #
-        # Detection that cannot observe the thing it was built for, and fires
-        # constantly on the thing it was not, is worse than no detection: it
-        # trains the operator to skim. The mount is the control now, and
+        # Detection that cannot observe what it exists for, and fires
+        # constantly on what it does not, is worse than no detection: it
+        # trains the operator to skim. The mount is the control, and
         # static.bats pins it.
 
         # tcb diffs: any change under the sandbox's own trusted computing
         # base, only populated when this session's workspace IS the
         # sandbox's own repo (see tcb_snapshot) - empty/no-op otherwise.
-        # Bounded at ### statusline (not $p, the last section now) so this
+        # Bounded at ### hostexec (not $p, the last section now) so this
         # doesn't also swallow that section's lines.
         # Split on whether git can see the change, because that decides
         # whether this finding is telling the operator anything.
@@ -1252,25 +1326,39 @@ case "$cmd" in
             fi
             crit+=("TCB (sandbox self) modified, INVISIBLE to git: $line")
             finding_ids+=("$tid")
-        done < <(comm -3 <(sed -n '/^### tcb/,/^### statusline/p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### tcb/,/^### statusline/p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n "/^### tcb/,/^$(_hostexec_boundary "$state")/p" "$state" | grep -v '^### ') \
+                         <(sed -n "/^### tcb/,/^$(_hostexec_boundary "$new")/p"   "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
         if [ "$tcb_visible" -gt 0 ]; then
             info+=("$tcb_visible change(s) under the sandbox's own bin/, hooks/, docker/, test/ - this workspace IS dejima; review them with git")
         fi
 
-        # statusline diff: ~/.claude/statusline.sh added/changed/removed/
-        # repointed - see STATUSLINE_PATH above for why this gets its own
-        # section instead of folding into hash_paths. Worded at least as
-        # strongly as COMMAND-EXECUTION/TCB above: this is unsandboxed host
-        # code execution, not just a config change.
+        # host-execution diff: a path the harness runs on the HOST added,
+        # changed, removed or repointed. Its own section rather than folded
+        # into hash_paths for the reason given where the surfaces are loaded,
+        # and worded at least as strongly as COMMAND-EXECUTION/TCB above:
+        # this is unsandboxed host code execution, not just a config change.
+        #
+        # The label is the plugin's, because it is the fixed prefix `ack`
+        # strips to recover the id and so belongs in trusted code rather than
+        # in manifest data. A leaf with no declaring surface cannot happen
+        # from a snapshot this run wrote, but it can from a state file
+        # written before the harness changed - such a line is skipped rather
+        # than reported under a label nothing owns.
         while IFS= read -r line; do
-            sid="statusline:$line"; ssha=""; [ -e "$STATUSLINE_PATH" ] && ssha="$(hash_entry "$STATUSLINE_PATH")"
+            _hl=""; _hns=""; _hpath=""
+            for _rec in ${DEJIMA_HOST_EXEC[@]+"${DEJIMA_HOST_EXEC[@]}"}; do
+                IFS=$'\t' read -r _ns _leaf _path _label <<< "$_rec"
+                [ "$_leaf" = "$line" ] || continue
+                _hns="$_ns"; _hpath="$_path"; _hl="$_label"; break
+            done
+            [ -n "$_hl" ] || continue
+            sid="$_hns:$line"; ssha=""; [ -e "$_hpath" ] && ssha="$(hash_entry "$_hpath")"
             baseline_suppresses "$sid" "$ssha" && continue
-            crit+=("HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): $(enc_id "$line")")
+            crit+=("$_hl$(enc_id "$line")")
             finding_ids+=("$sid")
-        done < <(comm -3 <(sed -n '/^### statusline/,$p' "$state" | grep -v '^### ') \
-                         <(sed -n '/^### statusline/,$p' "$new"   | grep -v '^### ') \
+        done < <(comm -3 <(sed -n "/^$(_hostexec_boundary "$state")/,\$p" "$state" | grep -v '^### ') \
+                         <(sed -n "/^$(_hostexec_boundary "$new")/,\$p" "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
         rm -f "$new"
@@ -1544,6 +1632,27 @@ case "$cmd" in
             # from $id because a gitconfig body carries `key=value` while its
             # id is the key alone.
             ackable=0; id=""; rid=""; lbl=""; surface=""
+            # Host-execution surfaces first, because their labels come from
+            # the harness plugin rather than from a literal here. Matched by
+            # an exact prefix strip - "$body" with the label removed differs
+            # from "$body" only when the label really is at position 0 -
+            # rather than by a `case` pattern, which would treat a label's
+            # own characters as globs. Anchoring is the whole point (#45):
+            # an unanchored match lets chosen text derive an id in the wrong
+            # namespace, and approving it baselines an id that never matches
+            # while the real finding counts as acknowledged.
+            for _rec in ${DEJIMA_HOST_EXEC[@]+"${DEJIMA_HOST_EXEC[@]}"}; do
+                IFS=$'\t' read -r _ns _leaf _path _label <<< "$_rec"
+                _rest="${body#"$_label"}"
+                [ "$_rest" != "$body" ] || continue
+                ackable=1; lbl="$_label"; surface="$_rest"
+                id="$_ns:$_rest"; rid="$_ns:$(dec_id "$_rest")"
+                break
+            done
+            # Only if none of them claimed it: a host-exec label that
+            # matched has already derived the id, and the arms below must
+            # not get a second go at the same text.
+            if [ -z "$id" ]; then
             case "$body" in
                 "HOST-CODE-EXECUTION workspace file: "*)
                     ackable=1; lbl="HOST-CODE-EXECUTION workspace file: "
@@ -1571,11 +1680,6 @@ case "$cmd" in
                     cfgline="${body#changed git config: }"
                     ekey="${cfgline%%=*}"; surface="$ekey"
                     id="gitconfig:$ekey"; rid="gitconfig:$(dec_id "$ekey")" ;;
-                "HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "*)
-                    ackable=1; lbl="HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): "
-                    esl="${body#HOST-CODE-EXECUTION statusline.sh changed (runs UNSANDBOXED on the host via settings.json statusLine.command): }"
-                    surface="$esl"
-                    id="statusline:$esl"; rid="statusline:$(dec_id "$esl")" ;;
                 "TCB (sandbox self) modified, INVISIBLE to git: "*)
                     ackable=1; lbl="TCB (sandbox self) modified, INVISIBLE to git: "
                     etcb="${body#TCB (sandbox self) modified, INVISIBLE to git: }"
@@ -1583,6 +1687,7 @@ case "$cmd" in
                     id="tcb:$etcb"; rid="tcb:$(dec_id "$etcb")" ;;
                 *) ackable=0 ;;
             esac
+            fi
             # Defence in depth: even an anchored arm above should never
             # leave id empty while claiming ackable, but don't trust that -
             # crit_acked (and thus whether a report can shed -CRITICAL.txt)
@@ -1644,8 +1749,8 @@ case "$cmd" in
             # is the whole difference between the two that record something
             # and it was not visible: approve pins this exact content and
             # re-fires on any other, ignore blankets the surface whatever it
-            # later contains. The WARNING prompt used to say a bare
-            # "approve", which read as the same thing as "always ignore".
+            # later contains. A bare "approve" reads as the same thing as
+            # "always ignore", which is the confusion these words avoid.
             #
             # "file" is wrong for a git config key, and naming the wrong kind
             # of thing in the sentence that offers a permanent mute is worth
@@ -1654,8 +1759,8 @@ case "$cmd" in
                 gitconfig:*) ign_noun="key" ;;
                 *)           ign_noun="file" ;;
             esac
-            k_a="$C_KEY[a]$C_RESET"; k_i="$C_KEY[i]$C_RESET"
-            k_s="$C_KEY[s]$C_RESET"; k_q="$C_KEY[q]$C_RESET"
+            k_a="${C_KEY}[a]$C_RESET"; k_i="${C_KEY}[i]$C_RESET"
+            k_s="${C_KEY}[s]$C_RESET"; k_q="${C_KEY}[q]$C_RESET"
             if [ "$ackable" -ne 1 ]; then
                 printf '  %s skip  %s quit (this finding cannot be acknowledged): ' "$k_s" "$k_q"
             elif [ "$tier" = CRITICAL ]; then

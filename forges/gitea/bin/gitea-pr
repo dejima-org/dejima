@@ -77,6 +77,14 @@ function api_or_die() {
     fi
 }
 
+# Same check, but an absent argument gets the usage line rather than a
+# complaint about the empty string: "no argument" and "wrong argument" are
+# different mistakes and deserve different advice.
+function require_number_or_usage() {
+    [ -n "${1:-}" ] || return 0
+    require_number "$1"
+}
+
 # Reads a body from a file, or from stdin for '-'. The point is to keep prose
 # out of argv: a body composed on a command line has to survive shell quoting,
 # and the things that break it - an apostrophe, a backtick, a $ - are exactly
@@ -110,6 +118,44 @@ function gitea_owner_repo() {
     echo "$owner_repo"
 }
 
+# Gitea paginates every list endpoint and answers a bare request with one
+# page. A caller that reads page one and stops is correct only while the list
+# is short and silently wrong afterwards, which is the worst shape for this:
+# `create`'s duplicate check would miss an existing PR and file a second one,
+# and `comments` would drop the review someone is waiting on, both without a
+# word. Sets `json` to the concatenation of every page, so callers keep
+# treating it as one array.
+#
+# Pages are followed until one comes back short, which is the end of the list.
+# PAGE_MAX bounds the loop rather than trusting that: a server that ignores
+# `page` would otherwise return a full page forever, and this runs
+# unattended.
+PAGE_LIMIT=50
+PAGE_MAX=40
+function api_all_pages() {
+    local what="$1" url="$2" sep page=1 count acc='[]'
+    case "$url" in *\?*) sep='&' ;; *) sep='?' ;; esac
+    while [ "$page" -le "$PAGE_MAX" ]; do
+        api_or_die "$what" "${url}${sep}limit=${PAGE_LIMIT}&page=${page}"
+        count=$(echo "$json" | jq 'if type == "array" then length else 0 end')
+        acc=$(jq -n --argjson a "$acc" --argjson b "$json" \
+            '$a + (if ($b | type) == "array" then $b else [] end)')
+        [ "$count" -eq "$PAGE_LIMIT" ] || break
+        page=$((page + 1))
+    done
+    if [ "$page" -gt "$PAGE_MAX" ]; then
+        echo "warning: stopped reading $what after $PAGE_MAX pages - some may be missing" >&2
+    fi
+    json="$acc"
+}
+
+# Every subcommand taking a PR number goes through this, not only the ones
+# where a bad value would be obvious. The number is interpolated into an API
+# URL path and curl normalises dot-segments, so a value like
+# `../../../other/repo/pulls/7` reaches a different repo's endpoint with this
+# token on it. No privilege boundary is crossed - the agent holds the token
+# and could curl directly - but a CLI that builds the URL should not be the
+# thing that makes it easy.
 function require_number() {
     if ! [[ "${1:-}" =~ ^[0-9]+$ ]]; then
         echo "Expected a PR number, got '${1:-}'" >&2
@@ -189,7 +235,7 @@ ${body}"
             base="${base:-main}"
         fi
 
-        api_or_die "check for an existing PR" "${GITEA_API}/repos/${owner}/${repo}/pulls?state=open"
+        api_all_pages "check for an existing PR" "${GITEA_API}/repos/${owner}/${repo}/pulls?state=open"
         existing_url=$(echo "$json" | jq -r --arg head "$current_branch" --arg base "$base" \
             '.[] | select(.head.ref == $head and .base.ref == $base) | .html_url' | head -1)
         if [ -n "$existing_url" ]; then
@@ -241,7 +287,8 @@ $body" '. + {body: $b}')
         echo "$json" | jq -r '.html_url'
         ;;
     comments)
-        pr_number="${1:-}"
+        require_number "${1:-}"
+        pr_number="$1"
         shift || true
         show_all=0
         while [ $# -gt 0 ]; do
@@ -259,12 +306,12 @@ $body" '. + {body: $b}')
         fi
 
         echo "=== Issue comments ==="
-        api_or_die "fetch issue comments" \
+        api_all_pages "fetch issue comments" \
             "${GITEA_API}/repos/${owner}/${repo}/issues/${pr_number}/comments"
         echo "$json" | jq -r '.[] | "[\(.user.login) @ \(.created_at)]\n\(.body)\n"'
 
         echo "=== Reviews ==="
-        api_or_die "fetch reviews" "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews"
+        api_all_pages "fetch reviews" "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews"
         reviews_json="$json"
         echo "$reviews_json" | jq -r '.[] | select(.body != "") | "[\(.user.login) @ \(.submitted_at) — \(.state)]\n\(.body)\n"'
 
@@ -272,11 +319,10 @@ $body" '. + {body: $b}')
         review_ids=$(echo "$reviews_json" | jq -r '.[] | select(.comments_count > 0) | .id')
         all_comments='[]'
         for review_id in $review_ids; do
-            api_or_die "fetch comments for review ${review_id}" \
+            api_all_pages "fetch comments for review ${review_id}" \
                 "${GITEA_API}/repos/${owner}/${repo}/pulls/${pr_number}/reviews/${review_id}/comments"
             # The hunk, not just the path. Gitea's review-comment objects carry
-            # no `line` field at all - the old `.line // "?"` could only ever
-            # print `?` - but they do carry `diff_hunk`, which is the exact
+            # no `line` field at all, but they do carry `diff_hunk`, which is the exact
             # text the comment was left against. Without it a reviewer's
             # "this is confusing" arrives with nothing to attach it to, and
             # whoever acts on the review has to guess which passage was meant.
@@ -318,6 +364,7 @@ $body" '. + {body: $b}')
         fi
         ;;
     merge)
+        require_number_or_usage "${1:-}"
         pr_number="${1:-}"
         if [ -z "$pr_number" ]; then
             echo "Usage: gitea-pr merge PR_NUMBER" >&2

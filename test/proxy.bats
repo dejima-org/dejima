@@ -394,7 +394,7 @@ make_cert() {
     [[ "$output" == *"ALPN protocol: http/1.1"* ]]
 }
 
-@test "forwarder loopback mode is unchanged: plaintext http on the old port" {
+@test "forwarder loopback mode serves plaintext http on the port it is given" {
     start_proxy
     start_forwarder loopback 18445
     run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
@@ -425,4 +425,42 @@ make_cert() {
         node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js"
     [ "$status" -ne 0 ]
     [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
+}
+
+@test "an oversized request body is refused rather than read into host RAM" {
+    # The client here is the sandboxed session and this runs on the host as
+    # the operator's user, so the body is session-controlled input with no
+    # bound of its own. Every other session-controlled size in the repo is
+    # capped; this was the one that was not.
+    start_proxy
+    local big
+    big="$TD/big"
+    # Just over the 32MiB cap, declared honestly in Content-Length.
+    head -c $((32 * 1024 * 1024 + 1024)) /dev/zero | tr '\0' 'a' > "$big"
+    run pcurl -o /dev/null -w '%{http_code}' -X POST \
+        --data-binary "@$big" -H 'Content-Type: application/json' \
+        "http://localhost/v1/messages"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "413" ] || { echo "expected 413, got $output"; return 1; }
+    # And the refusal says so on the host, where the operator can see it.
+    grep -q 'refused a request body' "$TD/stderr" \
+        || { echo "nothing logged: $(cat "$TD/stderr")"; return 1; }
+    # Nothing reached upstream: a body half-forwarded is worse than a refusal.
+    grep -q 'aaaa' "$TD/upstream-body" 2>/dev/null \
+        && { echo "an oversized body was forwarded upstream"; return 1; }
+    return 0
+}
+
+@test "a normal-sized request body still passes through" {
+    # The cap must be far above anything real. A conversation with attachments
+    # is the biggest thing a Messages request carries.
+    start_proxy
+    local body
+    body="$TD/normal"
+    head -c $((2 * 1024 * 1024)) /dev/zero | tr '\0' 'b' > "$body"
+    run pcurl -o /dev/null -w '%{http_code}' -X POST \
+        --data-binary "@$body" -H 'Content-Type: application/json' \
+        "http://localhost/v1/messages"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "200" ] || { echo "a 2MiB body was refused with $output"; return 1; }
 }
