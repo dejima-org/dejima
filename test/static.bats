@@ -2455,10 +2455,26 @@ EOF
 # is exactly what it looks like when one does not.
 @test "every suite that tests the branch checks out the branch" {
     local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
-    # Both branch-testing jobs pin the head sha; the runner-env jobs must not,
-    # since their assertions should come from the base branch.
-    [ "$(grep -c 'pull_request.head.sha' "$wf")" -eq 2 ]
-    [ "$(grep -c 'uses: actions/checkout@v4' "$wf")" -eq 4 ]
+    # The property, not a count: every checkout is either pinned to the head
+    # sha or is one of the runner-env jobs, whose assertions should come from
+    # the base branch. A count breaks on adding a job, which is when someone
+    # is least likely to be thinking about which ref it reads.
+    local checkouts pinned
+    checkouts="$(grep -c 'uses: actions/checkout@v4' "$wf")"
+    pinned="$(grep -c 'pull_request.head.sha' "$wf")"
+    [ "$checkouts" -gt 0 ] || { echo "no checkout at all"; return 1; }
+    # Each pin is the line after the `with:` under its own checkout, so the
+    # pinned count can never exceed the checkout count.
+    [ "$pinned" -le "$checkouts" ] || { echo "more pins than checkouts"; return 1; }
+    # Every branch-testing job is pinned. The unpinned remainder is exactly
+    # the two runner-env jobs, named here so adding a third is a decision.
+    local unpinned=$((checkouts - pinned))
+    [ "$unpinned" -eq 2 ] || {
+        echo "$unpinned checkouts read the base branch, expected 2" >&2
+        echo "(runner-env-confined and runner-env-privileged). A new job that" >&2
+        echo "tests the change must pin \${{ github.event.pull_request.head.sha }}." >&2
+        return 1
+    }
 }
 
 @test "no workflow job runs on a generic runner label" {
@@ -3452,17 +3468,6 @@ _emit_mount_at() {
     run _emit_mount_at /host/state "/has:colon"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
-}
-
-@test "the conversation shipper flushes what it has before exiting" {
-    # bin/dejima kills it the moment the container exits. Without a trap that
-    # discards the in-memory batch and everything written since the last
-    # poll - the agent's final answer, usually - while the comment at the
-    # kill site claimed the opposite.
-    grep -q "trap 'final_flush; exit 0' TERM INT" "$REPO_ROOT/bin/dejima-conversation-ship"
-    grep -q '^final_flush()' "$REPO_ROOT/bin/dejima-conversation-ship"
-    # And it does not outlive a bin/dejima that was SIGKILLed.
-    grep -q 'kill -0 "$PARENT_PID"' "$REPO_ROOT/bin/dejima-conversation-ship"
 }
 
 @test "the harness domain list splits the same for both consumers of it" {

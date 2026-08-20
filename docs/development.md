@@ -93,7 +93,13 @@ parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
 since the fast CI job's container deliberately has no daemon), `providers.bats`
 covers the forge/workflow/harness manifest contract documented in
 [docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling.
+proxy's own request handling. `conversation.bats` runs
+`bin/dejima-conversation-ship` against a real transcript and a real HTTP
+endpoint standing in for Loki, and asserts on what arrives: that a session's
+lines ship, that a torn line waits until it is whole, that a sibling project
+whose directory name merely extends this one is not swept up with it, and
+that neither the in-memory batch nor the unread tail is lost to the kill that
+ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service bound to the host's
@@ -142,9 +148,16 @@ SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
 Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`project.bats`, `providers.bats`, `proxy.bats`, `remote.bats` and
-`static.bats`, runs anywhere a shell does, including inside a dejima sandbox
-itself, which has no Docker daemon by design.
+`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
+`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
+a dejima sandbox itself, which has no Docker daemon by design.
+
+`.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
+the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
+by shebang rather than enumerated, so a script added under `bin/`, `hooks/`,
+`docker/` or a forge's `bin/` is covered the day it lands. The severity floor
+and the two disabled checks are in `.shellcheckrc`, each with the reason
+beside it.
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every
 push to one, `runtime.bats` included. That job needs two things from the

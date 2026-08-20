@@ -2284,9 +2284,30 @@ PY
     run bash -c "cd '$web' && sha256sum src/* package-lock.json | LC_ALL=C sort -k2"
     [ "$status" -eq 0 ]
     [ "$output" = "$(cat "$web/sources.sha256")" ] || {
-        echo "web/index.html is stale. Rebuild it:" >&2
+        echo "web/sources.sha256 is stale. Rebuild it:" >&2
         echo "  cd web && npm ci && node build.mjs" >&2
         diff <(printf '%s\n' "$output") "$web/sources.sha256" >&2 || true
+        false
+    }
+
+    # The manifest agreeing with the sources says the MANIFEST was rebuilt. It
+    # says nothing about the page, and a commit that stages web/src and
+    # web/sources.sha256 while leaving index.html behind is exactly the shape
+    # this test exists to catch - it would pass everything above.
+    #
+    # build.mjs stamps the page with sha256sum of the manifest it wrote in the
+    # same run, so the page carrying that hash is the page having been built
+    # from that manifest. Two comparisons, and the pair is what closes it.
+    local stamp expected
+    stamp="$(grep -oE 'Sources: [a-f0-9]{64}' "$web/index.html" | head -1)"
+    stamp="${stamp#Sources: }"
+    expected="$(sha256sum "$web/sources.sha256" | cut -d' ' -f1)"
+    [ -n "$stamp" ] || { echo "web/index.html carries no Sources stamp" >&2; false; }
+    [ "$stamp" = "$expected" ] || {
+        echo "web/index.html is stale: it was built from a different manifest." >&2
+        echo "  page stamp:  $stamp" >&2
+        echo "  manifest is: $expected" >&2
+        echo "Rebuild it:  cd web && npm ci && node build.mjs" >&2
         false
     }
 }

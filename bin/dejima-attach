@@ -349,6 +349,7 @@ attach() {
     # The name is baked in here rather than read at exit: $group is local, and
     # a trap body runs after the function's locals are gone, where set -u
     # would abort it and leak the session it exists to remove.
+    # shellcheck disable=SC2064
     trap "tmux kill-session -t '=$group' 2>/dev/null || true" EXIT
     if ! group_holds_pane "$group" "$entry_pane"; then
         echo "Session $run_id is stale - the tmux session holding its pane went away." >&2

@@ -254,6 +254,9 @@ _warn_forge_env_collisions() {
         [ "${ref:0:1}" = "@" ] || continue
         # NAME=<core section> <core key>, for every variable core fills from
         # the config file itself.
+        # A one-row table, not a loop that happens to run once: another
+        # core-filled variable is a line here rather than a new branch.
+        # shellcheck disable=SC2043
         for core in "GH_TOKEN=github token_file"; do
             core_name="${core%%=*}"
             [ "$name" = "$core_name" ] || continue
@@ -889,9 +892,12 @@ export WORKSPACE_DIR
 # The image's user is built to match this uid/gid/username exactly (see
 # Dockerfile) - this is what makes $HOME-based absolute paths (dotfiles,
 # ~/.claude's plugin bookkeeping) resolve identically inside the container.
-export SANDBOX_USER="$(id -un)"
-export SANDBOX_UID="$(id -u)"
-export SANDBOX_GID="$(id -g)"
+# Assigned before export, not `export X="$(...)"`: export always succeeds,
+# so the combined form returns the export's status and set -e never sees a
+# failing substitution. Split, a failure here stops the launch.
+SANDBOX_USER="$(id -un)"; export SANDBOX_USER
+SANDBOX_UID="$(id -u)"; export SANDBOX_UID
+SANDBOX_GID="$(id -g)"; export SANDBOX_GID
 export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
@@ -902,7 +908,7 @@ export SANDBOX_GITCONFIG_DIR
 [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
-export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
+SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # The --allow-github-push flag and a selected forge whose hosts_allowlisted_by_core
@@ -999,8 +1005,8 @@ export SANDBOX_CMD
 # "on"/"off" - config_get_bool is what produces that, config_get would pass
 # "on"/"off" straight through and (among other things) silently disable the
 # firewall by default.
-export ENABLE_FIREWALL="$(config_get_bool core firewall)"
-export LOKI_URL="$(config_get logging loki_url)"
+ENABLE_FIREWALL="$(config_get_bool core firewall)"; export ENABLE_FIREWALL
+LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
@@ -1076,6 +1082,8 @@ for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
         # skipped mount leaves the symlink dangling inside the container and
         # the hook failing for a reason nothing states.
         _guarded_stores
+        # The tilde is a label an operator reads, not a path to expand.
+        # shellcheck disable=SC2088
         _refuse_guarded_mount "~/.claude symlink target" "$real_dir" "${GUARDED_STORES[@]}"
         mounted_dirs="$mounted_dirs $real_dir"
         extra_mounts+=(-v "$real_dir:$real_dir:ro")
@@ -1324,6 +1332,9 @@ if remote_enabled; then
     # than proceed on anything else. Once this check passes, everything
     # created below it (sessions/, notify/, notify/<run-id>) is safe: mode
     # 700 here means no other user can plant anything inside it afterward.
+    # -m applying only to the leaf is the reason for the check below, not
+    # an oversight: the mode is verified and reset before anything trusts it.
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_STATE_DIR" 2>/dev/null || true
     if [ -L "$DEJIMA_STATE_DIR" ] || [ ! -d "$DEJIMA_STATE_DIR" ] \
         || [ "$(stat -c %u "$DEJIMA_STATE_DIR")" != "$(id -u)" ]; then
@@ -1335,9 +1346,13 @@ if remote_enabled; then
     fi
     chmod 700 "$DEJIMA_STATE_DIR"
 
+    # The parent exists and is 700 by the block above, so -p creates only
+    # these leaves and -m is the mode each of them gets.
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_STATE_DIR/sessions" "$DEJIMA_STATE_DIR/notify"
     DEJIMA_SESSION_FILE="$DEJIMA_STATE_DIR/sessions/$DEJIMA_RUN_ID"
     DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_NOTIFY_DIR"
 
     # Verify what was just created, because everything downstream assumes it.
