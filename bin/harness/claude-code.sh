@@ -270,6 +270,50 @@ harness_config_dirs() {
 # the two are the same file for opposite reasons: staging keeps a session
 # from reaching the host's copy, and the audit catches a change to it made
 # some other way.
+# The two config files the sandbox needs to exist, the one condition that
+# makes a session start wrong, and the override layer - all Claude Code's
+# shape, none of it core's business.
+#
+# $1 is where to write the override. dejima owns the file: it is a throwaway
+# the session cannot reach, mounted at a container-local path. Returning
+# nonzero stops the launch.
+harness_prepare_config() {
+    local overlay="$1" settings="$HOME/.claude/settings.json" settings_error
+
+    # install.sh normally creates settings.json, and many hosts have no
+    # CLAUDE.md at all. Created empty rather than left absent because
+    # harness_staged_config below emits both unconditionally and core skips
+    # staging a file that does not exist - so without this the session would
+    # silently start without them. statusline.sh is deliberately NOT created:
+    # an empty one would be staged executable and run as the status line.
+    [ -f "$settings" ] || echo '{}' > "$settings"
+    [ -f "$HOME/.claude/CLAUDE.md" ] || : > "$HOME/.claude/CLAUDE.md"
+
+    # Claude Code ignores a settings.json it cannot parse, wholesale and with
+    # only a startup warning, so a stray edit on the host costs the sandbox
+    # every permission, hook and plugin the operator configured - including
+    # skipDangerousModePermissionPrompt, which is why the first visible
+    # symptom is an unexpected bypass-mode warning rather than anything
+    # mentioning settings. The file is staged verbatim, so nothing else parses
+    # it before the session reads it - check here, where the fix is at hand.
+    if ! settings_error="$(jq . "$settings" 2>&1 >/dev/null)"; then
+        echo "$settings is not valid JSON:" >&2
+        echo "  $settings_error" >&2
+        echo "Claude Code would ignore it entirely and the sandbox would start with" >&2
+        echo "none of your settings. Fix it, then retry." >&2
+        return 1
+    fi
+
+    # Claude Code's own per-command sandboxing is redundant here and cannot
+    # work anyway - bwrap can't create a namespace without privileges that
+    # would undo this container's hardening - and a session can't be trusted
+    # to turn it off itself. The override reaches Claude Code as an extra
+    # --settings layer (the manifest's settings_args) above
+    # ~/.claude/settings.json, which holds only what the sandbox overrides;
+    # the operator's hooks, permissions and plugins still apply from there.
+    jq -n '{sandbox: {enabled: false}}' > "$overlay"
+}
+
 harness_staged_config() {
     # Emitted whether or not the host has each one. Whether a file exists,
     # and what a dangling symlink means, are core's to decide - filtering
@@ -401,4 +445,37 @@ harness_transform_transcript() {
           else empty
           end
     ' 2>/dev/null
+}
+
+# Which of the hooks install.sh registers are actually in the operator's
+# settings, and which are not. Prints the missing ones, one per line, and
+# returns 1 if there are any - so the launch can name what is not in force
+# rather than assert that nothing is.
+#
+# Every hook this harness would install is checked, not just the briefing:
+# the realistic failure (install.sh never run with a harness set) is
+# all-or-nothing, but a hand-edited settings.json missing one guard is a
+# session quietly running without it, which is the case worth catching.
+#
+# dejima-notify.sh is deliberately absent: bin/dejima registers it per
+# session into a throwaway layer, and it is never in the operator's file.
+#
+# Reads the operator's real settings rather than dejima's own layer, which
+# is composed fresh each launch and always looks right.
+harness_guards_registered() {
+    local settings="$HOME/.claude/settings.json" missing=0
+    _registered() {
+        [ -f "$settings" ] || return 1
+        jq -e --arg s "/$2" "[.hooks.$1[]?.hooks[]?.command // empty]
+               | any(endswith(\$s))" "$settings" >/dev/null 2>&1
+    }
+    _registered SessionStart sandbox-context.sh \
+        || { printf 'the session briefing\n'; missing=1; }
+    harness_has_guard push-guard && { _registered PreToolUse git-push-guard.sh \
+        || { printf 'push-guard\n'; missing=1; }; }
+    harness_has_guard merge-guard && { _registered PreToolUse merge-guard.sh \
+        || { printf 'merge-guard\n'; missing=1; }; }
+    harness_has_guard bash-deny && { _registered PreToolUse deny-dangerous-bash.sh \
+        || { printf 'bash-deny\n'; missing=1; }; }
+    return "$missing"
 }

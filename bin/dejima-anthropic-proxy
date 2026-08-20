@@ -100,15 +100,12 @@ class Credentials:
         # can see, and keeps the rename below same-filesystem (a subdirectory
         # of the same parent) so atomicity is unaffected.
         #
-        # This used to lean on bin/dejima masking both paths with bind mounts,
-        # on the reasoning that "what the container's own bind mount shows is
-        # irrelevant to a host-side rename". That was backwards, and it was
-        # #50: the rename is unaffected by the container's mount, but the
-        # container's mount is destroyed by the rename. Replacing the file
-        # unlinks the dentry the mask was pinned to, so the mask detached and
-        # the sandbox saw the real token from the first refresh on. ~/.claude
-        # is no longer bind-mounted as a whole, so neither this directory nor
-        # the credential reaches the container and there is nothing to mask.
+        # A bind mount over the credential would not make this safe: the
+        # rename below is unaffected by the container's mount, but the
+        # container's mount is destroyed by the rename, which unlinks the
+        # dentry it is pinned to. ~/.claude is not mounted whole, so neither
+        # this directory nor the credential has a path into the container
+        # (#50, docs/security.md).
         directory = os.path.join(os.path.dirname(self.path) or ".", ".credentials-proxy-tmp")
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory)
@@ -124,6 +121,13 @@ class Credentials:
             raise
 
 
+class BodyTooLarge(Exception):
+    """A request body over the cap. Its own type, not ValueError: _read_body
+    raises ValueError for a genuinely malformed request (a chunk length that
+    is not hex), and that must still surface as a fault rather than be
+    answered as if the session had merely sent too much."""
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -133,17 +137,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_error(self, fmt, *args):
         sys.stderr.write("dejima-anthropic-proxy: " + fmt % args + "\n")
 
+    # Capped, because the client is the sandboxed session and this runs on the
+    # host as the operator's user. Every other session-controlled size in this
+    # repo is bounded (dejima-audit's STAGE_FILE_CAP and DIFF_BYTE_CAP,
+    # dejima-project's declare_entry, the briefing fragment limit), several
+    # with explicit reasoning about $TMPDIR being tmpfs; this was the one
+    # place that discipline was not applied, and a request body goes straight
+    # into host RAM.
+    #
+    # 32 MiB is far above any real Messages API request - the largest thing
+    # one carries is a conversation plus attachments - and far below anything
+    # that troubles a host. Refused rather than truncated: half a request
+    # forwarded upstream is a worse outcome than a rejected one.
+    MAX_BODY_BYTES = 32 * 1024 * 1024
+
     def _read_body(self):
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
             chunks = []
+            total = 0
             while True:
                 size = int(self.rfile.readline().split(b";")[0], 16)
                 if size == 0:
                     self.rfile.readline()
                     return b"".join(chunks)
+                total += size
+                if total > self.MAX_BODY_BYTES:
+                    raise BodyTooLarge("%d bytes" % self.MAX_BODY_BYTES)
                 chunks.append(self.rfile.read(size))
                 self.rfile.read(2)
-        return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        length = int(self.headers.get("Content-Length", 0))
+        if length > self.MAX_BODY_BYTES:
+            raise BodyTooLarge("%d bytes" % self.MAX_BODY_BYTES)
+        return self.rfile.read(length)
 
     def _fail(self, status, message, log_message=None):
         # log_message (host stderr) may contain upstream response bytes or
@@ -223,7 +248,14 @@ class Handler(BaseHTTPRequestHandler):
         return conn, conn.getresponse()
 
     def _proxy(self):
-        body = self._read_body()
+        try:
+            body = self._read_body()
+        except BodyTooLarge as e:
+            # 413 rather than a traceback and a 500: the session gets a status
+            # that says what to do about it, and the host log says what came
+            # in. Nothing is forwarded upstream.
+            return self._fail(413, "credential proxy: request body too large",
+                              log_message="refused a request body: %s" % e)
         try:
             token = self.server.creds.access_token()
         except Exception as e:

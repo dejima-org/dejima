@@ -111,8 +111,8 @@ EOF
     # name dnsmasq ever answers: only allowlisted names have an upstream at
     # all (no-resolv + servers-file), so "gets answered" and "is
     # allowlisted" are the same set - including domains added mid-session
-    # by bin/dejima-allow, which previously only got a one-time
-    # snapshot (ipset= can't live in the SIGHUP-reloadable servers-file).
+    # by bin/dejima-allow (ipset= can't live in the SIGHUP-reloadable
+    # servers-file).
     # The explicit github-domains lines below still win for GitHub names -
     # dnsmasq applies the longest matching ipset= domain - which is what
     # keeps GitHub IPs out of this port-unrestricted set (github-domains

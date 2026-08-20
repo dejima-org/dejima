@@ -704,26 +704,87 @@ _declared_config_dirs() {
     grep -q 'extra_mounts+=(-v "\$path:\$path:ro")' "$REPO_ROOT/bin/dejima"
 }
 
-@test "bin/dejima forces sandbox.enabled to false in the generated override layer" {
+# A HOME with the ~/.claude a harness plugin expects, for exercising
+# harness_prepare_config without touching the operator's real one.
+_settings_home() {
+    local h
+    h="$(mktemp -d "$BATS_TEST_TMPDIR/settings-home.XXXXXX")"
+    mkdir -p "$h/.claude"
+    printf '%s' "$h"
+}
+
+@test "the override layer forces sandbox.enabled to false" {
     # Claude Code's own internal per-command sandboxing is redundant on top
     # of this container and can't actually function inside it (bwrap can't
     # create a namespace here) - a session can't be trusted to turn it off
-    # itself, so this has to happen in the generation step on the host,
-    # before the container starts.
-    grep -qE 'jq -n .\{sandbox: \{enabled: false\}\}' "$REPO_ROOT/bin/dejima"
+    # itself, so this has to happen on the host, before the container starts.
+    #
+    # Asserted on what the plugin writes rather than on the line that writes
+    # it: the content is the property, and a refactor of how it is produced
+    # should not read as this being switched off.
+    local overlay
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$(_settings_home)"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -f "$overlay"; return 1; }
+    run jq -r '.sandbox.enabled' "$overlay"
+    rm -f "$overlay"
+    [ "$output" = "false" ] || { echo "the overlay does not disable it: $output"; return 1; }
 }
 
-@test "the generated override layer is a delta, not a copy of the operator's settings" {
-    # jq -n reads no input: what ships is only what the sandbox overrides,
-    # and everything else still comes from the operator's real settings.json
-    # through Claude Code's own layering. A copy would go stale the moment
-    # the host edited the original, and would duplicate every hook it
-    # carried across two layers that get merged.
-    grep -qE '^jq -n .* > "\$SANDBOX_SETTINGS_FILE"$' "$REPO_ROOT/bin/dejima"
-    # The operator's settings.json is read only to check that it parses. It
-    # must never become an input to the override layer.
-    run grep -E 'HOME/\.claude/settings\.json.*SANDBOX_SETTINGS_FILE' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+@test "the override layer is a delta, not a copy of the operator's settings" {
+    # What ships is only what the sandbox overrides; everything else still
+    # comes from the operator's real settings.json through Claude Code's own
+    # layering. A copy would go stale the moment the host edited the original,
+    # and would duplicate every hook it carried across two merged layers.
+    local home overlay
+    home="$(_settings_home)"
+    # A setting nothing in the sandbox overrides, which must not appear.
+    printf '{"env":{"OPERATOR_ONLY":"1"},"sandbox":{"enabled":true}}\n' \
+        > "$home/.claude/settings.json"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -f "$overlay"; return 1; }
+    run grep -c OPERATOR_ONLY "$overlay"
+    rm -f "$overlay"
+    [ "$output" = "0" ] || { echo "the operator's settings were copied into the overlay"; return 1; }
+}
+
+@test "an unparseable settings.json stops the launch instead of being ignored" {
+    # Claude Code ignores a settings.json it cannot parse, wholesale and with
+    # a startup warning only - so the session would run without the
+    # permissions, hooks and plugins the operator configured, and the first
+    # symptom is an unrelated-looking bypass-mode warning.
+    local home overlay
+    home="$(_settings_home)"
+    printf '{"permissions": [oops\n' > "$home/.claude/settings.json"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -ne 0 ] || { echo "a broken settings.json was accepted"; return 1; }
+    [[ "$output" == *"not valid JSON"* ]] || { echo "$output"; return 1; }
+}
+
+@test "core names no harness config file of its own" {
+    # The three that used to live in bin/dejima - creating settings.json and
+    # CLAUDE.md by name, parsing settings.json, and generating Claude Code's
+    # own settings schema - are the plugin's now. Core creates the file and
+    # decides where it is mounted; what goes in it is the harness's.
+    run grep -nE '\$HOME/\.claude/(settings\.json|CLAUDE\.md)' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
+    run grep -n 'sandbox: {enabled' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] || { echo "core still generates the harness's settings schema"; return 1; }
 }
 
 @test "the override layer is mounted outside ~/.claude and passed as --settings" {
@@ -746,12 +807,49 @@ _declared_config_dirs() {
     grep -qE -- '\$\{settings\[@\]\+"\$\{settings\[@\]\}"\}' "$SANDBOX_DIR/harness-wrapper.sh"
 }
 
-@test "bin/dejima pre-creates the ~/.claude config files so neither is mounted as a directory" {
-    # Docker creates a missing bind source as a directory - without this, a
-    # host that has never run install.sh gets a junk directory at
-    # ~/.claude/settings.json and a session with no settings at all.
-    grep -qE '\[ -f "\$HOME/\.claude/settings\.json" \] \|\| echo' "$REPO_ROOT/bin/dejima"
-    grep -qE '\[ -f "\$HOME/\.claude/CLAUDE\.md" \] \|\|' "$REPO_ROOT/bin/dejima"
+@test "the harness's config files are created if absent, so neither is staged missing" {
+    # A host that has never run install.sh has no settings.json, and many have
+    # no CLAUDE.md at all. Core skips staging a file that does not exist, so
+    # without this the session starts with neither - silently.
+    local home overlay
+    home="$(_settings_home)"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$home/.claude/settings.json" ] || { echo "settings.json was not created"; return 1; }
+    [ -f "$home/.claude/CLAUDE.md" ] || { echo "CLAUDE.md was not created"; return 1; }
+    # Valid JSON, not an empty file: an empty settings.json is one Claude Code
+    # would refuse to parse, which is the condition the check exists for.
+    run jq -e . "$home/.claude/settings.json"
+    [ "$status" -eq 0 ] || { echo "the seeded settings.json does not parse"; return 1; }
+    # statusline.sh is deliberately NOT among them. It is staged executable
+    # and named by settings.json's statusLine.command, so an empty one
+    # created here would be a status line that runs and does nothing, in
+    # place of the harness simply having none.
+    [ ! -e "$home/.claude/statusline.sh" ] \
+        || { echo "an empty statusline.sh was created and would be staged"; return 1; }
+}
+
+@test "an existing config file is left exactly as the operator wrote it" {
+    local home overlay
+    home="$(_settings_home)"
+    printf '{"env":{"KEEP":"me"}}\n' > "$home/.claude/settings.json"
+    printf 'operator prose\n' > "$home/.claude/CLAUDE.md"
+    overlay="$(mktemp)"
+    run bash -c '
+        source "$1"
+        harness_plugin_load claude-code
+        HOME="$3" harness_prepare_config "$2"' _ \
+        "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
+    rm -f "$overlay"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '"KEEP"' "$home/.claude/settings.json" || { echo "settings.json was overwritten"; return 1; }
+    grep -q 'operator prose' "$home/.claude/CLAUDE.md" || { echo "CLAUDE.md was overwritten"; return 1; }
 }
 
 @test "Dockerfile never installs bubblewrap or socat" {
@@ -988,6 +1086,10 @@ else
     # rendering under test is never reached.
     url=""
     for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+    # Match on the path, not the whole URL: list reads carry ?limit&page, and
+    # a pattern anchored at the end of the string stops matching the moment
+    # one does.
+    url="${url%%\?*}"
     case "$url" in
         */reviews/*/comments)
             # Three comments, two of them one thread. The resolved thread has a
@@ -1023,6 +1125,87 @@ STUB
 
 # What was in the -d of the last gitea_cli call.
 cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
+
+# curl normalises dot-segments, so a PR "number" that is really a path
+# reaches a different repo's endpoint with this token on it. `edit` always
+# checked; the other two took the argument as given.
+@test "every gitea-pr subcommand taking a PR number refuses one that is a path" {
+    local sub bad
+    for sub in comments merge edit; do
+        for bad in '../../../other/repo/pulls/7' '7abc' 'x'; do
+            run gitea_cli gitea-pr "$sub" "$bad"
+            [ "$status" -ne 0 ] \
+                || { echo "gitea-pr $sub accepted '$bad'"; return 1; }
+            [[ "$output" == *"Expected a PR number"* ]] \
+                || { echo "gitea-pr $sub '$bad': $output"; return 1; }
+        done
+    done
+}
+
+@test "a PR-number subcommand with no argument says how to call it" {
+    # "no argument" and "wrong argument" are different mistakes: one wants the
+    # usage line, the other wants to know what was wrong with what was given.
+    local sub=merge
+    run gitea_cli gitea-pr "$sub"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage:"* ]] || { echo "$output"; return 1; }
+}
+
+# A paginating stub: full pages until the last one, so a caller that reads
+# page one and stops sees a prefix of the list and cannot tell that it did.
+paginating_cli() {
+    local cli="$1"; shift
+    local d="$BATS_TEST_TMPDIR/pcli"
+    if [ ! -d "$d" ]; then
+        mkdir -p "$d/stub" "$d/repo"
+        cat > "$d/stub/curl" <<'STUB'
+#!/bin/bash
+url=""
+for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+cat >/dev/null
+page=1; limit=50
+case "$url" in *page=*) page="${url##*page=}"; page="${page%%&*}" ;; esac
+case "$url" in *limit=*) limit="${url##*limit=}"; limit="${limit%%&*}" ;; esac
+emit() {
+    local n="$1" start="$2" i out=""
+    for ((i = 0; i < n; i++)); do
+        out="$out,{\"id\":$((start + i)),\"user\":{\"login\":\"u\"},\"created_at\":\"t\",\"body\":\"comment-$((start + i))\"}"
+    done
+    echo "[${out#,}]"
+}
+case "$url" in
+    */issues/*/comments*)
+        # Two full pages and a short third: 105 comments in all.
+        if   [ "$page" = 1 ]; then emit "$limit" 0
+        elif [ "$page" = 2 ]; then emit "$limit" "$limit"
+        elif [ "$page" = 3 ]; then emit 5 $((limit * 2))
+        else echo '[]'; fi ;;
+    *) echo '[]' ;;
+esac
+echo 200
+STUB
+        chmod +x "$d/stub/curl"
+        git -C "$d/repo" init -q -b feature
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
+        git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
+    fi
+    ( cd "$d/repo" && env PATH="$d/stub:$PATH" \
+        GITEA_SSH_HOST=forge.invalid GITEA_API=https://forge.invalid/api/v1 \
+        GITEA_TOKEN=stub-token \
+        "$REPO_ROOT/forges/gitea/bin/$cli" "$@" )
+}
+
+@test "gitea-pr comments reads past the first page of feedback" {
+    # The documented review loop is `gitea-pr comments <n>`, act, repeat. A
+    # read that stops at the server's page size drops the rest silently, so
+    # whoever is addressing the review never learns the rest exists.
+    run paginating_cli gitea-pr comments 1
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"comment-0"* ]] || { echo "the first page is missing"; return 1; }
+    [[ "$output" == *"comment-50"* ]] || { echo "the second page was not read"; return 1; }
+    [[ "$output" == *"comment-104"* ]] || { echo "the last page was not read"; return 1; }
+}
 
 @test "an inline review comment arrives with the diff it was left against" {
     # Gitea's review-comment objects have no `line` field, so the old
@@ -1176,11 +1359,53 @@ cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
     grep -q 'COPY forges/' "$SANDBOX_DIR/Dockerfile"
-    # install -m 755, not a plain cp, so the executable bit surviving isn't
-    # a separate chmod line that can fall out of sync.
-    grep -q -- '-exec install -m 755' "$SANDBOX_DIR/Dockerfile"
+    # Through the manifest's install list, not a find over the directory
+    # layout - see "what ships into the image is what a manifest declares".
+    grep -q 'install-forge-bins.sh' "$SANDBOX_DIR/Dockerfile"
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-pr" ]
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
+}
+
+# forges/ is inside the audit's TCB, so `install =` in a forge manifest is a
+# claim an operator is entitled to read as "this forge puts nothing else
+# executable in the image". The image build enforces it, but that is the slow
+# tier and only runs where Docker does; this catches a file added under a
+# forge's bin/ without a declaration at the same time as the rest of the
+# static checks, which is when someone is still looking at the change.
+@test "what ships into the image is what a manifest declares, both ways" {
+    local dest
+    dest="$(mktemp -d)"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
+    # Nothing under any forge's bin/ was skipped, and nothing else appeared.
+    local shipped declared
+    shipped="$(cd "$dest" && ls | sort)"
+    declared="$(find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n' | sort)"
+    rm -rf "$dest"
+    [ "$shipped" = "$declared" ] || {
+        echo "installed:"; echo "$shipped"; echo "present under a bin/:"; echo "$declared"; return 1; }
+}
+
+@test "an undeclared file under a forge's bin/ fails the image build" {
+    local fake dest
+    fake="$(mktemp -d)"; dest="$(mktemp -d)"
+    cp -r "$REPO_ROOT"/forges/. "$fake/"
+    mkdir -p "$fake/github/bin"
+    printf '#!/bin/sh\necho hi\n' > "$fake/github/bin/undeclared"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    [ "$status" -ne 0 ] || { echo "an undeclared CLI installed anyway"; rm -rf "$fake" "$dest"; return 1; }
+    [ ! -e "$dest/undeclared" ]
+    rm -rf "$fake" "$dest"
+}
+
+@test "a declared file a forge does not ship fails the image build" {
+    local fake dest
+    fake="$(mktemp -d)"; dest="$(mktemp -d)"
+    cp -r "$REPO_ROOT"/forges/. "$fake/"
+    rm "$fake/gitea/bin/gitea-pr"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    [ "$status" -ne 0 ] || { echo "a missing declared CLI passed"; rm -rf "$fake" "$dest"; return 1; }
+    rm -rf "$fake" "$dest"
 }
 
 @test "merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
@@ -2134,13 +2359,11 @@ EOF
     grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
 }
 
-# Was: that the cross-session false-positive case is documented. The finding
-# itself is gone - a session can no longer write another project's slug, so
-# every one it could still see belonged to some other session - and what
-# needs documenting now is its absence, so that removing detection stays a
-# stated decision rather than something a reader has to infer from silence.
+# The absence of a finding needs documenting as much as a finding does, so
+# that not detecting something stays a stated decision rather than something
+# a reader has to infer from silence.
 @test "docs/security.md says why there is no cross-project finding" {
-    grep -q 'no longer a .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
+    grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
     [ "$status" -ne 0 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
 }
@@ -2415,10 +2638,26 @@ EOF
 # is exactly what it looks like when one does not.
 @test "every suite that tests the branch checks out the branch" {
     local wf="$REPO_ROOT/.gitea/workflows/tests.yml"
-    # Both branch-testing jobs pin the head sha; the runner-env jobs must not,
-    # since their assertions should come from the base branch.
-    [ "$(grep -c 'pull_request.head.sha' "$wf")" -eq 2 ]
-    [ "$(grep -c 'uses: actions/checkout@v4' "$wf")" -eq 4 ]
+    # The property, not a count: every checkout is either pinned to the head
+    # sha or is one of the runner-env jobs, whose assertions should come from
+    # the base branch. A count breaks on adding a job, which is when someone
+    # is least likely to be thinking about which ref it reads.
+    local checkouts pinned
+    checkouts="$(grep -c 'uses: actions/checkout@v4' "$wf")"
+    pinned="$(grep -c 'pull_request.head.sha' "$wf")"
+    [ "$checkouts" -gt 0 ] || { echo "no checkout at all"; return 1; }
+    # Each pin is the line after the `with:` under its own checkout, so the
+    # pinned count can never exceed the checkout count.
+    [ "$pinned" -le "$checkouts" ] || { echo "more pins than checkouts"; return 1; }
+    # Every branch-testing job is pinned. The unpinned remainder is exactly
+    # the two runner-env jobs, named here so adding a third is a decision.
+    local unpinned=$((checkouts - pinned))
+    [ "$unpinned" -eq 2 ] || {
+        echo "$unpinned checkouts read the base branch, expected 2" >&2
+        echo "(runner-env-confined and runner-env-privileged). A new job that" >&2
+        echo "tests the change must pin \${{ github.event.pull_request.head.sha }}." >&2
+        return 1
+    }
 }
 
 @test "no workflow job runs on a generic runner label" {
@@ -2808,11 +3047,12 @@ _harness_proxied_domain() {
 }
 
 @test "the selected harness's own domains are in the fixed list, not built into the image" {
-    # platform.claude.com was written into fixed-domains.sh, where a second
-    # harness would have inherited it and still lacked its own.
+    # A harness's own api_domains reach the fixed list through its manifest.
+    # A name built into fixed-domains.sh instead would be inherited by every
+    # harness while a second one still lacked its own.
     [ -n "$(_harness_api_domains)" ] || { echo "the harness declares no api_domains"; return 1; }
-    # Non-comment lines only: the comment there explains that these used to
-    # be built in, which is worth keeping and is not a value.
+    # Non-comment lines only: the comment there names the harness's domains
+    # to explain why they are not written in, which is prose, not a value.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/fixed-domains.sh' | grep -n 'platform\.claude\.com\|api\.anthropic\.com'"
     [ "$status" -ne 0 ] || { echo "a harness's domain is still built in:"; echo "$output"; return 1; }
     run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
@@ -3411,4 +3651,52 @@ _emit_mount_at() {
     run _emit_mount_at /host/state "/has:colon"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the harness domain list splits the same for both consumers of it" {
+    # init-firewall.sh sources fixed-domains.sh with IFS=$'\n\t' and
+    # dns-proxy.sh with the default, so an unquoted expansion hands them
+    # different lists from one value - the drift that shared file exists to
+    # prevent. The single-domain real manifest cannot show it, which is why
+    # this uses two and reproduces init-firewall's IFS.
+    local two="a.example.com b.example.com" n_fw n_dns
+    n_fw="$(bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
+    n_dns="$(bash -c "SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
+    [ "$n_fw" = "$n_dns" ] \
+        || { echo "firewall sees $n_fw entries, dns proxy sees $n_dns"; return 1; }
+    # And both as separate names, not one glued element that fails the
+    # firewall's DNS check fatally.
+    run bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    grep -qx 'a.example.com' <<< "$output" || { echo "$output"; return 1; }
+    grep -qx 'b.example.com' <<< "$output" || { echo "$output"; return 1; }
+}
+
+@test "the docs name the staging path the entrypoint actually uses" {
+    # A static test already holds entrypoint.sh to the current name; nothing
+    # held the docs, so they kept the old one after the rename.
+    run grep -rn 'dejima-claude' "$REPO_ROOT/docs" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    grep -q 'etc/dejima-harness' "$REPO_ROOT/docs/security.md"
+}
+
+@test "docs/providers.md lists the whole briefing placeholder whitelist" {
+    # The list is what a fragment author checks a placeholder against, so one
+    # missing name reads as "not available" for something that is.
+    local ph
+    for ph in $(sed -n 's/^_BRIEFING_WHITELIST="\(.*\)"$/\1/p' \
+                "$REPO_ROOT/bin/dejima-provider-lib.sh"); do
+        grep -q "\`$ph\`" "$REPO_ROOT/docs/providers.md" \
+            || { echo "$ph is in the whitelist but not documented"; return 1; }
+    done
+}
+
+@test "the tmux prefix the config accepts is one the page can parse" {
+    # `C-space` passed the schema and was then rejected on the page, which
+    # fell back to C-b silently - the outcome refusing at launch exists to
+    # prevent. Both sides accept a named key in any case now.
+    grep -qE "charAt\(0\)\.toUpperCase" "$REPO_ROOT/web/src/keys.js"
+    grep -q 'Ss.pace' "$REPO_ROOT/bin/dejima-config-lib.sh"
 }

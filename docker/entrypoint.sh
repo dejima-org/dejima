@@ -120,8 +120,29 @@ if [ -n "${SANDBOX_HARNESS_COMMAND:-}" ]; then
             echo "entrypoint: refusing harness command name: $SANDBOX_HARNESS_COMMAND" >&2
             exit 1 ;;
     esac
-    ln -sf /usr/local/bin/dejima-harness-wrapper \
-        "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
+    # Refuse a name that already resolves to something else on PATH. The
+    # manifest's `identifier` type permits any bare name, and the wrapper is
+    # linked into /usr/local/bin, which comes first - so a harness declaring
+    # `command = gosu`, or `find`, or `install`, would shadow a binary the
+    # rest of this script then invokes as root. Resolved through PATH rather
+    # than by checking one directory, because those are what the entrypoint
+    # actually calls.
+    #
+    # Two resolutions are legitimate: the real binary being shadowed, and the
+    # wrapper itself from an earlier start. The manifest is trusted, so this
+    # turns a bad one into a clean refusal rather than closing a hole.
+    _wrapper=/usr/local/bin/dejima-harness-wrapper
+    _existing="$(command -v "$SANDBOX_HARNESS_COMMAND" 2>/dev/null || true)"
+    if [ -n "$_existing" ]; then
+        _existing_real="$(readlink -f "$_existing" 2>/dev/null || printf '%s' "$_existing")"
+        if [ "$_existing_real" != "$_wrapper" ] \
+           && [ "$_existing_real" != "$(readlink -f "${SANDBOX_HARNESS_REAL:-}" 2>/dev/null)" ]; then
+            echo "entrypoint: refusing harness command '$SANDBOX_HARNESS_COMMAND':" >&2
+            echo "it already resolves to $_existing_real, which is not this harness." >&2
+            exit 1
+        fi
+    fi
+    ln -sf "$_wrapper" "/usr/local/bin/$SANDBOX_HARNESS_COMMAND"
 fi
 
 # The harness's config arrives staged read-only under /etc/dejima-harness
@@ -157,14 +178,14 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
-# The real OAuth credential no longer enters the container at all - ~/.claude
-# isn't mounted wholesale any more, so there is nothing to mask (#50). What
-# lands at this path instead depends on the transport: the tls one needs a
-# well-formed fake credential, because Claude Code authenticates from this
-# file rather than from an ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
-# Nothing is mounted for the loopback transport, so give Claude Code the
-# empty file the old mask used to provide rather than betting that an absent
-# credentials file behaves the same as an empty one. Either way this is
+# ~/.claude is not mounted whole, so the real OAuth credential has no path
+# into the container (#50, docs/security.md). What lands at this path instead
+# depends on the transport: the tls one needs a well-formed fake credential,
+# because Claude Code authenticates from this file rather than from an
+# ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
+# Nothing is mounted for the loopback transport, so give Claude Code an empty
+# file rather than betting that an absent credentials file behaves the same
+# as an empty one. Either way this is
 # skipped when something is already there - which also covers
 # [credentials] proxy = off mounting the real credential in deliberately.
 if [ ! -e "$SANDBOX_HOME/.claude/.credentials.json" ]; then
@@ -228,7 +249,9 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
             echo "$openssl_err" >&2
             echo "Not starting the session - API traffic would have no valid cert to trust." >&2
             echo "On the HOST, set [credentials] transport = loopback in" >&2
-            echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
+            # The tilde is prose an operator reads, not a path this expands.
+        # shellcheck disable=SC2088
+        echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
             echo "the proxy (the real OAuth credential is then mounted into the" >&2
             echo "container) - then relaunch dejima." >&2
             exit 1
@@ -268,6 +291,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         echo "FATAL: the credential-proxy forwarder never bound 127.0.0.1:$forwarder_port." >&2
         echo "Not starting the session - API traffic would have no working path to the" >&2
         echo "host-side proxy. On the HOST, set [credentials] transport = loopback in" >&2
+        # shellcheck disable=SC2088
         echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
         echo "the proxy (the real OAuth credential is then mounted into the" >&2
         echo "container) - then relaunch dejima." >&2

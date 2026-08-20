@@ -86,6 +86,7 @@ jobs:
           - proxy
           - config
           - providers
+          - conversation
     name: confined (${{ matrix.suite }})
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
@@ -165,6 +166,33 @@ jobs:
       - run: |
           chown -R node:node .
           su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
+
+  shellcheck:
+    # Its own job rather than a matrix entry: it installs a different package,
+    # runs one command over the whole repo instead of one suite, and a lint
+    # failure should read as "lint" in the run list rather than as a suite name
+    # that happens to be a linter.
+    #
+    # static.bats does a great deal of grep-based invariant checking, but that
+    # is a different class of check - it asks whether a specific known thing is
+    # still true, and this asks whether any of a catalogue of shell hazards is
+    # present. The word-splitting bug in docker/fixed-domains.sh that shipped
+    # in #144 is exactly what the second kind catches and the first does not.
+    runs-on: dejima-confined
+    name: confined (shellcheck)
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Install shellcheck
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends shellcheck ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      # The file list lives in the script, so this job and the static test that
+      # pins its coverage cannot disagree about what is checked.
+      - run: bash test/shellcheck.sh
 
   privileged:
     # A different label from the job above, and the only one in this file that

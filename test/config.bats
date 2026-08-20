@@ -797,8 +797,8 @@ EOF
 }
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
-    # Finding 1 regression: forge_env_exports used to emit `GH_TOKEN=` (empty)
-    # whenever push_token_file was unset, and `-e GH_TOKEN=` on `docker
+    # forge_env_exports must not emit `GH_TOKEN=` (empty) when
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker
     # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
     # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
     # [github] token_file value every session is supposed to get regardless
@@ -1791,13 +1791,17 @@ _epitaph_transcript() {
     rm -rf "$workspace" "$proot"
 }
 
-@test "a harness hosting every guard says nothing about guards" {
+@test "a harness hosting every guard says nothing about missing ones" {
     # The message must not become a line an operator learns to scroll past.
+    # Matched on the report's own wording rather than the bare word "guards":
+    # the not-registered warning is a different message about a different
+    # problem, and this once failed on it.
     _rw_setup
     workspace="$(mktemp -d)"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
     _rw_launch "$workspace"
-    [[ "$output" != *"guards"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"does not support"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"of dejima's guards"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
 
@@ -1879,5 +1883,57 @@ _epitaph_transcript() {
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
     [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch says so when the harness's hooks were never registered" {
+    # install.sh registers them gated on [core] harness. An operator who set
+    # that key without re-running it gets no briefing and no guards, on every
+    # launch, with nothing saying why.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    # _rw_setup writes a settings.json with no hooks in it at all.
+    _rw_launch "$workspace"
+    [[ "$output" == *"not in force this session"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"the session briefing"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch names the one guard a hand-edited config dropped" {
+    # The realistic failure is all-or-nothing, so a check on the briefing
+    # alone would pass here - and a session would run without the merge
+    # guard, silently, which is what the report exists to prevent.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"the session briefing"* ]] \
+        || { echo "named something that is registered: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch stays quiet when the harness's hooks are registered" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/merge-guard.sh"},
+            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
+        > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [[ "$output" != *"not in force this session"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }

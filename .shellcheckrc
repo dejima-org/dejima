@@ -1,0 +1,19 @@
+# shellcheck runs over every shell script in the repo, in CI. See
+# .gitea/workflows/tests.yml and test/static.bats.
+#
+# The severity floor is `warning`. `info` and `style` are mostly matters of
+# taste, and a linter whose output is routinely ignored is not a check.
+#
+# Everything below is disabled because it flags a shape this repo uses on
+# purpose, not because the finding was inconvenient. Anything genuinely
+# specific to one site is suppressed at that site with a comment saying why,
+# which is the form that survives review.
+
+# A variable set in one file and read in another. dejima-color-lib.sh defines
+# C_OK/C_KEY/..., the shared argument parser sets dj_global/dj_project/..., and
+# each is read by whichever script sourced it. shellcheck sees one file at a
+# time, so the definition and the use are never both in view; -x does not help,
+# because the direction that matters here is the library not knowing its
+# consumers. Also covers `status=$?` inside a single-quoted trap body, which is
+# assigned at trap time and cannot be seen at parse time.
+disable=SC2034,SC2154

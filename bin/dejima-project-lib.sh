@@ -530,11 +530,10 @@ generate_derived_dockerfile() {
 # ---------------------------------------------------------------------------
 # Remote access (opt-in). See docs/remote-access.md.
 #
-# The switch is a non-empty [remote-access] base_url in the single config
-# file: same
-# "unset means every code path this feature adds is skipped" property, one
-# fewer file. An old remote.conf on disk grants nothing - install.sh reports
-# it as no longer read rather than deleting it.
+# The switch is [remote-access] enabled in the single config file: unset
+# means every code path this feature adds is skipped. An old remote.conf on
+# disk grants nothing - install.sh reports it as no longer read rather than
+# deleting it.
 # ---------------------------------------------------------------------------
 
 # The switch is an explicit boolean, not a URL. Overloading base_url as the
