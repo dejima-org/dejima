@@ -33,14 +33,19 @@ dependency, and it will not announce that it has been. dejima is built for
 that case: the agent works without asking, and what it can reach, take and
 break was decided before it started.
 
-Runs a coding agent (Claude Code by default, or whatever command you point
-it at) inside a firewalled Docker container with
-`--dangerously-skip-permissions` (no permission prompts, all tool use
-auto-accepted), against a project bind-mounted from the host. The agent gets
-to work without stopping to ask; the container is what makes that trade a
-reasonable one.
+dejima is a **sandboxed development environment for unsupervised agentic
+work.** It runs a coding agent (Claude Code, or whatever command you point it
+at) inside a firewalled Docker container with `--dangerously-skip-permissions`
+(no permission prompts, all tool use auto-accepted), against a project
+bind-mounted from the host. The agent gets to work without stopping to ask;
+the container is what makes that trade a reasonable one.
 
-Around that core is most of what running an agent unattended takes:
+A container on its own is only confinement. What makes this a development
+environment is the rest: a forge workflow the agent drives itself, project
+context written for the agent rather than for you, and enough of a trail left
+behind that you can walk away from a session and still pick up what it did.
+
+**What bounds it:**
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
   list does not connect, and the agent is told so.
@@ -56,10 +61,6 @@ Around that core is most of what running an agent unattended takes:
   mounted whole. A session gets its own project's transcripts, memory and
   edit history and nothing else, so it cannot read what you did elsewhere or
   write into the memory a future session in another project will believe.
-- **A PR and issue workflow.** `gitea-pr` and `gitea-issue` let a session
-  open pull requests and issues against Gitea or Forgejo and pull review
-  feedback back in, on a token scoped for exactly that. Merging stays a
-  human decision, made outside the sandbox.
 - **CI hardening, because push access is code execution.** A session opens a
   pull request, the workflow fires, and your runner executes that commit
   before you've read a line of it. The container bounds what a session reaches
@@ -68,23 +69,39 @@ Around that core is most of what running an agent unattended takes:
   takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
   for a tool that does it.
-- **Logging, off unless you turn it on.** Point `[logging] loki_url` at your
-  own Loki instance and every DNS lookup and rejected connection is shipped
-  there, with the session transcript too if you separately opt in. Nothing
-  leaves the machine otherwise, and there is no endpoint of ours anywhere in
-  this.
-- **Remote access, opt-in and off by default.** Attach to a live session
-  from a terminal or a browser, with a push notification when it wants you.
 - **Guard rails inside the session.** Hooks refuse obviously destructive
   commands, pushes to anywhere but the allowed remote, and merging a PR from
   inside the sandbox. These are
   fast-fail guards against an overeager agent, not a boundary against a
   hostile one: the container is the boundary.
+- **An exit-time audit** of the host surfaces a session could have written
+  to, so a change to your git config or `~/.claude` gets surfaced.
+
+**What it gives an agent to work with:**
+
+- **A PR and issue workflow the agent drives itself.** `gitea-pr` and
+  `gitea-issue` let a session open pull requests and issues against Gitea or
+  Forgejo and pull review feedback back in, on a token scoped for exactly
+  that. Merging stays a human decision, made outside the sandbox.
+- **Project context written for the agent.** A project ships a `.dejima.md`
+  saying how work is done in it - `CLAUDE.md`'s job under a harness-agnostic
+  name - and dejima loads it alongside a briefing on where the session is,
+  what it can reach, and why the limits are there. An agent that knows it is
+  in a sandbox asks for a domain instead of working around the firewall.
 - **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins
   and git identity carry over; uid, home directory and project path match on
   both sides, so a session's transcript is readable from the host afterward.
-- **An exit-time audit** of the host surfaces a session could have written
-  to, so a change to your git config or `~/.claude` gets surfaced.
+- **Remote access, opt-in and off by default.** Attach to a live session
+  from a terminal or a browser, with a push notification when it wants you.
+- **What a long session worked out, kept.** Each time the agent compacts, the
+  summary it writes is saved host-side, into a store no container mounts. It
+  is the only durable account of a session's reasoning, and it otherwise goes
+  when the container does.
+- **Logging, off unless you turn it on.** Point `[logging] loki_url` at your
+  own Loki instance and every DNS lookup and rejected connection is shipped
+  there, with the session transcript too if you separately opt in. Nothing
+  leaves the machine otherwise, and there is no endpoint of ours anywhere in
+  this.
 
 **Early development. Not ready to be depended on.** Nothing here has been
 through outside review, an external audit, or adversarial testing by anyone
@@ -218,6 +235,13 @@ engineering judgement or human review, and nothing here changes that.
 directly on your machine. A determined attacker, or one with a container
 escape, defeats all of it. Use it at your own risk.
 
+An escape does not leave the picture, though - it moves to the layer below,
+and dejima cannot bound that layer because it runs inside it.
+[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)
+is what bounds what an escape spreads to on the machine dejima runs on. See
+[docs/threat-model.md](docs/threat-model.md) for where each layer's
+compromise stops.
+
 **dejima's security says nothing about your software's.** Security isn't
 retrofittable: it's a property of how something was built, at every step. If
 what you build inside dejima turns out to be insecure, that isn't something a
@@ -273,11 +297,18 @@ sandbox escape if you get it wrong.
 
 ### Core (required)
 
-1. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
+1. **Install your harness on the host and sign in to it there**, before any
+   of the rest. dejima never authenticates anything: the credential proxy
+   holds the credential your harness wrote on the host and hands the
+   container a placeholder, so if there is nothing on the host there is
+   nothing to hold. A session in that state starts normally and then cannot
+   reach the model, which looks like a dejima fault and is not one. See
+   [Sign in on the host first](#sign-in-on-the-host-first).
+2. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
    `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
    exists yet. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
-2. Put `~/.local/bin` on your `PATH` if it isn't already.
+3. Put `~/.local/bin` on your `PATH` if it isn't already.
 That is enough to run `dejima`. No push credential is needed to get this far,
 because the default workflow does not push. The starter config `install.sh` writes has
 every key commented out at its default, which means `[core] forge = none` and
@@ -390,6 +421,36 @@ dejima --ro ~/other-project ~/myproject
 
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
+
+## Sign in on the host first
+
+**Install your harness on the host and authenticate it there before running
+dejima.** This is a prerequisite rather than a convenience, and nothing
+enforces it.
+
+dejima never signs in to anything. The credential proxy's whole design is
+that the credential stays on the host and the container gets a placeholder:
+a host-side process holds the real token, injects it per request, and owns
+the refresh. That only works if the host has a credential to hold. On a
+machine where the harness has never run and never logged in, there is
+nothing for the proxy to hold, so the proxy does not start and no credential
+is mounted.
+
+What that looks like is worth knowing, because it does not look like a
+missing prerequisite. `dejima` starts normally, the container comes up, the
+firewall self-checks pass - and then the session cannot reach the model.
+Authenticating from inside is not the fix: the container is where the
+credential deliberately never goes, and the egress allowlist is not built
+around completing a sign-in flow there.
+
+The same applies to the account state your harness keeps alongside the
+credential, which is read fresh from the host at every launch (see
+"Throwaway ~/.claude.json" in [docs/security.md](docs/security.md)). A host
+that has never run the harness has none of it.
+
+So: run your harness once on the host, sign in, confirm it answers, and then
+point dejima at a project. When a credential expires, refresh it the same
+way - on the host, not in a session.
 
 ## Config parity with your host Claude Code setup
 
@@ -637,6 +698,7 @@ covers, and how to run them.
 | --- | --- |
 | [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
 | [security.md](docs/security.md) | Provider trust, the egress firewall, identity, and logging |
+| [threat-model.md](docs/threat-model.md) | What is assumed hostile, and where each layer's compromise stops |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |

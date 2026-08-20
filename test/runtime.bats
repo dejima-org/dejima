@@ -16,18 +16,38 @@ bats_require_minimum_version 1.5.0
 # test container's own network namespace (no --network host, no bind mounts
 # of host paths) - none of it touches the host's real firewall state, same
 # as any other container. Container/network names are derived from
-# BATS_FILE_TMPDIR (a directory bats itself guarantees is unique per run and
-# stable across setup_file/every test/teardown_file in this file), so a
-# stray real container or network can never collide with, and get torn down
-# by, this suite. Don't derive these from $$ instead - bats reruns this
-# file's top-level code in a fresh subshell per test, so $$ (unlike
-# BATS_FILE_TMPDIR) is a *different* value in every test, setup_file, and
-# teardown_file, silently pointing them at containers that don't match.
+# BATS_RUN_TMPDIR, whose basename is the `bats-run-XXXXXX` bats makes once per
+# run: unique across runs, and stable across setup_file, every test, and
+# teardown_file. Both properties are needed and they pull in opposite
+# directions, so neither obvious shortcut works.
+#
+# Not $$: bats reruns this file's top-level code in a fresh subshell per test,
+# so $$ is a *different* value in every test, setup_file and teardown_file,
+# silently pointing each at containers that do not match.
+#
+# Not BATS_FILE_TMPDIR either, which is what this used to say. Its PATH is
+# unique, but its basename is the file's index within the run - `0` for the
+# only file here, in every run there has ever been. So the names were the
+# constants `dejima-test-0` and `dejima-test-net-0`, and the collision this
+# comment promised could never happen was in fact guaranteed: a run whose
+# teardown did not complete left a network of that name with a container still
+# attached, `docker network rm` could not remove it, and the next run died in
+# setup_file on `network with name dejima-test-net-0 already exists`.
+#
+# The `dejima-test-` prefix is this suite's own namespace. Nothing else may use
+# it, which is what makes the reclaim in setup_file safe.
 
 IMAGE=dejima:latest
 
-container_name() { echo "dejima-test-$(basename "$BATS_FILE_TMPDIR")"; }
-network_name() { echo "dejima-test-net-$(basename "$BATS_FILE_TMPDIR")"; }
+# How old a leftover network of this suite's must be before setup_file will
+# reap it along with whatever is still attached. Hours, not minutes: the only
+# thing it has to be longer than is a real run of this file, and the only
+# thing it has to be shorter than is an operator's patience with a runner
+# filling up with dead containers.
+REAP_AFTER=$((6 * 60 * 60))
+
+container_name() { echo "dejima-test-$(basename "$BATS_RUN_TMPDIR")"; }
+network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 
 # Every container here must go on network_name(), never the default bridge:
 # dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
@@ -150,6 +170,69 @@ setup_file() {
 
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
+
+    # A run killed between `network create` and teardown_file leaves its
+    # network behind with its container still attached, and an attached
+    # network cannot be removed - so the `|| true` above passes over it. Names
+    # are unique per run, so that no longer blocks the next run the way the
+    # old constant names did; it accumulates instead, one dead container and
+    # network per killed run, on a long-lived privileged runner.
+    #
+    # So this reaps them, scoped to this suite's own `dejima-test-net-` prefix
+    # and to networks older than REAP_AFTER. An unattached one goes on sight.
+    # An attached one is only ever this suite's own leftovers, but a live run
+    # elsewhere on the host has one too, and there is no way to tell "abandoned"
+    # from "in use" by inspection - so age is the discriminator, set far longer
+    # than any run of this suite takes. A concurrent run's network is minutes
+    # old and is never touched.
+    # Every name here is _-prefixed and used nowhere else in this file. The
+    # loop variables of a sweep must not be the plain nouns the rest of
+    # setup_file uses: `while read -r container` would leave $container
+    # holding the last endpoint it saw, and every `docker run --name
+    # "$container"` below would then use that instead - a failure that only
+    # appears once there is something to reap, which is to say only when this
+    # code matters.
+    local _stale _age _endpoint _dead _created
+    while IFS= read -r _stale; do
+        [ -n "$_stale" ] || continue
+        [ "$_stale" != "$network" ] || continue
+        docker network rm "$_stale" >/dev/null 2>&1 && continue
+        # Still attached. Reap only if it is old enough to be abandoned.
+        _age="$(docker network inspect -f '{{.Created}}' "$_stale" 2>/dev/null)" || continue
+        _age="$(date -d "$_age" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _age ))" -gt "$REAP_AFTER" ] || continue
+        while IFS= read -r _endpoint; do
+            [ -n "$_endpoint" ] || continue
+            docker rm -f "$_endpoint" >/dev/null 2>&1 || true
+            # An endpoint can outlive the container that owned it, which is
+            # what an unclean daemon stop - a host reboot, most often - leaves
+            # behind: nothing is running, `network rm` still reports active
+            # endpoints, and removing containers does not help. Forcing the
+            # disconnect is the way out of that state.
+            docker network disconnect -f "$_stale" "$_endpoint" >/dev/null 2>&1 || true
+        done < <(docker network inspect -f '{{range .Containers}}{{.Name}}
+{{end}}' "$_stale" 2>/dev/null)
+        docker network rm "$_stale" >/dev/null 2>&1 || true
+    done < <(docker network ls --filter name=^dejima-test-net- --format '{{.Name}}' 2>/dev/null)
+
+    # And this suite's own containers, which the loop above only reaches while
+    # they are still attached to a network it is reclaiming. A reboot stops
+    # them and releases their endpoints, so the network goes on sight and the
+    # containers are never seen again - accumulating for the life of the host.
+    #
+    # Same age guard. A stopped container of this suite's is already strong
+    # evidence of abandonment, since every one it starts is `docker run -d`
+    # and running, but the guard costs nothing and keeps one rule here.
+    while IFS= read -r _dead; do
+        [ -n "$_dead" ] || continue
+        [ "$_dead" != "$container" ] || continue
+        _created="$(docker inspect -f '{{.Created}}' "$_dead" 2>/dev/null)" || continue
+        _created="$(date -d "$_created" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _created ))" -gt "$REAP_AFTER" ] || continue
+        docker rm -f "$_dead" >/dev/null 2>&1 || true
+    done < <(docker ps -a --filter name=^dejima-test- --filter status=exited \
+                 --filter status=created --format '{{.Names}}' 2>/dev/null)
+
     docker network create "$network" >/dev/null
 
     # No DEJIMA_FORGE_HOSTS/LOKI_URL: this suite only asserts the default
@@ -737,18 +820,18 @@ dexec_node() {
     rm -rf "$dotclaude"
 }
 
-@test "staging also protects a symlinked statusline.sh, which the old read-only mount did not (Finding 1)" {
+@test "staging protects a symlinked statusline.sh, which a read-only mount does not" {
     # Same shape as the plain-regular-file test above, except statusline.sh
     # on the host is a symlink into a separate directory - the common real
     # setup (~/.claude/statusline.sh -> a config checkout elsewhere). That
-    # case used to be a CONFIRMED, documented gap: statusline.sh was mounted
+    # case is the one a :ro mount cannot cover: with statusline.sh mounted
     # read-only back onto its own path inside a read-write ~/.claude mount,
-    # the parent mount was established first so the destination already had
+    # the parent mount is established first, so the destination already has
     # the symlink sitting on it, and bind-mount destination resolution
-    # (runc's SecureJoin) followed it - the :ro mount landed on the target
-    # and the symlink dentry itself stayed an ordinary writable entry that a
-    # session could unlink and replace. Detection (bin/dejima-audit hashing
-    # the target string) was the only compensating control.
+    # (runc's SecureJoin) follows it - the :ro mount lands on the target
+    # and the symlink dentry itself stays an ordinary writable entry that a
+    # session can unlink and replace, leaving detection (bin/dejima-audit
+    # hashing the target string) as the only compensating control.
     #
     # Staging closes it outright, and for the opposite reason: source-side
     # symlink resolution is exactly what's wanted, so what lands at

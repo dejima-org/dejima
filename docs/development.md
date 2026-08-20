@@ -43,6 +43,7 @@ run them.
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
+| `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point: it resolves the project path,
@@ -93,7 +94,13 @@ parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
 since the fast CI job's container deliberately has no daemon), `providers.bats`
 covers the forge/workflow/harness manifest contract documented in
 [docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling.
+proxy's own request handling. `conversation.bats` runs
+`bin/dejima-conversation-ship` against a real transcript and a real HTTP
+endpoint standing in for Loki, and asserts on what arrives: that a session's
+lines ship, that a torn line waits until it is whole, that a sibling project
+whose directory name merely extends this one is not swept up with it, and
+that neither the in-memory batch nor the unread tail is lost to the kill that
+ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service bound to the host's
@@ -142,9 +149,16 @@ SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
 Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`project.bats`, `providers.bats`, `proxy.bats`, `remote.bats` and
-`static.bats`, runs anywhere a shell does, including inside a dejima sandbox
-itself, which has no Docker daemon by design.
+`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
+`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
+a dejima sandbox itself, which has no Docker daemon by design.
+
+`.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
+the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
+by shebang rather than enumerated, so a script added under `bin/`, `hooks/`,
+`docker/` or a forge's `bin/` is covered the day it lands. The severity floor
+and the two disabled checks are in `.shellcheckrc`, each with the reason
+beside it.
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every
 push to one, `runtime.bats` included. That job needs two things from the
@@ -311,19 +325,20 @@ harness-specific path resolving to nothing is the honest answer.
 | --- | --- | --- |
 | Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
 | Permission bypass | the flag itself, now `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
-| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core; the flag that carries them is `settings_args` in the manifest | `harnesses/<name>/harness.conf` |
+| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
+| Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
 | Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. Now `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
-| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. Now in the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
+| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. In the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
 | Briefing delivery | the briefing and the project's `.dejima.md` reach the session *through* the `SessionStart` hook. No hooks, no briefing | `hooks/sandbox-context.sh` |
 | Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
-| Config parity | which directories carry over and at what mode. Declared by the plugin now, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
+| Config parity | which directories carry over and at what mode. Declared by the plugin, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
 | Staged config | which files are copied rather than mounted. Declared by the plugin; the staging tree mirrors the destination, so `entrypoint.sh` names no harness's paths | `bin/harness/claude-code.sh` |
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
-| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). Now in the plugin | `bin/harness/claude-code.sh` |
+| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). In the plugin | `bin/harness/claude-code.sh` |
 | Transcript format | the transform from transcript lines to log lines. In the plugin; the shipping, batching and Loki labels stay core's | `bin/harness/claude-code.sh` |
 | Compaction format | what a compaction looks like in a transcript. In the plugin; the store, its modes and the provenance note stay core's | `bin/harness/claude-code.sh` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |

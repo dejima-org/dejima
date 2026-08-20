@@ -581,6 +581,55 @@ EOF
     grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
 }
 
+# A fake `docker` whose in-container dig answers only when asked upstream
+# directly (@127.0.0.11), which is what an internally-routed name looks like
+# from here: dnsmasq drops the private answer, the upstream still has it.
+stub_docker_rebind() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+case "$*" in
+    *dig*@127.0.0.11*) echo 10.0.0.1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+}
+
+@test "dejima-allow names the relaunch for an internally-routed domain" {
+    # "Failed to resolve" sent people looking at their DNS server, which is
+    # working - the container's rebind protection is what dropped the answer,
+    # and no live patch can lift it.
+    stub_docker_rebind
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --container c1 internal.example.com
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"private address (10.0.0.1)"* ]]
+    [[ "$output" == *"dejima-allow --global internal.example.com"* ]]
+}
+
+@test "dejima-allow points an internally-routed domain at the approval it just recorded" {
+    stub_docker_rebind
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --global --container c1 internal.example.com
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"approval recorded above already does this"* ]]
+    [[ "$output" == *"Relaunch the session"* ]]
+    grep -qx 'internal.example.com' "$CONFIG_DIR/allowed-domains"
+}
+
+@test "dejima-allow still reports a domain that resolves nowhere as unresolvable" {
+    # The rebind branch above must not swallow the ordinary failure: a typo'd
+    # or dead name gets no answer from the upstream either.
+    STUB_DIR="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_DIR/docker"
+    chmod +x "$STUB_DIR/docker"
+    run env PATH="$STUB_DIR:$PATH" \
+        "$REPO_ROOT/bin/dejima-allow" --container c1 nowhere.example.com
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Failed to resolve nowhere.example.com"* ]]
+}
+
 @test "dejima-project approve persists every domain even when a docker call would have failed" {
     # Under set -e the first dejima-allow to exit nonzero used to abort the
     # loop, silently skipping every domain after it. dejima-project's internal

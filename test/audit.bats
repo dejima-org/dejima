@@ -2021,3 +2021,21 @@ EOF
     run cmp_
     [[ "$output" != *"TCB (sandbox self) modified"* ]] || { echo "$output"; return 1; }
 }
+
+@test "a state file from before the hostexec rename compares without spurious findings" {
+    # The section boundaries exist so a state file written by one version
+    # stays parseable by the other across an upgrade mid-session. Renaming
+    # ### statusline to ### hostexec broke exactly that: the old entry fell
+    # into the tcb range, producing a TCB CRITICAL for a file nothing
+    # touched, plus a host-exec finding for a surface that had not changed.
+    printf '#!/bin/sh\necho original\n' > "$DEJIMA_AUDIT_STATUSLINE"
+    snap
+    # Rewrite this run's state file the way the previous version wrote one.
+    sed -i 's/^### hostexec$/### statusline/' "$STATE"
+    run cmp_
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"TCB (sandbox self) modified"* ]] \
+        || { echo "old boundary read as a TCB change: $output"; return 1; }
+    [[ "$output" != *"HOST-CODE-EXECUTION"* ]] \
+        || { echo "old boundary read as a statusline change: $output"; return 1; }
+}
