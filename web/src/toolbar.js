@@ -12,6 +12,31 @@
     if (navigator.vibrate) navigator.vibrate(ms);
   }
 
+  // What PASTE actually sends, and whether the operator needs telling.
+  //
+  // Bracketed paste tells the application this is pasted text rather than
+  // typing, which stops an editor auto-indenting every line into a staircase
+  // and, more to the point, means the application sees the text as data so
+  // nothing runs on arrival.
+  //
+  // Without it - a plain shell, one tmux prefix key away - the application
+  // cannot tell a paste from typing, so a trailing newline is
+  // indistinguishable from pressing Enter and the last line runs on arrival.
+  // The clipboard is session-writable through OSC 52, which makes that a path
+  // from "the session put text there" to "a shell ran it" with no keystroke
+  // of yours in between. The trailing newlines are stripped rather than the
+  // paste refused: it still lands, you press Enter yourself.
+  //
+  // Line breaks left in the MIDDLE still arrive as Enter. That is true of
+  // pasting into any terminal without bracketed paste and is not something
+  // this can fix without refusing legitimate pastes, so it is said out loud
+  // instead of silently trusted - the content may not be yours.
+  function pasteSequence(text, bracketed) {
+    if (bracketed) return { send: '\x1b[200~' + text + '\x1b[201~', warn: false };
+    var stripped = text.replace(/[\r\n]+$/, '');
+    return { send: stripped, warn: /[\r\n]/.test(stripped) };
+  }
+
   // opts: {root, term, modes, latch, sendText(text), prefix() -> string|null,
   //        notify(message)}
   function createToolbar(opts) {
@@ -42,12 +67,11 @@
       }
       navigator.clipboard.readText().then(function (text) {
         if (!text) return;
-        // Bracketed paste tells the application this is pasted text rather
-        // than typing, which is what stops an editor auto-indenting every
-        // line of it into a staircase.
-        opts.sendText(
-          opts.modes.bracketedPaste() ? '\x1b[200~' + text + '\x1b[201~' : text
-        );
+        var paste = pasteSequence(text, opts.modes.bracketedPaste());
+        if (paste.warn) {
+          opts.notify('Pasted text with line breaks into an application that does not support bracketed paste - each break arrives as Enter.');
+        }
+        opts.sendText(paste.send);
       }).catch(function () {
         opts.notify('The browser refused the clipboard. Allow clipboard access for this site, then tap PASTE again.');
       });
@@ -113,5 +137,5 @@
     };
   }
 
-  D.toolbar = { createToolbar: createToolbar };
+  D.toolbar = { createToolbar: createToolbar, pasteSequence: pasteSequence };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));

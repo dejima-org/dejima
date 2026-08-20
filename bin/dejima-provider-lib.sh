@@ -24,8 +24,16 @@ MAX_MANIFEST_LINES=200
 # enough (see _provider_keys_field) that an external process per call is
 # real, avoidable cost; every caller already invokes this file by a path
 # containing a "/", so the two are equivalent here.
+_PROVIDER_ROOT_CACHE=""
 provider_root() {
-    printf '%s' "${DEJIMA_PROVIDER_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}"
+    if [ -n "${DEJIMA_PROVIDER_ROOT:-}" ]; then
+        printf '%s' "$DEJIMA_PROVIDER_ROOT"
+        return 0
+    fi
+    # Only the repo path is cached. The test hook is re-read every call, so a
+    # test that repoints it mid-process still gets the directory it just set.
+    [ -n "$_PROVIDER_ROOT_CACHE" ] || _PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
+    printf '%s' "$_PROVIDER_ROOT_CACHE"
 }
 
 _provider_axis_dir() {
@@ -55,14 +63,24 @@ valid_provider_name() {
     [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]
 }
 
+# Resolved once per root+axis+name. The two readlinks are the containment
+# check, and it is called on every manifest read; keying the cache on the
+# resolved root rather than just the name is what keeps a test that repoints
+# DEJIMA_PROVIDER_ROOT from being answered about the previous one.
+declare -gA _PROVIDER_DIR_CACHE=()
 provider_dir() {
-    local axis="$1" name="$2" sub root axis_root dir_real
+    local axis="$1" name="$2" sub root axis_root dir_real id
     sub="$(_provider_axis_dir "$axis")" || return 1
     if ! valid_provider_name "$name"; then
         echo "invalid $axis name: $name" >&2
         return 1
     fi
     root="$(provider_root)"
+    id="$root:$axis:$name"
+    if [ -n "${_PROVIDER_DIR_CACHE[$id]+set}" ]; then
+        printf '%s' "${_PROVIDER_DIR_CACHE[$id]}"
+        return 0
+    fi
     axis_root="$(readlink -m "$root/$sub")"
     dir_real="$(readlink -m "$root/$sub/$name")"
     case "$dir_real/" in
@@ -74,6 +92,9 @@ provider_dir() {
         echo "no such $axis: $name" >&2
         return 1
     fi
+    # Only a resolved, contained, existing directory is cached, so a later
+    # call can never be answered from a refusal.
+    _PROVIDER_DIR_CACHE[$id]="$dir_real"
     printf '%s' "$dir_real"
 }
 
@@ -179,14 +200,30 @@ _provider_keyspec_parse() {
     printf '%s\t%s\t%s' "$name" "$type" "$default"
 }
 
-_manifest_spec() {
-    local axis="$1" want="$2" key type default
+# Read into _MFT_TYPE/_MFT_DEF on first use per axis, the way
+# _config_load_schema reads the config table. Every lookup below went through
+# a process substitution over the heredoc above, so a launch paid two forks
+# per manifest key it resolved, several hundred times over.
+declare -gA _MFT_TYPE=() _MFT_DEF=()
+_MFT_LOADED=" "
+_manifest_load_schema() {
+    local axis="$1" key type default
+    [[ "$_MFT_LOADED" == *" $axis "* ]] && return 0
     while IFS=$'\t' read -r key type default; do
-        [ "$key" = "$want" ] || continue
-        printf '%s\t%s' "$type" "$default"
-        return 0
+        [ -n "$key" ] || continue
+        _MFT_TYPE["$axis.$key"]="$type"
+        _MFT_DEF["$axis.$key"]="$default"
     done < <(_manifest_table "$axis")
-    return 1
+    # An unknown axis loads no keys, so every lookup against it still misses
+    # and returns 1 - marking it loaded only stops the empty read repeating.
+    _MFT_LOADED="$_MFT_LOADED$axis "
+}
+
+_manifest_spec() {
+    local axis="$1" want="$2"
+    _manifest_load_schema "$axis"
+    [ -n "${_MFT_TYPE["$axis.$want"]+set}" ] || return 1
+    printf '%s\t%s' "${_MFT_TYPE["$axis.$want"]}" "${_MFT_DEF["$axis.$want"]}"
 }
 
 # Types the config file does not have, all deliberately narrow because each
@@ -266,9 +303,47 @@ _provider_valid_value() {
     esac
 }
 
+# Each manifest is parsed once per process, into _MF_VAL/_MF_SEEN, for the
+# reason dejima-config-lib.sh gives for doing the same to the config file:
+# every read then sees a fully validated file, and no read can succeed
+# against a file another read would reject, because within a process there is
+# one parse for them all to agree with. It is also what makes a read cheap -
+# validating and then re-walking the same unchanged bytes on each of a
+# launch's ~35 manifest_get calls was several forks per line, 35 times over.
+#
+# Keyed on the axis and the RESOLVED directory rather than the provider name,
+# the way config_validate keys on the config path: a test that repoints
+# DEJIMA_PROVIDER_ROOT mid-process is then re-parsed rather than answered
+# about the root it used to have. provider_reset() is for the rarer case of a
+# manifest being rewritten in place under an unchanged path; nothing shipped
+# does that, and each test invokes the library in a fresh shell.
+declare -gA _MF_VAL=() _MF_SEEN=() _MF_STATUS=()
+
+provider_reset() {
+    _MF_VAL=()
+    _MF_SEEN=()
+    _MF_STATUS=()
+}
+
 manifest_validate() {
-    local axis="$1" name="$2" dir file line key value type line_count
+    local axis="$1" name="$2" dir id
     dir="$(provider_dir "$axis" "$name")" || return 1
+    id="$axis:$dir"
+    if [ -n "${_MF_STATUS[$id]+set}" ]; then
+        return "${_MF_STATUS[$id]}"
+    fi
+    # $? captured before anything else runs - an assignment would reset it to
+    # 0 and cache every malformed manifest as valid.
+    _manifest_parse "$axis" "$name" "$dir" "$id"
+    _MF_STATUS[$id]=$?
+    return "${_MF_STATUS[$id]}"
+}
+
+_manifest_parse() {
+    local axis="$1" name="$2" dir="$3" id="$4" file line key value type line_count
+    # Staged, and committed to _MF_VAL only once the whole file has passed, so
+    # a manifest that is refused halfway leaves no half of itself readable.
+    local -A staged=()
     file="$dir/$(_provider_manifest_name "$axis")"
     if [ ! -f "$file" ]; then
         echo "$axis $name has no manifest at $file" >&2
@@ -280,14 +355,14 @@ manifest_validate() {
         return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_config_trim "$line")"
+        _config_trim_into line "$line"
         case "$line" in
             ''|'#'*|';'*) continue ;;
             *=*) ;;
             *) echo "malformed line in $file: $line" >&2; return 1 ;;
         esac
-        key="$(_config_trim "${line%%=*}")"
-        value="$(_config_trim "${line#*=}")"
+        _config_trim_into key "${line%%=*}"
+        _config_trim_into value "${line#*=}"
         if ! type="$(_manifest_type "$axis" "$key")"; then
             echo "unknown key in $file: $key" >&2
             return 1
@@ -296,42 +371,44 @@ manifest_validate() {
             echo "invalid value for $key in $file: $value" >&2
             return 1
         fi
+        staged["$key"]="$value"
     done < "$file"
+    if [ "${#staged[@]}" -gt 0 ]; then
+        for key in "${!staged[@]}"; do
+            _MF_VAL["$id:$key"]="${staged[$key]}"
+            _MF_SEEN["$id:$key"]=1
+        done
+    fi
     return 0
 }
 
 _manifest_type() {
-    local spec
-    spec="$(_manifest_spec "$1" "$2")" || return 1
-    printf '%s' "${spec%%$'\t'*}"
+    _manifest_load_schema "$1"
+    [ -n "${_MFT_TYPE["$1.$2"]+set}" ] || return 1
+    printf '%s' "${_MFT_TYPE["$1.$2"]}"
 }
 
 _manifest_default() {
-    local spec
-    spec="$(_manifest_spec "$1" "$2")" || return 1
-    printf '%s' "${spec#*$'\t'}"
+    _manifest_load_schema "$1"
+    [ -n "${_MFT_TYPE["$1.$2"]+set}" ] || return 1
+    printf '%s' "${_MFT_DEF["$1.$2"]}"
 }
 
 # manifest_get <axis> <name> <key>
 # Validates the whole manifest first, same reason config_get does: a read must
 # never succeed against a file another read would reject.
 manifest_get() {
-    local axis="$1" name="$2" want="$3" dir file line key value found="" seen=0
+    local axis="$1" name="$2" want="$3" dir id
     _manifest_type "$axis" "$want" >/dev/null || {
         echo "unknown $axis manifest key: $want" >&2; return 1; }
     manifest_validate "$axis" "$name" || return 1
     dir="$(provider_dir "$axis" "$name")" || return 1
-    file="$dir/$(_provider_manifest_name "$axis")"
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="$(_config_trim "$line")"
-        case "$line" in ''|'#'*|';'*) continue ;; *=*) ;; *) continue ;; esac
-        key="$(_config_trim "${line%%=*}")"
-        [ "$key" = "$want" ] || continue
-        found="$(_config_trim "${line#*=}")"
-        seen=1
-    done < "$file"
-    [ "$seen" = 1 ] || found="$(_manifest_default "$axis" "$want")"
-    printf '%s' "$found"
+    id="$axis:$dir:$want"
+    if [ -n "${_MF_SEEN[$id]+set}" ]; then
+        printf '%s' "${_MF_VAL[$id]}"
+    else
+        _manifest_default "$axis" "$want"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -343,35 +420,18 @@ manifest_get() {
 # directory whose manifest declares its own keys, not editing core.
 # ---------------------------------------------------------------------------
 
-# config_validate re-parses the whole config on every config_get (~thirty per
-# launch), and each [forge.<name>] line calls back here. Going through
-# manifest_validate would mean that many full-manifest validations, so this
-# line-scans the `keys` field alone. Every other field still gets a full
-# manifest_validate before anything consequential reads it - this feeds a
-# config schema type check, never a forge action.
+# Reached from inside config_validate's own parse - each [forge.<name>] line
+# calls back here - so it line-scans the `keys` field alone rather than going
+# through manifest_validate. What it feeds is a config schema type check,
+# never a forge action; every other field still gets a full manifest_validate
+# before anything consequential reads it.
 #
-# Cached per axis+name for this command substitution only. bash forks a new
-# subshell per config_get, so it dedupes the keys of one section against each
-# other rather than across a launch: a cheap partial win, not a cross-process
-# cache this file has no way to invalidate.
-declare -gA _PROVIDER_KEYS_CACHE
-_provider_keys_cached() {
-    local axis="$1" name="$2" cache_key="$axis:$name"
-    if [ -z "${_PROVIDER_KEYS_CACHE[$cache_key]+set}" ]; then
-        _PROVIDER_KEYS_CACHE[$cache_key]="$(_provider_keys_field "$axis" "$name")" || return 1
-    fi
-    printf '%s' "${_PROVIDER_KEYS_CACHE[$cache_key]}"
-}
-
 # Reads and validates only the `keys = ...` line of a forge/harness manifest
-# - see _provider_keys_cached above for why this bypasses manifest_get's
-# full-manifest validation. Trimming is inlined (_config_trim's own logic,
+# - see above for why this bypasses manifest_get's full-manifest validation. Trimming is inlined (_config_trim's own logic,
 # not a call to it) and the line count uses bash's own read loop instead of
-# `wc -l`, both to avoid a subshell/external-process fork per manifest line -
-# this runs once per key in a [forge.<name>]/[harness.<name>] section on
-# EVERY config_validate pass (config_validate itself runs on every
-# config_get, "on the order of thirty" times per launch), so a per-line fork
-# here is a per-line fork thirty times over.
+# `wc -l`, both to avoid a subshell/external-process fork per manifest line:
+# this runs once per key in a [forge.<name>]/[harness.<name>] section, on
+# every config_validate pass that has not already been answered from cache.
 _provider_keys_field() {
     local axis="$1" name="$2" dir file line key value="" seen=0 type n=0
     # An unselected axis contributes no keys - a different question from
@@ -426,11 +486,11 @@ _config_extra_spec() {
     name="${rest%%.*}"
     key="${rest#*.}"
     [ "$key" != "$rest" ] || return 1
-    # No separate provider_dir check here - _provider_keys_cached (via
-    # _provider_keys_field) already refuses when the directory doesn't exist,
-    # and this runs often enough (see _provider_keys_field's comment) that a
-    # second containment check per call is real, avoidable cost.
-    for spec in $(_provider_keys_cached "$axis" "$name"); do
+    # No separate provider_dir check here - _provider_keys_field already
+    # refuses when the directory doesn't exist, and this runs often enough
+    # (see its comment) that a second containment check per call is real,
+    # avoidable cost.
+    for spec in $(_provider_keys_field "$axis" "$name"); do
         pname="${spec%%:*}"
         [ "$pname" = "$key" ] || continue
         IFS=$'\t' read -r pname ptype pdefault <<< "$(_provider_keyspec_parse "$spec")"
@@ -491,7 +551,7 @@ _config_extra_keys() {
 
 _config_extra_keys_for() {
     local axis="$1" name="$2" spec
-    for spec in $(_provider_keys_cached "$axis" "$name"); do
+    for spec in $(_provider_keys_field "$axis" "$name"); do
         printf '%s.%s.%s\n' "$axis" "$name" "${spec%%:*}"
     done
 }
@@ -564,10 +624,9 @@ provider_validate_selection() {
     esac
 
     # Rule 3: a workflow that pushes needs a forge that resolves to somewhere
-    # to push to. Deferred through Phase 2 because refusing an unconfigured
-    # forge had no correct alternative to offer - `forge = none` now exists,
-    # so an operator who genuinely pushes nowhere has an honest way to say it
-    # and this stops being a refusal with no remedy.
+    # to push to. `forge = none` is how an operator who genuinely pushes
+    # nowhere says so, which is what keeps this from being a refusal with no
+    # remedy.
     if [ "$push" = "on" ] && [ -z "$(forge_hosts "$forge")" ]; then
         if [ -z "$(manifest_get forge "$forge" keys)" ]; then
             # A forge with no keys at all has nothing to configure - "set
@@ -609,10 +668,9 @@ provider_validate_selection() {
             missing="${missing:+$missing }$key"
         fi
     done
-    # Rule 5: a partly configured forge is a typo, not a choice. Refused rather
-    # than warned now that `forge = none` exists: previously the only way to
-    # say "I don't use a forge" was to leave one half-filled, so refusing would
-    # have broken a supported state. Still scoped to PARTIAL configuration -
+    # Rule 5: a partly configured forge is a typo, not a choice. Refused, not
+    # warned: `forge = none` is the way to say no forge, so a half-filled
+    # section has no legitimate reading left. Still scoped to PARTIAL configuration -
     # nothing set at all is rule 3's case above, and carries its own message -
     # and, like rule 3, only when the workflow actually pushes: a non-pushing
     # workflow never invokes the forge at all, so a partially filled-in forge
