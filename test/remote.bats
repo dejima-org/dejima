@@ -235,8 +235,13 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
 
     # The registry decides which pane an operator gets attached to. A session
     # able to write it could redirect them, so it is never mounted.
+    #
+    # Matched on the registry's own path, not on the bare word "sessions":
+    # the harness has a ~/.claude/sessions of its own, and once that mount
+    # moved from docker-compose.yml onto the command line this read as the
+    # registry being mounted when it was not.
     case "$line" in
-        *sessions*) false ;;
+        */dejima/sessions*) false ;;
     esac
     rm -rf "$PROJ"
 }
@@ -532,6 +537,9 @@ EOF
 # $4 is the launch timestamp, defaulting to now. It matters to anything that
 # prunes: dejima-attach holds off on an entry too young to have a container
 # yet, so a test about pruning has to write one that is old enough.
+# $5 is the launcher pid. Omitted by default, which writes the pre-pid entry
+# shape - so every existing caller keeps exercising the upgrade fallback, and
+# a test that means to exercise the liveness check says which pid it means.
 write_entry() {
     mkdir -p "$RUNTIME_DIR/dejima/sessions"
     cat > "$RUNTIME_DIR/dejima/sessions/$1" <<EOF
@@ -540,6 +548,18 @@ pane=$2
 label=$3
 started=${4:-$(date +%s)}
 EOF
+    [ -z "${5:-}" ] || printf 'pid=%s\n' "$5" >> "$RUNTIME_DIR/dejima/sessions/$1"
+}
+
+# A pid that is certain to be dead: spawn a process and reap it, so the number
+# is one the kernel has genuinely finished with rather than one picked out of
+# the air and hoped to be free.
+dead_pid() {
+    local p
+    ( exit 0 ) &
+    p=$!
+    wait "$p" 2>/dev/null || true
+    printf '%s' "$p"
 }
 
 @test "dejima-attach refuses an id that is not a run id" {
@@ -910,12 +930,12 @@ EOF
 
 @test "a marker directory the sandbox made undeletable does not kill the listing" {
     # /run/dejima-notify is bind-mounted read-write, so a compromised session
-    # can chmod its own marker directory on the way out and make the next
-    # prune's rm -rf fail. Aborting there would blank the picker - a sandbox
-    # must not be able to deny the operator the front door.
+    # can chmod its own marker directory on the way out. Nothing in the prune
+    # tries to remove it, but a sandbox must not be able to deny the operator
+    # the front door by making a directory awkward, so this stays pinned.
     write_remote_config
     stub_docker_run_id 0123456789abcdef
-    write_entry 0000000000000000 '%1' 'work:1'
+    write_entry 0000000000000000 '%1' 'work:1' 0999999999
     write_entry 0123456789abcdef '%1' 'work:2'
     mkdir -p "$RUNTIME_DIR/dejima/notify/0000000000000000/waiting-dir"
     chmod 500 "$RUNTIME_DIR/dejima/notify/0000000000000000"
@@ -923,6 +943,57 @@ EOF
     chmod 700 "$RUNTIME_DIR/dejima/notify/0000000000000000"
     [ "$status" -eq 0 ]
     [[ "$output" == *"0123456789abcdef"* ]]
+}
+
+# The marker directory is the bind source of a mount bin/dejima declares, and
+# its lifetime belongs to that process's EXIT trap. A second owner in the
+# prune can only race it, and losing that race does not leave a tidy host: it
+# leaves Docker recreating the bind source root-owned, dejima-notify.sh
+# failing on every Notification and Stop for the rest of the run, and no code
+# anywhere that rewrites the registry entry to make the session visible again.
+@test "pruning a dead entry leaves the marker directory alone" {
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    write_entry 0123456789abcdef '%1' 'work:2' 0999999999 "$(dead_pid)"
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ] \
+        || { echo "the registry entry survived a dead launcher"; return 1; }
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ] \
+        || { echo "the prune deleted a marker directory it does not own"; return 1; }
+}
+
+# The failure this replaced: a cold first build outran STARTUP_GRACE, the
+# operator opened the front door to check on it, and the session was
+# unregistered mid-launch. A build takes as long as it takes; whether the
+# process that registered the entry is still running does not.
+@test "a launch still building is not pruned however long it has taken" {
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    # started= far enough back that any guessed window has long since passed.
+    write_entry 0123456789abcdef '%1' 'work:2' 0999999999 $$
+    mkdir -p "$RUNTIME_DIR/dejima/notify/0123456789abcdef"
+    run "$REPO_ROOT/bin/dejima-attach" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0123456789abcdef"* ]]
+    [[ "$output" == *"starting"* ]]
+    [ -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ]
+    [ -d "$RUNTIME_DIR/dejima/notify/0123456789abcdef" ]
+}
+
+@test "an entry whose pid is not a plain number is refused, not signalled" {
+    # pid reaches `kill`, which accepts a job spec and a negative pgid as well
+    # as a process. Neither may be reachable from a state file.
+    write_remote_config
+    stub_docker_run_id ffffffffffffffff
+    for bad in '%1' '-1' 'x[$(id)]' ' 1'; do
+        write_entry 0123456789abcdef '%1' 'work:2' 0999999999 "$bad"
+        run "$REPO_ROOT/bin/dejima-attach" --list
+        [ "$status" -eq 0 ] || { echo "pid '$bad' broke the listing: $output"; return 1; }
+        [ ! -f "$RUNTIME_DIR/dejima/sessions/0123456789abcdef" ] \
+            || { echo "pid '$bad' was treated as a live launcher"; return 1; }
+    done
 }
 
 # Waits for the grouped session an attach should have created, then prints
@@ -2213,9 +2284,30 @@ PY
     run bash -c "cd '$web' && sha256sum src/* package-lock.json | LC_ALL=C sort -k2"
     [ "$status" -eq 0 ]
     [ "$output" = "$(cat "$web/sources.sha256")" ] || {
-        echo "web/index.html is stale. Rebuild it:" >&2
+        echo "web/sources.sha256 is stale. Rebuild it:" >&2
         echo "  cd web && npm ci && node build.mjs" >&2
         diff <(printf '%s\n' "$output") "$web/sources.sha256" >&2 || true
+        false
+    }
+
+    # The manifest agreeing with the sources says the MANIFEST was rebuilt. It
+    # says nothing about the page, and a commit that stages web/src and
+    # web/sources.sha256 while leaving index.html behind is exactly the shape
+    # this test exists to catch - it would pass everything above.
+    #
+    # build.mjs stamps the page with sha256sum of the manifest it wrote in the
+    # same run, so the page carrying that hash is the page having been built
+    # from that manifest. Two comparisons, and the pair is what closes it.
+    local stamp expected
+    stamp="$(grep -oE 'Sources: [a-f0-9]{64}' "$web/index.html" | head -1)"
+    stamp="${stamp#Sources: }"
+    expected="$(sha256sum "$web/sources.sha256" | cut -d' ' -f1)"
+    [ -n "$stamp" ] || { echo "web/index.html carries no Sources stamp" >&2; false; }
+    [ "$stamp" = "$expected" ] || {
+        echo "web/index.html is stale: it was built from a different manifest." >&2
+        echo "  page stamp:  $stamp" >&2
+        echo "  manifest is: $expected" >&2
+        echo "Rebuild it:  cd web && npm ci && node build.mjs" >&2
         false
     }
 }
@@ -2429,12 +2521,12 @@ nginx_blocks() {
     [[ "$output" =~ [0-9]+[hd]$ ]]
 }
 
-@test "the terminal page carries the viewport meta the proxy used to inject" {
+@test "the terminal page ships its own viewport meta" {
     # ttyd serves no <meta name="viewport"> - not in 1.7.7, not on main - so a
     # phone lays the page out at a virtual desktop width and scales it down,
-    # which no font size can undo and which zooming cannot reflow. The nginx
-    # example used to supply the missing tag with sub_filter. The page now
-    # ships its own, so the property has moved rather than gone away.
+    # which no font size can undo and which zooming cannot reflow. The page
+    # supplies the tag itself, so the layout does not depend on the reverse
+    # proxy in front of it rewriting the body.
     local page="$REPO_ROOT/web/index.html"
     [ -f "$page" ]
     grep -qE '<meta name="viewport"[^>]*width=device-width' "$page"
@@ -2498,14 +2590,17 @@ nginx_blocks() {
 }
 
 @test "install.sh links the remote scripts and the notify hook, registers neither, and enables nothing" {
-    grep -q '^link_hook dejima-notify.sh$' "$REPO_ROOT/install.sh"
+    # The hook is linked by the harness plugin now - which file it is, and
+    # where the harness reads it from, is the harness's business - while the
+    # CLIs stay install.sh's, being dejima's own.
+    grep -q '_link_hook dejima-notify.sh' "$REPO_ROOT/bin/harness/claude-code.sh"
     grep -q '^link_bin dejima-attach$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-ttyd$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-notify-watch$' "$REPO_ROOT/install.sh"
     # The notify hook is registered per session by bin/dejima, into a
     # throwaway settings copy. Registered here it would fire for every
     # unsandboxed host session too.
-    run grep -nE 'register_hook.*dejima-notify' "$REPO_ROOT/install.sh"
+    run grep -nE '_register .*dejima-notify' "$REPO_ROOT/bin/harness/claude-code.sh"
     [ "$status" -ne 0 ]
     # Standing up a front door is an explicit operator decision. Nothing in
     # the installer may start, enable or even copy a unit. Code only - the

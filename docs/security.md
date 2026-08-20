@@ -193,7 +193,18 @@ guarantee does not reach into the *next* session: a workflow's or harness's
 briefing fragment (e.g. `workflows/worktree-pr/briefing.md`) lives in the
 checkout itself and needs no symlink to edit, so a session with write access
 to this repo's own checkout can change what the next launch composes and
-hands to whichever session starts against it. See
+hands to whichever session starts against it.
+
+The provider directories are in the exit-time audit's TCB list for that
+reason, alongside `bin/`, `hooks/`, `docker/` and `test/`. They hold no code
+and nothing executes them, but what they hold decides what the next launch
+permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`, which
+`entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so a
+line added to a manifest widens the egress boundary on the next run. An
+ordinary edit is a diff you are about to read and is not reported; one git
+cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
+or `skip-worktree` - is a CRITICAL finding. It is still a change a session
+can make; it is one the audit reports. See
 [docs/providers.md](providers.md) for the full manifest contract.
 
 ## The mounted project is fully writable
@@ -221,10 +232,10 @@ hands to whichever session starts against it. See
   the project mount instead of the config mount. "Only point this at
   trusted repositories" (above) covers input trust; this is about the
   sandbox writing a persistence payload into an otherwise-trusted repo.
-  The workspace's own `.git/hooks` directory is now mounted read-only
+  The workspace's own `.git/hooks` directory is mounted read-only
   (same pattern as the `~/.claude` code directories below), so planting a hook
   file directly is closed - accepted breakage: installing hooks
-  *in-session* (`husky`, `pre-commit install`) now fails, which is the
+  *in-session* (`husky`, `pre-commit install`) fails, which is the
   point. `core.hooksPath` and `.claude/settings.local.json` aren't
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
@@ -287,9 +298,9 @@ hands to whichever session starts against it. See
   A finding whose file has since been deleted is **cleared** rather than
   approved: there is no content left to pin an approval to, and a surface
   that does not exist does not run. Nothing is recorded, so if it comes back
-  it comes back as a new finding. Refusing instead - the old behaviour - left
-  the report unresolvable, and because `ack` opens CRITICAL reports first it
-  hid every other report behind that one.
+  it comes back as a new finding. Refusing would leave the report
+  unresolvable: `ack` opens CRITICAL reports first, so every other report
+  would hide behind one no decision could clear.
 
   Skipping asks again next session, the right default when you are unsure.
   It matters for keys some tools rewrite on every run: with no decision
@@ -422,14 +433,13 @@ hands to whichever session starts against it. See
   Residual: the workspace's own transcripts and memory stay fully writable
   throughout, since Claude Code needs that for host-side `claude --resume`.
 
-  There is no longer a `CROSS-PROJECT` finding for this. It existed when the
-  whole tree was mounted and a session really could write another project's
-  slug. Now that it cannot, the only writes the audit could still see there
-  are other sessions doing their own work - and on a host running several at
-  once it reported all of them, on every report. Detection that cannot
-  observe what it was built for, and fires constantly on what it was not,
-  trains an operator to skim. The mount is the control, and `static.bats`
-  pins it.
+  There is deliberately no `CROSS-PROJECT` finding. Since #104 a session
+  gets its own slugs and nothing else, so the only writes the audit could see
+  there are other sessions doing their own work - and on a host running
+  several at once it would report all of them, on every report. Detection
+  that cannot observe what it exists for, and fires constantly on what it
+  does not, trains an operator to skim. The mount is the control, and
+  `static.bats` pins it.
 - `~/.claude/file-history` (Claude Code's edit-undo record) is **not**
   mounted as a tree either, and the reason is sharper than for `projects/`.
   Each `<session>/<hash>@v1` is a **verbatim copy of an edited file**, so the
@@ -507,8 +517,8 @@ session, where the credential deliberately never goes.
   session - harmless, since it's a host temp file, and rare, since the proxy
   absorbs 401s with its own refresh-and-retry.
   `[credentials] proxy = off` (in `~/.config/dejima/config`) is the kill
-  switch, restoring the previous behavior - the credential mounted into the
-  container explicitly, readable by a compromised session. Setups without a
+  switch: the credential is then mounted into the container explicitly,
+  readable by a compromised session. Setups without a
   `claudeAiOauth` block (API-key
   auth) skip the proxy automatically; there's no stored subscription
   credential to protect.
@@ -565,10 +575,9 @@ session, where the credential deliberately never goes.
     discovers at launch. Those targets are discovered rather than
     configured, so they are checked against the approval store and the
     audit stores and refused if they overlap either - a hook symlinked into
-    the approval store used to mount it, read-only and silently, and
+    the approval store would otherwise mount it, read-only and silently, and
     read-only is no protection when the content is every project's
-    approvals. The same check now covers `[mounts] readonly`, which had
-    none at all. Hooks execute automatically with no separate
+    approvals. The same check covers `[mounts] readonly`. Hooks execute automatically with no separate
     approval step, skills can ship executable scripts, and
     commands/agents/output-styles are prompt text loaded into a later host
     session, so without this a compromised session could plant a backdoored
@@ -584,8 +593,9 @@ session, where the credential deliberately never goes.
     directory that already exists, and without pre-creation a compromised
     session could create and populate one itself.
   - **Copied in, not mounted**: `settings.json`, `CLAUDE.md`, and
-    `statusline.sh` are mounted read-only at `/etc/dejima-claude/` and
-    installed into `~/.claude` by `entrypoint.sh` as root-owned, unwritable
+    `statusline.sh` are mounted read-only under `/etc/dejima-harness/`,
+    at the path they are installed to, and copied into place by
+    `entrypoint.sh` as root-owned, unwritable
     files. A session can still unlink and replace them - `~/.claude` belongs
     to it - but only its own copy, which is why they are read-only.
 
@@ -610,14 +620,13 @@ session, where the credential deliberately never goes.
   the session but doesn't persist, which is the safer direction to fail.
 - `~/.claude/statusline.sh` (referenced by `settings.json`'s
   `statusLine.command` and executed on the host) is one of the copied-in
-  files above, and the case that shows why copying beats mounting. It used
-  to be bind-mounted read-only onto its own path, which - **confirmed
-  against a live container** - blocked replacement only when
-  `statusline.sh` was a plain regular file. When it was a symlink (the
-  common case, into a config checkout elsewhere), Docker/runc resolved the
+  files above, and the case that shows why copying beats mounting. A `:ro`
+  mount at its own path protects only the plain-file case - **confirmed
+  against a live container**: when `statusline.sh` is a symlink (the
+  common case, into a config checkout elsewhere), Docker/runc resolves the
   bind-mount destination through the symlink to its target, so the symlink
-  entry itself stayed on the writable `~/.claude` mount and remained
-  replaceable, and detection was the only compensating control. Staging
+  entry itself stays on the writable `~/.claude` mount and remains
+  replaceable, with detection the only compensating control. Staging
   turns that same symlink resolution into the fix: it happens on the
   *source* side, so what gets copied in is the real content and the copy
   has no route back to the host (`test/runtime.bats`'s statusline.sh
@@ -942,10 +951,32 @@ input - never tool outputs). Lines are JSON with the session ID inside
 (`{session, role, text}` / `{session, role: "tool", tool, input}`).
 
 Off by default - conversation content is a different sensitivity class
-than DNS names and firewall verdicts, so it never leaves the container
-unless you opt in. Transcripts of every session under the mounted
-workspace (including worktrees and subagent sessions) are shipped while
-the sandbox runs.
+than DNS names and firewall verdicts, so nothing is shipped unless you
+opt in. Transcripts of every session under the mounted workspace
+(including worktrees and subagent sessions) are shipped while the sandbox
+runs.
+
+**It ships from the host, not from inside the session.** The transcripts
+are bind-mounted from the host rather than produced in the container, so
+`bin/dejima-conversation-ship` reads them where they already are. That
+matters because this is an oversight log of the session it is watching:
+run inside, it was a process the session shared a filesystem and a signal
+namespace with, and a session that killed it ended its own logging with
+nothing on the host noticing. DNS and firewall logs still ship from
+inside, because those files only exist in the container.
+
+What that does **not** change is that the transcript is session-writable.
+This ships what was recorded; it does not attest to it - the same caveat
+[epitaph](configuration.md#reading-what-a-session-left-behind) carries.
+
+**And it moves a parser across the boundary.** The transform is `jq`, and it
+reads session-controlled bytes on the host as your user rather than in the
+container as root. That is the trade, not a free win: what
+is gained is that a session can no longer silence or edit its own oversight
+log, and what is accepted is that `jq` is load-bearing against hostile input
+outside the container. It is the same bet epitaph already makes with
+`python3`, and the reason the parser is a plugin's rather than something a
+manifest could supply.
 
 ### Viewing logs in Grafana
 

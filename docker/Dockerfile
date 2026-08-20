@@ -156,10 +156,9 @@ ENV SANDBOX_USER=$SANDBOX_USER
 ENV SANDBOX_HOME=$SANDBOX_HOME
 
 # Ensure the sandbox user has access to /usr/local/share. The recursion is
-# scoped to npm-global rather than applied to the whole directory, which is
-# what this used to do: Neovim now unpacks into /usr/local/share/nvim above
-# this line rather than below it, and recursing from the parent would hand
-# the sandbox user Neovim's runtime files. /usr/local/share itself is still
+# scoped to npm-global: Neovim unpacks into /usr/local/share/nvim above this
+# line, and recursing from the parent would hand the sandbox user Neovim's
+# runtime files. /usr/local/share itself is still
 # chowned, so anything that expected to create entries in it still can.
 RUN mkdir -p /usr/local/share/npm-global && \
   chown $SANDBOX_USER:$SANDBOX_USER /usr/local/share && \
@@ -265,10 +264,13 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
   npx playwright install chromium
 
 # Copy and set up firewall + DNS-proxy + entrypoint scripts, every forge's
-# CLI helpers, and the claude wrapper that pins
-# --dangerously-skip-permissions. The launched application itself
-# (SANDBOX_CMD, default `claude`) and any editor config for it are supplied
-# at runtime, not baked into the image - see docker-compose.yml/entrypoint.sh.
+# CLI helpers, and the harness wrapper that pins whichever no-confirm flags
+# the selected harness needs. The wrapper is installed under a neutral name:
+# the image is shared across harnesses and the selection is per launch, so
+# entrypoint.sh is what links it into place as the harness's own command.
+# The launched application itself (SANDBOX_CMD) and any editor config for it
+# are supplied at runtime, not baked into the image - see
+# docker-compose.yml/entrypoint.sh.
 COPY docker/fixed-domains.sh /usr/local/bin/
 COPY docker/dns-proxy.sh /usr/local/bin/
 COPY docker/init-firewall.sh /usr/local/bin/
@@ -278,7 +280,7 @@ COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua
 COPY docker/entrypoint.sh /usr/local/bin/
 COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
-COPY docker/claude-wrapper.sh /usr/local/bin/claude
+COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of
 # USER, so the copies above are unaffected, but the install(1) below is a RUN
@@ -289,10 +291,11 @@ USER root
 # its API URL and token, and an image that is identical regardless of which
 # forge is configured is one less thing for the exit audit to explain.
 COPY forges/ /tmp/forges/
-RUN find /tmp/forges -type f -path '*/bin/*' -exec install -m 755 {} /usr/local/bin/ \; \
-    && rm -rf /tmp/forges
+COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
+RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/bin \
+    && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/claude && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall

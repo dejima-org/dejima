@@ -77,6 +77,7 @@ DEBOUNCE_SECONDS="$(config_get remote-access debounce)"
 # planted here would send every mkdir and every rm below it into someone
 # else's tree. Created rather than required, so the unit can start before the
 # first sandbox has ever run.
+# shellcheck disable=SC2174
 mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || true
 if [ -L "$STATE_DIR" ] || [ ! -d "$STATE_DIR" ] \
     || [ "$(stat -c %u "$STATE_DIR")" != "$(id -u)" ]; then
@@ -88,6 +89,9 @@ fi
 # either side may get there first, so the mode is set unconditionally here -
 # same as bin/dejima:491.
 chmod 700 "$STATE_DIR"
+# The parent is verified and chmod 700 above, so -p creates only these two
+# leaves and -m is the mode each of them gets.
+# shellcheck disable=SC2174
 mkdir -p -m 700 "$NOTIFY_DIR" "$DEBOUNCE_DIR"
 
 # From the registry (host-written), not from anything the session wrote. Still
@@ -182,7 +186,7 @@ scan() {
         valid_run_id "$run_id" || continue
         # The enum is iterated, not discovered: a name that isn't one of these
         # is never stat'd, never read, never removed.
-        for event in waiting done; do
+        for event in waiting 'done'; do
             marker="$dir/$event"
             # -e follows the link and is FALSE for a dangling symlink, which a
             # session can plant as easily as a file; -L catches those so they

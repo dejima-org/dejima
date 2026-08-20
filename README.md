@@ -370,7 +370,7 @@ dejima ~/repos/some-project
 
 By default the container's entry point is bare `claude` (always running with
 `--dangerously-skip-permissions`, regardless of how it's invoked; see
-`docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
+`docker/harness-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
 The loop, in the part every workflow shares: point it at a project, ask for a

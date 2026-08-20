@@ -33,9 +33,12 @@ const CLIENT_SOURCES = [
   'src/main.js'
 ];
 
-// Everything the output depends on, for the staleness check in test/static.bats
+// Everything the output depends on, for the staleness check in test/remote.bats
 // - index.html is committed, so nothing forces a rebuild except noticing that
-// the sources moved on without it.
+// the sources moved on without it. The check compares this manifest against
+// the tree AND the page's own Sources stamp against this manifest; both are
+// needed, since the first alone passes on a commit that rebuilds the manifest
+// and leaves the page behind.
 const MANIFEST_SOURCES = [
   'package-lock.json',
   'src/config.js',
