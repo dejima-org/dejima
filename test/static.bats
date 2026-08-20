@@ -1987,6 +1987,67 @@ this line is not json'
     [[ "$output" != *"not json"* ]]
 }
 
+# runtime.bats names its container and network after the run, and both
+# properties it needs pull in opposite directions: unique ACROSS runs, so a
+# leftover from one cannot be adopted or destroyed by the next, and stable
+# WITHIN a run, so setup_file, every test and teardown_file all mean the same
+# container.
+#
+# BATS_FILE_TMPDIR looks like it gives both and gives only the second: its path
+# is unique but its basename is the file's index, `0` for the only file there.
+# That made the names the constants dejima-test-0 and dejima-test-net-0 in
+# every run ever, until a killed run left dejima-test-net-0 with a container
+# attached and every later run died in setup_file on "already exists".
+@test "runtime.bats derives its container and network names from the run, not the file index" {
+    local rt="$REPO_ROOT/test/runtime.bats"
+    run grep -nE '^(container|network)_name\(\)' "$rt"
+    [ "$status" -eq 0 ] || { echo "the name helpers are gone"; return 1; }
+    # Both derive from BATS_RUN_TMPDIR, whose basename is the per-run
+    # bats-run-XXXXXX.
+    local n
+    n=$(grep -cE '^(container|network)_name\(\).*BATS_RUN_TMPDIR' "$rt")
+    [ "$n" -eq 2 ] || { echo "expected 2 helpers keyed on BATS_RUN_TMPDIR, found $n"; return 1; }
+    run grep -nE '^(container|network)_name\(\).*BATS_FILE_TMPDIR' "$rt"
+    [ "$status" -ne 0 ] || {
+        echo "a name helper is back on BATS_FILE_TMPDIR, whose basename is always 0:" >&2
+        echo "$output" >&2
+        return 1
+    }
+    # And the property itself, rather than only the variable it comes from: two
+    # runs of the same helper text must not agree.
+    local probe first second
+    probe="$(mktemp "$BATS_TEST_TMPDIR/probe.XXXXXX.bats")"
+    {
+        grep -E '^network_name\(\)' "$rt"
+        echo '@test "n" { echo "NAME=$(network_name)" >&3; }'
+    } > "$probe"
+    first="$(bats "$probe" 2>&1 | sed -n 's/.*NAME=//p')"
+    second="$(bats "$probe" 2>&1 | sed -n 's/.*NAME=//p')"
+    [ -n "$first" ] || { echo "the probe produced no name"; return 1; }
+    [ "$first" != "$second" ] || {
+        echo "two separate runs produced the same network name: $first" >&2
+        echo "a leftover from one run would collide with the next" >&2
+        return 1
+    }
+}
+
+# A network left behind by a killed run keeps its container attached, so
+# `docker network rm` cannot remove it and `docker network create` then fails
+# on the name - on a long-lived privileged runner, for every run afterwards.
+@test "runtime.bats clears a stale network of its own before creating one" {
+    local rt="$REPO_ROOT/test/runtime.bats"
+    # Scoped to this suite's own prefix: it may clear its namespace and
+    # nothing else.
+    grep -q 'name=\^dejima-test-net-' "$rt" \
+        || { echo "the sweep is not scoped to the dejima-test-net- prefix"; return 1; }
+    # And it must come before the create, or it clears nothing in time.
+    local sweep create
+    sweep=$(grep -n 'name=\^dejima-test-net-' "$rt" | head -1 | cut -d: -f1)
+    create=$(grep -n 'docker network create' "$rt" | head -1 | cut -d: -f1)
+    [ "$sweep" -lt "$create" ] \
+        || { echo "the sweep at line $sweep runs after the create at line $create"; return 1; }
+}
+
 @test "every container runtime.bats starts is attached to a user-defined network" {
     # On the default bridge there's no 127.0.0.11, so dns-proxy.sh aborts and
     # the container dies mid-startup - which used to surface as flaky,
