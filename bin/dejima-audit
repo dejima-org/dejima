@@ -850,6 +850,9 @@ tcb_snapshot() {
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
+        # A one-row table, not a loop that happens to run once: the shape is
+        # what lets a second path be added as a line rather than a branch.
+        # shellcheck disable=SC2043
         for p in install.sh; do
             [ -f "$ws/$p" ] && { stage_entry "tcb:$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
@@ -1233,12 +1236,11 @@ case "$cmd" in
                           finding_ids+=("gitconfig:$key") ;;
                 esac
             else
-                # Suppressible and id-bearing like the CRITICAL arms above.
-                # Both were previously neither, which left this the one tier
-                # of finding with no way to curate it: keys some tools
-                # rewrite on every run (branch.<name>.merge on each push,
-                # submodule.*) re-fired every session and pushed real
-                # WARNINGs out of the capped list (#45).
+                # Suppressible and id-bearing like the CRITICAL arms above:
+                # without an id, keys some tools rewrite on every run
+                # (branch.<name>.merge on each push, submodule.*) re-fire
+                # every session and push real WARNINGs out of the capped
+                # list (#45).
                 #
                 # Safe by construction rather than by care taken here:
                 # id_severity already calls an exec key or any alias CRITICAL
@@ -1283,17 +1285,15 @@ case "$cmd" in
                          <(sed -n '/^### paths/,/^### projects/p' "$new"   | grep -v '^### ') \
                  | sed 's/^\t//' | cut -f1 | sort -u )
 
-        # There is deliberately no cross-project finding here any more. It
-        # reported a write to another project's ~/.claude/projects slug, and
-        # a session could once make one: the whole tree was mounted. Since
-        # #104 it gets its own slugs and nothing else, so the only writes this
-        # could still see are other host or dejima sessions doing their own
-        # legitimate work - and with several sessions running it reported all
+        # Deliberately no cross-project finding: since #104 a session gets
+        # its own ~/.claude/projects slugs and nothing else, so the only
+        # writes visible here are other host or dejima sessions doing their
+        # own legitimate work - and with several running it would report all
         # of them, on every report, drowning the findings that mattered.
         #
-        # Detection that cannot observe the thing it was built for, and fires
-        # constantly on the thing it was not, is worse than no detection: it
-        # trains the operator to skim. The mount is the control now, and
+        # Detection that cannot observe what it exists for, and fires
+        # constantly on what it does not, is worse than no detection: it
+        # trains the operator to skim. The mount is the control, and
         # static.bats pins it.
 
         # tcb diffs: any change under the sandbox's own trusted computing
@@ -1759,8 +1759,8 @@ case "$cmd" in
                 gitconfig:*) ign_noun="key" ;;
                 *)           ign_noun="file" ;;
             esac
-            k_a="$C_KEY[a]$C_RESET"; k_i="$C_KEY[i]$C_RESET"
-            k_s="$C_KEY[s]$C_RESET"; k_q="$C_KEY[q]$C_RESET"
+            k_a="${C_KEY}[a]$C_RESET"; k_i="${C_KEY}[i]$C_RESET"
+            k_s="${C_KEY}[s]$C_RESET"; k_q="${C_KEY}[q]$C_RESET"
             if [ "$ackable" -ne 1 ]; then
                 printf '  %s skip  %s quit (this finding cannot be acknowledged): ' "$k_s" "$k_q"
             elif [ "$tier" = CRITICAL ]; then

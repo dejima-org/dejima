@@ -797,8 +797,8 @@ EOF
 }
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
-    # Finding 1 regression: forge_env_exports used to emit `GH_TOKEN=` (empty)
-    # whenever push_token_file was unset, and `-e GH_TOKEN=` on `docker
+    # forge_env_exports must not emit `GH_TOKEN=` (empty) when
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker
     # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
     # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
     # [github] token_file value every session is supposed to get regardless

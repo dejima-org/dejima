@@ -126,9 +126,22 @@
   // OSC 52 is how a terminal application says "put this on the clipboard" -
   // tmux with set-clipboard, nvim, or anything else that emits it. xterm.js
   // has no handler of its own, so without this a yank goes nowhere.
+  //
+  // Announced every time, because the writer is whatever is running in the
+  // session and not necessarily you: a clipboard that changes silently is one
+  // you paste from believing you know what is on it. The toast is the only
+  // thing standing between "a session wrote your clipboard" and your next
+  // PASTE, so it is not conditional on the payload looking suspicious.
   term.parser.registerOscHandler(52, function (data) {
     var text = D.osc52.decodeOsc52(data);
-    if (text !== null) copyToClipboard(text);
+    if (text !== null) {
+      copyToClipboard(text);
+      notify('The session put ' + text.length + ' characters on your clipboard.');
+    } else if (D.osc52.oversize(data)) {
+      notify('The session tried to put more than ' +
+        Math.floor(D.osc52.MAX_CLIPBOARD_BYTES / 1024) +
+        'KB on your clipboard. Ignored.');
+    }
     return true;
   });
 

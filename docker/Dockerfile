@@ -156,10 +156,9 @@ ENV SANDBOX_USER=$SANDBOX_USER
 ENV SANDBOX_HOME=$SANDBOX_HOME
 
 # Ensure the sandbox user has access to /usr/local/share. The recursion is
-# scoped to npm-global rather than applied to the whole directory, which is
-# what this used to do: Neovim now unpacks into /usr/local/share/nvim above
-# this line rather than below it, and recursing from the parent would hand
-# the sandbox user Neovim's runtime files. /usr/local/share itself is still
+# scoped to npm-global: Neovim unpacks into /usr/local/share/nvim above this
+# line, and recursing from the parent would hand the sandbox user Neovim's
+# runtime files. /usr/local/share itself is still
 # chowned, so anything that expected to create entries in it still can.
 RUN mkdir -p /usr/local/share/npm-global && \
   chown $SANDBOX_USER:$SANDBOX_USER /usr/local/share && \

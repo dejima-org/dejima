@@ -737,18 +737,18 @@ dexec_node() {
     rm -rf "$dotclaude"
 }
 
-@test "staging also protects a symlinked statusline.sh, which the old read-only mount did not (Finding 1)" {
+@test "staging protects a symlinked statusline.sh, which a read-only mount does not" {
     # Same shape as the plain-regular-file test above, except statusline.sh
     # on the host is a symlink into a separate directory - the common real
     # setup (~/.claude/statusline.sh -> a config checkout elsewhere). That
-    # case used to be a CONFIRMED, documented gap: statusline.sh was mounted
+    # case is the one a :ro mount cannot cover: with statusline.sh mounted
     # read-only back onto its own path inside a read-write ~/.claude mount,
-    # the parent mount was established first so the destination already had
+    # the parent mount is established first, so the destination already has
     # the symlink sitting on it, and bind-mount destination resolution
-    # (runc's SecureJoin) followed it - the :ro mount landed on the target
-    # and the symlink dentry itself stayed an ordinary writable entry that a
-    # session could unlink and replace. Detection (bin/dejima-audit hashing
-    # the target string) was the only compensating control.
+    # (runc's SecureJoin) follows it - the :ro mount lands on the target
+    # and the symlink dentry itself stays an ordinary writable entry that a
+    # session can unlink and replace, leaving detection (bin/dejima-audit
+    # hashing the target string) as the only compensating control.
     #
     # Staging closes it outright, and for the opposite reason: source-side
     # symlink resolution is exactly what's wanted, so what lands at

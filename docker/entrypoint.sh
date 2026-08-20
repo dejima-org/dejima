@@ -178,14 +178,14 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
-# The real OAuth credential no longer enters the container at all - ~/.claude
-# isn't mounted wholesale any more, so there is nothing to mask (#50). What
-# lands at this path instead depends on the transport: the tls one needs a
-# well-formed fake credential, because Claude Code authenticates from this
-# file rather than from an ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
-# Nothing is mounted for the loopback transport, so give Claude Code the
-# empty file the old mask used to provide rather than betting that an absent
-# credentials file behaves the same as an empty one. Either way this is
+# ~/.claude is not mounted whole, so the real OAuth credential has no path
+# into the container (#50, docs/security.md). What lands at this path instead
+# depends on the transport: the tls one needs a well-formed fake credential,
+# because Claude Code authenticates from this file rather than from an
+# ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
+# Nothing is mounted for the loopback transport, so give Claude Code an empty
+# file rather than betting that an absent credentials file behaves the same
+# as an empty one. Either way this is
 # skipped when something is already there - which also covers
 # [credentials] proxy = off mounting the real credential in deliberately.
 if [ ! -e "$SANDBOX_HOME/.claude/.credentials.json" ]; then
@@ -249,7 +249,9 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
             echo "$openssl_err" >&2
             echo "Not starting the session - API traffic would have no valid cert to trust." >&2
             echo "On the HOST, set [credentials] transport = loopback in" >&2
-            echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
+            # The tilde is prose an operator reads, not a path this expands.
+        # shellcheck disable=SC2088
+        echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
             echo "the proxy (the real OAuth credential is then mounted into the" >&2
             echo "container) - then relaunch dejima." >&2
             exit 1
@@ -289,6 +291,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         echo "FATAL: the credential-proxy forwarder never bound 127.0.0.1:$forwarder_port." >&2
         echo "Not starting the session - API traffic would have no working path to the" >&2
         echo "host-side proxy. On the HOST, set [credentials] transport = loopback in" >&2
+        # shellcheck disable=SC2088
         echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
         echo "the proxy (the real OAuth credential is then mounted into the" >&2
         echo "container) - then relaunch dejima." >&2

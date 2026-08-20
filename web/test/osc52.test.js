@@ -44,3 +44,26 @@ test('decodeOsc52 rejects a query, an empty payload and garbage', () => {
 test('a base64 payload containing a semicolon is not truncated', () => {
   assert.equal(decodeOsc52('c;YTtiO2M='), 'a;b;c');
 });
+
+test('a payload over the clipboard cap is refused before it is decoded', () => {
+  const { MAX_CLIPBOARD_BYTES, oversize } = globalThis.DEJIMA.osc52;
+  // Valid base64 throughout, so the only thing refusing it is the cap.
+  const big = 'QQ=='.repeat(Math.ceil((MAX_CLIPBOARD_BYTES + 4096) / 1));
+  assert.equal(decodeOsc52('c;' + big), null);
+  assert.equal(oversize('c;' + big), true, 'and says which kind of refusal it is');
+});
+
+test('oversize is false for the refusals that are not about size', () => {
+  const { oversize } = globalThis.DEJIMA.osc52;
+  assert.equal(oversize('c;!!!!'), false, 'malformed, not too big');
+  assert.equal(oversize('c;?'), false, 'a query');
+  assert.equal(oversize('c;'), false, 'a clear');
+  assert.equal(oversize(null), false);
+});
+
+test('a yank at the cap still lands', () => {
+  const { MAX_CLIPBOARD_BYTES } = globalThis.DEJIMA.osc52;
+  const text = 'x'.repeat(MAX_CLIPBOARD_BYTES - 3);
+  const b64 = Buffer.from(text, 'utf8').toString('base64');
+  assert.equal(decodeOsc52('c;' + b64), text);
+});
