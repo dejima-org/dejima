@@ -162,6 +162,8 @@ EOF
             ;;
         harness) cat <<'EOF'
 install	?depspec
+image_dirs	?list:homepath
+image_env	?list:envpair
 command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
@@ -244,6 +246,27 @@ _provider_valid_value() {
             # Joined to a provider directory, so no absolute paths and no
             # traversal - a manifest may only name a file it ships.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$value" != *".."* ]]
+            ;;
+        homepath)
+            # A directory the harness needs inside the sandbox user's home,
+            # created in that harness's image layer. Relative to $HOME and
+            # nothing else: a leading slash would put it anywhere on the
+            # filesystem and `..` would walk out of the home it is scoped to,
+            # and both reach a `mkdir -p` running as root at build time.
+            # Unlike `relpath` a leading dot is allowed, because the
+            # directories a harness keeps state in are dotfiles.
+            case "$value" in
+                /*|.|./*|*/..|*/../*|..|../*) return 1 ;;
+                */) return 1 ;;
+            esac
+            [[ "$value" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]]
+            ;;
+        envpair)
+            # NAME=VALUE, becoming an ENV line in that harness's image layer.
+            # The value is deliberately narrow rather than quoted around: no
+            # whitespace and nothing shell-active, so there is no quoting to
+            # get wrong in a generated Dockerfile.
+            [[ "$value" =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/+-]+$ ]]
             ;;
         depspec)
             # The same grammar an operator's approved dependency goes through,

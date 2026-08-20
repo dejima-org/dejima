@@ -197,10 +197,10 @@ fi
 # socket, and anthropic-proxy-forwarder.js pipes bytes into it. Only started
 # when this session actually has a proxy socket.
 #
-# In the default tls transport, api.anthropic.com is pointed at loopback here
-# and the forwarder terminates TLS for it, so Claude Code runs with no
-# ANTHROPIC_BASE_URL and no placeholder token - it is indistinguishable from a
-# stock install, which is the whole point (see docs/security.md). The hosts
+# In the default tls transport the harness's proxied_api_domain is pointed at
+# loopback here and the forwarder terminates TLS for it, so the harness runs
+# with no base-URL override and no placeholder token - it is indistinguishable
+# from a stock install, which is the whole point (see docs/security.md). The hosts
 # entry deliberately lives inside this guard rather than in compose's
 # extra_hosts: under [credentials] proxy = off nothing listens on :443, and
 # an unconditional entry would black-hole the real API on exactly the path
@@ -225,6 +225,19 @@ case "$SANDBOX_ANTHROPIC_TRANSPORT" in
 esac
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     forwarder_port=18300
+    # Which name the terminator answers for is the selected harness's, from
+    # `proxied_api_domain` in its manifest - this image is shared by every
+    # harness and must name none of them. Empty here means a harness declared
+    # a credential proxy it gave no endpoint for: the terminator would come up
+    # answering for nothing, the session would reach the real API directly,
+    # and the credential the proxy exists to withhold would be the one in use.
+    proxied_domain="${SANDBOX_HARNESS_PROXIED_DOMAIN:-}"
+    if [ -z "$proxied_domain" ]; then
+        echo "FATAL: a credential proxy socket is mounted, but the selected harness" >&2
+        echo "declares no proxied_api_domain for the terminator to stand in front of." >&2
+        echo "Not starting the session - traffic would reach the API unintercepted." >&2
+        exit 1
+    fi
     if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "tls" ]; then
         forwarder_port=443
         # Generated here, in the container, rather than on the host: the key
@@ -243,15 +256,15 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         # block below; openssl's success-path chatter is just progress dots.
         if ! openssl_err=$(openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
             -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \
-            -subj "/CN=api.anthropic.com" \
-            -addext "subjectAltName=DNS:api.anthropic.com" 2>&1); then
-            echo "FATAL: openssl failed to generate the TLS terminator cert for api.anthropic.com." >&2
+            -subj "/CN=$proxied_domain" \
+            -addext "subjectAltName=DNS:$proxied_domain" 2>&1); then
+            echo "FATAL: openssl failed to generate the TLS terminator cert for $proxied_domain." >&2
             echo "$openssl_err" >&2
             echo "Not starting the session - API traffic would have no valid cert to trust." >&2
             echo "On the HOST, set [credentials] transport = loopback in" >&2
             # The tilde is prose an operator reads, not a path this expands.
-        # shellcheck disable=SC2088
-        echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
+            # shellcheck disable=SC2088
+            echo "~/.config/dejima/config, or [credentials] proxy = off to launch without" >&2
             echo "the proxy (the real OAuth credential is then mounted into the" >&2
             echo "container) - then relaunch dejima." >&2
             exit 1
@@ -264,7 +277,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         # /etc/hosts wins over DNS in getaddrinfo, so this bypasses the DNS
         # proxy entirely - which is why fixed-domains.sh leaves the name off
         # the allowlist whenever there is a proxy socket.
-        echo "127.0.0.1 api.anthropic.com" >> /etc/hosts
+        echo "127.0.0.1 $proxied_domain" >> /etc/hosts
         # The trust anchor for the cert above. NODE_EXTRA_CA_CERTS rather than
         # the system store: it needs no update-ca-certificates run, and it is
         # the single most ordinary variable a corporate environment sets.
@@ -350,4 +363,15 @@ fi
 # own command unless [core] command overrides it (e.g. to `nvim`) for an
 # editor-driven workflow; pair that with SANDBOX_NVIM_CONFIG (see bin/dejima)
 # to bring in a real config for it instead of running unconfigured.
-exec gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"
+# No default. Naming one harness here would make this image that harness's,
+# and would name a binary an image built for a different one does not contain
+# - an exec failure reading as a broken sandbox rather than as the container
+# having been started without the thing that selects a harness.
+if [ -z "${SANDBOX_CMD:-}" ]; then
+    echo "entrypoint: SANDBOX_CMD is unset, so there is no command to run." >&2
+    echo "It is set from the selected harness's manifest by bin/dejima, which" >&2
+    echo "is how a session starts. To poke at this image by hand, pass a" >&2
+    echo "command: docker run --entrypoint sh ..." >&2
+    exit 1
+fi
+exec gosu "$SANDBOX_USER" $SANDBOX_CMD "$@"

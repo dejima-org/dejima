@@ -1511,7 +1511,7 @@ fi
 # image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
 # build would rebuild the base Dockerfile under the derived name.
 SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \
-    docker compose -f "$COMPOSE_FILE" build claude
+    docker compose -f "$COMPOSE_FILE" build sandbox
 
 SANDBOX_IMAGE="dejima:${SANDBOX_USER}"
 
@@ -1550,8 +1550,15 @@ build_dep_layer() {
 # interpolate into a Dockerfile RUN line. Re-checking here would be a second
 # copy of a rule with no way to disagree with the first, and no way to test.
 SANDBOX_HARNESS_INSTALL="$(manifest_get harness "$DEJIMA_HARNESS_NAME" install)"
+# What this harness needs its image to contain besides the package: the
+# directories it keeps state in, and anything it wants in the environment.
+# Both used to be in the base image, where they were one harness's needs
+# imposed on every image dejima builds.
+SANDBOX_HARNESS_IMAGE_DIRS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_dirs)"
+SANDBOX_HARNESS_IMAGE_ENV="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_env)"
 
-if [ -n "$SANDBOX_HARNESS_INSTALL" ] \
+if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] \
     || [ -s "$(config_root)/dependencies" ] \
     || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
     SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
@@ -1561,9 +1568,11 @@ if [ -n "$SANDBOX_HARNESS_INSTALL" ] \
     SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/dejima-derived-ctx.XXXXXX")"
 fi
 
-if [ -n "$SANDBOX_HARNESS_INSTALL" ]; then
+if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ]; then
     tag="dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}"
     generate_spec_dockerfile "$SANDBOX_IMAGE" "$SANDBOX_HARNESS_INSTALL" \
+        "$SANDBOX_HARNESS_IMAGE_DIRS" "$SANDBOX_HARNESS_IMAGE_ENV" \
         > "$SANDBOX_DERIVED_DOCKERFILE"
     echo "Building $tag ($DEJIMA_HARNESS_NAME)..."
     if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
@@ -1677,7 +1686,7 @@ compose_status=0
 "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
 SANDBOX_CONVERSATION_SHIP_PID=$!
 
-docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2

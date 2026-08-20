@@ -332,9 +332,10 @@ harness-specific path resolving to nothing is the honest answer.
 | Permission bypass | the flag itself, `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
 | Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
 | Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
-| State directories | the base image pre-creates `~/.claude`, `~/.claude/projects` and `~/.claude/file-history` **by name**, owned by the sandbox user, so Docker does not create them root-owned as the parents of the mounts that land inside them. Still written against Claude Code, and one of two things left in the Dockerfile that is | `docker/Dockerfile` |
-| Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, set for every session whatever harness is selected. The other one | `docker/Dockerfile` |
-| Fallback command | `exec gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude}` names this harness as the default for a container started without `bin/dejima`. A real launch always sets `SANDBOX_CMD` from the manifest, so the fallback is reachable only by hand - and it names a binary the image may not contain | `docker/entrypoint.sh` |
+| State directories | which directories must exist in the sandbox user's home, 0700 and owned by them, so Docker does not create a mount's missing parent root-owned. The manifest's `image_dirs`, created in that harness's own image layer | `harnesses/<name>/harness.conf` |
+| Image environment | anything the harness wants set for every session of its own - for Claude Code, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The manifest's `image_env`, in the same layer | `harnesses/<name>/harness.conf` |
+| Command | there is no default anywhere shared. `SANDBOX_CMD` comes from the manifest's `command` via `bin/dejima`, and `entrypoint.sh` refuses an empty one rather than naming a harness a given image may not contain | `harnesses/<name>/harness.conf`, `docker/entrypoint.sh` |
+| Proxied endpoint | which name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. The manifest's `proxied_api_domain`; a credential proxy with no domain declared is refused rather than started answering for nothing | `harnesses/<name>/harness.conf`, `docker/entrypoint.sh` |
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
@@ -380,8 +381,11 @@ observed - and an untested guard is worse than a declared-absent one,
 because absent is visible to the operator and broken is not.
 
 `claude-code` is no exception to that: it is declared by its own manifest and
-built into its own layer like any other. What the base image still carries for
-it is the two rows the inventory above ends on.
+built into its own layer like any other. The base image carries nothing of any
+harness's - not its package, not the directories it keeps state in, not its
+environment, and not its name as a default command. What is left on the
+harness axis is the credential proxy, which is Claude Code's shape throughout
+and is the R5 row above.
 
 `providers.bats` covers the manifest contract itself and is where a new
 `harness.conf` gets its parsing and validation tests. The suites that assert

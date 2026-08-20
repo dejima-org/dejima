@@ -449,11 +449,20 @@ generate_derived_dockerfile() {
 # $2 is a newline-separated list. Callers are responsible for having validated
 # each one (valid_dep_spec); nothing below re-checks, for the same reason
 # approved_entries is the only way into the function above.
+#
+# $3 and $4 are for a harness layer and empty for a dependency one: directories
+# to create under the sandbox user's home, and NAME=VALUE pairs to set, both
+# space-separated. They exist because the base image must name no harness -
+# what a harness keeps state in, and what it wants in its environment, belong
+# to that harness's own layer. Validated by the manifest types `homepath` and
+# `envpair` before they reach here, which is what makes them safe to
+# interpolate unquoted.
 generate_spec_dockerfile() {
-    local base="$1" entries="$2" apt npm pip cargo spec name
-    local -a tarballs=()
+    local base="$1" entries="$2" dirs="${3:-}" envs="${4:-}"
+    local apt npm pip cargo spec name d e
 
     apt=""; npm=""; pip=""; cargo=""
+    local -a tarballs=()
     while IFS= read -r spec; do
         [ -n "$spec" ] || continue
         name="${spec#*:}"
@@ -468,6 +477,21 @@ generate_spec_dockerfile() {
 
     printf 'FROM %s\n' "$base"
     printf 'USER root\n'
+    if [ -n "$dirs" ]; then
+        # 0700 and owned by the sandbox user, because these are the parents of
+        # mounts that land inside them: Docker creates a missing parent
+        # root-owned, and the session then cannot write the state it keeps
+        # there. Created here rather than in the base image so an image
+        # carries one harness's directories and no other's.
+        printf 'RUN mkdir -p'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf ' \\\n  && chown -R ${SANDBOX_USER}:${SANDBOX_USER}'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf ' \\\n  && chmod 700'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf '\n'
+    fi
+    for e in $envs; do printf 'ENV %s\n' "$e"; done
     [ -n "$apt" ] && printf 'RUN apt-get update && apt-get install -y --no-install-recommends%s \\\n  && apt-get clean && rm -rf /var/lib/apt/lists/*\n' "$apt"
     [ -n "$pip" ] && printf 'RUN pip install --break-system-packages%s\n' "$pip"
     _emit_tarball_layers "${tarballs[@]+"${tarballs[@]}"}"

@@ -436,13 +436,32 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+# Whether the selected harness declares a directory its image layer creates.
+# The requirement each of the callers below describes is unchanged; what moved
+# is where it is satisfied. The base image is shared by every harness, so a
+# directory only one of them needs is declared by that one - see `image_dirs`
+# in docs/providers.md.
+_harness_declares_dir() {
+    local want="$1" dirs d
+    dirs="$(bash -c 'source "$1"; manifest_get harness claude-code image_dirs' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh")" || return 1
+    for d in $dirs; do [ "$d" = "$want" ] && return 0; done
+    return 1
+}
+
 @test "the image bakes in a user-owned ~/.claude for the enumerated mounts to land in" {
-    # Nothing mounts the directory itself any more, so it has to exist and be
-    # writable by the sandbox user - otherwise Docker auto-creates it root
-    # owned while setting up the mounts nested under it, and the session
-    # can't write its own cache or the config entrypoint.sh copies in.
-    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
-    grep -qE 'chown -R \$SANDBOX_USER:\$SANDBOX_USER .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
+    # Nothing mounts the directory itself, so it has to exist and be writable
+    # by the sandbox user - otherwise Docker auto-creates it root-owned while
+    # setting up the mounts nested under it, and the session cannot write its
+    # own cache or the config entrypoint.sh copies in.
+    _harness_declares_dir .claude \
+        || { echo "the harness does not declare ~/.claude"; return 1; }
+    # And the layer that reads the declaration makes it user-owned, which is
+    # the half a declaration alone would not give.
+    run bash -c 'source "$1"; generate_spec_dockerfile base "" ".claude" ""' _ \
+        "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *'chown -R ${SANDBOX_USER}:${SANDBOX_USER}'* ]] || { echo "$output"; return 1; }
 }
 
 
@@ -514,7 +533,8 @@ _declared_config_dirs() {
 # could not create a slug of its own - which is exactly what it must do when
 # the workspace has no history yet.
 @test "the image pre-creates ~/.claude/projects so the slug mounts have a writable parent" {
-    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude/projects' "$SANDBOX_DIR/Dockerfile"
+    _harness_declares_dir .claude/projects \
+        || { echo "the harness does not declare ~/.claude/projects"; return 1; }
 }
 
 # Each file-history/<session>/<hash>@v1 is a verbatim copy of an edited file,
@@ -538,7 +558,8 @@ _declared_config_dirs() {
 }
 
 @test "the image pre-creates ~/.claude/file-history so the session mounts have a writable parent" {
-    grep -qE '\$SANDBOX_HOME/\.claude/file-history' "$SANDBOX_DIR/Dockerfile"
+    _harness_declares_dir .claude/file-history \
+        || { echo "the harness does not declare ~/.claude/file-history"; return 1; }
 }
 
 # One definition of "this workspace's slugs", shared by the mount and the
@@ -2197,7 +2218,7 @@ STUB
     # anywhere in the file" check just as well, without actually applying to
     # this build.
     local build_line
-    build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build claude' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build sandbox' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
     [ -n "$build_line" ]
     run sed -n "$((build_line - 1))p" "$REPO_ROOT/bin/dejima"
     [[ "$output" == 'SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \' ]]
@@ -3109,16 +3130,19 @@ q
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }
 
-@test "entrypoint terminates TLS for api.anthropic.com on loopback by default" {
+@test "entrypoint terminates TLS on loopback for the proxied domain by default" {
     # The transport is normalized in exactly one place so the forwarder, the
     # cert generation, and the readiness probe cannot disagree about which
     # mode this session is in.
     grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
-    # CN alone is not enough - Node verifies the SAN.
-    grep -q 'subjectAltName=DNS:api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'CN=api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    # Which name it answers for is the selected harness's, so these assert the
+    # shape rather than one harness's API hostname - see "the TLS terminator
+    # answers for the harness's declared domain".
+    # CN alone is not enough: Node verifies the SAN.
+    grep -q 'subjectAltName=DNS:\$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'CN=\$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'NODE_EXTRA_CA_CERTS' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q '127.0.0.1 \$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test "entrypoint aborts when the forwarder never binds" {
@@ -3136,7 +3160,8 @@ q
     local guard body
     guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ -n "$guard" ]
-    body=$(grep -n '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    body=$(grep -n '127.0.0.1 \$proxied_domain' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ -n "$body" ] || { echo "no hosts entry at all"; return 1; }
     [ "$body" -gt "$guard" ]
 }
 
@@ -3998,15 +4023,13 @@ _emit_mount_at() {
     local doc="$REPO_ROOT/docs/development.md"
     local dockerfile="$SANDBOX_DIR/Dockerfile"
     # Lines of actual instruction, not comments.
-    local hits
-    hits="$(grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile" | grep -vc '^$' || true)"
-    [ "$hits" -gt 0 ] || { echo "no harness paths in the Dockerfile - update this test"; return 1; }
-    # Each of the two the inventory names.
-    grep -q 'State directories' "$doc" || { echo "no inventory row for the .claude directories"; return 1; }
-    grep -q 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' "$doc" \
-        || { echo "no inventory row for the telemetry variable"; return 1; }
-    grep -q 'Fallback command' "$doc" \
-        || { echo "no inventory row for entrypoint.sh's default command"; return 1; }
+    run grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile"
+    [ "$status" -ne 0 ] \
+        || { echo "the base image is back to naming a harness:"; echo "$output"; return 1; }
+    # A row for each, naming where it is satisfied now.
+    grep -q 'State directories' "$doc" || { echo "no inventory row for the state directories"; return 1; }
+    grep -q 'Image environment' "$doc" || { echo "no inventory row for the image environment"; return 1; }
+    grep -q 'Proxied endpoint' "$doc" || { echo "no inventory row for the proxied domain"; return 1; }
 }
 
 @test "every file the docs' file list names exists, and the libraries are all in it" {
@@ -4024,4 +4047,58 @@ _emit_mount_at() {
              bin/dejima-harness-lib.sh docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
+}
+
+# The base image is shared by every harness. Anything in it that only one
+# harness needs is that harness imposed on every image dejima builds, and
+# makes "add a second harness" mean "add to the first one's image".
+@test "the base image names no harness's state directories or environment" {
+    local d="$SANDBOX_DIR/Dockerfile"
+    # Instruction lines only: a comment may name a harness as an example of a
+    # general rule, and several do.
+    run grep -nE '^[^#]*(\.claude|CLAUDE_CODE|\.aider|\.opencode)' "$d"
+    [ "$status" -ne 0 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
+    # .ssh still is the base image's own, so the mkdir it shares has not
+    # simply been deleted along with them.
+    grep -qE '^RUN mkdir -p \$SANDBOX_HOME/\.ssh' "$d"
+}
+
+@test "nothing shared names one harness as the command to run" {
+    # A default here decides for every harness, and names a binary an image
+    # built for a different one does not contain.
+    run grep -nE 'SANDBOX_CMD:-[a-z]' "$SANDBOX_DIR/entrypoint.sh" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
+    # Refused rather than defaulted, so an unset one says why.
+    grep -q 'SANDBOX_CMD is unset' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "the compose service and its shared volumes are named for dejima, not a harness" {
+    local y="$SANDBOX_DIR/docker-compose.yml"
+    run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
+    [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
+    grep -qE '^  sandbox:' "$y"
+    # And bin/dejima refers to the service by the same name in both places.
+    [ "$(grep -c 'compose -f "$COMPOSE_FILE" \(build\|run\).* sandbox' "$REPO_ROOT/bin/dejima")" -eq 2 ] \
+        || { echo "bin/dejima does not use the service name in both places"; return 1; }
+}
+
+@test "the TLS terminator answers for the harness's declared domain, not a literal" {
+    # The manifest declares proxied_api_domain; the entrypoint used the name
+    # of one harness's API in the cert, the SAN and the /etc/hosts pin.
+    local e="$SANDBOX_DIR/entrypoint.sh"
+    run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
+    [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
+    grep -q 'SANDBOX_HARNESS_PROXIED_DOMAIN' "$e" \
+        || { echo "the entrypoint does not read the declared domain"; return 1; }
+    # And a harness that declares a proxy but no domain is refused, rather
+    # than bringing up a terminator that intercepts nothing.
+    grep -q 'declares no proxied_api_domain' "$e" \
+        || { echo "an empty proxied domain is not refused"; return 1; }
+}
+
+@test "a harness's image needs are declared in its manifest" {
+    local m="$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -qE '^image_dirs\s*=.*\.claude' "$m" || { echo "no image_dirs declared"; return 1; }
+    grep -qE '^image_env\s*=.*CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' "$m" \
+        || { echo "no image_env declared"; return 1; }
 }
