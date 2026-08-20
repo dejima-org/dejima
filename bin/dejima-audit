@@ -850,6 +850,9 @@ tcb_snapshot() {
     local ws="$1" p
     [ "$(readlink -f "$ws" 2>/dev/null)" = "$AUDIT_REPO_ROOT" ] || return 0
     {
+        # A one-row table, not a loop that happens to run once: the shape is
+        # what lets a second path be added as a line rather than a branch.
+        # shellcheck disable=SC2043
         for p in install.sh; do
             [ -f "$ws/$p" ] && { stage_entry "tcb:$p" "$ws/$p"; printf '%s\t%s\n' "$(enc_id "$p")" "$(hash_entry "$ws/$p")"; }
         done
@@ -1756,8 +1759,8 @@ case "$cmd" in
                 gitconfig:*) ign_noun="key" ;;
                 *)           ign_noun="file" ;;
             esac
-            k_a="$C_KEY[a]$C_RESET"; k_i="$C_KEY[i]$C_RESET"
-            k_s="$C_KEY[s]$C_RESET"; k_q="$C_KEY[q]$C_RESET"
+            k_a="${C_KEY}[a]$C_RESET"; k_i="${C_KEY}[i]$C_RESET"
+            k_s="${C_KEY}[s]$C_RESET"; k_q="${C_KEY}[q]$C_RESET"
             if [ "$ackable" -ne 1 ]; then
                 printf '  %s skip  %s quit (this finding cannot be acknowledged): ' "$k_s" "$k_q"
             elif [ "$tier" = CRITICAL ]; then

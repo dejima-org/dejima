@@ -522,9 +522,24 @@ clipboard. Nothing needs to be installed for that, and nothing here assumes
 any particular relay exists. That is the same path the sandbox already uses
 (`docker/sandbox-clipboard.lua` sets nvim up to emit it), so it is worth being
 explicit about what it means: anything running in the session can put text on
-the clipboard of whatever you are reading it from. A native terminal over the
-SSH front door behaves identically - honouring the sequence here closes a gap
-between the two front doors rather than opening one.
+the clipboard of whatever you are reading it from.
+
+This page is **more permissive than most native terminals**, so the two front
+doors are not equivalent here: xterm gates OSC 52 writes behind
+`allowWindowOps`, off by default; kitty prompts; Alacritty needs configuring.
+Two things bound it. Every write raises a toast naming how much was written,
+because a clipboard that changes silently is one you paste from believing you
+know what is on it; and a payload over 100KB is refused outright, since a yank
+is a selection rather than a stream.
+
+The step that matters is `PASTE`, not the write. Into an application with
+bracketed paste on - an editor, or a shell that supports it - the text arrives
+as data and nothing runs. Into one without it, a plain shell being the case to
+think about, a trailing newline is indistinguishable from pressing Enter, so
+`PASTE` strips trailing newlines: the text lands at your prompt and you press
+Enter yourself. Line breaks in the *middle* still arrive as Enter, which is
+true of pasting into any terminal without bracketed paste; `PASTE` says so
+when it sends one rather than leaving you to assume otherwise.
 
 The toolbar and the gestures appear only for a coarse pointer, so a desktop
 browser gets a plain terminal.

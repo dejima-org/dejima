@@ -93,7 +93,13 @@ parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
 since the fast CI job's container deliberately has no daemon), `providers.bats`
 covers the forge/workflow/harness manifest contract documented in
 [docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling.
+proxy's own request handling. `conversation.bats` runs
+`bin/dejima-conversation-ship` against a real transcript and a real HTTP
+endpoint standing in for Loki, and asserts on what arrives: that a session's
+lines ship, that a torn line waits until it is whole, that a sibling project
+whose directory name merely extends this one is not swept up with it, and
+that neither the in-memory batch nor the unread tail is lost to the kill that
+ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service bound to the host's
@@ -142,9 +148,16 @@ SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
 Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`project.bats`, `providers.bats`, `proxy.bats`, `remote.bats` and
-`static.bats`, runs anywhere a shell does, including inside a dejima sandbox
-itself, which has no Docker daemon by design.
+`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
+`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
+a dejima sandbox itself, which has no Docker daemon by design.
+
+`.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
+the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
+by shebang rather than enumerated, so a script added under `bin/`, `hooks/`,
+`docker/` or a forge's `bin/` is covered the day it lands. The severity floor
+and the two disabled checks are in `.shellcheckrc`, each with the reason
+beside it.
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every
 push to one, `runtime.bats` included. That job needs two things from the
@@ -311,7 +324,8 @@ harness-specific path resolving to nothing is the honest answer.
 | --- | --- | --- |
 | Install | `npm install -g @anthropic-ai/claude-code`, and a pinned `CLAUDE_CODE_VERSION` build arg | `docker/Dockerfile` |
 | Permission bypass | the flag itself, now `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
-| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core; the flag that carries them is `settings_args` in the manifest | `harnesses/<name>/harness.conf` |
+| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
+| Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
 | Telemetry | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `docker/Dockerfile` |
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. Now `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |

@@ -254,6 +254,9 @@ _warn_forge_env_collisions() {
         [ "${ref:0:1}" = "@" ] || continue
         # NAME=<core section> <core key>, for every variable core fills from
         # the config file itself.
+        # A one-row table, not a loop that happens to run once: another
+        # core-filled variable is a line here rather than a new branch.
+        # shellcheck disable=SC2043
         for core in "GH_TOKEN=github token_file"; do
             core_name="${core%%=*}"
             [ "$name" = "$core_name" ] || continue
@@ -682,40 +685,20 @@ for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     mkdir -p "$_cdir"
 done
 
-# Same for settings.json, which install.sh normally creates, and CLAUDE.md,
-# which many hosts don't have at all.
-[ -f "$HOME/.claude/settings.json" ] || echo '{}' > "$HOME/.claude/settings.json"
-[ -f "$HOME/.claude/CLAUDE.md" ] || : > "$HOME/.claude/CLAUDE.md"
-
-# Claude Code ignores a settings.json it can't parse, wholesale and with only
-# a startup warning, so a stray edit on the host costs the sandbox every
-# permission, hook and plugin the operator configured - including
-# skipDangerousModePermissionPrompt, which is why the first visible symptom is
-# an unexpected bypass-mode warning rather than anything mentioning settings.
-# The file is staged verbatim, so nothing else parses it before the session
-# reads it - check here, where the fix is at hand.
-if ! settings_error="$(jq . "$HOME/.claude/settings.json" 2>&1 >/dev/null)"; then
-    echo "$HOME/.claude/settings.json is not valid JSON:" >&2
-    echo "  $settings_error" >&2
-    echo "Claude Code would ignore it entirely and the sandbox would start with" >&2
-    echo "none of your settings. Fix it, then retry." >&2
-    exit 1
-fi
-
-# Claude Code's own per-command sandboxing is redundant here and cannot work
-# anyway - bwrap can't create a namespace without privileges that would undo
-# this container's hardening - and a session can't be trusted to turn it off
-# itself. So the override is generated host-side and reaches Claude Code as
-# an extra --settings layer above ~/.claude/settings.json, which holds only
-# what the sandbox overrides; the operator's hooks, permissions and plugins
-# still apply from there.
+# The override layer the sandbox imposes on the harness's own settings, and
+# any config file the harness needs to exist before it is staged.
 #
-# It is mounted at a container-local path, never over ~/.claude/settings.json:
-# a mount at the real path detaches when the host renames over the file (a
-# rename unlinks the dentry the mount is pinned to), silently restoring the
-# operator's settings with sandboxing back on (#47).
+# What that layer says, which files must exist, and what makes one unusable
+# are the harness's - a settings schema is exactly the harness-shaped thing a
+# manifest cannot carry, since it is a parser's grammar rather than a value.
+# What is dejima's: that the layer is a throwaway file the session cannot
+# reach, that it is mounted at a container-local path and NEVER over the
+# harness's own settings file - a mount at the real path detaches when the
+# host renames over the file, silently restoring the operator's settings with
+# sandboxing back on (#47) - and that a plugin refusing here stops the launch
+# rather than starting a session the harness would misread.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
-jq -n '{sandbox: {enabled: false}}' > "$SANDBOX_SETTINGS_FILE"
+harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 
 # ~/.claude.json mixes live app state with config (mcpServers) that cannot be
 # split at the mount level, and read-only is not an option: Claude Code does
@@ -889,9 +872,12 @@ export WORKSPACE_DIR
 # The image's user is built to match this uid/gid/username exactly (see
 # Dockerfile) - this is what makes $HOME-based absolute paths (dotfiles,
 # ~/.claude's plugin bookkeeping) resolve identically inside the container.
-export SANDBOX_USER="$(id -un)"
-export SANDBOX_UID="$(id -u)"
-export SANDBOX_GID="$(id -g)"
+# Assigned before export, not `export X="$(...)"`: export always succeeds,
+# so the combined form returns the export's status and set -e never sees a
+# failing substitution. Split, a failure here stops the launch.
+SANDBOX_USER="$(id -un)"; export SANDBOX_USER
+SANDBOX_UID="$(id -u)"; export SANDBOX_UID
+SANDBOX_GID="$(id -g)"; export SANDBOX_GID
 export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
@@ -902,7 +888,7 @@ export SANDBOX_GITCONFIG_DIR
 [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
-export SSH_KNOWN_HOSTS="$(config_get core known_hosts)"
+SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS
 export GH_TOKEN="${GH_TOKEN:-}"
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # The --allow-github-push flag and a selected forge whose hosts_allowlisted_by_core
@@ -999,8 +985,8 @@ export SANDBOX_CMD
 # "on"/"off" - config_get_bool is what produces that, config_get would pass
 # "on"/"off" straight through and (among other things) silently disable the
 # firewall by default.
-export ENABLE_FIREWALL="$(config_get_bool core firewall)"
-export LOKI_URL="$(config_get logging loki_url)"
+ENABLE_FIREWALL="$(config_get_bool core firewall)"; export ENABLE_FIREWALL
+LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
@@ -1076,6 +1062,8 @@ for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
         # skipped mount leaves the symlink dangling inside the container and
         # the hook failing for a reason nothing states.
         _guarded_stores
+        # The tilde is a label an operator reads, not a path to expand.
+        # shellcheck disable=SC2088
         _refuse_guarded_mount "~/.claude symlink target" "$real_dir" "${GUARDED_STORES[@]}"
         mounted_dirs="$mounted_dirs $real_dir"
         extra_mounts+=(-v "$real_dir:$real_dir:ro")
@@ -1324,6 +1312,9 @@ if remote_enabled; then
     # than proceed on anything else. Once this check passes, everything
     # created below it (sessions/, notify/, notify/<run-id>) is safe: mode
     # 700 here means no other user can plant anything inside it afterward.
+    # -m applying only to the leaf is the reason for the check below, not
+    # an oversight: the mode is verified and reset before anything trusts it.
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_STATE_DIR" 2>/dev/null || true
     if [ -L "$DEJIMA_STATE_DIR" ] || [ ! -d "$DEJIMA_STATE_DIR" ] \
         || [ "$(stat -c %u "$DEJIMA_STATE_DIR")" != "$(id -u)" ]; then
@@ -1335,9 +1326,13 @@ if remote_enabled; then
     fi
     chmod 700 "$DEJIMA_STATE_DIR"
 
+    # The parent exists and is 700 by the block above, so -p creates only
+    # these leaves and -m is the mode each of them gets.
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_STATE_DIR/sessions" "$DEJIMA_STATE_DIR/notify"
     DEJIMA_SESSION_FILE="$DEJIMA_STATE_DIR/sessions/$DEJIMA_RUN_ID"
     DEJIMA_NOTIFY_DIR="$DEJIMA_STATE_DIR/notify/$DEJIMA_RUN_ID"
+    # shellcheck disable=SC2174
     mkdir -p -m 700 "$DEJIMA_NOTIFY_DIR"
 
     # Verify what was just created, because everything downstream assumes it.
@@ -1403,11 +1398,19 @@ if remote_enabled; then
 
     # Flat key=value, like the rest of the host-side store: no jq dependency
     # here, and nothing that reads it ever sources it.
+    #
+    # pid is this process, and it is what dejima-attach asks about instead of
+    # guessing how long a launch takes: "is the thing that registered this
+    # still running" is observable, and a cold build that outruns any guessed
+    # window is the case a guess gets wrong. Written before the container
+    # exists, so it covers the whole build, and it stops being true at exactly
+    # the moment the EXIT trap below stops being able to run.
     {
         printf 'workspace=%s\n' "$WORKSPACE_DIR"
         printf 'pane=%s\n' "${TMUX_PANE:-}"
         printf 'label=%s\n' "$dejima_tmux_label"
         printf 'started=%s\n' "$(date +%s)"
+        printf 'pid=%s\n' "$$"
     } > "$DEJIMA_SESSION_FILE"
 
     # This run's OWN marker directory is the only thing mounted in - never
