@@ -98,6 +98,33 @@ function api_or_die() {
     fi
 }
 
+# Gitea paginates its list endpoints, and a caller that reads one page is
+# correct only while the list is short. Duplicated from gitea-pr rather than
+# shared, for the reason gitea-issue's header gives: these are self-contained
+# files copied into the image, and a library would be a third thing to keep in
+# step. Sets `json` to the concatenation of every page.
+#
+# Pages are followed until one comes back short. PAGE_MAX bounds the loop
+# rather than trusting that, since this runs unattended.
+PAGE_LIMIT=100
+PAGE_MAX=40
+function api_all_pages() {
+    local what="$1" url="$2" sep page=1 count acc='[]'
+    case "$url" in *\?*) sep='&' ;; *) sep='?' ;; esac
+    while [ "$page" -le "$PAGE_MAX" ]; do
+        api_or_die "$what" "${url}${sep}limit=${PAGE_LIMIT}&page=${page}"
+        count=$(echo "$json" | jq 'if type == "array" then length else 0 end')
+        acc=$(jq -n --argjson a "$acc" --argjson b "$json" \
+            '$a + (if ($b | type) == "array" then $b else [] end)')
+        [ "$count" -eq "$PAGE_LIMIT" ] || break
+        page=$((page + 1))
+    done
+    if [ "$page" -gt "$PAGE_MAX" ]; then
+        echo "warning: stopped reading $what after $PAGE_MAX pages - some may be missing" >&2
+    fi
+    json="$acc"
+}
+
 function gitea_owner_repo() {
     local remote_url host owner_repo
     remote_url=$(git remote get-url origin 2>/dev/null) || {
@@ -163,8 +190,14 @@ function resolve_run() {
 # by run number as well as by commit, since a re-run puts a second run's
 # statuses on the same commit.
 function fetch_jobs() {
-    api_or_die "list jobs for run $run_number" \
-        "${GITEA_API}/repos/${owner}/${repo}/commits/${run_sha}/statuses?page=1&limit=100"
+    # Every page, not the first hundred. A job writes at least two statuses
+    # and a re-run stacks another set on the same commit, all BEFORE the
+    # run-number filter below - so on a re-run of a workflow with a dozen jobs
+    # the requested run's own statuses fall off page one. A failed job going
+    # missing that way is not a visible error: it leaves `logs` printing
+    # "all N jobs succeeded" to an agent that will act on it.
+    api_all_pages "list jobs for run $run_number" \
+        "${GITEA_API}/repos/${owner}/${repo}/commits/${run_sha}/statuses"
     jobs_json=$(echo "$json" | jq --arg rn "$run_number" '
         [.[] | select(.target_url | test("/actions/runs/" + $rn + "/jobs/[0-9]+$"))]
         | group_by(.context) | map(first)
@@ -254,9 +287,15 @@ case "$subcommand" in
                 event: .[0].event,
                 sha: (.[0].head_sha[0:8]),
                 title: .[0].display_title,
+                # "skipped" is a finished job. Counting it as unfinished, as
+                # anything-but-success did, leaves a run reading in_progress
+                # for good. Anything else unrecognised still reads
+                # in_progress, which is the safe direction for a status this
+                # does not know.
                 result: (if   any(.[]; .status == "failure")   then "failure"
                          elif any(.[]; .status == "cancelled") then "cancelled"
-                         elif any(.[]; .status != "success")   then "in_progress"
+                         elif any(.[]; .status as $s | ["success", "skipped"] | index($s) | not)
+                              then "in_progress"
                          else "success" end)
               })
             | sort_by(.run) | reverse | .[0:$limit] | .[]

@@ -988,6 +988,10 @@ else
     # rendering under test is never reached.
     url=""
     for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+    # Match on the path, not the whole URL: list reads carry ?limit&page, and
+    # a pattern anchored at the end of the string stops matching the moment
+    # one does.
+    url="${url%%\?*}"
     case "$url" in
         */reviews/*/comments)
             # Three comments, two of them one thread. The resolved thread has a
@@ -1023,6 +1027,87 @@ STUB
 
 # What was in the -d of the last gitea_cli call.
 cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
+
+# curl normalises dot-segments, so a PR "number" that is really a path
+# reaches a different repo's endpoint with this token on it. `edit` always
+# checked; the other two took the argument as given.
+@test "every gitea-pr subcommand taking a PR number refuses one that is a path" {
+    local sub bad
+    for sub in comments merge edit; do
+        for bad in '../../../other/repo/pulls/7' '7abc' 'x'; do
+            run gitea_cli gitea-pr "$sub" "$bad"
+            [ "$status" -ne 0 ] \
+                || { echo "gitea-pr $sub accepted '$bad'"; return 1; }
+            [[ "$output" == *"Expected a PR number"* ]] \
+                || { echo "gitea-pr $sub '$bad': $output"; return 1; }
+        done
+    done
+}
+
+@test "a PR-number subcommand with no argument says how to call it" {
+    # "no argument" and "wrong argument" are different mistakes: one wants the
+    # usage line, the other wants to know what was wrong with what was given.
+    local sub=merge
+    run gitea_cli gitea-pr "$sub"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage:"* ]] || { echo "$output"; return 1; }
+}
+
+# A paginating stub: full pages until the last one, so a caller that reads
+# page one and stops sees a prefix of the list and cannot tell that it did.
+paginating_cli() {
+    local cli="$1"; shift
+    local d="$BATS_TEST_TMPDIR/pcli"
+    if [ ! -d "$d" ]; then
+        mkdir -p "$d/stub" "$d/repo"
+        cat > "$d/stub/curl" <<'STUB'
+#!/bin/bash
+url=""
+for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+cat >/dev/null
+page=1; limit=50
+case "$url" in *page=*) page="${url##*page=}"; page="${page%%&*}" ;; esac
+case "$url" in *limit=*) limit="${url##*limit=}"; limit="${limit%%&*}" ;; esac
+emit() {
+    local n="$1" start="$2" i out=""
+    for ((i = 0; i < n; i++)); do
+        out="$out,{\"id\":$((start + i)),\"user\":{\"login\":\"u\"},\"created_at\":\"t\",\"body\":\"comment-$((start + i))\"}"
+    done
+    echo "[${out#,}]"
+}
+case "$url" in
+    */issues/*/comments*)
+        # Two full pages and a short third: 105 comments in all.
+        if   [ "$page" = 1 ]; then emit "$limit" 0
+        elif [ "$page" = 2 ]; then emit "$limit" "$limit"
+        elif [ "$page" = 3 ]; then emit 5 $((limit * 2))
+        else echo '[]'; fi ;;
+    *) echo '[]' ;;
+esac
+echo 200
+STUB
+        chmod +x "$d/stub/curl"
+        git -C "$d/repo" init -q -b feature
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
+        git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
+    fi
+    ( cd "$d/repo" && env PATH="$d/stub:$PATH" \
+        GITEA_SSH_HOST=forge.invalid GITEA_API=https://forge.invalid/api/v1 \
+        GITEA_TOKEN=stub-token \
+        "$REPO_ROOT/forges/gitea/bin/$cli" "$@" )
+}
+
+@test "gitea-pr comments reads past the first page of feedback" {
+    # The documented review loop is `gitea-pr comments <n>`, act, repeat. A
+    # read that stops at the server's page size drops the rest silently, so
+    # whoever is addressing the review never learns the rest exists.
+    run paginating_cli gitea-pr comments 1
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"comment-0"* ]] || { echo "the first page is missing"; return 1; }
+    [[ "$output" == *"comment-50"* ]] || { echo "the second page was not read"; return 1; }
+    [[ "$output" == *"comment-104"* ]] || { echo "the last page was not read"; return 1; }
+}
 
 @test "an inline review comment arrives with the diff it was left against" {
     # Gitea's review-comment objects have no `line` field, so the old
