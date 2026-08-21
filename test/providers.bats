@@ -469,12 +469,12 @@ assert_remedy_forges_exist() {
         while IFS= read -r ph; do
             [ -n "$ph" ] || continue
             found=1
-            case "$ph" in
-                pr_command|issue_command|forge_name|forge_ssh_host|blocked_branches) ;;
-                container_id|project_dir|workspace_dir|session_id) ;;
-                resume_command|writable_mounts) ;;
-                *) echo "$f uses unknown placeholder: $ph"; return 1 ;;
-            esac
+            # Against the real whitelist, not a copy of it. A second list here
+            # would have to be edited in step with the first, and the failure
+            # mode of forgetting is this test passing on a placeholder
+            # composition then refuses - which is the launch, not the suite.
+            lib _briefing_whitelisted "$ph" \
+                || { echo "$f uses unknown placeholder: $ph"; return 1; }
         done < <(grep -oE '\{\{[a-z_]+\}\}' "$f" | tr -d '{}')
     done < <(find "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$REPO_ROOT/forges" -name '*.md' -o -name '*.conf')
     # Guards against a grep that silently matches nothing.

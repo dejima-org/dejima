@@ -7,7 +7,15 @@
 setup() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
+    LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
+
+# Runs one function from the provider library in a subshell, the same way
+# providers.bats does. A test that reads a manifest must go through the real
+# parser rather than grepping the file: the point of most of these is that a
+# declared value has an effect, and grep cannot tell a value from a comment
+# mentioning one.
+lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
@@ -784,6 +792,224 @@ _settings_home() {
     run grep -c OPERATOR_ONLY "$overlay"
     rm -f "$overlay"
     [ "$output" = "0" ] || { echo "the operator's settings were copied into the overlay"; return 1; }
+}
+
+# --- the Cline plugin ------------------------------------------------------
+#
+# Every one of these is a property established by running Cline in a container
+# and writing down what happened - see docs/development.md, "Worked example:
+# Cline". They are pinned here because the next person to read Cline's
+# documentation will find it says something else.
+
+# A config directory selecting cline, with whatever [harness.cline] keys the
+# test needs. Everything the plugin reads goes through config_get, so this is
+# the whole of its input besides the workspace.
+_cline_cfg() {
+    local d
+    d="$(mktemp -d "$BATS_TEST_TMPDIR/cline-cfg.XXXXXX")"
+    {
+        printf '[core]\nharness = cline\nforge = none\nworkflow = local-only\n'
+        printf '[harness.cline]\nstate_dir = %s/state\n' "$d"
+        printf '%s\n' "$@"
+    } > "$d/config"
+    printf '%s' "$d"
+}
+
+# $1 is the config dir, $2 the workspace. Prints whatever the plugin said and
+# returns its status.
+_cline_prepare() {
+    DEJIMA_CONFIG_DIR="$1" bash -c '
+        source "$2/bin/dejima-provider-lib.sh"
+        source "$2/bin/dejima-harness-lib.sh"
+        source "$2/bin/dejima-slug-lib.sh"
+        harness_plugin_load cline
+        WORKSPACE_DIR="$1"
+        harness_prepare_config /dev/null' _ "$2" "$REPO_ROOT"
+}
+
+@test "cline refuses to launch with no model configured" {
+    # Deliberately no default in the manifest: any model id shipped there goes
+    # stale with the next Cline release, and which model an unattended agent
+    # runs on is not dejima's call. So the absence has to refuse rather than
+    # fall back to whatever Cline would have picked - which is its own hosted
+    # endpoint, reached with a credential dejima never saw.
+    run _cline_prepare "$(_cline_cfg)" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "launched with no model"; return 1; }
+    [[ "$output" == *"no model is configured"* ]] || { echo "$output"; return 1; }
+}
+
+@test "cline refuses a hosted endpoint whose credential dejima cannot withhold" {
+    # R5 is the requirement here, not a network rule. With base_url unset the
+    # session reaches Anthropic through dejima's own credential proxy and the
+    # key never enters the container; pointed at someone else's hosted API,
+    # there is no proxy that could hold a key back, so the key would have to
+    # go in. That is the one thing this harness may not do quietly.
+    local cfg
+    cfg="$(_cline_cfg 'model = m' 'base_url = https://api.openai.com/v1')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "accepted a hosted endpoint"; return 1; }
+    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
+}
+
+@test "cline refuses the credential modes it has no path through" {
+    # claude-code with the proxy off mounts the operator's real credential -
+    # the documented downgrade. cline has no equivalent: the credential it
+    # would need is in the providers.json dejima declines to mount, so a
+    # placeholder would just produce an auth failure three layers from its
+    # cause. Same for the loopback transport, which hands the harness a base
+    # URL through the environment that cline does not read.
+    local cfg
+    for cfg in 'proxy = off' 'transport = loopback'; do
+        run _cline_prepare "$(_cline_cfg 'model = m' '[credentials]' "$cfg")" "$BATS_TEST_TMPDIR/ws"
+        [ "$status" -ne 0 ] || { echo "accepted $cfg"; return 1; }
+        [[ "$output" == *"no way to reach Anthropic"* ]] || { echo "$output"; return 1; }
+    done
+}
+
+@test "cline with a local endpoint does not care about the credential proxy" {
+    # The refusal above is about reaching Anthropic. A model served locally
+    # needs no credential at all, so the proxy's state is irrelevant to it -
+    # and refusing there would be refusing the configuration that made this
+    # harness worth adding.
+    local cfg
+    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:11434/v1' \
+        '[credentials]' 'proxy = off')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "cline accepts a model served on the host or the sandbox network" {
+    # The case the whole provider-agnostic argument rests on: an open-weight
+    # model served locally needs no credential at all, so there is nothing for
+    # R5 to protect and the endpoint is supported today.
+    local addr cfg
+    for addr in 127.0.0.1 10.1.2.3 192.168.1.5 172.17.0.1 localhost; do
+        cfg="$(_cline_cfg 'model = m' "base_url = http://$addr:11434/v1")"
+        run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+        [ "$status" -eq 0 ] || { echo "refused $addr: $output"; return 1; }
+    done
+}
+
+@test "cline does not mistake a hostname for the private range it starts with" {
+    # A glob match on "10." accepts 10.example.com, which resolves wherever
+    # its owner says and would take the key with it. The octets are compared
+    # as numbers for exactly this.
+    local host cfg
+    for host in 10.example.com 192.168.example.com 172.16.example.com; do
+        cfg="$(_cline_cfg 'model = m' "base_url = http://$host/v1")"
+        run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+        [ "$status" -ne 0 ] || { echo "accepted $host as a private address"; return 1; }
+    done
+}
+
+@test "cline's provider config carries a placeholder, never a real credential" {
+    # The same arrangement as Claude Code's faked .credentials.json: what the
+    # container holds is a placeholder, and the host-side proxy substitutes the
+    # real credential on the way out. Confirmed end to end against the API.
+    local cfg ws
+    cfg="$(_cline_cfg 'model = claude-haiku-4-5-20251001')"
+    ws="$BATS_TEST_TMPDIR/ws"
+    run _cline_prepare "$cfg" "$ws"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f
+    f="$(find "$cfg/state" -name providers.json | head -1)"
+    [ -n "$f" ] || { echo "no providers.json was written"; return 1; }
+    run jq -r '.providers.anthropic.settings.apiKey' "$f"
+    [[ "$output" == *placeholder* ]] || { echo "the key is not a placeholder: $output"; return 1; }
+    # And the endpoint is the real hostname, because the terminator answers
+    # for it in-container - not a base-URL override, which would make the
+    # session distinguishable from a stock install.
+    run jq -r '.providers.anthropic.settings.baseUrl // "unset"' "$f"
+    [ "$output" = "unset" ] || { echo "a base URL was written: $output"; return 1; }
+}
+
+@test "cline's state directory is one per workspace, not one for all of them" {
+    # Cline indexes every session it has ever run in a single sessions.db, with
+    # the project a session belonged to as a field inside the record rather
+    # than a directory above it. So there is no per-project subtree to mount,
+    # and the only thing that keeps one project's transcripts out of another's
+    # session - #104 - is dejima handing each workspace its own data directory.
+    local cfg a b
+    cfg="$(_cline_cfg 'model = m')"
+    a="$(DEJIMA_CONFIG_DIR="$cfg" bash -c '
+        source "$2/bin/dejima-provider-lib.sh"
+        source "$2/bin/dejima-harness-lib.sh"
+        source "$2/bin/dejima-slug-lib.sh"
+        harness_plugin_load cline
+        harness_briefing_state_dir "$1"' _ /tmp/project-one "$REPO_ROOT")"
+    b="$(DEJIMA_CONFIG_DIR="$cfg" bash -c '
+        source "$2/bin/dejima-provider-lib.sh"
+        source "$2/bin/dejima-harness-lib.sh"
+        source "$2/bin/dejima-slug-lib.sh"
+        harness_plugin_load cline
+        harness_briefing_state_dir "$1"' _ /tmp/project-two "$REPO_ROOT")"
+    [ -n "$a" ] && [ -n "$b" ] || { echo "no state directory was resolved"; return 1; }
+    [ "$a" != "$b" ] || { echo "both projects share $a"; return 1; }
+}
+
+# --- delivering the briefing to a harness with no hook ----------------------
+
+@test "every shipped harness delivers the briefing by exactly one route" {
+    # Three exist - a session-start hook, a file the harness reads, or a
+    # command-line argument - and every harness has to use one. Zero is a
+    # session that does not know it is sandboxed, which is what R3 exists to
+    # prevent. Two is the same text arriving twice, and one of those copies
+    # goes through the hook, which truncates it.
+    local name path args hook n
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        path="$(lib manifest_get harness "$name" briefing_path)"
+        args="$(lib manifest_get harness "$name" briefing_args)"
+        hook=0
+        grep -q 'sandbox-context.sh' "$REPO_ROOT/bin/harness/$name.sh" && hook=1
+        n=0
+        [ -z "$path" ] || n=$((n + 1))
+        [ -z "$args" ] || n=$((n + 1))
+        # Installing the hook AND taking the briefing by argument is the
+        # supported pairing rather than a double delivery: the hook reduces
+        # itself to the session id in that case, which the argument route
+        # cannot carry.
+        [ "$hook" -eq 0 ] || [ -n "$args" ] || n=$((n + 1))
+        [ "$n" -eq 1 ] \
+            || { echo "$name has $n briefing routes (path='$path' args='$args' hook=$hook)"; return 1; }
+    done < <(lib provider_list harness)
+}
+
+@test "entrypoint refuses a briefing path that escapes the sandbox home" {
+    # Validated as a homepath in the manifest already. Checked again where it
+    # becomes a path, because the manifest is data and core is the one that
+    # enforces against it.
+    grep -q 'refusing harness briefing path' "$REPO_ROOT/docker/entrypoint.sh"
+    run bash -c 'grep -A 3 "SANDBOX_HARNESS_BRIEFING_PATH\" in" "$1"' _ "$REPO_ROOT/docker/entrypoint.sh"
+    [[ "$output" == *'/*|*..*'* ]] || { echo "no absolute/traversal refusal: $output"; return 1; }
+}
+
+@test "the core briefing preamble names no one harness's flags or state" {
+    # It used to say --dangerously-skip-permissions and ~/.claude, both of
+    # which are Claude Code's and neither of which is true of a second harness.
+    # Telling a Cline session about a flag it does not have is not a cosmetic
+    # problem: the preamble is where it learns what state it is running in.
+    local lib_file="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    local preamble
+    preamble="$(sed -n '/^_briefing_core_preamble/,/^BRIEFING_EOF$/p' "$lib_file")"
+    [[ "$preamble" != *"dangerously-skip-permissions"* ]] \
+        || { echo "the preamble names Claude Code's flag"; return 1; }
+    [[ "$preamble" != *"~/.claude"* ]] \
+        || { echo "the preamble names Claude Code's state directory"; return 1; }
+    [[ "$preamble" == *"{{no_confirm_args}}"* ]] \
+        || { echo "the preamble no longer says what mode the session is in"; return 1; }
+}
+
+@test "shellcheck covers harness plugins, which carry no shebang" {
+    # Plugins are sourced, so they have no shebang, so the shebang-based
+    # discovery dropped them - silently, while they sit in the trusted
+    # computing base. Every plugin is in the list or this is not true.
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "bin/harness/$name.sh" \
+            || { echo "bin/harness/$name.sh is not shellchecked"; return 1; }
+    done < <(lib provider_list harness)
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {
@@ -3984,6 +4210,11 @@ _harness_proxied_domain() {
         [ -f "$f" ] || continue
         while IFS= read -r fn; do
             [ -n "$fn" ] || continue
+            # A leading underscore is the plugin's own helper, and says so.
+            # The check that matters is the near-miss - harness_state_mount
+            # for harness_state_mounts - and a name that does not even claim
+            # to be a hook cannot be one of those.
+            case "$fn" in _*) continue ;; esac
             case " $hooks " in
                 *" $fn "*) ;;
                 *) echo "$(basename "$f") defines $fn, which core never calls"; return 1 ;;

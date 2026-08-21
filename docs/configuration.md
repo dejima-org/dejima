@@ -221,7 +221,8 @@ parent's; global approvals apply everywhere regardless.
 
 What carries over from your host into the container, and what deliberately
 does not. The mechanism is the same whichever harness `[core] harness`
-selects; the specific paths below belong to the one harness shipped today.
+selects; the specific paths below are per harness, and the two shipped ones
+differ more than the mechanism does.
 
 ### Claude Code
 
@@ -260,6 +261,47 @@ Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
 made inside the sandbox get the right identity, but nothing written to it
 during a session reaches your real file). Falls back to an empty config if
 you don't have one.
+
+### Cline
+
+Almost nothing carries over, and that is the design rather than a gap.
+
+Cline keeps one `sessions.db` indexing every session it has ever run, with
+the project a session belonged to as a field inside the record rather than a
+directory above it. There is no per-project slice of your `~/.cline/data` to
+mount, so mounting it at all would put every project's transcripts into every
+session. dejima instead gives each workspace its own Cline data directory
+under `[harness.cline] state_dir` (default `~/.local/share/dejima/cline`),
+mounted at `~/.cline/data` in the container. Sessions persist across runs of
+the same project and are invisible to every other project.
+
+Because that directory is dejima's rather than yours, resuming on the host
+needs `CLINE_DATA_DIR` set to it. The exact command is at the end of every
+session's briefing.
+
+The provider configuration is written fresh by dejima at each launch and is
+not yours either. Two shapes are supported:
+
+- **`base_url` unset** - Anthropic, reached through dejima's own credential
+  proxy exactly as Claude Code is. What is written into the container is the
+  placeholder `sandbox-credential-proxy-placeholder`; the real credential
+  stays on the host.
+- **`base_url` set to a loopback or RFC 1918 address** - a model you are
+  serving yourself, on the Docker host or the sandbox network. Nothing needs
+  a credential, so there is nothing to withhold.
+
+A hosted provider other than Anthropic is refused at launch. Its API key
+would have to go inside the container, and dejima has no proxy that could
+hold one back on its behalf - which is the one property the sandbox does not
+trade away. See [development.md](development.md#worked-example-cline).
+
+`[harness.cline] model` has no default and must be set. Any model id shipped
+here would go stale with the next Cline release, and choosing the model an
+unattended agent runs on is yours to make.
+
+Cline's CLI needs a CPU with AVX2. It is a Bun-embedded compiled binary and
+Bun's default build requires it, so a VM whose CPU model is `x86-64-v2-AES`
+gets SIGILL before printing anything. `x86-64-v3` or better works.
 
 Caveat: MCP servers or hooks that shell out to host-specific binaries (a
 browser, a language runtime not installed here) will not work until that

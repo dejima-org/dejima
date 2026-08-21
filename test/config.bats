@@ -1821,7 +1821,15 @@ _epitaph_transcript() {
     DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
     [[ "$output" == *"does not support 2 of dejima's guards"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"push-guard"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"merge the agent"* || "$output" == *"merge its own pull requests"* ]] \
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    # What is lost has to be what is actually lost. Since the push and merge
+    # guards became PATH shadows they hold whatever the harness declares, so
+    # a message saying pushes are not refused would send an operator looking
+    # for a hole that is not there. What a harness adds by hosting them is
+    # the invocation the shadow cannot see.
+    [[ "$output" == *"PATH shadow"* ]] \
+        || { echo "the message overstates what an undeclared guard costs:"; echo "$output"; return 1; }
+    [[ "$output" != *"pushes to hosts and branches outside the allowed set are not refused"* ]] \
         || { echo "$output"; return 1; }
     rm -rf "$workspace" "$proot"
 }

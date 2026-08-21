@@ -225,10 +225,11 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
 | `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
+| `briefing_path` | `?homepath` | (empty) | Where this harness reads its briefing from, relative to `$HOME`, for a harness that has no session-start hook to be handed it through. Set, `entrypoint.sh` renders the briefing into that path root-owned and read-only before the session starts, and refuses to start it at all if that fails. Empty for a harness that registers a hook instead, which is how Claude Code gets it. |
 | `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
 | `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
-| `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. |
+| `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. Substitution is not recursive and the `template` type has no `=`, so a resume command that needs a second placeholder or an environment variable goes in the harness's briefing fragment instead, where both resolve. |
 | `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
 
 Worked example, `harnesses/claude-code/harness.conf`:
@@ -268,12 +269,17 @@ opposite of "providers are data, never sourced." In reading order:
    markers resolved.
 3. The core closing text (how to hand a task back to the operator when the
    sandbox genuinely can't do it).
-4. The selected harness's fragment (today, just the resume command).
+4. The selected harness's fragment: how to resume this session on the host,
+   and where the history it would resume from lives. Both are the harness's
+   own facts rather than core's - Claude Code resumes from a bind-mounted
+   `~/.claude`, Cline from a per-project state directory the command has to
+   name - so the closing sentence is in the fragment and not in the preamble.
 
 Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
-`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`) - an unrecognized one is a
+`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`,
+`no_confirm_args`, `harness_state_dir`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
@@ -301,6 +307,16 @@ The hook still runs for a harness using `briefing_args`, carrying only
 `@@SESSION_ID@@`'s value - the harness has not started when the entrypoint
 runs, so the id does not exist yet. A harness declaring no `briefing_args` gets
 the whole briefing through the hook as before.
+
+Substitution is one pass over the assembled text, not a fixed point: a value
+that itself contains a `{{placeholder}}` leaves it unresolved and the whole
+composition is refused. That is why a harness whose resume command needs more
+than `{{session_id}}` puts the command in its fragment rather than in
+`resume_command`.
+
+A third route exists for a harness that neither registers a hook nor takes a
+flag: `briefing_path` names a file it reads, which `entrypoint.sh` writes from
+the same rendering, root-owned and read-only.
 
 The result is mounted **read-only** into the container - so a session can
 never rewrite what the *next* session is told, even a session running
@@ -388,7 +404,8 @@ every launch:
 | workflow | `worktree-pr` | worktree → push → PR, stops at the PR |
 | workflow | `branch-push` | worktree → push, stops at the branch |
 | workflow | `local-only` | **default** - commits locally, pushes nothing |
-| harness | `claude-code` | the only harness today, and **not a default** - `[core] harness` must be set |
+| harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
+| harness | `cline` | provider-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
 
 **The shipped defaults are deliberately the non-pushing pair**
 (`forge = none`, `workflow = local-only`). A fresh install has no forge host

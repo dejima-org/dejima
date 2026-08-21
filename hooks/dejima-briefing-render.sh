@@ -15,8 +15,8 @@
 # project declares it needs and what this image has, and the project's own
 # .dejima.md - was never Claude Code's in the first place. entrypoint.sh is
 # the second caller, rendering the briefing before the session starts so it
-# can be handed to the harness as an argument (see `briefing_args` in
-# docs/providers.md).
+# can be handed to the harness as an argument or written to a file it reads
+# (see `briefing_args` and `briefing_path` in docs/providers.md).
 #
 # Baked into the image rather than reached through the ~/.claude/hooks mount,
 # because that mount is Claude Code's config and a harness that has none of it

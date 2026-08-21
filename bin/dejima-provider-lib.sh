@@ -171,6 +171,7 @@ api_domains	?list:hostname
 proxied_api_domain	?hostname
 guards	?list:identifier
 briefing_args	?args
+briefing_path	?homepath
 no_confirm_args	?args
 settings_args	?args
 keys	?list:keyspec
@@ -825,7 +826,7 @@ BRIEFING_FRAGMENT_MAX=16384
 # is a hard refusal (_briefing_substitute below), not a literal passthrough -
 # an unrecognized {{key}} reaching an agent's context verbatim is exactly the
 # kind of silent drift this whole function exists to prevent.
-_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist"
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist no_confirm_args harness_state_dir"
 
 _briefing_whitelisted() {
     _set_contains "$_BRIEFING_WHITELIST" "$1"
@@ -839,16 +840,16 @@ _briefing_core_preamble() {
     cat <<'BRIEFING_EOF'
 You are running inside the dejima Docker container, not directly on
 the user's machine, with
---dangerously-skip-permissions active (no tool-use confirmations).
+{{no_confirm_args}} active (no tool-use confirmations).
 
 What this means:
 - The workspace directory is bind-mounted read-write and is the real
   project. ~/shared is also a real, persistent host directory (not part of
   the project) - use it to hand the user a file (a screenshot, a temp
   script) without touching the project checkout, or to pick up something
-  they left there for you. ~/.claude is bind-mounted too, so this session's
-  transcript and its project memory outlive the container - the work is
-  recoverable on the host with the `--resume` command at the end of this
+  they left there for you. Your harness keeps its own state on the host too,
+  so this session's transcript outlives the container - the work is
+  recoverable on the host with the command at the end of this
   briefing.{{writable_mounts}} Everything else is disposable: installed system
   packages, anything outside the mounted paths, and the container itself go
   away when this run ends.
@@ -944,17 +945,6 @@ GUI/hardware access - stop and explain clearly to the user what you need
 and why, instead of trying to work around the firewall or sandbox yourself.
 They can continue this exact session outside the container by running on
 the host:
-BRIEFING_EOF
-}
-
-# $requirements and $project_doc (the missing-dependency report and
-# .dejima.md) stay hook-computed and hook-appended after this - they read
-# container-local and workspace-local state a host-side compose has no
-# business resolving, and moving them is Task 5's job, not this one.
-_briefing_core_closing_b() {
-    cat <<'BRIEFING_EOF'
-(session history is shared via the bind-mounted ~/.claude, so it will pick
-up right where this left off).
 BRIEFING_EOF
 }
 
@@ -1099,6 +1089,20 @@ _briefing_resolve_key() {
         project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;
         workspace_dir)    printf '%s' "${WORKSPACE_DIR:-}" ;;
         resume_command)   manifest_get harness "$harness" resume_command ;;
+        # The flags that put the harness in no-confirmation mode. From the
+        # manifest rather than written into the preamble, because the
+        # preamble's sentence is about the state the session is in and every
+        # harness names that state differently - claiming
+        # --dangerously-skip-permissions to a Cline session would be telling
+        # it about a flag it does not have.
+        no_confirm_args)  manifest_get harness "$harness" no_confirm_args ;;
+        # Where this harness keeps this workspace's state on the host. Only
+        # the plugin can say: it is the plugin that decides how state is
+        # sliced per project, and for a harness that keeps one index over
+        # every session it has ever run, that slicing is the whole of R4.
+        # Empty when the harness has no such directory, which is why the
+        # resolver is a hook call rather than a config key.
+        harness_state_dir) harness_hook harness_briefing_state_dir "${WORKSPACE_DIR:-}" ;;
         writable_mounts)
             if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
                 printf '\n  These host directories are bind-mounted read-write at their own paths and\n  outlive the container too: %s.\n ' "$DEJIMA_RW_MOUNTS"
@@ -1200,11 +1204,20 @@ briefing_compose() {
         text+="$(_briefing_core_github_push)"
         text+=$'\n\n'
     fi
+    # The harness fragment closes the briefing: it supplies both the resume
+    # command closing_a has just promised and the sentence about where the
+    # session history it resumes from actually lives. Both are the harness's
+    # own facts - Claude Code resumes from a bind-mounted ~/.claude, Cline
+    # from a per-project state directory named in the command itself - and
+    # core stating either one meant stating Claude Code's.
+    #
+    # $requirements and $project_doc (the missing-dependency report and
+    # .dejima.md) stay hook-computed and hook-appended after this - they read
+    # container-local and workspace-local state a host-side compose has no
+    # business resolving.
     text+="$(_briefing_core_closing_a)"
     text+=$'\n\n'
     text+="$harness_frag"
-    text+=$'\n\n'
-    text+="$(_briefing_core_closing_b)"
 
     _briefing_substitute "$text" "$forge" "$workflow" "$harness"
 }
