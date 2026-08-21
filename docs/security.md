@@ -922,6 +922,57 @@ The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
 by name when a task is blocked on a single missing domain, rather than
 stopping the whole session over it.
 
+### The firewall bounds the container, not the harness
+
+Everything above is about what the *container* can connect to. A harness may
+also offer the session a tool whose network request does not come from the
+container at all, and the allowlist has no view of those.
+
+Claude Code's `WebSearch` is the instance to reason from. Observed in one
+session, in this container:
+
+```
+$ curl https://aider.chat/docs/config/options.html
+curl: (6) Could not resolve host: aider.chat
+```
+
+and in the same session, `WebSearch` returned that page's content. The
+retrieval did not use the container's network, because the container has no
+route to that host. The only channel into a session that is not the
+container's own network is the model API connection - which dejima already
+routes through the host-side credential proxy - so the search ran on the API
+side and its result arrived in the model's response.
+
+That cuts both ways, and neither is closed here:
+
+- **Inward.** Text from any site on the internet can enter the session without
+  the DNS allowlist seeing the name. The allowlist is described elsewhere in
+  this document as bounding where a prompt injection could fetch its next
+  instruction from; that is true of anything the container fetches, and not
+  true of this.
+- **Outward.** A search query is session-controlled text sent to a third
+  party. It is low bandwidth next to an HTTP body, but it is a channel out
+  that no `.dejima/allowed-domains` line was ever reviewed for.
+
+What this is not is unmonitored. The traffic rides the model API connection,
+which in the default configuration is exactly the connection dejima terminates
+in-container and forwards through its own host-side proxy - so it crosses a
+process the operator runs. dejima does not inspect what crosses it, and this
+document does not claim it does.
+
+The lever an operator has is the harness's own, not dejima's: Claude Code
+takes a `permissions.deny` entry for a tool name, and dejima already writes a
+settings overlay it could go in. It is not written there by default, because
+the tool is useful and the exposure is a search query rather than a file.
+
+**This is not a Claude Code quirk, it is a harness question.** Any harness may
+ship a tool whose fetch happens somewhere other than the container - Cline's
+tool set includes `fetch_web_content`, and which side executes it is a thing
+its integration has to establish rather than assume. A harness's own network
+reach belongs in its worked example in
+[development.md](development.md#adding-a-new-harness) alongside the rest of
+what it can and cannot do.
+
 ## Network request logging
 
 If `[logging] loki_url` is set (see Prerequisites in the README), every DNS query and every new
