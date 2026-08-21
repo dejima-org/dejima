@@ -261,15 +261,27 @@ So aider is now supportable at a smaller guard set, honestly declared. It is
 not supported, because nobody has written the plugin and the tests - which is
 the real gate, and always was.
 
+One thing to settle first if that changes. R4 passes trivially because aider's
+state is `.aider.*` **inside the workspace** - and the workspace is the real
+project, bind-mounted read-write. `.aider.chat.history.md` is a transcript of
+prompts and model responses that, by aider's own documentation, can carry
+secrets from terminal output. aider ships a `.gitignore` entry for it, but a
+project that predates the entry, or has its own ignore file, gets a
+secrets-bearing file written into the checkout: it outlives the container,
+reaches the host, and shows up in the exit audit as a workspace change.
+
+So aider's plugin should move that file out of the workspace rather than rely
+on a `.gitignore` the project may not have - the same reasoning that keeps
+every other harness's state out of the project, arrived at from the opposite
+direction. That is what `image_dirs` and the state mounts are for.
+
 ### Worked example: Cline
 
-Cline is the strongest candidate for the harness after Claude Code on the
-requirement a second one most needs: it is genuinely provider-agnostic. That
-is not a claim from its documentation - it was run here against a
-purpose-written OpenAI-compatible endpoint on loopback, which it used for
-every request and whose tool call it then executed. Neither Gemini CLI nor
-Codex CLI can be pointed anywhere; Gemini CLI was also retired in June 2026
-in favour of a closed-source successor.
+Cline is provider-agnostic, which is what a second harness most needs to be:
+it can be pointed at any endpoint, including an open-weight model served
+locally. That is not a claim from its documentation - it was run here against
+a purpose-written OpenAI-compatible endpoint on loopback, which it used for
+every request and whose tool call it then executed.
 
 It needs AVX2, which is worth knowing before an integration begins: its CLI is
 a Bun-embedded compiled binary and Bun's default build requires it. A VM whose
@@ -280,16 +292,16 @@ or better is the requirement.
 | | Verified |
 | --- | --- |
 | **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
-| **D1** *(was R2)* | **Fails as a CLI, and this no longer decides it.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported, which is what R2 asks for. |
+| **D1** *(was R2)* | **Fails as a CLI, and this no longer decides it.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported. Declared absent, and named at launch. |
 | **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
 | **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
 | **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
 
 Two notes for whoever writes the integration. Cline's plugin manifest schema
 still carries a field described as "not read by Claude Code", so its plugin
-format is derived from Claude Code's - which is the reason to expect the
-existing `hooks/*.sh` to port rather than be rewritten, and the reason R2
-being unresolved is a documentation question rather than a capability one. And
+format is derived from Claude Code's, which is the reason to expect the
+existing `hooks/*.sh` to port rather than be rewritten if a refusal path does
+turn up. And
 `CLINE_SANDBOX=1` turns on an inner sandbox that relocates state under a
 `cline-sandbox` directory; like Claude Code's, it is redundant inside this
 container and wants turning off.
@@ -303,17 +315,11 @@ process dejima's own JavaScript rather than `cline`. That is a different shape
 from every other harness, and it is not necessary: with the push and merge
 guards on PATH, what the CLI costs is `deny-dangerous-bash.sh` alone.
 
-So Cline clears the four hard requirements, and would be supported at a guard
-set short one fast-fail denylist, declared in its manifest and named at every
-launch. On the axis it was a candidate for it is the best of the field: R4 in
-particular is the cleanest of anything assessed, and it is R4 that guards the
-incident #104 was about.
-
-The comparison with opencode inverts once R2 stops being a gate. opencode
-keeps `bash-deny`, through a plugin's `tool.execute.before`. Cline keeps its
-state where dejima puts it. One of those is a fast-fail guard against an eager
-agent; the other is the requirement that exists because cross-project context
-poisoning actually happened.
+So Cline clears the four hard requirements, at a guard set short one fast-fail
+denylist - declared in its manifest and named at every launch. Its R4 is the
+part worth keeping in mind while integrating it: state goes where `--data-dir`
+puts it, so the per-project scoping #104 is about is a flag rather than
+something to be inferred.
 
 ### Where a harness's support lives: three tiers
 
