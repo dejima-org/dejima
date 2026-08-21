@@ -243,43 +243,45 @@ operator gets everywhere else would be missing with no way to restore them,
 and "supported" would mean something different for that one harness than
 for every other. So it is not supported, and this is the reason.
 
-### Worked example: Cline, assessed but blocked on this host
+### Worked example: Cline, assessed
 
-Cline is the strongest candidate found for the harness after Claude Code, on
-the requirement that matters most for a second one: it is genuinely
-provider-agnostic. `openai-compatible` appears 442 times in its binary,
-alongside Ollama and LM Studio, and it takes a base URL for every provider -
-so it can be pointed at any endpoint, including an open-weight model served
-locally. Neither Gemini CLI nor Codex CLI can be, and Gemini CLI was retired
-in June 2026 in favour of a closed-source successor.
+Cline is the strongest candidate for the harness after Claude Code on the
+requirement a second one most needs: it is genuinely provider-agnostic. That
+is not a claim from its documentation - it was run here against a
+purpose-written OpenAI-compatible endpoint on loopback, which it used for
+every request and whose tool call it then executed. Neither Gemini CLI nor
+Codex CLI can be pointed anywhere; Gemini CLI was also retired in June 2026
+in favour of a closed-source successor.
 
-**It cannot run on the host this repository is developed on.** Cline's CLI is
-a Bun-embedded compiled binary; Bun's default build requires AVX2, and this VM
-presents a `QEMU Virtual CPU version 2.5+` with SSE4.2 and no AVX at all. The
-binary dies on SIGILL (exit 132) before producing a byte of output. Cline
-publishes six platform packages - linux/darwin/windows x64 and arm64 - and
-none is a baseline build, so there is nothing for `CLINE_BIN_PATH` to point
-at. This is a property of the VM's CPU model rather than of Cline: a QEMU
-guest without `-cpu host` gets that generic model, and passthrough on any host
-CPU made since about 2013 would expose AVX2.
+It needs AVX2, which is worth knowing before an integration begins: its CLI is
+a Bun-embedded compiled binary and Bun's default build requires it. A VM whose
+CPU model is `x86-64-v2-AES` - Proxmox's default for new guests - gets SIGILL
+and exit 132 before any output, and no baseline build is published. `x86-64-v3`
+or better is the requirement.
 
-So the assessment below is from the installed package - the binary's own
-strings, not its documentation - and is complete except for R4, which needs
-the thing to run.
-
-| | Evidence |
+| | Verified |
 | --- | --- |
-| **R1** | Clears. `--yolo`, `--auto-approve`, and `--dangerously-bypass-approvals-and-sandbox`. |
-| **R2** | Clears, and unusually cheaply. The binary carries `beforeTool`/`afterTool`, `preToolUse`/`postToolUse`, `hookEventName`, `hooks.json`, and the full decision vocabulary `"allow"`/`"deny"`/`"block"`/`"ask"`. The capitalised `PreToolUse`/`PostToolUse` are Claude Code's own names: hooks are shell commands taking JSON on stdin with Claude-Code-compatible matchers, so `git-push-guard.sh`, `merge-guard.sh` and `deny-dangerous-bash.sh` would likely port rather than be rewritten. |
-| **R3** | Clears. `SessionStart` appears with `additionalContext` and `systemMessage` - again Claude Code's exact field names - and `.clinerules` is a second operator-controlled context path. |
-| **R4** | **Unresolved.** `.cline/data`, `taskHistory` and `checkpoints` exist, but whether task state is per-project and computable on the host, or one global store, cannot be read out of a binary. This is the requirement opencode only clears on its second branch, so it is the one worth settling first. |
-| **R5** | Clears. A wide set of `*_API_KEY` variables, plus `ANTHROPIC_BASE_URL` and `baseUrl` throughout - the credential comes from the environment and the endpoint is redirectable, which is R5's second path and the reason it is provider-agnostic at all. |
+| **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
+| **R2** | **Not demonstrated.** The capability is evidenced from several directions - the hook event enum is `agent_start, agent_resume, agent_abort, agent_end, agent_error, tool_call, tool_result, prompt_submit, pre_compact, session_shutdown`; the `tool_call` payload carries `preToolUse: {toolName, parameters}`; the decision vocabulary `allow`/`deny`/`block`/`ask` is present; and `hook_event` records for `tool_call` and `tool_result` appear in the `--json` stream during a real run. But no hook could be registered through eight attempted layouts, and the plugin manifest was rejected each time. **This is the requirement that decides whether Cline can be supported, and it is the one still open.** |
+| **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
+| **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
+| **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
 
-Two things noted for whenever the integration is written: Cline reaches
-`otel.cline.bot`, so it wants the same telemetry-off treatment
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` gets, which is what `image_env` is
-for. And its default sign-in is a hosted Cline provider; the assessment above
-assumes the environment-variable path instead, which is what dejima would use.
+Two notes for whoever writes the integration. Cline's plugin manifest schema
+still carries a field described as "not read by Claude Code", so its plugin
+format is derived from Claude Code's - which is the reason to expect the
+existing `hooks/*.sh` to port rather than be rewritten, and the reason R2
+being unresolved is a documentation question rather than a capability one. And
+`CLINE_SANDBOX=1` turns on an inner sandbox that relocates state under a
+`cline-sandbox` directory; like Claude Code's, it is redundant inside this
+container and wants turning off.
+
+The comparison that matters is with opencode, the only other provider-agnostic
+candidate that clears R2. opencode's state is a single SQLite database with no
+per-project directory and no way to relocate it, so it clears R4 only on the
+second branch - discardable and container-local, no history shared with the
+host. Cline clears it outright. Against that, opencode's R2 is demonstrated
+and Cline's is not.
 
 ### Where a harness's support lives: three tiers
 
