@@ -243,7 +243,7 @@ operator gets everywhere else would be missing with no way to restore them,
 and "supported" would mean something different for that one harness than
 for every other. So it is not supported, and this is the reason.
 
-### Worked example: Cline, assessed
+### Worked example: why Cline is not supported
 
 Cline is the strongest candidate for the harness after Claude Code on the
 requirement a second one most needs: it is genuinely provider-agnostic. That
@@ -262,7 +262,7 @@ or better is the requirement.
 | | Verified |
 | --- | --- |
 | **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
-| **R2** | **Not demonstrated.** The capability is evidenced from several directions - the hook event enum is `agent_start, agent_resume, agent_abort, agent_end, agent_error, tool_call, tool_result, prompt_submit, pre_compact, session_shutdown`; the `tool_call` payload carries `preToolUse: {toolName, parameters}`; the decision vocabulary `allow`/`deny`/`block`/`ask` is present; and `hook_event` records for `tool_call` and `tool_result` appear in the `--json` stream during a real run. But no hook could be registered through eight attempted layouts, and the plugin manifest was rejected each time. **This is the requirement that decides whether Cline can be supported, and it is the one still open.** |
+| **R2** | **Fails as a CLI.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported, which is what R2 asks for. |
 | **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
 | **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
 | **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
@@ -276,12 +276,30 @@ being unresolved is a documentation question rather than a capability one. And
 `cline-sandbox` directory; like Claude Code's, it is redundant inside this
 container and wants turning off.
 
-The comparison that matters is with opencode, the only other provider-agnostic
-candidate that clears R2. opencode's state is a single SQLite database with no
-per-project directory and no way to relocate it, so it clears R4 only on the
-second branch - discardable and container-local, no history shared with the
-host. Cline clears it outright. Against that, opencode's R2 is demonstrated
-and Cline's is not.
+**There is a refusal point, but it is in the SDK rather than the CLI.**
+`ClineCore.create()` takes a `requestToolApproval` capability - it receives
+`{toolName, input}` before the tool runs, returns `{approved: false}` to
+refuse, and the agent is told and moves on. That is exactly what the push
+guard, the merge guard and the bash denylist need. It is also not a harness
+dejima launches: it is a library dejima would have to write and maintain a
+host program around, making the container's main process dejima's own
+JavaScript rather than `cline`. Every other harness is a binary with hooks
+hanging off it; this one would be an embedding.
+
+So Cline is **not supported today**, and the reason is R2 rather than anything
+about the CLI's quality - it is better than the alternatives on R1, R4, R5 and
+provider agnosticism, and R4 in particular is the cleanest of any candidate
+looked at. If its CLI ever exposes the approval callback the SDK already has,
+it becomes the obvious choice and this assessment should be redone.
+
+That leaves opencode as the next harness. It is the only provider-agnostic
+candidate whose refusal point is both documented and reachable from a CLI: a
+plugin's `tool.execute.before` throws and the call does not run. The cost is
+R4 - one SQLite database, no per-project directory, no way to relocate it - so
+opencode clears that requirement only on its second branch, discardable and
+container-local, with no session history shared with the host. That is a
+smaller integration than Claude Code's, and it should be stated as such rather
+than discovered later.
 
 ### Where a harness's support lives: three tiers
 
