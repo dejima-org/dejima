@@ -243,6 +243,44 @@ operator gets everywhere else would be missing with no way to restore them,
 and "supported" would mean something different for that one harness than
 for every other. So it is not supported, and this is the reason.
 
+### Worked example: Cline, assessed but blocked on this host
+
+Cline is the strongest candidate found for the harness after Claude Code, on
+the requirement that matters most for a second one: it is genuinely
+provider-agnostic. `openai-compatible` appears 442 times in its binary,
+alongside Ollama and LM Studio, and it takes a base URL for every provider -
+so it can be pointed at any endpoint, including an open-weight model served
+locally. Neither Gemini CLI nor Codex CLI can be, and Gemini CLI was retired
+in June 2026 in favour of a closed-source successor.
+
+**It cannot run on the host this repository is developed on.** Cline's CLI is
+a Bun-embedded compiled binary; Bun's default build requires AVX2, and this VM
+presents a `QEMU Virtual CPU version 2.5+` with SSE4.2 and no AVX at all. The
+binary dies on SIGILL (exit 132) before producing a byte of output. Cline
+publishes six platform packages - linux/darwin/windows x64 and arm64 - and
+none is a baseline build, so there is nothing for `CLINE_BIN_PATH` to point
+at. This is a property of the VM's CPU model rather than of Cline: a QEMU
+guest without `-cpu host` gets that generic model, and passthrough on any host
+CPU made since about 2013 would expose AVX2.
+
+So the assessment below is from the installed package - the binary's own
+strings, not its documentation - and is complete except for R4, which needs
+the thing to run.
+
+| | Evidence |
+| --- | --- |
+| **R1** | Clears. `--yolo`, `--auto-approve`, and `--dangerously-bypass-approvals-and-sandbox`. |
+| **R2** | Clears, and unusually cheaply. The binary carries `beforeTool`/`afterTool`, `preToolUse`/`postToolUse`, `hookEventName`, `hooks.json`, and the full decision vocabulary `"allow"`/`"deny"`/`"block"`/`"ask"`. The capitalised `PreToolUse`/`PostToolUse` are Claude Code's own names: hooks are shell commands taking JSON on stdin with Claude-Code-compatible matchers, so `git-push-guard.sh`, `merge-guard.sh` and `deny-dangerous-bash.sh` would likely port rather than be rewritten. |
+| **R3** | Clears. `SessionStart` appears with `additionalContext` and `systemMessage` - again Claude Code's exact field names - and `.clinerules` is a second operator-controlled context path. |
+| **R4** | **Unresolved.** `.cline/data`, `taskHistory` and `checkpoints` exist, but whether task state is per-project and computable on the host, or one global store, cannot be read out of a binary. This is the requirement opencode only clears on its second branch, so it is the one worth settling first. |
+| **R5** | Clears. A wide set of `*_API_KEY` variables, plus `ANTHROPIC_BASE_URL` and `baseUrl` throughout - the credential comes from the environment and the endpoint is redirectable, which is R5's second path and the reason it is provider-agnostic at all. |
+
+Two things noted for whenever the integration is written: Cline reaches
+`otel.cline.bot`, so it wants the same telemetry-off treatment
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` gets, which is what `image_env` is
+for. And its default sign-in is a hosted Cline provider; the assessment above
+assumes the environment-variable path instead, which is what dejima would use.
+
 ### Where a harness's support lives: three tiers
 
 | Tier | What | Rule |
