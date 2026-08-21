@@ -129,6 +129,17 @@ What they change is what the row below it costs.
 
 ## What this repository does not claim
 
+- **That the egress allowlist bounds what reaches the model.** It bounds what
+  the container can connect to. A harness tool executed outside the container
+  - Claude Code's `WebSearch` is the one confirmed by observation - puts text
+  from any site into the session without the allowlist seeing the name, and
+  sends a session-controlled query out to a third party. It rides the model
+  API connection, so it crosses dejima's own credential proxy rather than
+  going somewhere unseen, but nothing inspects it. Which of a harness's tools
+  fetch from the container and which do not is a per-harness question, and
+  belongs in that harness's assessment.
+  [security.md](security.md#the-firewall-bounds-the-container-not-the-harness)
+  has the evidence.
 - **That escape is impossible.** It is a row in the table with controls of its
   own, not an outcome that has been designed away.
 - **That the hooks stop a hostile agent.** They stop an unlucky one.

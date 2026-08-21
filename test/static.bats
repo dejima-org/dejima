@@ -2641,6 +2641,28 @@ EOF
     done
 }
 
+# The egress allowlist is the control this repository leans on hardest in
+# prose - it is named as what bounds where a prompt injection could fetch its
+# next instruction from. That is true of what the container fetches and not of
+# a harness tool executed elsewhere, so both documents have to keep saying so.
+# A reader who takes the allowlist as the boundary and is not corrected has
+# been misled by us, not by the harness.
+@test "both documents say the egress allowlist does not bound a harness's own tools" {
+    local sec="$REPO_ROOT/docs/security.md" tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q 'The firewall bounds the container, not the harness' "$sec" \
+        || { echo "security.md drops the limit of the allowlist"; return 1; }
+    # The evidence, not just the assertion: a reader has to be able to see why
+    # this is a fact about the setup rather than a worry about it.
+    grep -q 'Could not resolve host: aider.chat' "$sec" \
+        || { echo "security.md asserts it without the observation behind it"; return 1; }
+    grep -q 'egress allowlist bounds what reaches the model' "$tm" \
+        || { echo "the threat model does not disclaim it"; return 1; }
+    # And that it is framed per harness rather than as one harness's quirk,
+    # since the next harness has to be asked the same question.
+    grep -q 'per-harness question' "$tm" \
+        || { echo "the threat model reads as a Claude Code quirk"; return 1; }
+}
+
 @test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/threat-model.md" ]
     grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"
