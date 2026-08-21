@@ -275,6 +275,12 @@ COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-c
 COPY docker/entrypoint.sh /usr/local/bin/
 COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
 COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
+# The two guards that do not need the harness's help. git-guard shadows git on
+# PATH; forge-guard is linked over a forge CLI by entrypoint.sh when a workflow
+# blocks one of its subcommands. Both are copied in unconditionally and cost
+# nothing until something puts them on PATH.
+COPY docker/git-guard.sh /usr/local/lib/dejima/git-guard.sh
+COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of
 # USER, so the copies above are unaffected, but the install(1) below is a RUN
@@ -286,10 +292,10 @@ USER root
 # forge is configured is one less thing for the exit audit to explain.
 COPY forges/ /tmp/forges/
 COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
-RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/bin \
+RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
