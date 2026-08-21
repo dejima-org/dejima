@@ -24,8 +24,16 @@
 # already requires, because this parser runs where that one does not.
 set -euo pipefail
 
-root="${1:?usage: install-forge-bins.sh <forges-dir> <dest>}"
-dest="${2:?usage: install-forge-bins.sh <forges-dir> <dest>}"
+root="${1:?usage: install-forge-bins.sh <forges-dir> <real-dir> <bin-dir>}"
+real="${2:?usage: install-forge-bins.sh <forges-dir> <real-dir> <bin-dir>}"
+dest="${3:?usage: install-forge-bins.sh <forges-dir> <real-dir> <bin-dir>}"
+
+# The real CLI goes in <real-dir> and <bin-dir> gets a symlink to it. That
+# indirection is what lets entrypoint.sh replace the symlink with
+# docker/forge-guard.sh for whichever command a workflow blocks, while the
+# guard still has a fixed path to exec the real one through. A forge with
+# nothing blocked keeps the symlink and pays nothing.
+mkdir -p "$real" "$dest"
 
 declared_any=0
 for conf in "$root"/*/forge.conf; do
@@ -58,7 +66,8 @@ for conf in "$root"/*/forge.conf; do
             echo "forge $forge declares $rel, which it does not ship" >&2
             exit 1
         fi
-        install -m 755 "$forge_dir/$rel" "$dest/"
+        install -m 755 "$forge_dir/$rel" "$real/"
+        ln -sf "$real/${rel##*/}" "$dest/${rel##*/}"
         declared="$declared ${rel##*/}"
         declared_any=1
     done

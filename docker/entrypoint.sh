@@ -100,6 +100,45 @@ if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     export SSH_AUTH_SOCK
 fi
 
+# The guards that do not depend on the harness. Both shadow a name on PATH, so
+# they catch the command whatever ran it - which is what lets a harness with no
+# way to intercept a tool call still get them. Neither is a boundary: a session
+# that means to get past either can call the real binary by its full path,
+# exactly as it could have used a tool a hook did not cover. They stop an eager
+# agent doing the obvious thing by accident, which is what the hooks they
+# replace were for (docs/security.md).
+#
+# Linked here rather than COPYed into place at build time because both depend
+# on values that are only known per launch: which hosts this forge may be
+# pushed to, and which subcommand this workflow blocks.
+if [ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" ]; then
+    # /usr/local/bin precedes /usr/bin, so this shadows git without moving it
+    # and the guard execs /usr/bin/git directly.
+    ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
+fi
+
+if [ -n "${DEJIMA_MERGE_BLOCK:-}" ]; then
+    # The first word of the block names the CLI to shadow. The real one is
+    # already behind the symlink this replaces (see install-forge-bins.sh), so
+    # the guard has a fixed path to exec.
+    _blocked_cli="${DEJIMA_MERGE_BLOCK%% *}"
+    case "$_blocked_cli" in
+        */*|.*|'')
+            echo "entrypoint: refusing merge-block command name: $_blocked_cli" >&2
+            exit 1 ;;
+    esac
+    if [ -x "/usr/local/lib/dejima/forge/$_blocked_cli" ]; then
+        ln -sf /usr/local/lib/dejima/forge-guard.sh "/usr/local/bin/$_blocked_cli"
+    else
+        # A workflow blocking a command this forge does not ship is a
+        # misconfiguration that would otherwise be silent - the guard would
+        # never be reached and the block would look enforced.
+        echo "entrypoint: [workflow] merge_block names '$_blocked_cli', which forge" >&2
+        echo "'${DEJIMA_FORGE_NAME:-?}' does not install. Nothing is being blocked." >&2
+        exit 1
+    fi
+fi
+
 # Put the harness wrapper on PATH under the harness's own command name,
 # ahead of the real binary, so every invocation gets the no-confirm flags -
 # including the ones dejima never sees, an interactive shell or an editor

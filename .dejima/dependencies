@@ -1,11 +1,25 @@
-# Every harness dejima supports, so a session working on this repo can run
-# and test the integration rather than reason about it. A harness dejima
-# claims to support and cannot exercise here is one whose guards are asserted
-# rather than observed.
+# Every harness dejima supports, and every one under assessment, so a session
+# working on this repo can run and test the integration rather than reason
+# about it. A harness dejima claims to support and cannot exercise here is one
+# whose guards are asserted rather than observed.
 #
-# claude-code is not listed: it is installed in docker/Dockerfile, being the
-# harness the image is built around.
+# claude-code is not listed: like every supported harness it installs from its
+# own manifest's `install` spec, into a layer of its own above the base image.
+# Nothing here has to name it.
 npm:opencode-ai
+
+# Being integrated as the second supported harness. Needs AVX2: its CLI is a
+# Bun-embedded compiled binary and Bun's default build requires it, so a VM
+# whose CPU model is x86-64-v2-AES - Proxmox's default for new guests - gets
+# SIGILL before any output, and no baseline build is published. x86-64-v3 or
+# better is the requirement. See docs/development.md, "Worked example: Cline".
+#
+# No allowed-domains entry accompanies this, unlike opencode: Cline fetches no
+# provider catalogue at startup. Its own hosted endpoints (api.cline.bot,
+# app.cline.bot, otel.cline.bot) are deliberately absent for the same reason
+# the model API is - a name granted by being written here is a name nobody
+# reviewed, and the point is to point it at an endpoint of our choosing.
+npm:cline
 
 apt:tmux
 apt:bats

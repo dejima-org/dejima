@@ -1490,11 +1490,11 @@ STUB
 @test "what ships into the image is what a manifest declares, both ways" {
     local dest
     dest="$(mktemp -d)"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
     [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
     # Nothing under any forge's bin/ was skipped, and nothing else appeared.
     local shipped declared
-    shipped="$(cd "$dest" && ls | sort)"
+    shipped="$(cd "$dest/bin" && ls | sort)"
     declared="$(find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n' | sort)"
     rm -rf "$dest"
     [ "$shipped" = "$declared" ] || {
@@ -1507,7 +1507,7 @@ STUB
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     mkdir -p "$fake/github/bin"
     printf '#!/bin/sh\necho hi\n' > "$fake/github/bin/undeclared"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "an undeclared CLI installed anyway"; rm -rf "$fake" "$dest"; return 1; }
     [ ! -e "$dest/undeclared" ]
     rm -rf "$fake" "$dest"
@@ -1518,9 +1518,169 @@ STUB
     fake="$(mktemp -d)"; dest="$(mktemp -d)"
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     rm "$fake/gitea/bin/gitea-pr"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest"
+    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "a missing declared CLI passed"; rm -rf "$fake" "$dest"; return 1; }
     rm -rf "$fake" "$dest"
+}
+
+# --- guards that do not need the harness ------------------------------------
+#
+# push-guard and merge-guard used to exist only as hook scripts, which meant
+# they existed only for a harness that can intercept a tool call. As PATH
+# shadows they work for any harness, and they read argv instead of
+# regex-matching a reconstructed command string.
+#
+# They overlap the hooks deliberately rather than replacing them, because the
+# coverage differs in both directions: a hook sees `/usr/bin/git push`, which
+# walks past the shadow; a shadow sees a push from an editor integration or a
+# script, which the harness never reports as a Bash tool call. Neither is a
+# boundary - the firewall bounds where a push can reach and the forge decides
+# whether to accept it.
+
+_git_guard() {
+    # $1 is the repo, rest is argv. Prints the first line of whatever comes out.
+    local repo="$1"; shift
+    DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+        DEJIMA_FORGE_NAME=gitea bash "$SANDBOX_DIR/git-guard.sh" -C "$repo" "$@" 2>&1 | head -1
+}
+
+_guard_repo() {
+    local d
+    d="$(mktemp -d "$BATS_TEST_TMPDIR/guardrepo.XXXXXX")"
+    git -C "$d" init -q -b feature
+    git -C "$d" remote add origin git@forge.invalid:o/r.git
+    git -C "$d" remote add elsewhere git@evil.invalid:o/r.git
+    git -C "$d" -c user.name=t -c user.email=t@invalid commit -q --allow-empty -m seed
+    printf '%s' "$d"
+}
+
+@test "the git guard refuses a push to a host the forge does not own" {
+    local repo; repo="$(_guard_repo)"
+    run _git_guard "$repo" push elsewhere
+    [[ "$output" == *"may only push to"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the git guard refuses a direct push to a blocked branch, however it is spelled" {
+    local repo form; repo="$(_guard_repo)"
+    # Each of these is the same push wearing different clothes. The hook this
+    # supplements matched a regex over a command string and had to anticipate
+    # the spelling; argv does not care.
+    for form in "push origin main" "push origin HEAD:main" "push --repo=origin main" \
+                "push --repo origin main" "push -o ci.skip origin main"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"aren't allowed in the sandbox"* ]] \
+            || { echo "not blocked: git $form -> $output"; return 1; }
+    done
+}
+
+@test "the git guard leaves everything that is not a blocked push alone" {
+    local repo; repo="$(_guard_repo)"
+    run _git_guard "$repo" status --short
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+    # A push to an allowed host and an unblocked branch reaches real git, which
+    # then fails on its own terms (there is no such host to connect to).
+    run _git_guard "$repo" push origin feature
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the git guard refuses a push whose remote it cannot resolve" {
+    # The shape a disagreement between this parser and git's takes. Passing it
+    # through would be a push nothing checked, so it fails closed.
+    local repo; repo="$(_guard_repo)"
+    run _git_guard "$repo" push nosuchremote
+    [[ "$output" == *"cannot resolve the remote"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the two push guards agree on the same pushes" {
+    # Two implementations of one rule is the drift this repo warns about, so
+    # the overlap is pinned rather than assumed: for each case, the hook and
+    # the shadow reach the same verdict.
+    local repo cmd hook_out guard_out hook_blocked guard_blocked
+    repo="$(_guard_repo)"
+    for cmd in "git push origin main" "git push elsewhere" "git push origin feature"; do
+        # `|| true` because the hook signals a block by exiting 2, which would
+        # otherwise abort the test body before the comparison.
+        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
+            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+        # shellcheck disable=SC2086
+        guard_out="$(_git_guard "$repo" ${cmd#git } || true)"
+        hook_blocked=0; guard_blocked=0
+        [[ "$hook_out" == *"Blocked by"* ]] && hook_blocked=1
+        [[ "$guard_out" == *"Blocked by dejima"* ]] && guard_blocked=1
+        [ "$hook_blocked" -eq "$guard_blocked" ] || {
+            echo "disagreement on '$cmd': hook=$hook_blocked shadow=$guard_blocked" >&2
+            echo "  hook:   $hook_out" >&2
+            echo "  shadow: $guard_out" >&2
+            return 1
+        }
+    done
+}
+
+@test "the forge guard refuses only the subcommand a workflow blocks" {
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgeguard.XXXXXX")"
+    mkdir -p "$d/real"
+    printf '#!/bin/bash\necho "real: $*"\n' > "$d/real/gitea-pr"
+    chmod +x "$d/real/gitea-pr"
+    cp "$SANDBOX_DIR/forge-guard.sh" "$d/gitea-pr"
+    chmod +x "$d/gitea-pr"
+    local blocked="merge"
+
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
+        "$d/gitea-pr" "$blocked" 7
+    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+
+    # Flags before the subcommand do not smuggle it past.
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
+        "$d/gitea-pr" --verbose "$blocked" 7
+    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+
+    # Everything else reaches the real CLI, including a subcommand that merely
+    # starts with the blocked word.
+    local sub
+    for sub in create comments mergeable; do
+        run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
+            "$d/gitea-pr" "$sub" 7
+        [[ "$output" == real:* ]] || { echo "$sub was blocked: $output"; return 1; }
+    done
+
+    # A block naming a different CLI is not this one's business.
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
+        "$d/gitea-pr" "$blocked" 7
+    [[ "$output" == real:* ]] || { echo "$output"; return 1; }
+}
+
+@test "a forge CLI sits behind the shadow, with the name on PATH a symlink to it" {
+    # The guard needs a fixed path to exec the real binary through, which is
+    # what the indirection buys - and it is what lets entrypoint.sh swap the
+    # PATH entry for the guard without moving anything at runtime.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgeinstall.XXXXXX")"
+    run bash "$SANDBOX_DIR/install-forge-bins.sh" "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f
+    for f in "$d/bin"/*; do
+        [ -L "$f" ] || { echo "$(basename "$f") on PATH is not a symlink"; return 1; }
+        [ -x "$d/lib/$(basename "$f")" ] || { echo "no real binary behind $(basename "$f")"; return 1; }
+    done
+}
+
+@test "the entrypoint links each guard only when it has something to enforce" {
+    local e="$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$e" \
+        || { echo "git is never shadowed"; return 1; }
+    grep -q 'ln -sf /usr/local/lib/dejima/forge-guard.sh' "$e" \
+        || { echo "the forge CLI is never shadowed"; return 1; }
+    # Both are conditional: a launch with no push hosts and no merge block
+    # should leave PATH as the image left it.
+    grep -q 'if \[ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" \]' "$e" \
+        || { echo "the git shadow is unconditional"; return 1; }
+    grep -q 'if \[ -n "${DEJIMA_MERGE_BLOCK:-}" \]' "$e" \
+        || { echo "the forge shadow is unconditional"; return 1; }
+    # And a merge_block naming a command the forge does not ship is refused
+    # rather than looking enforced.
+    grep -q 'does not install. Nothing is being blocked' "$e" \
+        || { echo "a merge_block for a missing CLI is silent"; return 1; }
 }
 
 @test "merge-guard.sh blocks a sandbox merge and is a no-op on the host" {
@@ -2712,9 +2872,16 @@ EOF
     sec="$(sed -n '/^### What a harness must be able to do/,/^### What the manifest/p' \
         "$REPO_ROOT/docs/development.md")"
     [ -n "$sec" ] || { echo "the capability bar is gone"; return 1; }
-    for r in R1 R2 R3 R4 R5; do
+    for r in R1 R3 R4 R5; do
         grep -q "\*\*$r\*\*" <<< "$sec" || { echo "no $r in the bar"; return 1; }
     done
+    # R2 moved to the declarable table when the push and merge guards stopped
+    # needing it. The gap is deliberate, and the move has to stay stated -
+    # a bar that simply lost a requirement reads as an oversight.
+    grep -q 'R2 is not missing from the table above' <<< "$sec" \
+        || { echo "the bar drops R2 without saying where it went"; return 1; }
+    grep -qE '\*\*D1\*\*.*was R2' <<< "$sec" \
+        || { echo "D1 does not identify itself as the former R2"; return 1; }
     # Unattended execution is the premise every other control is justified
     # against, so it stays stated rather than assumed.
     grep -qi 'without confirming each one' <<< "$sec"
