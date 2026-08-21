@@ -1972,3 +1972,106 @@ _epitaph_transcript() {
     [[ "$output" != *"not in force this session"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
+
+# --- the harness layer ----------------------------------------------------
+
+@test "the selected harness is built into a layer of its own, and the session runs on it" {
+    # The base image carries no harness. What the session actually runs has to
+    # be the layer that installed the selected one - a launch that built the
+    # layer and then started the base image would be a session with no
+    # harness, failing as an exec error inside the container.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    # SANDBOX_IMAGE is what `docker compose run` is given, and it arrives in
+    # the environment rather than in argv - so the stub records it. Asserting
+    # on the `docker build -t` line instead would pass a launch that built the
+    # layer and then started the base image, which is the mistake worth
+    # catching: the session comes up without its harness.
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'STUB'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$SANDBOX_TEST_DOCKER_LOG"; done
+[ "$1" != compose ] || printf '%s\n' "${SANDBOX_IMAGE:-<unset>}" >> "$SANDBOX_TEST_IMAGE_LOG"
+exit 0
+STUB
+    chmod +x "$STUB_DIR/docker"
+    docker_log="$(mktemp)"; image_log="$(mktemp)"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG="$docker_log" SANDBOX_TEST_IMAGE_LOG="$image_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness-claude-code"* ]] \
+        || { echo "no harness layer was built:"; echo "$output"; return 1; }
+    grep -qxF "dejima:$(id -un)-harness-claude-code" "$docker_log" \
+        || { echo "the harness layer was not tagged as expected:"; cat "$docker_log"; return 1; }
+    # The LAST compose invocation is the run; the first builds the base.
+    local ran
+    ran="$(tail -1 "$image_log")"
+    [ "$ran" = "dejima:$(id -un)-harness-claude-code" ] \
+        || { echo "the session ran on '$ran', not the harness layer"; cat "$image_log"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$docker_log" "$image_log"
+}
+
+@test "a harness install spec that is not a dependency spec refuses the launch" {
+    # Manifest data reaching a Dockerfile RUN line built on the host, and the
+    # provider directories are session-writable when dejima sandboxes its own
+    # checkout - so this is refused at launch rather than trusted for having
+    # come from a file dejima ships.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local root
+    root="$(mktemp -d)"
+    mkdir -p "$root/harnesses/evil" "$root/forges" "$root/workflows"
+    cp -r "$REPO_ROOT/forges/." "$root/forges/"
+    cp -r "$REPO_ROOT/workflows/." "$root/workflows/"
+    printf 'command = evil\ninstall = npm:x$(id>/tmp/pwned)\nno_confirm_args = -y\n' \
+        > "$root/harnesses/evil/harness.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'harness = evil' 'forge = none' 'workflow = local-only'
+    DEJIMA_PROVIDER_ROOT="$root" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with an unvalidated install spec"; return 1; }
+    [ ! -e /tmp/pwned ]
+    rm -rf "$workspace" "$RW_HOME" "$root" "${docker_log:-}"
+}
+
+@test "the harness layer creates the harness's own state directories and environment" {
+    # These were in the base image, imposed on every image dejima builds. They
+    # are the selected harness's now, and have to actually reach its layer -
+    # a manifest key nothing consumes would leave the directories to Docker,
+    # which creates a mount's missing parent root-owned and leaves the session
+    # unable to write beside it.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    STUB_DIR="$(mktemp -d)"
+    dockerfile_log="$(mktemp)"
+    cat > "$STUB_DIR/docker" <<'STUB'
+#!/bin/bash
+if [ "$1" = build ]; then
+    nextf=0
+    for a in "$@"; do
+        [ "$nextf" = 1 ] && { cat "$a" >> "$SANDBOX_TEST_DOCKERFILE_LOG"; nextf=0; }
+        [ "$a" = -f ] && nextf=1
+    done
+fi
+exit 0
+STUB
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG=/dev/null SANDBOX_TEST_DOCKERFILE_LOG="$dockerfile_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local df
+    df="$(cat "$dockerfile_log")"
+    [[ "$df" == *'mkdir -p "${SANDBOX_HOME}"/.claude '* ]] \
+        || { echo "the layer creates no state directories:"; echo "$df"; return 1; }
+    [[ "$df" == *'.claude/file-history'* ]] \
+        || { echo "a declared directory is missing from the layer:"; echo "$df"; return 1; }
+    # Owned by the session's user and 0700, which is the whole reason they are
+    # pre-created rather than left to Docker.
+    [[ "$df" == *'chown -R ${SANDBOX_USER}:${SANDBOX_USER}'* ]] || { echo "$df"; return 1; }
+    [[ "$df" == *'chmod 700'* ]] || { echo "$df"; return 1; }
+    [[ "$df" == *'ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'* ]] \
+        || { echo "the declared environment is missing from the layer:"; echo "$df"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$dockerfile_log"
+}

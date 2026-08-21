@@ -1511,7 +1511,7 @@ fi
 # image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
 # build would rebuild the base Dockerfile under the derived name.
 SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \
-    docker compose -f "$COMPOSE_FILE" build claude
+    docker compose -f "$COMPOSE_FILE" build sandbox
 
 SANDBOX_IMAGE="dejima:${SANDBOX_USER}"
 
@@ -1532,13 +1532,62 @@ build_dep_layer() {
     SANDBOX_IMAGE="$tag"
 }
 
-if [ -s "$(config_root)/dependencies" ] || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
+# The selected harness, and only it.
+#
+# The base image is shared by every project on this host, so a harness baked
+# into it would be carried by every sandbox whether or not it is the one
+# selected - and a second harness could only ever be added alongside the
+# first, never chosen between. Here it is a layer keyed on the harness's own
+# name, so switching [core] harness switches images rather than accumulating
+# into one.
+#
+# Built before the dependency layers so a project's own packages sit above the
+# harness rather than being invalidated whenever it changes.
+#
+# The spec is manifest data of type `depspec`, so manifest_get has already
+# refused anything valid_dep_spec would - the same function an operator's
+# approved dependency goes through, and the reason this string is safe to
+# interpolate into a Dockerfile RUN line. Re-checking here would be a second
+# copy of a rule with no way to disagree with the first, and no way to test.
+SANDBOX_HARNESS_INSTALL="$(manifest_get harness "$DEJIMA_HARNESS_NAME" install)"
+# What this harness needs its image to contain besides the package: the
+# directories it keeps state in, and anything it wants in the environment.
+# Both used to be in the base image, where they were one harness's needs
+# imposed on every image dejima builds.
+SANDBOX_HARNESS_IMAGE_DIRS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_dirs)"
+SANDBOX_HARNESS_IMAGE_ENV="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_env)"
+SANDBOX_HARNESS_IMAGE_FILES="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_files)"
+
+if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ] \
+    || [ -s "$(config_root)/dependencies" ] \
+    || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
     SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
     # An empty context, never $WORKSPACE_DIR: the project directory is
     # session-writable, and a root-context build with it as context would let a
     # compromised session feed files into the image it then runs in.
     SANDBOX_DERIVED_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/dejima-derived-ctx.XXXXXX")"
 fi
+
+if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ]; then
+    tag="dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}"
+    generate_spec_dockerfile "$SANDBOX_IMAGE" "$SANDBOX_HARNESS_INSTALL" \
+        "$SANDBOX_HARNESS_IMAGE_DIRS" "$SANDBOX_HARNESS_IMAGE_ENV" \
+        "$SANDBOX_HARNESS_IMAGE_FILES" \
+        > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building $tag ($DEJIMA_HARNESS_NAME)..."
+    if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback: a session started on an image without its harness gets
+        # an exec failure inside a container, which reads as dejima being
+        # broken rather than as this build having failed.
+        echo "Failed to build $tag." >&2
+        echo "The harness installs from: $SANDBOX_HARNESS_INSTALL" >&2
+        exit 1
+    fi
+    SANDBOX_IMAGE="$tag"
+fi
+
 if [ -s "$(config_root)/dependencies" ]; then
     build_dep_layer "dejima:${SANDBOX_USER}-global" "$(config_root)"
 fi
@@ -1639,7 +1688,7 @@ compose_status=0
 "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
 SANDBOX_CONVERSATION_SHIP_PID=$!
 
-docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} claude "$@" || compose_status=$?
+docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2

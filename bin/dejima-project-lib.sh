@@ -30,59 +30,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/dejima-provider-lib.sh"
 
 DEJIMA_MAX_DECLARED=200
 
-# <ecosystem>:<name>. The character class is deliberately narrow: an
-# approved spec gets interpolated into a generated Dockerfile RUN line, so
-# anything shell-active here would be a root-context injection at build.
-# The name must start with an alphanumeric - without that, a leading dash
-# (e.g. "--allow-unauthenticated") validates as a name and lands in the
-# generated RUN line as an option instead, quietly weakening apt/pip/npm/
-# cargo's own signature/lockfile checks.
-valid_dep_spec() {
-    [[ "$1" =~ ^(apt|npm|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && return 0
-    valid_tarball_spec "$1"
-}
-
-# tarball:<name>@<sha256>:<url> - a release archive unpacked into the image,
-# for a toolchain no package ecosystem ships in a usable version.
-#
-# The digest is mandatory and is what makes this an approval at all. Without
-# it the operator would be approving a *name* whose contents the other end can
-# change afterwards, which is not a decision anyone can make once; with it,
-# what was approved is a specific archive and nothing else can take its place.
-# The generated build verifies it before unpacking, not after.
-#
-# The character classes are narrower than the URL grammar allows, for the same
-# reason as above: this string is interpolated into a Dockerfile RUN line that
-# runs as root. Everything shell-active is excluded rather than quoted around
-# - no $, backtick, quote, backslash, whitespace, or ;|&<>() - so there is no
-# quoting to get wrong later. https only: the digest already provides
-# integrity, but there is no reason to also accept a plaintext fetch.
-DEJIMA_MAX_TARBALL_URL=512
-valid_tarball_spec() {
-    local spec="$1" rest name sha url
-    [[ "$spec" == tarball:* ]] || return 1
-    rest="${spec#tarball:}"
-
-    name="${rest%%@*}"
-    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
-    # Becomes a directory under /opt/dejima; a name that walks out of it, or
-    # that is a relative-path token, is not a name.
-    case "$name" in .|..) return 1 ;; esac
-
-    rest="${rest#"$name"}"
-    [[ "$rest" == @* ]] || return 1
-    rest="${rest#@}"
-
-    sha="${rest%%:*}"
-    [[ "$sha" =~ ^[a-f0-9]{64}$ ]] || return 1
-
-    url="${rest#"$sha"}"
-    [[ "$url" == :* ]] || return 1
-    url="${url#:}"
-    [ ${#url} -le "$DEJIMA_MAX_TARBALL_URL" ] || return 1
-    [[ "$url" =~ ^https://[A-Za-z0-9._~/?=+%-]+$ ]] || return 1
-}
-
 # read_declared <file> <validator-fn>
 # Prints "ok <entry>" / "rejected <entry>" per entry, plus a final
 # "truncated <total>" when the cap kicked in. Invalid entries are reported
@@ -487,12 +434,35 @@ _emit_tarball_layers() {
 # the latter would need apt/npm/PyPI/crates.io reachable as root before
 # init-firewall.sh locks egress down.
 generate_derived_dockerfile() {
-    local base="$1" store="$2" entries apt npm pip cargo spec name
-    local -a tarballs=()
+    local base="$1" store="$2" entries
     entries="$(approved_entries "$store" dependencies)" \
         || { echo "refusing to build from a corrupt dependency list in $store" >&2; return 1; }
+    generate_spec_dockerfile "$base" "$entries"
+}
+
+# The same, from specs handed in directly rather than read from an approval
+# store. What installs the selected harness is one of these, and it comes from
+# that harness's manifest rather than from an operator's approval - so it has
+# no store to be read out of, and every other property of the layer should be
+# identical to a dependency's.
+#
+# $2 is a newline-separated list. Callers are responsible for having validated
+# each one (valid_dep_spec); nothing below re-checks, for the same reason
+# approved_entries is the only way into the function above.
+#
+# $3, $4 and $5 are for a harness layer and empty for a dependency one:
+# directories to create under the sandbox user's home, NAME=VALUE pairs to
+# set, and files to create empty at 0600, all space-separated. They exist because the base image must name no harness -
+# what a harness keeps state in, and what it wants in its environment, belong
+# to that harness's own layer. Validated by the manifest types `homepath` and
+# `envpair` before they reach here, which is what makes them safe to
+# interpolate unquoted.
+generate_spec_dockerfile() {
+    local base="$1" entries="$2" dirs="${3:-}" envs="${4:-}" files="${5:-}"
+    local apt npm pip cargo spec name d e f
 
     apt=""; npm=""; pip=""; cargo=""
+    local -a tarballs=()
     while IFS= read -r spec; do
         [ -n "$spec" ] || continue
         name="${spec#*:}"
@@ -507,6 +477,38 @@ generate_derived_dockerfile() {
 
     printf 'FROM %s\n' "$base"
     printf 'USER root\n'
+    if [ -n "$dirs" ]; then
+        # 0700 and owned by the sandbox user, because these are the parents of
+        # mounts that land inside them: Docker creates a missing parent
+        # root-owned, and the session then cannot write the state it keeps
+        # there. Created here rather than in the base image so an image
+        # carries one harness's directories and no other's.
+        printf 'RUN mkdir -p'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf ' \\\n  && chown -R ${SANDBOX_USER}:${SANDBOX_USER}'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf ' \\\n  && chmod 700'
+        for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf '\n'
+    fi
+    if [ -n "$files" ]; then
+        # Empty, 0600, owned by the session's user. A harness that reads a
+        # credential from a fixed path needs SOMETHING there: an absent file
+        # and an empty one are not reliably the same to it, and betting that
+        # they are is how a session comes up unauthenticated in a way that
+        # reads as a dejima fault.
+        #
+        # Created in the image rather than by the entrypoint, so a mount at
+        # the same path simply shadows it - which is what happens on every
+        # transport that mounts one. The entrypoint did it at runtime, which
+        # meant every container created one harness's path whether or not that
+        # harness was the one selected, and failed outright on an image whose
+        # harness had never declared the directory it lives in.
+        printf 'RUN install -o ${SANDBOX_USER} -g ${SANDBOX_USER} -m 600 /dev/null'
+        for f in $files; do printf ' "${SANDBOX_HOME}"/%s' "$f"; done
+        printf '\n'
+    fi
+    for e in $envs; do printf 'ENV %s\n' "$e"; done
     [ -n "$apt" ] && printf 'RUN apt-get update && apt-get install -y --no-install-recommends%s \\\n  && apt-get clean && rm -rf /var/lib/apt/lists/*\n' "$apt"
     [ -n "$pip" ] && printf 'RUN pip install --break-system-packages%s\n' "$pip"
     _emit_tarball_layers "${tarballs[@]+"${tarballs[@]}"}"

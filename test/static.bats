@@ -436,13 +436,40 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+# Whether the selected harness declares a directory its image layer creates.
+# The requirement each of the callers below describes is unchanged; what moved
+# is where it is satisfied. The base image is shared by every harness, so a
+# directory only one of them needs is declared by that one - see `image_dirs`
+# in docs/providers.md.
+_harness_declares_file() {
+    local want="$1" files f
+    files="$(bash -c 'source "$1"; manifest_get harness claude-code image_files' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh")" || return 1
+    for f in $files; do [ "$f" = "$want" ] && return 0; done
+    return 1
+}
+
+_harness_declares_dir() {
+    local want="$1" dirs d
+    dirs="$(bash -c 'source "$1"; manifest_get harness claude-code image_dirs' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh")" || return 1
+    for d in $dirs; do [ "$d" = "$want" ] && return 0; done
+    return 1
+}
+
 @test "the image bakes in a user-owned ~/.claude for the enumerated mounts to land in" {
-    # Nothing mounts the directory itself any more, so it has to exist and be
-    # writable by the sandbox user - otherwise Docker auto-creates it root
-    # owned while setting up the mounts nested under it, and the session
-    # can't write its own cache or the config entrypoint.sh copies in.
-    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
-    grep -qE 'chown -R \$SANDBOX_USER:\$SANDBOX_USER .*\$SANDBOX_HOME/\.claude' "$SANDBOX_DIR/Dockerfile"
+    # Nothing mounts the directory itself, so it has to exist and be writable
+    # by the sandbox user - otherwise Docker auto-creates it root-owned while
+    # setting up the mounts nested under it, and the session cannot write its
+    # own cache or the config entrypoint.sh copies in.
+    _harness_declares_dir .claude \
+        || { echo "the harness does not declare ~/.claude"; return 1; }
+    # And the layer that reads the declaration makes it user-owned, which is
+    # the half a declaration alone would not give.
+    run bash -c 'source "$1"; generate_spec_dockerfile base "" ".claude" ""' _ \
+        "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *'chown -R ${SANDBOX_USER}:${SANDBOX_USER}'* ]] || { echo "$output"; return 1; }
 }
 
 
@@ -514,7 +541,8 @@ _declared_config_dirs() {
 # could not create a slug of its own - which is exactly what it must do when
 # the workspace has no history yet.
 @test "the image pre-creates ~/.claude/projects so the slug mounts have a writable parent" {
-    grep -qE '^RUN mkdir -p .*\$SANDBOX_HOME/\.claude/projects' "$SANDBOX_DIR/Dockerfile"
+    _harness_declares_dir .claude/projects \
+        || { echo "the harness does not declare ~/.claude/projects"; return 1; }
 }
 
 # Each file-history/<session>/<hash>@v1 is a verbatim copy of an edited file,
@@ -538,7 +566,8 @@ _declared_config_dirs() {
 }
 
 @test "the image pre-creates ~/.claude/file-history so the session mounts have a writable parent" {
-    grep -qE '\$SANDBOX_HOME/\.claude/file-history' "$SANDBOX_DIR/Dockerfile"
+    _harness_declares_dir .claude/file-history \
+        || { echo "the harness does not declare ~/.claude/file-history"; return 1; }
 }
 
 # One definition of "this workspace's slugs", shared by the mount and the
@@ -1317,6 +1346,92 @@ STUB
     grep -q 'type=issues' "$REPO_ROOT/forges/gitea/bin/gitea-issue"
 }
 
+# A run carries two numbers: the per-workflow counter this tool lists (225)
+# and the repo-wide index its web URL and every status target_url use (11387).
+# They are equal on a fresh instance and diverge for good once a second
+# workflow runs, so a tool that filters statuses by the first finds nothing at
+# all - `jobs` reported "no jobs" for a run whose twelve jobs were right
+# there, and `logs` could not reach the one that failed.
+#
+# The stub gives them deliberately different values, which is the only shape
+# that tells the two apart.
+actions_cli() {
+    local d="$BATS_TEST_TMPDIR/acli"
+    if [ ! -d "$d" ]; then
+        mkdir -p "$d/stub" "$d/repo"
+        cat > "$d/stub/curl" <<'STUB'
+#!/bin/bash
+url=""
+for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+cat >/dev/null
+case "$url" in
+    */actions/tasks*)
+        cat <<'JSON'
+{"workflow_runs":[
+ {"id":2663,"run_number":225,"name":"privileged","head_sha":"deadbeefdeadbeef",
+  "status":"failure","event":"pull_request_target","display_title":"a change",
+  "url":"https://forge.invalid/owner/name/actions/runs/11387"},
+ {"id":2662,"run_number":225,"name":"confined (static)","head_sha":"deadbeefdeadbeef",
+  "status":"success","event":"pull_request_target","display_title":"a change",
+  "url":"https://forge.invalid/owner/name/actions/runs/11387"}
+]}
+JSON
+        ;;
+    */statuses*)
+        # target_url carries the WEB id. A filter keyed on run_number matches
+        # none of these.
+        cat <<'JSON'
+[{"status":"failure","context":"tests / privileged (pull_request_target)",
+  "target_url":"/owner/name/actions/runs/11387/jobs/13320"},
+ {"status":"success","context":"tests / confined (static) (pull_request_target)",
+  "target_url":"/owner/name/actions/runs/11387/jobs/13318"}]
+JSON
+        ;;
+    *) echo '[]' ;;
+esac
+echo 200
+STUB
+        chmod +x "$d/stub/curl"
+        git -C "$d/repo" init -q -b feature
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
+        git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
+    fi
+    ( cd "$d/repo" && env PATH="$d/stub:$PATH" \
+        GITEA_SSH_HOST=forge.invalid GITEA_API=https://forge.invalid/api/v1 \
+        GITEA_TOKEN=stub-token \
+        "$REPO_ROOT/forges/gitea/bin/gitea-actions" "$@" )
+}
+
+@test "gitea-actions finds a run's jobs when its two numbers differ" {
+    run actions_cli jobs 225
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"privileged"* ]] \
+        || { echo "the failed job is missing:"; echo "$output"; return 1; }
+    [[ "$output" == *"13320"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"reports no jobs"* ]] \
+        || { echo "the run-number filter matched nothing again"; return 1; }
+}
+
+@test "gitea-actions accepts either of a run's two numbers" {
+    # `runs` prints one and the usage has always described the other, so both
+    # have been told to people.
+    local by_number by_web
+    by_number="$(actions_cli jobs 225)"
+    by_web="$(actions_cli jobs 11387)"
+    [ "$by_number" = "$by_web" ] || {
+        echo "the two forms disagree:"; echo "$by_number"; echo "--"; echo "$by_web"; return 1; }
+}
+
+@test "gitea-actions addresses a job's log by the id its URL uses" {
+    # The log endpoint is under the web id too, so a request built from
+    # run_number 404s - which api_or_die reports as a failed fetch rather than
+    # as the wrong number having been used.
+    grep -q 'actions/runs/\${run_web_id}/jobs/\${index}/logs' \
+        "$REPO_ROOT/forges/gitea/bin/gitea-actions" \
+        || { echo "the log URL is not keyed on the web id"; return 1; }
+}
+
 @test "gitea-actions only reads - it issues no request that could change anything" {
     # It authenticates with the same write-scoped token as gitea-pr, so
     # "it only fetches runs and logs" has to be a property of the file and
@@ -1785,15 +1900,20 @@ registered_commands() {
     [ "$branch_line" -lt "$mount_line" ]
 }
 
-@test "entrypoint.sh gives the container an empty credentials file of its own" {
-    # The mask used to provide one; Claude Code shouldn't have to be trusted
-    # to treat an absent credentials file the same as an empty one. Guarded
-    # on non-existence so it can't clobber either of the credentials
-    # bin/dejima does mount - the fake one under the tls transport, the real
-    # one under SANDBOX_CREDENTIAL_PROXY=0 - since mounts are established
-    # before the entrypoint runs.
-    grep -q 'if \[ ! -e "\$SANDBOX_HOME/\.claude/\.credentials\.json" \]; then' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'install -o "\$SANDBOX_USER" -g "\$SANDBOX_USER" -m 600 /dev/null "\$SANDBOX_HOME/\.claude/\.credentials\.json"' "$SANDBOX_DIR/entrypoint.sh"
+@test "the container gets an empty credentials file of its own" {
+    # A harness should not have to be trusted to treat an absent credentials
+    # file the same as an empty one. It comes from that harness's own image
+    # layer rather than from entrypoint.sh - see "a file a harness needs
+    # seeded is declared" - and a mount at the same path shadows it, which is
+    # what keeps it from clobbering either of the credentials bin/dejima does
+    # mount: the fake one under the tls transport, the real one under
+    # [credentials] proxy = off.
+    _harness_declares_file .claude/.credentials.json \
+        || { echo "the harness declares no credentials file"; return 1; }
+    # Shadowing only works if the mount is at the same path the layer created.
+    grep -q '\.credentials\.json' "$SANDBOX_DIR/docker-compose.yml" \
+        || grep -q '\.credentials\.json' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing ever mounts a credential over it"; return 1; }
 }
 
 @test "bin/dejima refuses to launch when the proxy fails to start" {
@@ -2197,7 +2317,7 @@ STUB
     # anywhere in the file" check just as well, without actually applying to
     # this build.
     local build_line
-    build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build claude' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build sandbox' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
     [ -n "$build_line" ]
     run sed -n "$((build_line - 1))p" "$REPO_ROOT/bin/dejima"
     [[ "$output" == 'SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \' ]]
@@ -3109,16 +3229,19 @@ q
     grep -q ' run --rm ' "$DEJIMA_T/docker-log"
 }
 
-@test "entrypoint terminates TLS for api.anthropic.com on loopback by default" {
+@test "entrypoint terminates TLS on loopback for the proxied domain by default" {
     # The transport is normalized in exactly one place so the forwarder, the
     # cert generation, and the readiness probe cannot disagree about which
     # mode this session is in.
     grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
-    # CN alone is not enough - Node verifies the SAN.
-    grep -q 'subjectAltName=DNS:api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'CN=api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    # Which name it answers for is the selected harness's, so these assert the
+    # shape rather than one harness's API hostname - see "the TLS terminator
+    # answers for the harness's declared domain".
+    # CN alone is not enough: Node verifies the SAN.
+    grep -q 'subjectAltName=DNS:\$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'CN=\$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'NODE_EXTRA_CA_CERTS' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q '127.0.0.1 \$proxied_domain' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test "entrypoint aborts when the forwarder never binds" {
@@ -3136,7 +3259,8 @@ q
     local guard body
     guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ -n "$guard" ]
-    body=$(grep -n '127.0.0.1 api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    body=$(grep -n '127.0.0.1 \$proxied_domain' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    [ -n "$body" ] || { echo "no hosts entry at all"; return 1; }
     [ "$body" -gt "$guard" ]
 }
 
@@ -3910,4 +4034,351 @@ _emit_mount_at() {
     # prevent. Both sides accept a named key in any case now.
     grep -qE "charAt\(0\)\.toUpperCase" "$REPO_ROOT/web/src/keys.js"
     grep -q 'Ss.pace' "$REPO_ROOT/bin/dejima-config-lib.sh"
+}
+
+@test "every supported harness is available to a session working on dejima" {
+    # A harness dejima claims to support and cannot run here is one whose
+    # guards are asserted rather than observed. claude-code is installed in
+    # the image; the rest are declared as dependencies of this project.
+    local d name
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ "$name" = "claude-code" ] && continue
+        grep -qE "^[a-z]+:.*$name" "$REPO_ROOT/.dejima/dependencies" \
+            || { echo "$name is supported but not declared in .dejima/dependencies"; return 1; }
+    done
+}
+
+# The base image is shared by every project on the host. A harness baked into
+# it is carried by every sandbox whether or not it is the one selected, and a
+# second harness could only ever be added alongside the first rather than
+# chosen between.
+@test "the base image installs no harness" {
+    run grep -nE 'npm install -g .*(claude-code|opencode|aider)' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
+    # And no build arg pinning one, which is the shape it had.
+    run grep -nE '^ARG .*(CLAUDE|HARNESS).*VERSION' "$SANDBOX_DIR/Dockerfile"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    # The Dockerfile says where the harness went, so the absence reads as a
+    # decision rather than as something dropped.
+    grep -qi 'harness' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "the harness layer is keyed on the harness, and built under the dependency layers" {
+    local f="$REPO_ROOT/bin/dejima"
+    # Keyed on the name: switching [core] harness has to switch images, not
+    # add to one.
+    grep -q 'dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}' "$f" \
+        || { echo "the harness layer's tag does not name the harness"; return 1; }
+    # Below the dependency layers, so a project's own packages sit on top of
+    # the harness rather than being invalidated whenever it changes.
+    local harness_at global_at
+    harness_at=$(grep -n 'SANDBOX_USER}-harness-' "$f" | head -1 | cut -d: -f1)
+    global_at=$(grep -n 'build_dep_layer "dejima:${SANDBOX_USER}-global"' "$f" | head -1 | cut -d: -f1)
+    [ -n "$harness_at" ] && [ -n "$global_at" ] || { echo "could not locate both layers"; return 1; }
+    [ "$harness_at" -lt "$global_at" ] \
+        || { echo "the harness layer is built after the dependency layers"; return 1; }
+}
+
+@test "the harness install spec is validated before it reaches a RUN line" {
+    # It is manifest data and the manifest is dejima's own, but the provider
+    # directories are session-writable when dejima sandboxes its own checkout,
+    # and this string is interpolated into a Dockerfile built on the host.
+    #
+    # The schema types it, so every read goes through the validator - which is
+    # why bin/dejima does not check it a second time. Pinned as the type,
+    # since a manifest key that quietly became a bare string would still read
+    # correctly at every call site.
+    run bash -c 'source "$1"; _manifest_type harness install' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -eq 0 ] || { echo "the harness schema has no install key"; return 1; }
+    [ "$output" = "?depspec" ] \
+        || { echo "install is typed '$output', not a dependency spec"; return 1; }
+    # And that the type actually delegates to the shared validator, rather
+    # than growing a second grammar that could drift from the approval one.
+    grep -A 6 'depspec)' "$REPO_ROOT/bin/dejima-provider-lib.sh" | grep -q 'valid_dep_spec' \
+        || { echo "the depspec type does not use valid_dep_spec"; return 1; }
+}
+
+# docs/development.md's inventory is the document a second harness is built
+# from, so a row that has stopped being true is worse than a missing one: it
+# sends someone to a file to change something that is not there. These pin the
+# claims that this branch made false once already.
+@test "the harness inventory does not describe an install the Dockerfile stopped doing" {
+    local doc="$REPO_ROOT/docs/development.md"
+    # The inventory named a RUN line and a build arg, both gone.
+    run grep -nE 'npm install -g .*claude-code|CLAUDE_CODE_VERSION' "$doc"
+    [ "$status" -ne 0 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
+    # And the file list said the base image carries the harness.
+    run grep -nE '^\| `docker/Dockerfile` \|.*[Cc]laude' "$doc"
+    [ "$status" -ne 0 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
+}
+
+@test "every Claude Code path the base image still names has an inventory row" {
+    # The inventory claims to be complete. Two things in the Dockerfile are
+    # written against this harness by name; if a third appears, it needs a row
+    # rather than passing unnoticed because the table looks thorough.
+    local doc="$REPO_ROOT/docs/development.md"
+    local dockerfile="$SANDBOX_DIR/Dockerfile"
+    # Lines of actual instruction, not comments.
+    run grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile"
+    [ "$status" -ne 0 ] \
+        || { echo "the base image is back to naming a harness:"; echo "$output"; return 1; }
+    # A row for each, naming where it is satisfied now.
+    grep -q 'State directories' "$doc" || { echo "no inventory row for the state directories"; return 1; }
+    grep -q 'Image environment' "$doc" || { echo "no inventory row for the image environment"; return 1; }
+    grep -q 'Proxied endpoint' "$doc" || { echo "no inventory row for the proxied domain"; return 1; }
+}
+
+@test "every file the docs' file list names exists, and the libraries are all in it" {
+    local doc="$REPO_ROOT/docs/development.md" f missing=""
+    # The Files table only - the manifest key tables further down use the same
+    # row shape for things that are not paths.
+    while IFS= read -r f; do
+        case "$f" in */|*'<'*|*'*'*) continue ;; esac
+        [ -e "$REPO_ROOT/$f" ] || missing="$missing $f"
+    done < <(sed -n '/^## Files/,/^## /p' "$doc" | grep -oP '(?<=^\| `)[^`]+')
+    [ -z "$missing" ] || { echo "the file list names files that do not exist:$missing"; return 1; }
+    # And the other direction for the shared libraries, which are the entries
+    # most easily forgotten because nothing puts them on PATH.
+    for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
+             bin/dejima-harness-lib.sh docker/install-forge-bins.sh; do
+        grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
+    done
+}
+
+# The base image is shared by every harness. Anything in it that only one
+# harness needs is that harness imposed on every image dejima builds, and
+# makes "add a second harness" mean "add to the first one's image".
+@test "the base image names no harness's state directories or environment" {
+    local d="$SANDBOX_DIR/Dockerfile"
+    # Instruction lines only: a comment may name a harness as an example of a
+    # general rule, and several do.
+    run grep -nE '^[^#]*(\.claude|CLAUDE_CODE|\.aider|\.opencode)' "$d"
+    [ "$status" -ne 0 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
+    # .ssh still is the base image's own, so the mkdir it shares has not
+    # simply been deleted along with them.
+    grep -qE '^RUN mkdir -p \$SANDBOX_HOME/\.ssh' "$d"
+}
+
+@test "nothing shared names one harness as the command to run" {
+    # A default here decides for every harness, and names a binary an image
+    # built for a different one does not contain.
+    run grep -nE 'SANDBOX_CMD:-[a-z]' "$SANDBOX_DIR/entrypoint.sh" "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
+    # Refused rather than defaulted, so an unset one says why.
+    grep -q 'SANDBOX_CMD is unset' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "the compose service and its shared volumes are named for dejima, not a harness" {
+    local y="$SANDBOX_DIR/docker-compose.yml"
+    run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
+    [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
+    grep -qE '^  sandbox:' "$y"
+    # And bin/dejima refers to the service by the same name in both places.
+    [ "$(grep -c 'compose -f "$COMPOSE_FILE" \(build\|run\).* sandbox' "$REPO_ROOT/bin/dejima")" -eq 2 ] \
+        || { echo "bin/dejima does not use the service name in both places"; return 1; }
+}
+
+@test "the TLS terminator answers for the harness's declared domain, not a literal" {
+    # The manifest declares proxied_api_domain; the entrypoint used the name
+    # of one harness's API in the cert, the SAN and the /etc/hosts pin.
+    local e="$SANDBOX_DIR/entrypoint.sh"
+    run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
+    [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
+    grep -q 'SANDBOX_HARNESS_PROXIED_DOMAIN' "$e" \
+        || { echo "the entrypoint does not read the declared domain"; return 1; }
+    # And a harness that declares a proxy but no domain is refused, rather
+    # than bringing up a terminator that intercepts nothing.
+    grep -q 'declares no proxied_api_domain' "$e" \
+        || { echo "an empty proxied domain is not refused"; return 1; }
+}
+
+@test "a harness's image needs are declared in its manifest" {
+    local m="$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -qE '^image_dirs\s*=.*\.claude' "$m" || { echo "no image_dirs declared"; return 1; }
+    grep -qE '^image_env\s*=.*CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' "$m" \
+        || { echo "no image_env declared"; return 1; }
+}
+
+# entrypoint.sh runs in every container this repo builds, including the base
+# image on its own - runtime.bats boots exactly that, with no harness layer
+# above it. So a path only one harness has is not merely a coupling here, it
+# is a container that aborts during startup on any image whose harness never
+# declared the directory that path lives in. That is what happened: the
+# credential seeding outlived the ~/.claude the base image used to create.
+#
+# Only the privileged tier caught it, because only that tier boots a
+# container. This is the same check without a Docker daemon.
+@test "the shared entrypoint names no harness's paths" {
+    local e="$SANDBOX_DIR/entrypoint.sh"
+    run grep -nE '^[^#]*(\$SANDBOX_HOME|\$HOME|~)/\.(claude|aider|opencode)' "$e"
+    [ "$status" -ne 0 ] || {
+        echo "entrypoint.sh reaches into one harness's home directory:" >&2
+        echo "$output" >&2
+        echo "It runs in every image, including the base one on its own." >&2
+        return 1
+    }
+}
+
+@test "a file a harness needs seeded is declared, not created by shared code" {
+    # An absent file and an empty one are not reliably the same to a harness
+    # that reads a credential from a fixed path, so something has to be
+    # there - declared by the harness that needs it, created in its own
+    # layer, and shadowed by whatever the transport mounts over it.
+    local m="$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -qE '^image_files\s*=.*\.credentials\.json' "$m" \
+        || { echo "the credential file is not declared"; return 1; }
+    run bash -c 'source "$1"; generate_spec_dockerfile base "" "" "" ".claude/.credentials.json"' _ \
+        "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Empty and 0600: it stands in for a credential, so it must not be
+    # readable by anything but the session's own user.
+    [[ "$output" == *'install -o ${SANDBOX_USER} -g ${SANDBOX_USER} -m 600 /dev/null'* ]] \
+        || { echo "$output"; return 1; }
+}
+
+# The confined tier cannot boot a container, so it cannot see a container
+# aborting at startup. It CAN see the cross-file invariant behind one, which
+# is what this is: entrypoint.sh runs in the base image with nothing above it,
+# so every literal path it writes under the sandbox user's home has to be
+# created by the Dockerfile, or by the entrypoint itself before use.
+#
+# The credential seeding was neither. It wrote into a ~/.claude the Dockerfile
+# used to create, that moved to the harness's own layer, and every container
+# on an image whose harness had not declared it then died in startup. Only the
+# privileged tier caught it, hours later; this is the same question asked of
+# the files instead of a running container.
+@test "every home path the entrypoint writes is created by the image or by itself" {
+    local e="$SANDBOX_DIR/entrypoint.sh" d="$SANDBOX_DIR/Dockerfile"
+    local p top missing="" checked=0
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        top="${p%%/*}"
+        checked=$((checked + 1))
+        # Created in the base image.
+        grep -qE "mkdir -p .*\\\$SANDBOX_HOME/$top" "$d" && continue
+        missing="$missing $top"
+    done < <(grep -oP '(?<=\$SANDBOX_HOME/)[A-Za-z0-9._][A-Za-z0-9._/-]*' "$e" | sort -u)
+    [ "$checked" -gt 0 ] \
+        || { echo "no literal home paths found - has the extraction stopped working?"; return 1; }
+    [ -z "$missing" ] || {
+        echo "entrypoint.sh writes under home directories nothing creates:$missing" >&2
+        echo "It runs in the base image alone, so a directory a harness layer" >&2
+        echo "adds is not there. Create it in the Dockerfile, or declare it" >&2
+        echo "and write the file from the harness's own layer." >&2
+        return 1
+    }
+}
+
+# runtime.bats is the only suite that boots containers, so its fixtures are
+# the only place a container-shaped mistake can hide until the privileged
+# tier runs - twenty minutes and a queue behind every other job. These three
+# ask the questions that tier answered the hard way.
+@test "runtime.bats names every container after the run, not the file index" {
+    # basename "$BATS_FILE_TMPDIR" is the file's index within the run, which
+    # is "0" for the only file there - so a name built from it is the same in
+    # every run. `docker run` refuses a name in use, so one leftover from a
+    # failed run fails every run afterwards until someone clears it by hand.
+    # That is exactly what happened, to a container the earlier fix did not
+    # cover: it changed the two helpers and left twenty per-test names alone.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    run grep -nE 'dejima-test-[a-z-]*\$?\(?basename "\$BATS_FILE_TMPDIR"' "$rt"
+    [ "$status" -ne 0 ] || {
+        echo "a container or image name is keyed on the file index:" >&2
+        echo "$output" >&2
+        return 1
+    }
+    grep -q '^test_container_name() {' "$rt" \
+        || { echo "there is no one place per-test names come from"; return 1; }
+}
+
+@test "runtime.bats removes what it made by deriving it, not by listing it" {
+    # The teardown enumerated twenty names by hand and had to be kept in step
+    # with twenty test bodies. It silently stopped matching all of them the
+    # moment the names changed, which is a leak that fills a runner and then
+    # fails the next run on a conflict.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    # The per-test teardown, which is where the twenty-name list lived.
+    local body
+    body="$(sed -n '/^teardown() {/,/^}/p' "$rt")"
+    [ -n "$body" ] || { echo "no teardown"; return 1; }
+    grep -q 'docker ps -a --filter' <<< "$body" \
+        || { echo "teardown does not derive the containers it removes"; return 1; }
+    local listed
+    listed=$(grep -c 'dejima-test-[a-z-]\+-\$' <<< "$body" || true)
+    [ "$listed" -eq 0 ] \
+        || { echo "teardown still names $listed containers by hand"; return 1; }
+    # It runs after every test and the file-wide container has to survive all
+    # of them, so the sweep must exclude it explicitly rather than by luck.
+    grep -q 'keep="$(container_name)"' <<< "$body" \
+        || { echo "the per-test sweep would remove the file-wide container"; return 1; }
+}
+
+@test "every runtime.bats container that mounts a proxy socket declares the domain" {
+    # entrypoint.sh refuses a credential proxy with no proxied_api_domain,
+    # because a terminator answering for nothing would let the session reach
+    # the real API directly. A fixture that mounts the socket without the
+    # domain is not testing the proxy, it is testing that refusal - which is
+    # how two of these failed.
+    local rt="$REPO_ROOT/test/runtime.bats" sock dom
+    sock=$(grep -c 'SANDBOX_ANTHROPIC_PROXY_SOCKET=.*proxy\.sock' "$rt")
+    dom=$(grep -c 'SANDBOX_HARNESS_PROXIED_DOMAIN=' "$rt")
+    [ "$sock" -gt 0 ] || { echo "no proxy fixtures found - has this moved?"; return 1; }
+    # One of the domain lines is the file-wide fixture, which mounts no
+    # socket, so the domains must outnumber the sockets that go through a
+    # container. The one socket that does not is the host-side forwarder,
+    # which never reaches entrypoint.sh.
+    [ "$dom" -ge "$sock" ] || {
+        echo "$sock proxy sockets but only $dom declared domains - a container" >&2
+        echo "mounting the socket without the domain is refused at startup." >&2
+        return 1
+    }
+}
+
+# bats runs setup_file in one process and every test in another, and does not
+# carry a plain assignment from the first into the second. So a fixture
+# variable is set in setup_file and EMPTY everywhere a test can reach - which
+# is not an error, just a wrong answer, and the wrong answer here was an empty
+# proxied domain that made two containers refuse to start.
+#
+# The rule that avoids it: anything a test body can reach derives its own
+# paths from BATS_TEST_DIRNAME, which bats exports. setup_file's variables
+# stay inside setup_file.
+@test "runtime.bats' fixture variables do not escape setup_file" {
+    local rt="$REPO_ROOT/test/runtime.bats" v outside start end
+    # setup_file's line range, so "inside" is decided by position rather than
+    # by matching its text - a body with a blank line in it makes any
+    # fixed-string filter match every line in the file.
+    start=$(grep -n '^setup_file() {' "$rt" | cut -d: -f1)
+    [ -n "$start" ] || { echo "no setup_file"; return 1; }
+    end=$(awk -v s="$start" 'NR > s && /^}/ { print NR; exit }' "$rt")
+    [ -n "$end" ] || { echo "setup_file has no end"; return 1; }
+    for v in SANDBOX_DIR REPO_ROOT; do
+        sed -n "${start},${end}p" "$rt" | grep -q "$v=" || continue
+        # Every use of it outside that range, comments aside.
+        outside=$(grep -n "\$$v" "$rt" \
+            | grep -v '^[0-9]*:[[:space:]]*#' \
+            | awk -F: -v s="$start" -v e="$end" '$1 < s || $1 > e' || true)
+        [ -z "$outside" ] || {
+            echo "\$$v is assigned in setup_file and used outside it:" >&2
+            echo "$outside" >&2
+            echo "A test body reaching that gets an empty string, not an error." >&2
+            return 1
+        }
+    done
+}
+
+@test "runtime.bats fails loudly when the harness layer cannot be built" {
+    # `export VAR="$(cmd)"` returns the export's status, so a failed build
+    # leaves the tag empty, the default at the top of the file substitutes the
+    # base image, and the suite tests an image no session runs while blaming
+    # whichever assertions happen to depend on the harness's directories.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    run grep -n 'export SESSION_IMAGE="\$(build_harness_layer' "$rt"
+    [ "$status" -ne 0 ] || {
+        echo "the layer build's failure is masked by export:" >&2; echo "$output" >&2; return 1; }
+    grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
+        || { echo "the layer build's status is not checked"; return 1; }
 }

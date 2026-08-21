@@ -1,3 +1,12 @@
+# opencode is a declared dependency (see dependencies): it loads its provider
+# catalogue from models.dev at startup, so a session testing that integration
+# cannot get as far as running it without this one.
+#
+# The model API itself is deliberately not here. Which endpoint that is
+# depends on the provider an operator authenticates opencode against, and a
+# name granted by being written here is a name nobody reviewed.
+models.dev
+
 docs.gitea.com
 deb.debian.org
 download.docker.com

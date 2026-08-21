@@ -1,2 +1,11 @@
+# Every harness dejima supports, so a session working on this repo can run
+# and test the integration rather than reason about it. A harness dejima
+# claims to support and cannot exercise here is one whose guards are asserted
+# rather than observed.
+#
+# claude-code is not listed: it is installed in docker/Dockerfile, being the
+# harness the image is built around.
+npm:opencode-ai
+
 apt:tmux
 apt:bats

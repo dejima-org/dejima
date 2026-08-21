@@ -10,7 +10,10 @@
 name: dejima
 
 services:
-  claude:
+  # Named for what it is, not for one harness: the image this builds and
+  # runs is whichever harness [core] harness selected, and bin/dejima refers
+  # to this service by name for both.
+  sandbox:
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -71,7 +74,11 @@ services:
       # What actually runs as the sandbox user - the selected harness's own
       # command unless [core] command overrides it. See entrypoint.sh and
       # bin/dejima's SANDBOX_NVIM_CONFIG.
-      SANDBOX_CMD: ${SANDBOX_CMD:-claude}
+      # No default: bin/dejima sets this from the selected harness's
+      # manifest, and a literal here would name one harness in a file shared
+      # by all of them. entrypoint.sh refuses an empty one rather than
+      # guessing.
+      SANDBOX_CMD: ${SANDBOX_CMD:-}
       # The selected harness's manifest, resolved host-side: which command
       # the wrapper shadows, the real binary behind it, the flags that make
       # the session unattended, and how this harness is told to read dejima's
@@ -175,7 +182,7 @@ services:
       # launch (it inspects the symlinks and appends the exact mounts
       # needed), not listed statically here, since this repo can't assume
       # what else might be installed on a given host.
-      - claude-code-bashhistory:/commandhistory
+      - dejima-bashhistory:/commandhistory
       - nvim-data:${HOME}/.local/share/nvim
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim
@@ -205,7 +212,9 @@ services:
     tty: true
 
 volumes:
-  claude-code-bashhistory:
+  # Shell history, shared by every harness - it is the container's shell that
+  # writes it, not the agent.
+  dejima-bashhistory:
   # Named explicitly so bin/dejima can give each project its own set. These
   # persist across containers by design (a plugin install should not have to
   # happen every launch), which without the split meant one project's session

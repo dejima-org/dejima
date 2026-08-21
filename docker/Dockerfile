@@ -15,21 +15,19 @@ FROM node:22
 ARG TZ
 ENV TZ="$TZ"
 
-ARG CLAUDE_CODE_VERSION=latest
-
 # Install basic development tools, iptables/ipset (for the egress firewall),
 # openssh-client (for git-over-ssh and agent forwarding), and the toolchain a
 # typical nvim plugin set (telescope/treesitter/mason) expects, since
 # SANDBOX_NVIM_CONFIG can point a session's editor at one.
 #
-# Deliberately NOT installing bubblewrap/socat: those exist to let Claude
-# Code's own internal per-command sandboxing (~/.claude/settings.json's
-# "sandbox" block) and /remote-control run, but that inner sandbox is
-# redundant on top of this container - it can't even function inside it
-# anyway (bwrap can't create a namespace here, and fixing that would need
-# privilege escalation approaching --privileged, undoing this container's
-# own hardening). bin/dejima mounts a settings.json copy with
-# sandbox.enabled forced to false, so there's nothing here to satisfy.
+# Deliberately NOT installing bubblewrap/socat: they exist to let a harness's
+# own internal per-command sandboxing run, and that inner sandbox is redundant
+# on top of this container - it cannot even function inside it anyway (bwrap
+# cannot create a namespace here, and fixing that would need privilege
+# escalation approaching --privileged, undoing this container's own
+# hardening). Whichever harness has one, its plugin's harness_prepare_config
+# turns it off in the override layer, so there is nothing here to satisfy.
+# Claude Code's is the "sandbox" block in settings.json.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
   git \
@@ -63,12 +61,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
 
-# Disable non-essential network traffic (telemetry/error reporting) so the
-# firewall allowlist can stay small.
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-
-# Lets Claude Code (and the SessionStart hook in ~/.claude/hooks) know it's
-# running inside this container rather than directly on the host.
+# Lets the harness, and the SessionStart hook it runs, know it is inside this
+# container rather than directly on the host.
 ENV DEJIMA=1
 
 # Dedicated unprivileged user for ulogd2 (see entrypoint.sh) - unlike
@@ -131,12 +125,11 @@ RUN npx -y playwright@${PLAYWRIGHT_VERSION} install-deps chromium
 
 # Replace the base image's built-in `node` user (uid/gid 1000,
 # $HOME=/home/node) with one matching the host user who runs
-# bin/dejima - so absolute paths under $HOME (dotfiles, and
-# ~/.claude/plugins/installed_plugins.json's own installPath bookkeeping,
-# which Claude Code resolves as a literal host-absolute string rather than
-# relative to whatever $HOME happens to be) resolve identically inside and
+# bin/dejima - so absolute paths under $HOME resolve identically inside and
 # outside the container, instead of needing a one-off dual-mount for every
-# individual thing that assumes the real host path. Defaults below
+# individual thing that assumes the real host path. Harnesses do assume it:
+# Claude Code's installed_plugins.json records an installPath it resolves as a
+# literal host-absolute string rather than relative to whatever $HOME is. Defaults below
 # reproduce today's node/1000/1000//home/node exactly, so a build that
 # never overrides them (bin/dejima always does; the test suite
 # never does) exercises this same rename path rather than a separate,
@@ -172,21 +165,19 @@ RUN mkdir /commandhistory && \
 
 # Create the ssh directory and set permissions. The project directory itself
 # is bind-mounted at runtime at its real host path (see docker-compose.yml),
-# not a fixed /workspace, so it can share ~/.claude project/session history
-# with the host.
+# not a fixed /workspace, so a harness keying its project or session history
+# on the working directory resolves to the same key inside and outside.
 #
-# ~/.claude itself is baked in here rather than bind-mounted (see the mount
-# inventory in docker-compose.yml): only enumerated paths *inside* it come
-# from the host, and Docker creates the parents of a mount point root-owned
-# if they don't already exist - which would leave the sandbox user unable to
-# write the caches and history it keeps directly in ~/.claude.
-# projects/ is in that list for the same reason one level down: it is no
-# longer mounted itself, only individual slug directories inside it, so
-# without this Docker creates it root-owned while setting those up and the
-# session cannot write a slug of its own.
-RUN mkdir -p $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude $SANDBOX_HOME/.claude/projects $SANDBOX_HOME/.claude/file-history && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude && \
-  chmod 700 $SANDBOX_HOME/.ssh $SANDBOX_HOME/.claude
+# Only .ssh here. The directories a harness keeps state in are that harness's,
+# declared as `image_dirs` in its manifest and created in its own image layer -
+# this image is shared by every harness and must name none of them. The reason
+# they have to exist at all is the same either way: only enumerated paths
+# inside them come from the host, and Docker creates the parents of a mount
+# point root-owned if they are not already there, which would leave the
+# sandbox user unable to write the state it keeps beside them.
+RUN mkdir -p $SANDBOX_HOME/.ssh && \
+  chown $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
+  chmod 700 $SANDBOX_HOME/.ssh
 
 # Pre-create the nvim data/state/cache dirs owned by the sandbox user,
 # since they're mounted as named volumes in docker-compose.yml: Docker
@@ -238,9 +229,12 @@ RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
   -x && \
   rm /tmp/zsh-in-docker.sh
 
-# Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
-
+# No harness here. The image is shared by every project on the host, and
+# baking one harness into it means every sandbox carries it whether or not it
+# is the one selected - and a second harness could only ever be added to the
+# same shared image, never chosen between. The selected harness installs into
+# a layer on top instead, from the `install` spec in its own manifest, the
+# same way an approved dependency does (bin/dejima, build_harness_layer).
 # Install the tree-sitter CLI, which nvim-treesitter (plugins/treesitter.lua)
 # needs to install/update parsers. Pinned below latest: newer tree-sitter-cli
 # prebuilds require glibc >=2.39, which this (Debian 12 bookworm) image
@@ -301,5 +295,5 @@ RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/lo
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
 # directly, with no sudo/setuid escalation path available to node at any
 # point afterward. It drops to node itself via gosu before execing
-# SANDBOX_CMD (default `claude` - see entrypoint.sh).
+# SANDBOX_CMD, which bin/dejima sets from the selected harness's manifest.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

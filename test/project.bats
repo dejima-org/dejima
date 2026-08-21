@@ -946,10 +946,13 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 }
 
 @test "the launcher runs the derived image only when the project has approved dependencies" {
+    # The baseline is the harness layer, not the base image: the base carries
+    # no harness, and the selected one installs into a layer of its own that
+    # every launch runs on whether or not any dependency is approved.
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
 
     "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run launch "$PROJ"
@@ -1030,7 +1033,11 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    dockerfile_for "dejima:$(id -un)-global" | grep -qxF "FROM dejima:$(id -un)"
+    # base -> harness -> global -> project, each FROM the one before it.
+    dockerfile_for "dejima:$(id -un)-harness-claude-code" \
+        | grep -qxF "FROM dejima:$(id -un)"
+    dockerfile_for "dejima:$(id -un)-global" \
+        | grep -qxF "FROM dejima:$(id -un)-harness-claude-code"
     dockerfile_for "dejima:$(id -un)-$slug" | grep -qxF "FROM dejima:$(id -un)-global"
 }
 
@@ -1038,9 +1045,14 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    run grep -- "-t dejima:" <(docker_log)
-    [ "$status" -ne 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)" ]
+    # The harness layer is built regardless - it is what puts the selected
+    # harness in the image - so this is about the DEPENDENCY layers, which is
+    # what "no approved dependencies" is a statement about.
+    local tagged
+    tagged="$(grep -oE -- '-t dejima:[^ ]+' <(docker_log) | sed 's/^-t //' | sort -u)"
+    [ "$tagged" = "dejima:$(id -un)-harness-claude-code" ] \
+        || { echo "expected only the harness layer to be built, got:"; echo "$tagged"; return 1; }
+    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
 }
 
 @test "the launcher warns when the approval store sits inside the mounted workspace" {
