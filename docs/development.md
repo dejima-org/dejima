@@ -187,26 +187,41 @@ depth of integration Claude Code has - the same mounts, the same guards, the
 same audit surfaces - so a harness is not a manifest someone drops in. That
 is only possible if the harness can host what those protections need.
 
-These are the requirements. A harness that fails one of the first five
-cannot be supported, and that is a decision about the harness rather than a
-gap in dejima.
+These are the requirements. A harness that fails one of the first four cannot
+be supported, and that is a decision about the harness rather than a gap in
+dejima.
 
 | | Requirement | Why it is load-bearing |
 | --- | --- | --- |
 | **R1** | **Unattended execution.** A documented mode that runs tool calls without confirming each one. | The premise the project rests on. A harness that stops to ask is one an operator sits in front of, and the argument for accepting that mode is that the container makes being unattended survivable. |
-| **R2** | **Tool-call interception.** A supported mechanism to inspect a command before it runs and refuse it, without patching the harness. | The push guard, the merge guard and the dangerous-command denylist all live here. They are guards against an eager agent rather than a boundary against a hostile one, but a harness without them ships three protections short and the operator cannot add them back. |
 | **R3** | **Host-controlled context at session start.** A way to place text into the session's context at start, from a file the operator controls and the session cannot rewrite for the run in progress. | How the briefing and the project's `.dejima.md` arrive. It is also how the agent learns it is sandboxed, which is what makes it ask for a domain instead of working around the firewall. |
 | **R4** | **State dejima can locate or discard.** Per-project state must be computable on the host before launch, so it can be scoped per project - or safely discardable, so it can stay container-local. | #104. A store that is neither computable nor discardable cannot be scoped, and mounting it whole reintroduces cross-project context poisoning. |
 | **R5** | **A withholdable credential.** The model credential must live somewhere dejima can decline to mount, and the harness must accept a substitute: a staged fake, or an environment variable pointed at the host-side proxy. | The credential never entering the container is a headline property, not a nicety. |
 
-Three more are required, but may be declared absent in the manifest, in
-which case dejima says at launch what is not in force:
+R2 is not missing from the table above: it moved into the one below, for the
+reason given after it. The numbering of the rest is left alone so that every
+reference to R1, R3, R4 and R5 elsewhere still points at the same thing.
+
+Four more are required, but may be declared absent in the manifest, in which
+case dejima says at launch what is not in force:
 
 | | Requirement | What is lost without it |
 | --- | --- | --- |
-| **D1** | Session lifecycle signals - something that fires when the agent wants attention and when it stops. | Remote access notifications. The session still runs and is still attachable. |
-| **D2** | A parseable record of the session. | Epitaph, and conversation logging. |
-| **D3** | An enumerable config directory whose extension points can be mounted read-only. | Config parity, and the read-only mounts that stop a session installing a persistent hook for the next one. |
+| **D1** | **Tool-call interception.** *(was R2)* A supported mechanism to inspect a command before it runs and refuse it, without patching the harness. | `deny-dangerous-bash.sh`. The push guard and the merge guard do not depend on this any more - they are PATH shadows over `git` and the forge CLI, so they hold for every harness. What is left is the denylist, and it is the weakest of the three: a regex over a command string, evadable by anything that does not look like the pattern. |
+| **D2** | Session lifecycle signals - something that fires when the agent wants attention and when it stops. | Remote access notifications. The session still runs and is still attachable. |
+| **D3** | A parseable record of the session. | Epitaph, and conversation logging. |
+| **D4** | An enumerable config directory whose extension points can be mounted read-only. | Config parity, and the read-only mounts that stop a session installing a persistent hook for the next one. |
+
+R2 was a hard gate until the guards stopped needing it. Two of the three it
+hosted - the push guard and the merge guard - are now PATH shadows over `git`
+and the forge CLI (`docker/git-guard.sh`, `docker/forge-guard.sh`), which hold
+whatever the harness can or cannot intercept, and read argv rather than
+regex-matching a reconstructed command string. That left one guard depending
+on interception, and it is the one this repository already describes as "a
+fast-fail guard against an overeager agent doing something obviously
+destructive, not a boundary against one that's actively trying to get around
+them" (docs/security.md). A gate that costs a harness its support should be
+guarding more than that.
 
 Declaring one absent is a real decision with a visible cost, not a
 formality. It is there so a harness can be supported honestly at a smaller
@@ -225,25 +240,28 @@ happens to define the hook: a harness that forgot to declare a guard but
 implemented it would otherwise get a protection the launch message has just
 told the operator it does not have.
 
-### Worked example: why aider is not supported
+### Worked example: aider, and what moving R2 changed
 
 aider clears R1 (`--yes-always`), R3 (`--read` places a file in context),
 R4 (its state is `.aider.*` inside the workspace, which is already mounted)
 and R5 (it takes an API key from the environment).
 
-It fails **R2**. aider has no hook or event system; the only occurrence of
-"hook" in its options is `--no-verify`, which controls git's own pre-commit
-hooks. There is no supported point at which a command can be inspected and
-refused, so `git-push-guard.sh`, `merge-guard.sh` and
-`deny-dangerous-bash.sh` have nowhere to live and no equivalent to be
-rebuilt from. It also fails D1.
+It was declined on R2, which it fails outright: aider has no hook or event
+system, and the only occurrence of "hook" in its options is `--no-verify`,
+which controls git's own pre-commit hooks. There is no point at which a
+command can be inspected and refused.
 
-The container would still bound an aider session. But three guards an
-operator gets everywhere else would be missing with no way to restore them,
-and "supported" would mean something different for that one harness than
-for every other. So it is not supported, and this is the reason.
+That is still true, and it no longer decides the question. The push guard and
+the merge guard reach aider through the PATH shadows like any other harness,
+so what it actually loses is `deny-dangerous-bash.sh` - one fast-fail guard,
+declared absent and named at launch. It also fails D2, so remote-access
+notifications would not fire.
 
-### Worked example: why Cline is not supported
+So aider is now supportable at a smaller guard set, honestly declared. It is
+not supported, because nobody has written the plugin and the tests - which is
+the real gate, and always was.
+
+### Worked example: Cline
 
 Cline is the strongest candidate for the harness after Claude Code on the
 requirement a second one most needs: it is genuinely provider-agnostic. That
@@ -262,7 +280,7 @@ or better is the requirement.
 | | Verified |
 | --- | --- |
 | **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
-| **R2** | **Fails as a CLI.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported, which is what R2 asks for. |
+| **D1** *(was R2)* | **Fails as a CLI, and this no longer decides it.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported, which is what R2 asks for. |
 | **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
 | **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
 | **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
@@ -276,30 +294,26 @@ being unresolved is a documentation question rather than a capability one. And
 `cline-sandbox` directory; like Claude Code's, it is redundant inside this
 container and wants turning off.
 
-**There is a refusal point, but it is in the SDK rather than the CLI.**
+There is a refusal point, but it is in the SDK rather than the CLI.
 `ClineCore.create()` takes a `requestToolApproval` capability - it receives
 `{toolName, input}` before the tool runs, returns `{approved: false}` to
-refuse, and the agent is told and moves on. That is exactly what the push
-guard, the merge guard and the bash denylist need. It is also not a harness
-dejima launches: it is a library dejima would have to write and maintain a
-host program around, making the container's main process dejima's own
-JavaScript rather than `cline`. Every other harness is a binary with hooks
-hanging off it; this one would be an embedding.
+refuse, and the agent is told and moves on. Using it would mean dejima wrote
+and maintained a host program embedding Cline, making the container's main
+process dejima's own JavaScript rather than `cline`. That is a different shape
+from every other harness, and it is not necessary: with the push and merge
+guards on PATH, what the CLI costs is `deny-dangerous-bash.sh` alone.
 
-So Cline is **not supported today**, and the reason is R2 rather than anything
-about the CLI's quality - it is better than the alternatives on R1, R4, R5 and
-provider agnosticism, and R4 in particular is the cleanest of any candidate
-looked at. If its CLI ever exposes the approval callback the SDK already has,
-it becomes the obvious choice and this assessment should be redone.
+So Cline clears the four hard requirements, and would be supported at a guard
+set short one fast-fail denylist, declared in its manifest and named at every
+launch. On the axis it was a candidate for it is the best of the field: R4 in
+particular is the cleanest of anything assessed, and it is R4 that guards the
+incident #104 was about.
 
-That leaves opencode as the next harness. It is the only provider-agnostic
-candidate whose refusal point is both documented and reachable from a CLI: a
-plugin's `tool.execute.before` throws and the call does not run. The cost is
-R4 - one SQLite database, no per-project directory, no way to relocate it - so
-opencode clears that requirement only on its second branch, discardable and
-container-local, with no session history shared with the host. That is a
-smaller integration than Claude Code's, and it should be stated as such rather
-than discovered later.
+The comparison with opencode inverts once R2 stops being a gate. opencode
+keeps `bash-deny`, through a plugin's `tool.execute.before`. Cline keeps its
+state where dejima puts it. One of those is a fast-fail guard against an eager
+agent; the other is the requirement that exists because cross-project context
+poisoning actually happened.
 
 ### Where a harness's support lives: three tiers
 
