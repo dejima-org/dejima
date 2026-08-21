@@ -1346,6 +1346,92 @@ STUB
     grep -q 'type=issues' "$REPO_ROOT/forges/gitea/bin/gitea-issue"
 }
 
+# A run carries two numbers: the per-workflow counter this tool lists (225)
+# and the repo-wide index its web URL and every status target_url use (11387).
+# They are equal on a fresh instance and diverge for good once a second
+# workflow runs, so a tool that filters statuses by the first finds nothing at
+# all - `jobs` reported "no jobs" for a run whose twelve jobs were right
+# there, and `logs` could not reach the one that failed.
+#
+# The stub gives them deliberately different values, which is the only shape
+# that tells the two apart.
+actions_cli() {
+    local d="$BATS_TEST_TMPDIR/acli"
+    if [ ! -d "$d" ]; then
+        mkdir -p "$d/stub" "$d/repo"
+        cat > "$d/stub/curl" <<'STUB'
+#!/bin/bash
+url=""
+for a in "$@"; do case "$a" in https://*) url="$a" ;; esac; done
+cat >/dev/null
+case "$url" in
+    */actions/tasks*)
+        cat <<'JSON'
+{"workflow_runs":[
+ {"id":2663,"run_number":225,"name":"privileged","head_sha":"deadbeefdeadbeef",
+  "status":"failure","event":"pull_request_target","display_title":"a change",
+  "url":"https://forge.invalid/owner/name/actions/runs/11387"},
+ {"id":2662,"run_number":225,"name":"confined (static)","head_sha":"deadbeefdeadbeef",
+  "status":"success","event":"pull_request_target","display_title":"a change",
+  "url":"https://forge.invalid/owner/name/actions/runs/11387"}
+]}
+JSON
+        ;;
+    */statuses*)
+        # target_url carries the WEB id. A filter keyed on run_number matches
+        # none of these.
+        cat <<'JSON'
+[{"status":"failure","context":"tests / privileged (pull_request_target)",
+  "target_url":"/owner/name/actions/runs/11387/jobs/13320"},
+ {"status":"success","context":"tests / confined (static) (pull_request_target)",
+  "target_url":"/owner/name/actions/runs/11387/jobs/13318"}]
+JSON
+        ;;
+    *) echo '[]' ;;
+esac
+echo 200
+STUB
+        chmod +x "$d/stub/curl"
+        git -C "$d/repo" init -q -b feature
+        git -C "$d/repo" -c user.name=t -c user.email=t@invalid \
+            commit -q --allow-empty -m seed
+        git -C "$d/repo" remote add origin git@forge.invalid:owner/name.git
+    fi
+    ( cd "$d/repo" && env PATH="$d/stub:$PATH" \
+        GITEA_SSH_HOST=forge.invalid GITEA_API=https://forge.invalid/api/v1 \
+        GITEA_TOKEN=stub-token \
+        "$REPO_ROOT/forges/gitea/bin/gitea-actions" "$@" )
+}
+
+@test "gitea-actions finds a run's jobs when its two numbers differ" {
+    run actions_cli jobs 225
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"privileged"* ]] \
+        || { echo "the failed job is missing:"; echo "$output"; return 1; }
+    [[ "$output" == *"13320"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"reports no jobs"* ]] \
+        || { echo "the run-number filter matched nothing again"; return 1; }
+}
+
+@test "gitea-actions accepts either of a run's two numbers" {
+    # `runs` prints one and the usage has always described the other, so both
+    # have been told to people.
+    local by_number by_web
+    by_number="$(actions_cli jobs 225)"
+    by_web="$(actions_cli jobs 11387)"
+    [ "$by_number" = "$by_web" ] || {
+        echo "the two forms disagree:"; echo "$by_number"; echo "--"; echo "$by_web"; return 1; }
+}
+
+@test "gitea-actions addresses a job's log by the id its URL uses" {
+    # The log endpoint is under the web id too, so a request built from
+    # run_number 404s - which api_or_die reports as a failed fetch rather than
+    # as the wrong number having been used.
+    grep -q 'actions/runs/\${run_web_id}/jobs/\${index}/logs' \
+        "$REPO_ROOT/forges/gitea/bin/gitea-actions" \
+        || { echo "the log URL is not keyed on the web id"; return 1; }
+}
+
 @test "gitea-actions only reads - it issues no request that could change anything" {
     # It authenticates with the same write-scoped token as gitea-pr, so
     # "it only fetches runs and logs" has to be a property of the file and
@@ -4151,4 +4237,37 @@ _emit_mount_at() {
     # readable by anything but the session's own user.
     [[ "$output" == *'install -o ${SANDBOX_USER} -g ${SANDBOX_USER} -m 600 /dev/null'* ]] \
         || { echo "$output"; return 1; }
+}
+
+# The confined tier cannot boot a container, so it cannot see a container
+# aborting at startup. It CAN see the cross-file invariant behind one, which
+# is what this is: entrypoint.sh runs in the base image with nothing above it,
+# so every literal path it writes under the sandbox user's home has to be
+# created by the Dockerfile, or by the entrypoint itself before use.
+#
+# The credential seeding was neither. It wrote into a ~/.claude the Dockerfile
+# used to create, that moved to the harness's own layer, and every container
+# on an image whose harness had not declared it then died in startup. Only the
+# privileged tier caught it, hours later; this is the same question asked of
+# the files instead of a running container.
+@test "every home path the entrypoint writes is created by the image or by itself" {
+    local e="$SANDBOX_DIR/entrypoint.sh" d="$SANDBOX_DIR/Dockerfile"
+    local p top missing="" checked=0
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        top="${p%%/*}"
+        checked=$((checked + 1))
+        # Created in the base image.
+        grep -qE "mkdir -p .*\\\$SANDBOX_HOME/$top" "$d" && continue
+        missing="$missing $top"
+    done < <(grep -oP '(?<=\$SANDBOX_HOME/)[A-Za-z0-9._][A-Za-z0-9._/-]*' "$e" | sort -u)
+    [ "$checked" -gt 0 ] \
+        || { echo "no literal home paths found - has the extraction stopped working?"; return 1; }
+    [ -z "$missing" ] || {
+        echo "entrypoint.sh writes under home directories nothing creates:$missing" >&2
+        echo "It runs in the base image alone, so a directory a harness layer" >&2
+        echo "adds is not there. Create it in the Dockerfile, or declare it" >&2
+        echo "and write the file from the harness's own layer." >&2
+        return 1
+    }
 }
