@@ -4271,3 +4271,68 @@ _emit_mount_at() {
         return 1
     }
 }
+
+# runtime.bats is the only suite that boots containers, so its fixtures are
+# the only place a container-shaped mistake can hide until the privileged
+# tier runs - twenty minutes and a queue behind every other job. These three
+# ask the questions that tier answered the hard way.
+@test "runtime.bats names every container after the run, not the file index" {
+    # basename "$BATS_FILE_TMPDIR" is the file's index within the run, which
+    # is "0" for the only file there - so a name built from it is the same in
+    # every run. `docker run` refuses a name in use, so one leftover from a
+    # failed run fails every run afterwards until someone clears it by hand.
+    # That is exactly what happened, to a container the earlier fix did not
+    # cover: it changed the two helpers and left twenty per-test names alone.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    run grep -nE 'dejima-test-[a-z-]*\$?\(?basename "\$BATS_FILE_TMPDIR"' "$rt"
+    [ "$status" -ne 0 ] || {
+        echo "a container or image name is keyed on the file index:" >&2
+        echo "$output" >&2
+        return 1
+    }
+    grep -q '^test_container_name() {' "$rt" \
+        || { echo "there is no one place per-test names come from"; return 1; }
+}
+
+@test "runtime.bats removes what it made by deriving it, not by listing it" {
+    # The teardown enumerated twenty names by hand and had to be kept in step
+    # with twenty test bodies. It silently stopped matching all of them the
+    # moment the names changed, which is a leak that fills a runner and then
+    # fails the next run on a conflict.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    # The per-test teardown, which is where the twenty-name list lived.
+    local body
+    body="$(sed -n '/^teardown() {/,/^}/p' "$rt")"
+    [ -n "$body" ] || { echo "no teardown"; return 1; }
+    grep -q 'docker ps -a --filter' <<< "$body" \
+        || { echo "teardown does not derive the containers it removes"; return 1; }
+    local listed
+    listed=$(grep -c 'dejima-test-[a-z-]\+-\$' <<< "$body" || true)
+    [ "$listed" -eq 0 ] \
+        || { echo "teardown still names $listed containers by hand"; return 1; }
+    # It runs after every test and the file-wide container has to survive all
+    # of them, so the sweep must exclude it explicitly rather than by luck.
+    grep -q 'keep="$(container_name)"' <<< "$body" \
+        || { echo "the per-test sweep would remove the file-wide container"; return 1; }
+}
+
+@test "every runtime.bats container that mounts a proxy socket declares the domain" {
+    # entrypoint.sh refuses a credential proxy with no proxied_api_domain,
+    # because a terminator answering for nothing would let the session reach
+    # the real API directly. A fixture that mounts the socket without the
+    # domain is not testing the proxy, it is testing that refusal - which is
+    # how two of these failed.
+    local rt="$REPO_ROOT/test/runtime.bats" sock dom
+    sock=$(grep -c 'SANDBOX_ANTHROPIC_PROXY_SOCKET=.*proxy\.sock' "$rt")
+    dom=$(grep -c 'SANDBOX_HARNESS_PROXIED_DOMAIN=' "$rt")
+    [ "$sock" -gt 0 ] || { echo "no proxy fixtures found - has this moved?"; return 1; }
+    # One of the domain lines is the file-wide fixture, which mounts no
+    # socket, so the domains must outnumber the sockets that go through a
+    # container. The one socket that does not is the host-side forwarder,
+    # which never reaches entrypoint.sh.
+    [ "$dom" -ge "$sock" ] || {
+        echo "$sock proxy sockets but only $dom declared domains - a container" >&2
+        echo "mounting the socket without the domain is refused at startup." >&2
+        return 1
+    }
+}

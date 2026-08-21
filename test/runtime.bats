@@ -49,6 +49,13 @@ REAP_AFTER=$((6 * 60 * 60))
 container_name() { echo "dejima-test-$(basename "$BATS_RUN_TMPDIR")"; }
 network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 
+# A container for ONE test, named the same way and for the same reasons: a
+# leftover from a run that died mid-test must not be adoptable - or, worse,
+# collide with - the next run's. `docker run` refuses a name in use, so a
+# constant one turns any failed run into a failing run afterwards, on a
+# long-lived runner, until someone clears it by hand.
+test_container_name() { echo "dejima-test-$1-$(basename "$BATS_RUN_TMPDIR")"; }
+
 # Every container here must go on network_name(), never the default bridge:
 # dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
 # only exists on a user-defined network. On the default bridge dnsmasq has
@@ -288,27 +295,29 @@ teardown() {
     # reporting zero executed tests.
     local pid
     for pid in ${HOST_LISTENER_PIDS:-}; do kill "$pid" 2>/dev/null || true; done
-    docker rm -f "dejima-test-override-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rmi "dejima-test-override:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-ghforge-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-ghextra-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-proxy-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-derived-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rmi "dejima-test-derived:$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-tls-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-nohosts-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-notifydir-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
-    docker rm -f "dejima-test-nonotify-$(basename "$BATS_FILE_TMPDIR")" >/dev/null 2>&1 || true
+    # Every PER-TEST container and image this run made, found by the run's own
+    # suffix rather than enumerated. The list here was twenty lines that had to
+    # be kept in step with twenty test bodies by hand, and it silently stopped
+    # matching any of them the moment the names changed - which is the shape of
+    # leak that fills a long-lived runner and then fails the next run on a name
+    # conflict.
+    #
+    # The file-wide container is excluded by name, not by luck: this runs after
+    # EVERY test, and it is the one container that has to survive all of them.
+    # test_container_name() puts a purpose between the prefix and the suffix,
+    # so the file-wide name is the only one with nothing there.
+    local suffix keep
+    suffix="$(basename "$BATS_RUN_TMPDIR")"
+    keep="$(container_name)"
+    local c
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        [ "$c" != "$keep" ] || continue
+        docker rm -f "$c" >/dev/null 2>&1 || true
+    done < <(docker ps -a --filter "name=^dejima-test-.*$suffix\$" \
+                 --format '{{.Names}}' 2>/dev/null)
+    docker images -q "dejima-test-*:$suffix" 2>/dev/null \
+        | xargs -r docker rmi -f >/dev/null 2>&1 || true
 }
 
 dexec() {
@@ -320,8 +329,8 @@ dexec_node() {
 }
 
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
-    local test_image="dejima-test-override:$(basename "$BATS_FILE_TMPDIR")"
-    local test_container="dejima-test-override-$(basename "$BATS_FILE_TMPDIR")"
+    local test_image="dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
+    local test_container="$(test_container_name override)"
     local sandbox_dir="$BATS_TEST_DIRNAME/../docker"
     local repo_root="$BATS_TEST_DIRNAME/.."
 
@@ -359,7 +368,7 @@ dexec_node() {
     key_dir="$BATS_TEST_TMPDIR"
     ssh-keygen -t ed25519 -N '' -f "$key_dir/testkey" >/dev/null
 
-    test_container="dejima-test-sshkey-$(basename "$BATS_FILE_TMPDIR")"
+    test_container="$(test_container_name sshkey)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -407,7 +416,7 @@ dexec_node() {
     # seeded with the same content as the mounted file but never mounted
     # itself, so it can only change if something actually writes back to the
     # real source - which must not happen.
-    local test_container="dejima-test-claudejson-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name claudejson)"
     local mounted_copy="$BATS_TEST_TMPDIR/claude.json"
     local host_copy="$BATS_TEST_TMPDIR/claude-json-original.json"
 
@@ -526,7 +535,7 @@ dexec_node() {
 }
 
 @test "ALLOW_GITHUB_PUSH=1 opens port 22 to GitHub" {
-    local test_container="dejima-test-ghpush-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name ghpush)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -558,7 +567,7 @@ dexec_node() {
     # port-unrestricted allowed-domains ipset, its own startup self-check
     # finds github.com:22 reachable without ALLOW_GITHUB_PUSH=1, and
     # entrypoint.sh (set -Eeuo pipefail) dies before the agent ever runs.
-    local test_container="dejima-test-ghforge-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name ghforge)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -612,7 +621,7 @@ dexec_node() {
     # the port-22 self-check re-resolves the name: it catches the hole when
     # GitHub's second answer matches the first, and misses it when the name
     # has rotated in between. This test does not depend on that coin flip.
-    local test_container="dejima-test-ghextra-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name ghextra)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -653,7 +662,7 @@ dexec_node() {
     # them host-side from whichever forge is configured and hands the result
     # over under this one name. Feeding the old variable here made the test
     # assert against a hostname the entrypoint never saw.
-    local test_container="dejima-test-rebind-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name rebind)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -679,7 +688,7 @@ dexec_node() {
 }
 
 @test "the code-carrying ~/.claude overlay dirs are read-only inside the container" {
-    local test_container="dejima-test-overlays-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name overlays)"
     local src; src="$(mktemp -d)"
     mkdir -p "$src/skills" "$src/commands" "$src/agents"
     docker run -d --name "$test_container" \
@@ -713,7 +722,7 @@ dexec_node() {
 # parent were read-only instead, this is where it would hang the way a
 # blocked ~/.claude.json write did.
 @test "only the mounted project slugs exist in the container, and an unmounted one is still creatable" {
-    local test_container="dejima-test-projects-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name projects)"
     local src; src="$(mktemp -d)"
     mkdir -p "$src/own" "$src/sibling" "$src/fh-own"
     echo host > "$src/own/existing.jsonl"
@@ -776,7 +785,7 @@ dexec_node() {
     # path. This test does NOT use bin/dejima or docker-compose.yml directly
     # - it builds the same shape by hand. This shared container isn't reused
     # for it (it has no staging mount at all - see setup_file).
-    local test_container="dejima-test-statusline-regular-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name statusline-regular)"
     local dotclaude; dotclaude="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$dotclaude/statusline.sh"
     chmod +x "$dotclaude/statusline.sh"
@@ -838,7 +847,7 @@ dexec_node() {
     # /etc/dejima-harness holds the real content, and entrypoint.sh copies it to
     # a path with no route back to the host at all. This test asserts the
     # replacement no longer reaches either the symlink or its target.
-    local test_container="dejima-test-statusline-symlink-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name statusline-symlink)"
     local target_dir dotclaude
     target_dir="$(mktemp -d)"
     printf '#!/bin/sh\necho original\n' > "$target_dir/statusline.sh"
@@ -1005,13 +1014,14 @@ EOF
     # more clearly than a test that fails on a bare false condition.
     chmod 666 "$TD/proxy.sock"
 
-    container="dejima-test-proxy-$(basename "$BATS_FILE_TMPDIR")"
+    container="$(test_container_name proxy)"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
@@ -1074,7 +1084,7 @@ EOF
     chmod 666 "$TD/dotclaude/.credentials.json"
     chmod -R 777 "$TD/dotclaude"
 
-    container="dejima-test-proxy-mask-$(basename "$BATS_FILE_TMPDIR")"
+    container="$(test_container_name proxy-mask)"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -1184,7 +1194,7 @@ EOF
     local hook="$BATS_TEST_TMPDIR/sandbox-context.sh"
     cp "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh" "$hook"
 
-    local test_container="dejima-test-ctxreq-$(basename "$BATS_FILE_TMPDIR")"
+    local test_container="$(test_container_name ctxreq)"
     docker run -d --name "$test_container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -1211,8 +1221,8 @@ EOF
 }
 
 @test "a derived project image gets the package and keeps the base privilege posture" {
-    local derived="dejima-test-derived:$(basename "$BATS_FILE_TMPDIR")"
-    local test_container="dejima-test-derived-$(basename "$BATS_FILE_TMPDIR")"
+    local derived="dejima-test-derived:$(basename "$BATS_RUN_TMPDIR")"
+    local test_container="$(test_container_name derived)"
     local ctx; ctx="$(mktemp -d)"
     local store; store="$(mktemp -d)"
     local df; df="$(mktemp)"
@@ -1371,7 +1381,7 @@ EOF
     # See the loopback test above for why this chmod is here.
     chmod 666 "$TD/proxy.sock"
 
-    container="dejima-test-tls-$(basename "$BATS_FILE_TMPDIR")"
+    container="$(test_container_name tls)"
     # No ANTHROPIC_* env at all - that absence is the thing under test.
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
@@ -1379,6 +1389,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$IMAGE" >/dev/null
@@ -1432,7 +1443,7 @@ EOF
     # forwarder. If the hosts entry were unconditional (a compose extra_hosts
     # entry, say), this container would send every API call into a loopback
     # port nothing is listening on.
-    container="dejima-test-nohosts-$(basename "$BATS_FILE_TMPDIR")"
+    container="$(test_container_name nohosts)"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
@@ -1454,7 +1465,7 @@ EOF
     # `Loopback` is not `loopback`: bin/dejima would take its tls branch while
     # this container took its loopback one, and every API call in the session
     # would fail with nothing naming the cause.
-    container="dejima-test-badtransport-$(basename "$BATS_FILE_TMPDIR")"
+    container="$(test_container_name badtransport)"
     docker rm -f "$container" >/dev/null 2>&1 || true
 
     # Run in the FOREGROUND and read the container's own streams, rather than
@@ -1533,7 +1544,7 @@ EOF
     # setup_file and used by every dexec test in this file. Starting a second
     # container under that name conflicts, and removing it at the end of this
     # body would take the shared one with it.
-    local container="dejima-test-notifydir-$(basename "$BATS_FILE_TMPDIR")"
+    local container="$(test_container_name notifydir)"
     local host_dir; host_dir="$(mktemp -d)"
     # Unwritable by the sandbox user, which is the property the check keys on.
     # Built here rather than by removing a bind source, so the test does not
@@ -1579,7 +1590,7 @@ EOF
 # default - a warning about an unconfigured optional feature is noise on every
 # start, and noise is what stops warnings being read.
 @test "no marker-directory warning when remote access is not enabled" {
-    local container="dejima-test-nonotify-$(basename "$BATS_FILE_TMPDIR")"
+    local container="$(test_container_name nonotify)"
     docker run -d --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --network "$(network_name)" \
