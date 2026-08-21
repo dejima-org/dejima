@@ -1556,9 +1556,10 @@ SANDBOX_HARNESS_INSTALL="$(manifest_get harness "$DEJIMA_HARNESS_NAME" install)"
 # imposed on every image dejima builds.
 SANDBOX_HARNESS_IMAGE_DIRS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_dirs)"
 SANDBOX_HARNESS_IMAGE_ENV="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_env)"
+SANDBOX_HARNESS_IMAGE_FILES="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image_files)"
 
 if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
-    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] \
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ] \
     || [ -s "$(config_root)/dependencies" ] \
     || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
     SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
@@ -1569,10 +1570,11 @@ if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
 fi
 
 if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
-    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ]; then
+    || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ]; then
     tag="dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}"
     generate_spec_dockerfile "$SANDBOX_IMAGE" "$SANDBOX_HARNESS_INSTALL" \
         "$SANDBOX_HARNESS_IMAGE_DIRS" "$SANDBOX_HARNESS_IMAGE_ENV" \
+        "$SANDBOX_HARNESS_IMAGE_FILES" \
         > "$SANDBOX_DERIVED_DOCKERFILE"
     echo "Building $tag ($DEJIMA_HARNESS_NAME)..."
     if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then

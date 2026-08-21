@@ -163,6 +163,7 @@ EOF
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
+image_files	?list:homepath
 image_env	?list:envpair
 command	identifier	claude
 command_path	?path

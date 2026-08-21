@@ -441,6 +441,14 @@ EOF
 # is where it is satisfied. The base image is shared by every harness, so a
 # directory only one of them needs is declared by that one - see `image_dirs`
 # in docs/providers.md.
+_harness_declares_file() {
+    local want="$1" files f
+    files="$(bash -c 'source "$1"; manifest_get harness claude-code image_files' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh")" || return 1
+    for f in $files; do [ "$f" = "$want" ] && return 0; done
+    return 1
+}
+
 _harness_declares_dir() {
     local want="$1" dirs d
     dirs="$(bash -c 'source "$1"; manifest_get harness claude-code image_dirs' _ \
@@ -1806,15 +1814,20 @@ registered_commands() {
     [ "$branch_line" -lt "$mount_line" ]
 }
 
-@test "entrypoint.sh gives the container an empty credentials file of its own" {
-    # The mask used to provide one; Claude Code shouldn't have to be trusted
-    # to treat an absent credentials file the same as an empty one. Guarded
-    # on non-existence so it can't clobber either of the credentials
-    # bin/dejima does mount - the fake one under the tls transport, the real
-    # one under SANDBOX_CREDENTIAL_PROXY=0 - since mounts are established
-    # before the entrypoint runs.
-    grep -q 'if \[ ! -e "\$SANDBOX_HOME/\.claude/\.credentials\.json" \]; then' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'install -o "\$SANDBOX_USER" -g "\$SANDBOX_USER" -m 600 /dev/null "\$SANDBOX_HOME/\.claude/\.credentials\.json"' "$SANDBOX_DIR/entrypoint.sh"
+@test "the container gets an empty credentials file of its own" {
+    # A harness should not have to be trusted to treat an absent credentials
+    # file the same as an empty one. It comes from that harness's own image
+    # layer rather than from entrypoint.sh - see "a file a harness needs
+    # seeded is declared" - and a mount at the same path shadows it, which is
+    # what keeps it from clobbering either of the credentials bin/dejima does
+    # mount: the fake one under the tls transport, the real one under
+    # [credentials] proxy = off.
+    _harness_declares_file .claude/.credentials.json \
+        || { echo "the harness declares no credentials file"; return 1; }
+    # Shadowing only works if the mount is at the same path the layer created.
+    grep -q '\.credentials\.json' "$SANDBOX_DIR/docker-compose.yml" \
+        || grep -q '\.credentials\.json' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing ever mounts a credential over it"; return 1; }
 }
 
 @test "bin/dejima refuses to launch when the proxy fails to start" {
@@ -4101,4 +4114,41 @@ _emit_mount_at() {
     grep -qE '^image_dirs\s*=.*\.claude' "$m" || { echo "no image_dirs declared"; return 1; }
     grep -qE '^image_env\s*=.*CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' "$m" \
         || { echo "no image_env declared"; return 1; }
+}
+
+# entrypoint.sh runs in every container this repo builds, including the base
+# image on its own - runtime.bats boots exactly that, with no harness layer
+# above it. So a path only one harness has is not merely a coupling here, it
+# is a container that aborts during startup on any image whose harness never
+# declared the directory that path lives in. That is what happened: the
+# credential seeding outlived the ~/.claude the base image used to create.
+#
+# Only the privileged tier caught it, because only that tier boots a
+# container. This is the same check without a Docker daemon.
+@test "the shared entrypoint names no harness's paths" {
+    local e="$SANDBOX_DIR/entrypoint.sh"
+    run grep -nE '^[^#]*(\$SANDBOX_HOME|\$HOME|~)/\.(claude|aider|opencode)' "$e"
+    [ "$status" -ne 0 ] || {
+        echo "entrypoint.sh reaches into one harness's home directory:" >&2
+        echo "$output" >&2
+        echo "It runs in every image, including the base one on its own." >&2
+        return 1
+    }
+}
+
+@test "a file a harness needs seeded is declared, not created by shared code" {
+    # An absent file and an empty one are not reliably the same to a harness
+    # that reads a credential from a fixed path, so something has to be
+    # there - declared by the harness that needs it, created in its own
+    # layer, and shadowed by whatever the transport mounts over it.
+    local m="$REPO_ROOT/harnesses/claude-code/harness.conf"
+    grep -qE '^image_files\s*=.*\.credentials\.json' "$m" \
+        || { echo "the credential file is not declared"; return 1; }
+    run bash -c 'source "$1"; generate_spec_dockerfile base "" "" "" ".claude/.credentials.json"' _ \
+        "$REPO_ROOT/bin/dejima-project-lib.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Empty and 0600: it stands in for a credential, so it must not be
+    # readable by anything but the session's own user.
+    [[ "$output" == *'install -o ${SANDBOX_USER} -g ${SANDBOX_USER} -m 600 /dev/null'* ]] \
+        || { echo "$output"; return 1; }
 }

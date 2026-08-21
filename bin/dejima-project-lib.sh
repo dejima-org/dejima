@@ -450,16 +450,16 @@ generate_derived_dockerfile() {
 # each one (valid_dep_spec); nothing below re-checks, for the same reason
 # approved_entries is the only way into the function above.
 #
-# $3 and $4 are for a harness layer and empty for a dependency one: directories
-# to create under the sandbox user's home, and NAME=VALUE pairs to set, both
-# space-separated. They exist because the base image must name no harness -
+# $3, $4 and $5 are for a harness layer and empty for a dependency one:
+# directories to create under the sandbox user's home, NAME=VALUE pairs to
+# set, and files to create empty at 0600, all space-separated. They exist because the base image must name no harness -
 # what a harness keeps state in, and what it wants in its environment, belong
 # to that harness's own layer. Validated by the manifest types `homepath` and
 # `envpair` before they reach here, which is what makes them safe to
 # interpolate unquoted.
 generate_spec_dockerfile() {
-    local base="$1" entries="$2" dirs="${3:-}" envs="${4:-}"
-    local apt npm pip cargo spec name d e
+    local base="$1" entries="$2" dirs="${3:-}" envs="${4:-}" files="${5:-}"
+    local apt npm pip cargo spec name d e f
 
     apt=""; npm=""; pip=""; cargo=""
     local -a tarballs=()
@@ -489,6 +489,23 @@ generate_spec_dockerfile() {
         for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
         printf ' \\\n  && chmod 700'
         for d in $dirs; do printf ' "${SANDBOX_HOME}"/%s' "$d"; done
+        printf '\n'
+    fi
+    if [ -n "$files" ]; then
+        # Empty, 0600, owned by the session's user. A harness that reads a
+        # credential from a fixed path needs SOMETHING there: an absent file
+        # and an empty one are not reliably the same to it, and betting that
+        # they are is how a session comes up unauthenticated in a way that
+        # reads as a dejima fault.
+        #
+        # Created in the image rather than by the entrypoint, so a mount at
+        # the same path simply shadows it - which is what happens on every
+        # transport that mounts one. The entrypoint did it at runtime, which
+        # meant every container created one harness's path whether or not that
+        # harness was the one selected, and failed outright on an image whose
+        # harness had never declared the directory it lives in.
+        printf 'RUN install -o ${SANDBOX_USER} -g ${SANDBOX_USER} -m 600 /dev/null'
+        for f in $files; do printf ' "${SANDBOX_HOME}"/%s' "$f"; done
         printf '\n'
     fi
     for e in $envs; do printf 'ENV %s\n' "$e"; done

@@ -178,20 +178,6 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
-# ~/.claude is not mounted whole, so the real OAuth credential has no path
-# into the container (#50, docs/security.md). What lands at this path instead
-# depends on the transport: the tls one needs a well-formed fake credential,
-# because Claude Code authenticates from this file rather than from an
-# ANTHROPIC_AUTH_TOKEN, and bin/dejima mounts one.
-# Nothing is mounted for the loopback transport, so give Claude Code an empty
-# file rather than betting that an absent credentials file behaves the same
-# as an empty one. Either way this is
-# skipped when something is already there - which also covers
-# [credentials] proxy = off mounting the real credential in deliberately.
-if [ ! -e "$SANDBOX_HOME/.claude/.credentials.json" ]; then
-    install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 /dev/null "$SANDBOX_HOME/.claude/.credentials.json"
-fi
-
 # TCP front door for the host-side credential proxy (see bin/dejima and
 # bin/dejima-anthropic-proxy): the proxy listens on a bind-mounted unix
 # socket, and anthropic-proxy-forwarder.js pipes bytes into it. Only started
