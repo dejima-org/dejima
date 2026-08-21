@@ -39,6 +39,13 @@ bats_require_minimum_version 1.5.0
 
 IMAGE=dejima:latest
 
+# What a session actually runs: the base image plus the selected harness's own
+# layer, built in setup_file. Exported there because bats re-runs this file's
+# top-level code in a fresh process per test, so a plain assignment would not
+# survive - and re-defaulted here for the same reason, since the export has to
+# win over the line that re-runs.
+SESSION_IMAGE="${SESSION_IMAGE:-$IMAGE}"
+
 # How old a leftover network of this suite's must be before setup_file will
 # reap it along with whatever is still attached. Hours, not minutes: the only
 # thing it has to be longer than is a real run of this file, and the only
@@ -136,13 +143,44 @@ wait_ready() {
 # One value from the selected harness's manifest. bin/dejima resolves these
 # and passes them into the container; a container started here has to do the
 # same or it is testing an arrangement that never occurs.
+# BATS_TEST_DIRNAME, not $SANDBOX_DIR: bats runs each test in its own process
+# and does not carry setup_file's plain assignments into it, so a fixture
+# variable is set here and empty in every test body. This is called from both.
+# The symptom is not an error but an empty value - which, for the proxied
+# domain, means a container that refuses to start because the harness appears
+# to have declared no endpoint.
 harness_manifest_value() {
-    sed -n "s/^$1 *= *//p" "$SANDBOX_DIR/../harnesses/claude-code/harness.conf"
+    sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../harnesses/claude-code/harness.conf"
+}
+
+# The selected harness's image layer, on top of $1, tagged for this run so
+# teardown_file's sweep finds it. Prints the new tag.
+build_harness_layer() {
+    local base="$1" tag df ctx
+    tag="dejima-test-harness:$(basename "$BATS_RUN_TMPDIR")"
+    df="$(mktemp)"
+    # An empty build context, for the reason bin/dejima uses one: a build
+    # whose context is a directory anything else can write is a way into the
+    # image it then runs.
+    ctx="$(mktemp -d)"
+    # shellcheck source=../bin/dejima-project-lib.sh
+    source "$BATS_TEST_DIRNAME/../bin/dejima-project-lib.sh"
+    generate_spec_dockerfile "$base" "" \
+        "$(manifest_get harness claude-code image_dirs)" \
+        "$(manifest_get harness claude-code image_env)" \
+        "$(manifest_get harness claude-code image_files)" > "$df"
+    if ! docker build -q -t "$tag" -f "$df" "$ctx" >&2; then
+        rm -rf "$df" "$ctx"
+        echo "could not build the harness layer this suite runs on" >&2
+        return 1
+    fi
+    rm -rf "$df" "$ctx"
+    printf '%s' "$tag"
 }
 
 assert_image_matches_checkout() {
     local expected actual
-    expected=$(cd "$SANDBOX_DIR" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
+    expected=$(cd "$BATS_TEST_DIRNAME/../docker" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
     actual=$(docker run --rm --entrypoint sh "$IMAGE" -c \
         'cd /usr/local/bin && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh' 2>&1 | awk '{print $1}')
     if [ "$expected" != "$actual" ]; then
@@ -164,6 +202,12 @@ assert_image_matches_checkout() {
 }
 
 setup_file() {
+    # These two are setup_file's own. bats runs every test in a separate
+    # process and does not carry a plain assignment here into it, so anything
+    # a test body can reach - directly, or through a helper it calls - has to
+    # derive its own paths from BATS_TEST_DIRNAME, which bats exports. A
+    # helper that read one of these was set in the fixture and empty in every
+    # test, which is not an error, just a wrong answer.
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     local container network
@@ -174,6 +218,31 @@ setup_file() {
         docker build -q -t "$IMAGE" -f "$SANDBOX_DIR/Dockerfile" "$REPO_ROOT" >&2
     fi
     assert_image_matches_checkout
+
+    # What a session runs is the base image plus its harness's own layer: the
+    # directories that harness keeps state in, the files it needs seeded, its
+    # environment. Several assertions in this file are about exactly that - a
+    # staged statusline landing in a ~/.claude the session can unlink inside,
+    # an empty credentials file it can read - and booting the base image alone
+    # tests an image no session is ever given.
+    #
+    # Built through bin/dejima's own generator, from the manifest, so this
+    # fixture cannot drift from what a real launch produces. The harness's
+    # PACKAGE is deliberately left out: nothing here runs the harness binary,
+    # and an npm install would put a network fetch on the critical path of
+    # every run of this file. A test that does run it needs the install spec
+    # passed here too.
+    # Assigned before export: `export VAR="$(cmd)"` returns the export's
+    # status, so a failed build would leave this empty, the default at the top
+    # of the file would quietly substitute the base image, and the suite would
+    # test an image no session runs while blaming the tests.
+    local session_image
+    session_image="$(build_harness_layer "$IMAGE")" || {
+        echo "could not build the harness layer - see above" >&2
+        return 1
+    }
+    [ -n "$session_image" ] || { echo "the harness layer built to an empty tag" >&2; return 1; }
+    export SESSION_IMAGE="$session_image"
 
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
@@ -271,7 +340,7 @@ setup_file() {
         -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
         -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     wait_ready "$container"
 }
@@ -376,7 +445,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     wait_ready "$test_container"
 
@@ -431,7 +500,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$mounted_copy:/home/node/.claude.json" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     wait_ready "$test_container"
 
@@ -543,7 +612,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ALLOW_GITHUB_PUSH=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     wait_ready "$test_container"
 
@@ -577,7 +646,7 @@ dexec_node() {
         -e DEJIMA_PUSH_HOSTS="github.com ssh.github.com api.github.com" \
         -e ALLOW_GITHUB_PUSH=1 \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     # The container coming up at all is half the assertion.
     wait_ready "$test_container"
@@ -630,7 +699,7 @@ dexec_node() {
         -e DEJIMA_FORGE_HOSTS= \
         -e ALLOWED_DOMAINS="github.com api.github.com" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     # Coming up at all is part of the assertion: the port-22 self-check runs
     # during startup, and with the address in the wrong set it fails the boot.
@@ -670,7 +739,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_FORGE_HOSTS=forge.internal.example \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
 
     wait_ready "$test_container"
 
@@ -700,7 +769,7 @@ dexec_node() {
         -v "$src/commands:/home/node/.claude/commands:ro" \
         -v "$src/agents:/home/node/.claude/agents:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$test_container"
     for d in skills commands agents; do
         run docker exec -u node "$test_container" bash -c "touch /home/node/.claude/$d/pwned 2>&1"
@@ -739,7 +808,7 @@ dexec_node() {
         -v "$src/own:/home/node/.claude/projects/own" \
         -v "$src/fh-own:/home/node/.claude/file-history/own-session" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$test_container"
 
     # the sibling project is absent, not merely unwritable
@@ -803,7 +872,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$test_container"
 
     run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
@@ -866,7 +935,7 @@ dexec_node() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$test_container"
 
     run docker exec -u node "$test_container" sh -c \
@@ -1026,7 +1095,7 @@ EOF
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     # This test depends on the forwarder having already bound port 18300;
     # wait_ready covers that, since entrypoint.sh waits for the bind itself
     # before reaching the `sleep infinity` wait_ready matches on.
@@ -1093,7 +1162,7 @@ EOF
         -v "$TD/dotclaude/projects:/home/node/.claude/projects" \
         -v "$TD/dotclaude/plans:/home/node/.claude/plans" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$container"
 
     run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
@@ -1203,7 +1272,7 @@ EOF
         -v "$ws:$ws" \
         -v "$hook:/usr/local/bin/sandbox-context.sh:ro" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$test_container"
 
     # -w is deliberately an unrelated directory, not "$ws": if cwd extraction
@@ -1240,7 +1309,7 @@ EOF
         false
     }
     bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
-        _ "$BATS_TEST_DIRNAME/../bin/dejima-project-lib.sh" "$IMAGE" "$store" > "$df"
+        _ "$BATS_TEST_DIRNAME/../bin/dejima-project-lib.sh" "$SESSION_IMAGE" "$store" > "$df"
     docker build -q -t "$derived" -f "$df" "$ctx" >&2
 
     # The image's own config, not the running container: `docker run` below
@@ -1392,7 +1461,7 @@ EOF
         -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$container"
 
     # NODE_EXTRA_CA_CERTS has to be passed explicitly: docker exec starts from
@@ -1450,7 +1519,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$container"
 
     run docker exec "$container" grep -c 'api.anthropic.com' /etc/hosts
@@ -1495,7 +1564,7 @@ EOF
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE"
+        "$SESSION_IMAGE"
     exit_code=$status
     logs=$output
 
@@ -1566,7 +1635,7 @@ EOF
         -e DEJIMA_NOTIFY_DIR=/run/dejima-notify \
         -v "$host_dir:/run/dejima-notify" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$container"
 
     run settled_logs "$container"
@@ -1597,7 +1666,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         --entrypoint /usr/local/bin/entrypoint.sh \
-        "$IMAGE" >/dev/null
+        "$SESSION_IMAGE" >/dev/null
     wait_ready "$container"
 
     run settled_logs "$container"

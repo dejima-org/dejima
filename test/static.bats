@@ -4336,3 +4336,49 @@ _emit_mount_at() {
         return 1
     }
 }
+
+# bats runs setup_file in one process and every test in another, and does not
+# carry a plain assignment from the first into the second. So a fixture
+# variable is set in setup_file and EMPTY everywhere a test can reach - which
+# is not an error, just a wrong answer, and the wrong answer here was an empty
+# proxied domain that made two containers refuse to start.
+#
+# The rule that avoids it: anything a test body can reach derives its own
+# paths from BATS_TEST_DIRNAME, which bats exports. setup_file's variables
+# stay inside setup_file.
+@test "runtime.bats' fixture variables do not escape setup_file" {
+    local rt="$REPO_ROOT/test/runtime.bats" v outside start end
+    # setup_file's line range, so "inside" is decided by position rather than
+    # by matching its text - a body with a blank line in it makes any
+    # fixed-string filter match every line in the file.
+    start=$(grep -n '^setup_file() {' "$rt" | cut -d: -f1)
+    [ -n "$start" ] || { echo "no setup_file"; return 1; }
+    end=$(awk -v s="$start" 'NR > s && /^}/ { print NR; exit }' "$rt")
+    [ -n "$end" ] || { echo "setup_file has no end"; return 1; }
+    for v in SANDBOX_DIR REPO_ROOT; do
+        sed -n "${start},${end}p" "$rt" | grep -q "$v=" || continue
+        # Every use of it outside that range, comments aside.
+        outside=$(grep -n "\$$v" "$rt" \
+            | grep -v '^[0-9]*:[[:space:]]*#' \
+            | awk -F: -v s="$start" -v e="$end" '$1 < s || $1 > e' || true)
+        [ -z "$outside" ] || {
+            echo "\$$v is assigned in setup_file and used outside it:" >&2
+            echo "$outside" >&2
+            echo "A test body reaching that gets an empty string, not an error." >&2
+            return 1
+        }
+    done
+}
+
+@test "runtime.bats fails loudly when the harness layer cannot be built" {
+    # `export VAR="$(cmd)"` returns the export's status, so a failed build
+    # leaves the tag empty, the default at the top of the file substitutes the
+    # base image, and the suite tests an image no session runs while blaming
+    # whichever assertions happen to depend on the harness's directories.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    run grep -n 'export SESSION_IMAGE="\$(build_harness_layer' "$rt"
+    [ "$status" -ne 0 ] || {
+        echo "the layer build's failure is masked by export:" >&2; echo "$output" >&2; return 1; }
+    grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
+        || { echo "the layer build's status is not checked"; return 1; }
+}
