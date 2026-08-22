@@ -707,6 +707,13 @@ assert_remedy_forges_exist() {
         || { echo "does not exempt steps that only read"; return 1; }
     [[ "$flat" == *"squash"* ]] \
         || { echo "says nothing about squashing the step commits away"; return 1; }
+    # And names the act that actually destroys the record. A squash-merge with
+    # the branch retained leaves the step commits reachable, because a clone
+    # fetches remote branches; deleting the branch removes the last pointer to
+    # them. Naming only squashing would let a project follow every rule and
+    # still yield nothing, under a forge default it never chose.
+    [[ "$flat" == *"DELETED"* ]] \
+        || { echo "does not name branch deletion as the destructive act"; return 1; }
 }
 
 @test "a project declaring no corpus gets no commit-granularity rule" {

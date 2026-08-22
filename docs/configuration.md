@@ -112,6 +112,20 @@ An unknown rule is reported but never offered for approval. One that nothing
 implements would approve cleanly, sit in the store and do nothing, which reads
 as being in force when it is not.
 
+**Check the forge's merge policy before relying on this.** The briefing tells
+the agent how to commit, but the setting that can undo all of it is yours: a
+squash-merge is survivable, because a clone fetches remote branches and the
+step commits stay reachable through the branch ref, but deleting the branch
+afterwards removes the last thing pointing at them. Several forges offer
+"delete branch on merge" and some default it on. Measured both ways on a
+throwaway repository: squash-merge with the branch retained left every step
+commit reachable in a fresh clone; the same merge with the branch deleted first
+left none.
+
+So a project can adopt the rule, write every plan correctly, and still yield
+nothing, with no error anywhere - a squash-merged `main` looks perfectly
+healthy. dejima's own history is intact because it merges with merge commits.
+
 The reason is recoverability rather than tidiness. A step is only legible
 afterwards if the file's state immediately before it and immediately after it
 can both be read back from history: before from the commit's parent, after

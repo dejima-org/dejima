@@ -989,6 +989,14 @@ BRIEFING_EOF
 # material from its steps, and the one committing once per task yielded none,
 # with every step after the first to touch a given file discarded.
 #
+# The bullet about deletion is measured too, and names branch deletion rather
+# than squashing on purpose. Verified here: a squash-merge with the branch
+# retained leaves both step commits reachable in a fresh clone, because a clone
+# fetches remote branches; the same squash-merge with the branch deleted first
+# leaves none. Squashing is what an operator notices; deleting the branch is
+# what several forges do by default, and it is the one that destroys the
+# record.
+#
 # Deliberately says nothing about what the corpus is for or who collects it.
 # That is the operator's business, and a briefing that argued for it would be
 # dejima making a case rather than stating a rule the project already adopted.
@@ -1001,9 +1009,14 @@ This project keeps its history as usable evidence of how the work was done
   step. Not one commit at the end covering five steps.
 - A step that only reads files or runs tests needs no commit. This is about
   steps that write, not ceremony.
-- Do not squash a task's step commits together before merging. The forge may
-  squash the branch itself, but if the individual step commits never existed
-  the record is gone with them.
+- Do not squash a task's step commits together before committing them. What
+  happens at merge time is survivable: a clone fetches remote branches, so a
+  squash-merge still leaves the step commits reachable through the branch ref.
+  What does not survive is the branch being DELETED afterwards, which removes
+  the last thing pointing at them. Several forges offer that as a
+  merge-time default. If this one does, say so rather than assuming the record
+  is safe, because everything above can be done perfectly and still yield
+  nothing.
 
 The reason is that a step is only legible later if the file's state before it
 and after it can both be read back from history: before from the commit's
