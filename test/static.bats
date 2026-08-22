@@ -1162,9 +1162,14 @@ _cli_tools() {
         # satisfied by a page with the wrong title on it.
         [[ "${lines[0]}" == *"$name"* ]] \
             || { echo "$name --help opens with: ${lines[0]}"; return 1; }
-        # And -h reaches the same place.
-        run "$REPO_ROOT/bin/$name" -h
-        [ "$status" -eq 0 ] || { echo "$name -h exited $status"; return 1; }
+        # And -h reaches the same place - the same output, not merely another
+        # exit 0. A tool that ignored -h and happened to succeed would pass a
+        # status-only check while printing nothing like help.
+        local long="$output" short
+        short="$("$REPO_ROOT/bin/$name" -h 2>/dev/null)" \
+            || { echo "$name -h failed"; return 1; }
+        [ "$short" = "$long" ] \
+            || { echo "$name -h and --help disagree"; return 1; }
     done < <(_cli_tools)
 }
 
