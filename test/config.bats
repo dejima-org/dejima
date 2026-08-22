@@ -1465,6 +1465,62 @@ EOF
     rm -rf "$rw"
 }
 
+@test "declaring corpus does not turn it on; approving it does" {
+    # The security half, and the reason this is not simply "does the file
+    # exist". .dejima/ is in the workspace, which is session-writable - so a
+    # session that could turn this on by writing a file would be writing the
+    # next session's system prompt. The project declares, the operator
+    # approves, and bin/dejima reads only what was approved.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-step\n' > "$ws/.dejima/corpus"
+
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"its own commit"* ]] \
+        || { echo "a declaration alone put the rule in force"; return 1; }
+
+    yes | "$REPO_ROOT/bin/dejima-project" approve "$ws" >/dev/null 2>&1
+
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"its own commit"* ]] \
+        || { echo "approving it did not put the rule in force: $output"; return 1; }
+    rm -rf "$ws"
+}
+
+@test "an unknown corpus rule is refused rather than approved and ignored" {
+    # A rule nothing implements would approve cleanly, sit in the store, and
+    # do nothing - which reads as being in force when it is not.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-hour\n' > "$ws/.dejima/corpus"
+    run "$REPO_ROOT/bin/dejima-project" status "$ws"
+    [[ "$output" == *"commit-per-hour"* ]] || { echo "not reported at all: $output"; return 1; }
+    [[ "$output" != *"pending   commit-per-hour"* ]] \
+        || { echo "an unimplemented rule is offered for approval: $output"; return 1; }
+    rm -rf "$ws"
+}
+
+@test "the corpus rule is resolved before --print-briefing exits" {
+    # --print-briefing composes and exits early, so anything it needs has to
+    # be resolved above it. DEJIMA_RW_MOUNTS was caught by exactly this once,
+    # its sentence missing from the printed briefing while real sessions were
+    # told correctly - a diagnostic that disagrees with the session is worse
+    # than no diagnostic.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-step\n' > "$ws/.dejima/corpus"
+    yes | "$REPO_ROOT/bin/dejima-project" approve "$ws" >/dev/null 2>&1
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [[ "$output" == *"its own commit"* ]] \
+        || { echo "--print-briefing disagrees with what a session would get"; return 1; }
+    rm -rf "$ws"
+}
+
 @test "a read_write entry overlapping a protected path is refused, not warned" {
     _rw_setup
     workspace="$(mktemp -d)"

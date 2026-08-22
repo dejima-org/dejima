@@ -686,6 +686,57 @@ assert_remedy_forges_exist() {
     [[ "$output" == *"say so in your reply"* ]]
 }
 
+@test "a project that declares corpus gets the commit-granularity rule" {
+    DEJIMA_CORPUS=on run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Matched against the text with its line breaks flattened. The briefing is
+    # wrapped prose, so any assertion on more than a couple of words is
+    # otherwise hostage to where a line happens to end - which is how the
+    # first version of this test failed on text that was present.
+    local flat
+    flat="$(printf '%s' "$output" | tr '\n' ' ' | tr -s ' ')"
+    [[ "$flat" == *"its own commit"* ]] || { echo "no per-step commit rule"; return 1; }
+    # The reason travels with the rule. A convention with no reason attached is
+    # one an agent talks itself out of the first time it is inconvenient.
+    [[ "$flat" == *"state before it and after it can both be read back"* ]] \
+        || { echo "the rule is stated without its reason"; return 1; }
+    [[ "$flat" == *"inventing a file state the repository never held"* ]] \
+        || { echo "does not say why splitting the diff is not an option"; return 1; }
+    # And the two edges that stop it becoming ceremony.
+    [[ "$flat" == *"needs no commit"* ]] \
+        || { echo "does not exempt steps that only read"; return 1; }
+    [[ "$flat" == *"squash"* ]] \
+        || { echo "says nothing about squashing the step commits away"; return 1; }
+    # And names the act that actually destroys the record. A squash-merge with
+    # the branch retained leaves the step commits reachable, because a clone
+    # fetches remote branches; deleting the branch removes the last pointer to
+    # them. Naming only squashing would let a project follow every rule and
+    # still yield nothing, under a forge default it never chose.
+    [[ "$flat" == *"DELETED"* ]] \
+        || { echo "does not name branch deletion as the destructive act"; return 1; }
+}
+
+@test "a project declaring no corpus gets no commit-granularity rule" {
+    # Off by default, and the default is the absence of a file rather than a
+    # setting - so this is what every project that has not asked for it sees.
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"own commit"* ]] \
+        || { echo "the corpus rule leaked into an undeclared project"; return 1; }
+}
+
+@test "the corpus rule says nothing about who collects it or why" {
+    # dejima ships the rule, not the argument for it. A briefing that made the
+    # case would be dejima lobbying for a use the project already opted into,
+    # in every session, for every user of that project.
+    DEJIMA_CORPUS=on run lib briefing_compose gitea worktree-pr claude-code
+    local forbidden
+    for forbidden in benchmark corpus-building training "machine learning" dataset; do
+        [[ "${output,,}" != *"${forbidden,,}"* ]] \
+            || { echo "the briefing argues for the use: $forbidden"; return 1; }
+    done
+}
+
 # Two points from docs/responsible-use.md that an agent can act on, as
 # opposed to the majority which are the operator's to follow. Kept short on
 # purpose: this text is in every session's context, for every user.

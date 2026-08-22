@@ -971,6 +971,62 @@ BRIEFING_EOF
 # has done something the operator was supposed to decide, and added to a queue
 # maintainers are already drowning in. Saying so here is cheaper than
 # discovering it afterwards, and the flag is exactly when it becomes possible.
+# What a project gets for declaring .dejima/corpus: a rule about commit
+# granularity, and the reason for it.
+#
+# The reason is not style. A plan step is only usable as evidence if the file's
+# state immediately before it and immediately after it can both be recovered
+# from history - before from the commit's parent, after from the commit. One
+# commit carrying several steps that touch the same file destroys that: the
+# third step's "after" already contains the fourth's and the fifth's, and
+# splitting the diff to attribute a hunk per step would mean constructing a
+# file state that never existed in the repository. So the information has to
+# be put into the history when the work is done, or it is not recoverable
+# afterwards by any amount of cleverness.
+#
+# Measured rather than assumed, on two repositories with the same author and
+# the same planning workflow: the one committing per step yielded usable
+# material from its steps, and the one committing once per task yielded none,
+# with every step after the first to touch a given file discarded.
+#
+# The bullet about deletion is measured too, and names branch deletion rather
+# than squashing on purpose. Verified here: a squash-merge with the branch
+# retained leaves both step commits reachable in a fresh clone, because a clone
+# fetches remote branches; the same squash-merge with the branch deleted first
+# leaves none. Squashing is what an operator notices; deleting the branch is
+# what several forges do by default, and it is the one that destroys the
+# record.
+#
+# Deliberately says nothing about what the corpus is for or who collects it.
+# That is the operator's business, and a briefing that argued for it would be
+# dejima making a case rather than stating a rule the project already adopted.
+_briefing_core_corpus() {
+    cat <<'BRIEFING_EOF'
+This project keeps its history as usable evidence of how the work was done
+(it declares .dejima/corpus). That puts one requirement on how you commit:
+
+- Give every plan step that changes a file its own commit, and say so in the
+  step. Not one commit at the end covering five steps.
+- A step that only reads files or runs tests needs no commit. This is about
+  steps that write, not ceremony.
+- Do not squash a task's step commits together before committing them. What
+  happens at merge time is survivable: a clone fetches remote branches, so a
+  squash-merge still leaves the step commits reachable through the branch ref.
+  What does not survive is the branch being DELETED afterwards, which removes
+  the last thing pointing at them. Several forges offer that as a
+  merge-time default. If this one does, say so rather than assuming the record
+  is safe, because everything above can be done perfectly and still yield
+  nothing.
+
+The reason is that a step is only legible later if the file's state before it
+and after it can both be read back from history: before from the commit's
+parent, after from the commit. When one commit carries several steps that
+touch the same file, no step in it can be isolated any more, and reconstructing
+one would mean inventing a file state the repository never held. Nothing can
+recover that afterwards, which is why it has to be done while the work is.
+BRIEFING_EOF
+}
+
 _briefing_core_github_push() {
     cat <<'BRIEFING_EOF'
 - GitHub push is enabled for this session, for the repository you were
@@ -1248,6 +1304,10 @@ briefing_compose() {
     text+=$'\n\n'
     if [ "${DEJIMA_GITHUB_PUSH:-off}" = "on" ]; then
         text+="$(_briefing_core_github_push)"
+        text+=$'\n\n'
+    fi
+    if [ "${DEJIMA_CORPUS:-off}" = "on" ]; then
+        text+="$(_briefing_core_corpus)"
         text+=$'\n\n'
     fi
     # The harness fragment closes the briefing: it supplies both the resume

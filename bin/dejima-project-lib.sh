@@ -235,8 +235,25 @@ _approved_validator() {
     case "$1" in
         allowed-domains) printf 'valid_domain' ;;
         dependencies)    printf 'valid_dep_spec' ;;
+        corpus)          printf 'valid_corpus_rule' ;;
         *) return 1 ;;
     esac
+}
+
+# The rules a project can declare in .dejima/corpus, each of which changes
+# what the session briefing tells the agent about how to record its work.
+#
+# A fixed set rather than a free identifier, and refusing the unknown is the
+# point: an entry nothing implements would approve cleanly, appear in the
+# store, and do nothing - which reads as the rule being in force when it is
+# not. There is one today.
+DEJIMA_CORPUS_RULES="commit-per-step"
+
+valid_corpus_rule() {
+    case " $DEJIMA_CORPUS_RULES " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
 }
 
 # Approvals are host-side and trusted, so an entry that fails validation

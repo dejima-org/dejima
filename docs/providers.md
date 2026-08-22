@@ -268,9 +268,13 @@ opposite of "providers are data, never sourced." In reading order:
    for the agent too) - fixed prose, not overridable by any provider.
 2. The selected workflow's fragment, with its worktree/capability/autonomy
    markers resolved.
-3. The core closing text (how to hand a task back to the operator when the
+3. The commit-granularity rule, when the project ships a `.dejima/corpus`
+   file - see [configuration.md](configuration.md#declaring-that-the-history-is-evidence).
+   Conditional core prose, gated the same way the GitHub-push paragraph is,
+   and absent for every project that has not declared it.
+4. The core closing text (how to hand a task back to the operator when the
    sandbox genuinely can't do it).
-4. The selected harness's fragment: how to resume this session on the host,
+5. The selected harness's fragment: how to resume this session on the host,
    and where the history it would resume from lives. Both are the harness's
    own facts rather than core's - Claude Code resumes from a bind-mounted
    `~/.claude`, Cline from a per-project state directory the command has to
