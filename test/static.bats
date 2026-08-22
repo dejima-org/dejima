@@ -484,6 +484,52 @@ _harness_declares_dir() {
 # The config directories the selected harness declares, as "path<TAB>mode<TAB>scan"
 # lines. Runs the hook rather than grepping the plugin, so these assert what a
 # launch would actually mount.
+# The seed destinations the harness declares, one per line. Against a fixture
+# HOME rather than the operator's, so the set does not depend on which plugins
+# happen to be installed on the machine running the tests - except where a test
+# says otherwise.
+_declared_seeds() {
+    local home="${1:-$PLUGIN_FIXTURE_HOME}"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME="'"$home"'"
+        harness_plugin_load claude-code
+        harness_seed_load
+        for r in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
+            printf "%s\n" "${r%%$'"'"'\t'"'"'*}"
+        done
+    '
+}
+
+# The read-only mounts the harness emits for installed plugin versions.
+_declared_plugin_mounts() {
+    local home="${1:-$PLUGIN_FIXTURE_HOME}"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME="'"$home"'"
+        harness_plugin_load claude-code
+        extra_mounts=()
+        _guarded_stores() { GUARDED_STORES=(); }
+        _plugin_version_mounts
+        printf "%s\n" ${extra_mounts[@]+"${extra_mounts[@]}"} | grep -v "^-v$"
+    '
+}
+
+# A plugin tree shaped like a real one: a marketplace, two plugins, and two
+# installed versions of one of them - which is what an update looks like
+# mid-flight, and the case the whole arrangement exists for.
+_plugin_fixture() {
+    PLUGIN_FIXTURE_HOME="$(mktemp -d "$BATS_TEST_TMPDIR/plughome.XXXXXX")"
+    local p="$PLUGIN_FIXTURE_HOME/.claude/plugins"
+    mkdir -p "$p/marketplaces/mkt" "$p/data/thing" \
+        "$p/cache/mkt/alpha/1.0.0" "$p/cache/mkt/alpha/1.1.0" "$p/cache/mkt/beta/2.0.0"
+    printf '{}\n' > "$p/installed_plugins.json"
+    printf '{}\n' > "$p/known_marketplaces.json"
+    printf '{}\n' > "$p/plugin-catalog-cache.json"
+}
+
 _declared_config_dirs() {
     bash -c '
         source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
@@ -625,17 +671,72 @@ _declared_config_dirs() {
     [ "$status" -ne 0 ] || { echo "entrypoint still names a harness path"; return 1; }
 }
 
-@test "~/.claude/hooks and plugins are mounted read-only" {
-    # Hooks run automatically with no approval gate, and plugins carry code a
-    # later unsandboxed host session loads - see docker-compose.yml's comment
-    # on these mount lines. Without them, a compromised session can unlink a
-    # hook symlink and drop a plain malicious file in its place, which the
-    # dynamic-mount logic in bin/dejima never sees (it only protects symlink
-    # targets that resolve outside ~/.claude).
+@test "~/.claude/hooks is mounted read-only" {
+    # Hooks run automatically with no approval gate - see docker-compose.yml's
+    # comment on these mount lines. Without this, a compromised session can
+    # unlink a hook symlink and drop a plain malicious file in its place,
+    # which the dynamic-mount logic in bin/dejima never sees (it only protects
+    # symlink targets that resolve outside ~/.claude).
     local dirs
     dirs="$(_declared_config_dirs)"
     grep -q "^/h/.claude/hooks"$'\t'"ro" <<< "$dirs" || { echo "$dirs"; return 1; }
-    grep -q "^/h/.claude/plugins"$'\t'"ro" <<< "$dirs" || { echo "$dirs"; return 1; }
+}
+
+@test "the plugin tree is not mounted read-only wholesale" {
+    # It was, with the rest of the directories holding something executable,
+    # and that broke plugin updates without protecting anything. Claude Code
+    # materialises a new version beside the old and rewrites its registry;
+    # read-only it can do neither, and the plugin is left at a version the
+    # catalogue no longer matches. A copy has no path to the host, which is
+    # what the read-only mount was for.
+    local dirs
+    dirs="$(_declared_config_dirs)"
+    grep -q "^/h/.claude/plugins"$'\t' <<< "$dirs" \
+        && { echo "the plugin tree is still a config-dir mount: $dirs"; return 1; }
+    return 0
+}
+
+@test "what the harness rewrites in the plugin tree is seeded writable" {
+    _plugin_fixture
+    # The registry, the catalogue and the marketplace checkout: all rewritten
+    # by Claude Code as it installs or refreshes, none of them useful to the
+    # session read-only.
+    local seeds
+    seeds="$(_declared_seeds)"
+    local rel
+    for rel in .claude/plugins/installed_plugins.json \
+               .claude/plugins/known_marketplaces.json \
+               .claude/plugins/plugin-catalog-cache.json \
+               .claude/plugins/marketplaces; do
+        grep -qx "$rel" <<< "$seeds" || { echo "$rel is not seeded: $seeds"; return 1; }
+    done
+}
+
+@test "the levels above an installed plugin version are seeded as writable directories" {
+    _plugin_fixture
+    # Docker creates a bind mount's missing parents as root, so mounting each
+    # version without this leaves the session able to read every installed one
+    # and write no new one beside them - which is the whole failure.
+    local seeds
+    seeds="$(_declared_seeds)"
+    grep -qx '.claude/plugins/cache' <<< "$seeds" \
+        || { echo "the cache root is not seeded: $seeds"; return 1; }
+    grep -qE '^\.claude/plugins/cache/[^/]+/[^/]+$' <<< "$seeds" \
+        || { echo "no per-plugin cache directory is seeded: $seeds"; return 1; }
+}
+
+@test "an installed plugin version is mounted read-only, not copied" {
+    _plugin_fixture
+    # One MCP server's node_modules is most of the tree. An update writes a
+    # NEW version directory rather than changing an existing one, which is
+    # what makes mounting these safe and copying them wasteful.
+    local mounts
+    mounts="$(_declared_plugin_mounts)"
+    [ -n "$mounts" ] || skip "no installed plugin versions on this host to assert against"
+    grep -qE ':ro$' <<< "$mounts" \
+        || { echo "a version directory is mounted writable: $mounts"; return 1; }
+    grep -qE '/\.claude/plugins/cache/[^/]+/[^/]+/[^/:]+:' <<< "$mounts" \
+        || { echo "not mounted at version granularity: $mounts"; return 1; }
 }
 
 @test "~/.claude.json is a throwaway per-session copy, not the real file mounted directly" {
@@ -2136,11 +2237,17 @@ registered_commands() {
     # fails here rather than presenting as a missing skill in a session.
     local dirs d
     dirs="$(_declared_config_dirs)"
-    for d in skills commands agents output-styles hooks plugins \
+    for d in skills commands agents output-styles hooks \
              backups tasks plans sessions; do
         grep -q "^/h/.claude/$d"$'\t' <<< "$dirs" \
             || { echo "$d is no longer declared: $dirs"; return 1; }
     done
+    # plugins/ is deliberately not among them: it is seeded as a writable copy
+    # rather than mounted, so entrypoint.sh creates it and there is no mount
+    # source for bin/dejima to pre-create.
+    grep -q "^/h/.claude/plugins"$'\t' <<< "$dirs" \
+        && { echo "plugins is a config-dir mount again: $dirs"; return 1; }
+    return 0
 }
 
 @test "bin/dejima overlays the workspace .git/hooks read-only when .git is a real dir" {
@@ -2464,8 +2571,8 @@ registered_commands() {
         grep -q "^/h/.claude/$d"$'\t'"ro"$'\t'"scan" <<< "$dirs" \
             || { echo "$d is not scanned for symlink targets: $dirs"; return 1; }
     done
-    grep -q "^/h/.claude/plugins"$'\t'"ro"$'\t'"scan" <<< "$dirs" \
-        && { echo "plugins should not be scanned: $dirs"; return 1; }
+    grep -q "^/h/.claude/plugins" <<< "$dirs" \
+        && { echo "plugins is not a config-dir mount any more: $dirs"; return 1; }
     grep -q 'mounted_scan' "$REPO_ROOT/bin/dejima"
 }
 
