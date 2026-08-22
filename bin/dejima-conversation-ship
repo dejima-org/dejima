@@ -16,6 +16,39 @@
 # Usage: dejima-conversation-ship <workspace>
 set -uo pipefail   # not -e: a torn line or a Loki hiccup must not kill the tailer
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_CONVERSATION_SHIP_HELP'
+dejima-conversation-ship - ship a session's conversation to Loki
+
+Usage: dejima-conversation-ship <workspace>
+
+Started and stopped by bin/dejima around a session. Running it by hand is only
+useful for debugging.
+
+Ships prompts, replies and tool invocations - never tool output, which is most
+of the volume and was not asked for. Runs on the host rather than in the
+container, because a log of a session that the session shares a filesystem and
+a signal namespace with is one it can silence.
+
+What that does not buy is trust in the contents. The transcript is written by
+the session, so this ships what was recorded without attesting to it.
+
+Off unless [logging] loki_url is set AND [logging] conversation is on. Both are
+required because session content is a different sensitivity class from the DNS
+and firewall logs, which ship on loki_url alone.
+
+Where the transcripts are, and how one becomes a log line, are the selected
+harness's business; the batching and the shipping are dejima's.
+
+See docs/configuration.md.
+DEJIMA_CONVERSATION_SHIP_HELP
+        exit 0 ;;
+esac
+
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
