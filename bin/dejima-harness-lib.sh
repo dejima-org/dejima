@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered harness_briefing_state_dir"
+DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered harness_briefing_state_dir harness_transcript_files"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the

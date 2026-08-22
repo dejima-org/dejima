@@ -235,3 +235,93 @@ await_shipped() {
     echo "the orphaned shipper was still polling after 30s"
     return 1
 }
+
+# --- the rewrite update model ------------------------------------------------
+#
+# Claude Code appends a line per record, so the shipper reads forward from a
+# byte offset. Cline replaces the whole file every time it writes, where an
+# offset would land in the middle of a JSON document. The manifest says which,
+# and these exercise the second path against a transcript shaped like the ones
+# Cline actually produces.
+
+CLINE_STATE=""
+
+write_cline_config() {
+    CLINE_STATE="$(mktemp -d)"
+    cat > "$CONFIG_DIR/config" <<EOF
+[core]
+harness = cline
+[logging]
+loki_url = http://127.0.0.1:$LOKI_PORT
+conversation = on
+[harness.cline]
+state_dir = $CLINE_STATE
+model = m
+EOF
+}
+
+# Where Cline's plugin looks: <state_dir>/<slug>/sessions/<id>/<id>.messages.json
+cline_session_file() {
+    local slug
+    slug="$(bash -c 'source "$1"; ws_slug "$2"' _ \
+        "$REPO_ROOT/bin/dejima-slug-lib.sh" "$WS")"
+    printf '%s/%s/sessions/sess-1/sess-1.messages.json' "$CLINE_STATE" "$slug"
+}
+
+# The whole file, rewritten, carrying $@ as successive user messages - which is
+# how Cline writes: never an append.
+cline_write() {
+    local f; f="$(cline_session_file)"
+    mkdir -p "$(dirname "$f")"
+    python3 - "$f" "$@" <<'EOF'
+import json, sys
+path, texts = sys.argv[1], sys.argv[2:]
+json.dump({"version": 1, "sessionId": "sess-1",
+           "messages": [{"role": "user", "content": [{"type": "text", "text": t}]}
+                        for t in texts]}, open(path, "w"))
+EOF
+}
+
+@test "a rewritten transcript ships only the records that are new" {
+    start_loki
+    write_cline_config
+    cline_write "first thing said"
+    start_ship
+    await_shipped "first thing said" || { echo "never arrived: $(shipped)"; return 1; }
+    # Rewritten whole, with the earlier message still in it. A byte offset
+    # would ship the tail of a JSON document; the count of records already
+    # sent is what makes this work.
+    sleep 1
+    cline_write "first thing said" "second thing said"
+    await_shipped "second thing said" || { echo "the new record never arrived: $(shipped)"; return 1; }
+    run grep -c "first thing said" "$LOKI_LOG"
+    [ "$output" -eq 1 ] || { echo "the earlier record shipped again ($output times)"; return 1; }
+}
+
+@test "a transcript that has not changed is not shipped again" {
+    start_loki
+    write_cline_config
+    cline_write "said once"
+    start_ship
+    await_shipped "said once" || { echo "never arrived: $(shipped)"; return 1; }
+    # Several poll intervals with no write at all.
+    sleep 4
+    run grep -c "said once" "$LOKI_LOG"
+    [ "$output" -eq 1 ] || { echo "an unchanged transcript was re-shipped ($output times)"; return 1; }
+}
+
+@test "a harness that cannot say where its transcripts are ships nothing" {
+    # Both hooks are required and neither is assumed. Without them the shipper
+    # exits rather than guessing at a layout - which is what it used to do,
+    # since the layout was written into it.
+    start_loki
+    write_cline_config
+    # A config naming cline but with no state_dir resolves no transcripts.
+    sed -i 's#^state_dir = .*#state_dir =#' "$CONFIG_DIR/config"
+    cline_write "should not ship"
+    "$REPO_ROOT/bin/dejima-conversation-ship" "$WS" &
+    SHIP_PID=$!
+    sleep 3
+    run grep -c "should not ship" "$LOKI_LOG"
+    [ "$output" -eq 0 ] || { echo "shipped without a resolvable layout: $(shipped)"; return 1; }
+}
