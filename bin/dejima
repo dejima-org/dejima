@@ -156,6 +156,7 @@ while [ $# -gt 0 ]; do
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
+        --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
         --extra-readonly|--ro)
