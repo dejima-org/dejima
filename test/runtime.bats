@@ -603,6 +603,70 @@ dexec_node() {
     [ "$status" -ne 0 ]
 }
 
+@test "a seeded plugin tree is writable, and a mounted version is not" {
+    # The arrangement plugin updates depend on, asserted in a real container
+    # because ownership is the whole point and only Docker produces it: it
+    # creates a bind mount's missing parents as root, so the levels above an
+    # installed version have to be seeded or the session owns nothing along
+    # the path.
+    #
+    # The failure this guards against is a plugin that will not load. Claude
+    # Code installs an update by materialising the new version beside the old,
+    # at cache/<marketplace>/<plugin>/<newversion>/, and then rewriting its
+    # registry. With the tree mounted read-only it could do neither, and the
+    # only way out was to run Claude Code on the host and restart.
+    local test_container seed ver
+    test_container="$(test_container_name seed)"
+    seed="$(mktemp -d)"
+    # A host tree shaped like a real one: bookkeeping, a marketplace checkout,
+    # and one installed version.
+    mkdir -p "$seed/state/.claude/plugins/marketplaces/mkt" \
+             "$seed/state/.claude/plugins/cache/mkt/alpha"
+    printf '{"installed":true}\n' > "$seed/state/.claude/plugins/installed_plugins.json"
+    printf 'catalog\n' > "$seed/state/.claude/plugins/marketplaces/mkt/entry"
+    mkdir -p "$seed/version"
+    printf 'shipped\n' > "$seed/version/plugin.json"
+
+    ver=/home/node/.claude/plugins/cache/mkt/alpha/1.0.0
+    docker run -d --name "$test_container" \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e SANDBOX_HARNESS_SEED=".claude/plugins/installed_plugins.json .claude/plugins/marketplaces .claude/plugins/cache .claude/plugins/cache/mkt .claude/plugins/cache/mkt/alpha" \
+        -v "$seed/state/.claude/plugins/installed_plugins.json:/etc/dejima-seed/.claude/plugins/installed_plugins.json:ro" \
+        -v "$seed/state/.claude/plugins/marketplaces:/etc/dejima-seed/.claude/plugins/marketplaces:ro" \
+        -v "$seed/version:$ver:ro" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$SESSION_IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    # The seeded copies arrived, and belong to the session.
+    run docker exec "$test_container" cat /home/node/.claude/plugins/installed_plugins.json
+    [[ "$output" == *'"installed":true'* ]] || { echo "registry not seeded: $output"; return 1; }
+    run docker exec "$test_container" cat /home/node/.claude/plugins/marketplaces/mkt/entry
+    [ "$output" = "catalog" ] || { echo "marketplace not seeded: $output"; return 1; }
+
+    # Writable, which the mount it replaced was not - this is the registry
+    # rewrite that used to fail.
+    run docker exec -u node "$test_container" \
+        bash -c 'printf "{\"installed\":false}\n" > /home/node/.claude/plugins/installed_plugins.json'
+    [ "$status" -eq 0 ] || { echo "the registry is not writable: $output"; return 1; }
+
+    # A new version can be created beside the mounted one. This is the update.
+    run docker exec -u node "$test_container" mkdir -p "$ver/../1.1.0"
+    [ "$status" -eq 0 ] || { echo "cannot install a new version: $output"; return 1; }
+
+    # And the installed version itself is still read-only, which is why it can
+    # be shared from the host at all.
+    run docker exec -u node "$test_container" bash -c "printf x > $ver/tamper"
+    [ "$status" -ne 0 ] || { echo "an installed version is writable from the session"; return 1; }
+    run docker exec "$test_container" cat "$ver/plugin.json"
+    [ "$output" = "shipped" ] || { echo "the mounted version changed: $output"; return 1; }
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
+    rm -rf "$seed"
+}
+
 @test "ALLOW_GITHUB_PUSH=1 opens port 22 to GitHub" {
     local test_container="$(test_container_name ghpush)"
     docker run -d --name "$test_container" \

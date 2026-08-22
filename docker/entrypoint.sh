@@ -217,6 +217,48 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
+# The harness's own writable state. Unlike the staged config above, these are
+# owned by the sandbox user and stay writable: they are what the harness
+# rewrites as it runs - a plugin registry, a catalogue, an install marker -
+# and a harness that cannot record what it just did is a harness that redoes
+# it, or refuses to load what it already has.
+#
+# Nothing written here reaches the host. The host's copy was mounted read-only
+# into the staging tree and read once; what the session has is a copy of it.
+# That is the whole reason this is a copy rather than a mount.
+#
+# A destination with nothing staged for it is created empty and left that way.
+# That is not a no-op: it is how a directory whose CONTENTS are bind-mounted
+# individually comes to be owned by the sandbox user. Docker creates a mount's
+# missing parents as root, so without this the session could read the mounted
+# entries and add nothing beside them - which is exactly what it needs to do
+# when the harness installs a version it did not have.
+#
+# chown is not recursive past a staged copy, and does not need to be: the
+# copied trees hold no mounts, and the directories that do hold mounts have
+# nothing staged for them, so the walk never descends into one.
+for _rel in ${SANDBOX_HARNESS_SEED:-}; do
+    case "$_rel" in
+        /*|*..*)
+            echo "entrypoint: refusing harness seed path '$_rel': it must be" >&2
+            echo "relative to the sandbox user's home and must not contain '..'." >&2
+            exit 1 ;;
+    esac
+    _dest="$SANDBOX_HOME/$_rel"
+    if [ -e "/etc/dejima-seed/$_rel" ]; then
+        mkdir -p "$(dirname "$_dest")"
+        # -T so a directory source lands AS the destination rather than
+        # inside it on a second run, and --no-preserve=ownership because the
+        # host's uid is not necessarily this container's.
+        cp -a -T --no-preserve=ownership "/etc/dejima-seed/$_rel" "$_dest" 2>/dev/null \
+            || cp -a -T "/etc/dejima-seed/$_rel" "$_dest"
+        chown -R "$SANDBOX_USER:$SANDBOX_USER" "$_dest"
+    else
+        mkdir -p "$_dest"
+        chown "$SANDBOX_USER:$SANDBOX_USER" "$_dest"
+    fi
+done
+
 # The briefing, rendered before the session starts, for a harness that is not
 # handed it by a session-start hook. Two routes and one rendering: the manifest
 # names a flag in `briefing_args` for a harness that takes the text on its
