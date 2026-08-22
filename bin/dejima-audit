@@ -8,6 +8,43 @@
 # `claude` in that repo again. See docs/security.md.
 set -uo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_AUDIT_HELP'
+dejima-audit - report what a session changed outside its workspace
+
+Usage: dejima-audit <snapshot|compare|show|ack> [workspace] [state-file]
+
+  snapshot         record the current state of everything watched
+  compare          compare against the last snapshot and file a report
+  show [--full]    index of reports waiting to be read; --full prints one
+  ack              walk a report finding by finding and record a decision
+
+  workspace defaults to the enclosing git repository, else $PWD.
+
+snapshot and compare are run by bin/dejima around a session, not usually by
+hand. show and ack are for reading what they found.
+
+What is watched is the part a container boundary cannot protect: dejima's own
+trusted code, the harness configuration a later host session would execute,
+and anything else on the host a session could have reached. A finding is
+CRITICAL when it names something that runs unsandboxed on the host.
+
+ack records a decision per finding, so an approved change stops being reported
+until the thing it approved changes again. Acknowledging is per value, not per
+path: the same file with different content is a new finding.
+
+Reports and baselines live under ~/.local/share/dejima, outside every mount, so
+a session cannot read what was concluded about it or edit what is pending.
+
+See docs/security.md.
+DEJIMA_AUDIT_HELP
+        exit 0 ;;
+esac
+
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-color-lib.sh
