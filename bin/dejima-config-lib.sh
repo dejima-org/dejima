@@ -100,6 +100,14 @@ _config_load_schema() {
     _CFG_SCHEMA_LOADED=1
 }
 
+# Loaded here, at source time, rather than on first use. Lazily is not enough:
+# nearly every caller reaches config_get through `$(...)`, and a cache filled
+# inside a command substitution dies with the subshell that filled it. The
+# first call in each of those subshells therefore re-read the table, so the
+# cache above saved nothing for exactly the callers that dominate a launch.
+# Filling it in the parent means every subshell inherits it already populated.
+_config_load_schema
+
 _config_spec() {
     _config_load_schema
     if [ -n "${_CFG_TYPE[$1]+x}" ]; then

@@ -80,6 +80,11 @@ harness_state_mounts() {
         [ -d "$history/$sid" ] || continue
         emit_mount "$history/$sid"
     done < <(workspace_session_ids "$projects" "$ws")
+
+    # Each installed plugin version, read-only. Here rather than in a hook of
+    # its own because this is the hook core calls to collect mounts, and the
+    # plugin tree is state this harness keeps on the host like the two above.
+    _plugin_version_mounts
 }
 
 # Puts dejima's guard hooks where Claude Code will find them: symlinked into
@@ -256,9 +261,95 @@ harness_config_dirs() {
     for d in backups tasks plans sessions; do
         emit_config_dir "$HOME/.claude/$d"
     done
-    emit_config_dir "$HOME/.claude/plugins" ro
+    # plugins/ is deliberately absent, and used to be here read-only. See
+    # harness_seed below: the tree is partly the operator's install and partly
+    # Claude Code's own bookkeeping, and mounting all of it read-only stopped
+    # the bookkeeping without protecting anything.
     for d in hooks skills commands agents output-styles; do
         emit_config_dir "$HOME/.claude/$d" ro scan
+    done
+}
+
+# The plugin tree: which parts of it the session may write, and why the answer
+# is not "none".
+#
+# ~/.claude/plugins was mounted read-only, with the rest of the config
+# directories that hold something executable. That was the wrong shape, and
+# the symptom was a plugin that would not load. The tree is two things at
+# once:
+#
+#   marketplaces/<name>/       the catalogue checkout, and the plugin sources
+#   cache/<name>/<plugin>/<v>/ each installed version, materialised
+#   installed_plugins.json     what is installed, and at which version
+#   known_marketplaces.json    where those came from
+#   plugin-catalog-cache.json  the catalogue, resolved
+#
+# Claude Code updates a plugin by materialising the new version alongside the
+# old, at cache/<marketplace>/<plugin>/<newversion>/, and then rewriting the
+# registry. Read-only, it can do neither: the update fails and the plugin is
+# left at a version the catalogue no longer matches, which is what "the plugin
+# does not load" turns out to mean. The only way out was to run Claude Code on
+# the host and restart the container.
+#
+# Mounting it read-only protected nothing, either. The concern for hooks/ and
+# skills/ is that a session writing them installs something the HOST will
+# execute next time. A copy has no such path: the session writes its own copy,
+# which goes away with the container.
+#
+# So: everything the harness rewrites is seeded as a writable copy, and only
+# the version directories - the bulk, and already-materialised code - stay
+# read-only mounts of the host's. That keeps the 400-odd megabytes of an
+# installed MCP server out of a per-launch copy while leaving the session able
+# to add a version beside them.
+harness_seed() {
+    local plugins="$HOME/.claude/plugins" f mkt plug ver
+
+    # Small, and all of it rewritten in place by Claude Code.
+    for f in installed_plugins.json known_marketplaces.json \
+             plugin-catalog-cache.json .last_inuse_sweep; do
+        emit_seed_from "$plugins/$f" ".claude/plugins/$f"
+    done
+    # The catalogue checkout and per-plugin data. Copied rather than mounted
+    # so a refresh in-session works; a few megabytes, against a mount that
+    # would make the refresh fail.
+    emit_seed_from "$plugins/marketplaces" ".claude/plugins/marketplaces"
+    emit_seed_from "$plugins/data" ".claude/plugins/data"
+
+    # The levels above an installed version, created empty and owned by the
+    # session. Docker makes a bind mount's missing parents root-owned, so
+    # without these the session could read every mounted version and write no
+    # new one beside them - which is the failure this whole hook is about.
+    emit_seed_dir ".claude/plugins/cache"
+    [ -d "$plugins/cache" ] || return 0
+    for mkt in "$plugins/cache"/*/; do
+        [ -d "$mkt" ] || continue
+        emit_seed_dir ".claude/plugins/cache/$(basename "$mkt")"
+        for plug in "$mkt"*/; do
+            [ -d "$plug" ] || continue
+            emit_seed_dir ".claude/plugins/cache/$(basename "$mkt")/$(basename "$plug")"
+        done
+    done
+}
+
+# Each installed plugin version, mounted read-only at its own path.
+#
+# The bulk of the tree by far - one MCP server's node_modules is most of it -
+# and none of it is rewritten: an update writes a NEW version directory rather
+# than changing an existing one, which is what makes mounting these safe and
+# copying them wasteful. harness_seed above owns the writable levels between
+# them.
+_plugin_version_mounts() {
+    local plugins="$HOME/.claude/plugins" mkt plug ver
+    [ -d "$plugins/cache" ] || return 0
+    for mkt in "$plugins/cache"/*/; do
+        [ -d "$mkt" ] || continue
+        for plug in "$mkt"*/; do
+            [ -d "$plug" ] || continue
+            for ver in "$plug"*/; do
+                [ -d "$ver" ] || continue
+                emit_mount "${ver%/}" ro
+            done
+        done
     done
 }
 

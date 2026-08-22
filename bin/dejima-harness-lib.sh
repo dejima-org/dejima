@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered"
+DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered harness_seed"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -205,8 +205,12 @@ emit_mount_at() {
     _guarded_stores
     _refuse_guarded_mount "harness state mount" "$src" \
         ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"}
+    # Resolved once, above the loop. It does not depend on $guarded, and
+    # inside the loop it was a fork per container path per mount.
+    local target_real
+    target_real="$(readlink -m "$target")"
     for guarded in $DEJIMA_CONTAINER_PATHS; do
-        if _paths_overlap "$(readlink -m "$target")" "$guarded"; then
+        if _paths_overlap "$target_real" "$guarded"; then
             echo "Refusing harness mount at $target: it overlaps $guarded," >&2
             echo "which the sandbox needs in place inside the container." >&2
             exit 1
@@ -374,6 +378,78 @@ emit_staged_config() {
 harness_staged_config_load() {
     DEJIMA_STAGED_CONFIG=()
     harness_hook harness_staged_config
+}
+
+# --- seeded state ---------------------------------------------------------
+#
+# State the harness OWNS and rewrites, carried from the host as a writable
+# container-local copy. The third tier, and the distinction from the two above
+# is what the session may do to it:
+#
+#   config dirs   - mounted. The host's copy is what the session sees, and a
+#                   read-only one is read-only because the session writing it
+#                   would be writing the host's.
+#   staged config - copied, root-owned, read-only. The session cannot write it
+#                   at all, which is the point for anything that RUNS.
+#   seeded state  - copied, owned by the session, WRITABLE. The session may
+#                   rewrite it freely, and nothing it writes reaches the host,
+#                   because the host's copy was only ever read.
+#
+# The third exists because a harness keeps bookkeeping it must be able to
+# update mid-session - a plugin registry, a catalogue, an install marker - and
+# mounting that read-only does not protect anything. The host's copy is not
+# what a session could subvert; the host's copy is what the operator's own
+# runs produce. What mounting it read-only actually did was break the harness,
+# because it could not record what it had just done.
+#
+# Same mirroring as staged config, so entrypoint.sh needs no mapping:
+# /etc/dejima-seed/<rel> is installed at $HOME/<rel>.
+DEJIMA_SEED=()
+
+# A path under $HOME the session must be able to write, with no host content
+# behind it. For a directory whose CONTENTS are mounted individually: Docker
+# creates a bind mount's missing parents as root, so without this the session
+# owns nothing along the path and cannot add an entry beside the mounted ones.
+emit_seed_dir() {
+    _emit_seed_record "$1" ""
+}
+
+# The same, seeded with a copy of a host path. The copy is the point: mounting
+# it would make the session's writes the operator's, and staging it read-only
+# would stop the harness writing at all.
+emit_seed_from() {
+    local src="$1" rel="$2"
+    [ -n "$src" ] || return 0
+    # Absent is not an error. A harness names the state it would carry if the
+    # operator had any, and a fresh install has none of it yet.
+    [ -e "$src" ] || return 0
+    _emit_seed_record "$rel" "$src"
+}
+
+_emit_seed_record() {
+    local rel="$1" src="${2:-}"
+    [ -n "$rel" ] || return 0
+    # Same refusal as staged config, for the same reason: this becomes a
+    # location under $HOME inside the container, and anything that could climb
+    # out of it is a plugin bug rather than something to normalise quietly.
+    # Spaces are refused too, because the list reaches the container as one
+    # space-separated environment variable - the homepath manifest type
+    # already forbids them, and a plugin computing one has the same duty.
+    case "$rel" in
+        /*|*..*|*[[:space:]]*|*$'\t'*|*$'\n'*)
+            echo "Harness plugin emitted an invalid seed path: $rel" >&2
+            exit 1 ;;
+    esac
+    case "$src" in
+        *:*) echo "Harness plugin emitted a seed source containing a colon: $src" >&2
+             exit 1 ;;
+    esac
+    DEJIMA_SEED+=("$rel"$'\t'"$src")
+}
+
+harness_seed_load() {
+    DEJIMA_SEED=()
+    harness_hook harness_seed
 }
 
 # --- epitaphs ------------------------------------------------------------
