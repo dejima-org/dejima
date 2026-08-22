@@ -412,6 +412,39 @@ every launch:
 | harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
 | harness | `cline` | provider-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
 
+### Harness integration maturity
+
+Both harnesses are supported, and supported means the same thing for each: a
+manifest, a plugin, tests, and the capability bar in
+[development.md](development.md) either met or declared unmet. It does not mean
+they have had the same amount of use, and the gap is wide enough to say so
+rather than let the word "supported" imply otherwise.
+
+**Claude Code is the harness dejima was built around.** Nearly every mechanism
+here - the credential proxy, the briefing, the per-project state mounts, the
+exit audit - was designed against it and generalised afterwards. It hosts all
+four guards. Its rough edges were found by running it for real work, over and
+over, which is a kind of coverage no test suite substitutes for.
+
+**Cline is new, and has barely been used.** Its integration was built
+deliberately and is tested, but a test only covers what someone thought to
+check. The first run against a live model immediately turned up a bug no test
+had: Cline silently discards a provider entry with no `updatedAt` and falls back
+to its own hosted endpoint, which presents as a connection failure to a host
+nobody configured. The first real session turned up a second, in a component
+Cline does not own at all - the conversation shipper passed its payload as a
+command-line argument, which Cline's larger tool results overflow. It hosts no
+guards, so every launch names what is not in force.
+
+Neither of those was a bad integration. That is the normal rate of discovery
+for something this new, and it is the reason to expect more.
+
+So: if you are choosing between them with no other reason to prefer one, choose
+`claude-code`. Choose `cline` for what it offers that the other does not - it
+can be pointed at any endpoint, including a model you serve yourself - and
+expect to be the person who finds the next crack.
+
+
 **The shipped defaults are deliberately the non-pushing pair**
 (`forge = none`, `workflow = local-only`). A fresh install has no forge host
 and no forge credential, so any default naming a real forge would be an
