@@ -1246,6 +1246,25 @@ for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
     extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")
 done
 
+# The harness's own writable state, seeded from the host. Mounted read-only
+# into a staging tree the same way staged config is - entrypoint.sh installs a
+# copy owned by the session user, so the harness can rewrite it and nothing it
+# writes reaches the operator's.
+#
+# The destinations travel as one space-separated list rather than being
+# rediscovered by walking the staging tree, because some of them have no
+# source: a directory whose contents are mounted individually needs to exist
+# and be owned by the session, and there is nothing to copy into it.
+harness_seed_load
+SANDBOX_HARNESS_SEED=""
+for _rec in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
+    IFS=$'\t' read -r _seedrel _seedsrc <<< "$_rec"
+    SANDBOX_HARNESS_SEED="${SANDBOX_HARNESS_SEED:+$SANDBOX_HARNESS_SEED }$_seedrel"
+    [ -n "$_seedsrc" ] || continue
+    extra_mounts+=(-v "$_seedsrc:/etc/dejima-seed/$_seedrel:ro")
+done
+export SANDBOX_HARNESS_SEED
+
 # The real Anthropic OAuth credential never enters the container: a host-side
 # proxy injects it per request (bin/dejima-anthropic-proxy, docs/security.md).
 # ~/.claude is not mounted whole, so the credential has no path into the

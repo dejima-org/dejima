@@ -231,6 +231,21 @@ first-run login, though the credential itself never enters the container
 (see [security notes](security.md) for the host-side proxy that makes
 that work).
 
+Plugins carry over in two pieces, because they are two different things. What
+Claude Code rewrites as it runs - the installed-plugin registry, the resolved
+catalogue, the marketplace checkout - is copied in as a **writable** copy, so
+the session can install or refresh a plugin without reaching your files. Each
+already-installed version under `plugins/cache/` is mounted **read-only**
+instead: it is the bulk of the tree, and an update writes a new version
+directory beside the old rather than changing it.
+
+That split is why a plugin update now works inside a session. The whole tree
+used to be mounted read-only, which meant Claude Code could neither materialise
+the new version nor record it, and the plugin was left at a version the
+catalogue no longer matched - which presents as the plugin simply not loading.
+The fix was not to make your files writable: nothing the session writes reaches
+them either way, because what it writes is a copy.
+
 `~/.claude` itself is *not* shared as a whole: its contents are enumerated
 in `docker-compose.yml`, config files are copied in rather than mounted,
 and anything not listed is container-local - writable during the session,
