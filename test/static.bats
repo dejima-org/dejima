@@ -7,7 +7,15 @@
 setup() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
+    LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
+
+# Runs one function from the provider library in a subshell, the same way
+# providers.bats does. A test that reads a manifest must go through the real
+# parser rather than grepping the file: the point of most of these is that a
+# declared value has an effect, and grep cannot tell a value from a comment
+# mentioning one.
+lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
@@ -4091,6 +4099,11 @@ _harness_proxied_domain() {
         [ -f "$f" ] || continue
         while IFS= read -r fn; do
             [ -n "$fn" ] || continue
+            # A leading underscore is the plugin's own helper, and says so.
+            # The check that matters is the near-miss - harness_state_mount
+            # for harness_state_mounts - and a name that does not even claim
+            # to be a hook cannot be one of those.
+            case "$fn" in _*) continue ;; esac
             case " $hooks " in
                 *" $fn "*) ;;
                 *) echo "$(basename "$f") defines $fn, which core never calls"; return 1 ;;
