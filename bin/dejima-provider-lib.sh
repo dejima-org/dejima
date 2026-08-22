@@ -24,7 +24,10 @@ MAX_MANIFEST_LINES=200
 # enough (see _provider_keys_field) that an external process per call is
 # real, avoidable cost; every caller already invokes this file by a path
 # containing a "/", so the two are equivalent here.
-_PROVIDER_ROOT_CACHE=""
+# Resolved once, here, for the same subshell reason as the schema loads below:
+# filling this on first use meant filling it again in every `$(...)` that
+# reached it, which was a fork apiece and hundreds of them per launch.
+_PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 provider_root() {
     if [ -n "${DEJIMA_PROVIDER_ROOT:-}" ]; then
         printf '%s' "$DEJIMA_PROVIDER_ROOT"
@@ -224,6 +227,27 @@ _manifest_load_schema() {
     _MFT_LOADED="$_MFT_LOADED$axis "
 }
 
+# Every axis, at source time, for the reason _config_load_schema is called at
+# source time: manifest_get is reached through `$(...)` almost everywhere, and
+# a cache populated in a subshell is discarded with it. There are three axes
+# and the tables are compile-time constants, so loading all of them costs one
+# pass and removes the re-read from every subshell that follows.
+_manifest_load_schema forge
+_manifest_load_schema workflow
+_manifest_load_schema harness
+
+# Every shipped provider's directory, resolved here for the same reason.
+# provider_dir does two readlinks and a containment check per call, caches the
+# result, and is then called from inside `$(manifest_get ...)` - so the cache
+# was rebuilt in each subshell and the readlinks paid again. There are a
+# handful of provider directories and the resolution cannot change during a
+# run, so doing all of them once costs a fixed few forks and removes the
+# repeat from every manifest read that follows.
+#
+# Failures are ignored: an unreadable or missing directory is not this loop's
+# to report, and provider_dir refuses it again with its own message when
+# something actually asks for it.
+
 _manifest_spec() {
     local axis="$1" want="$2"
     _manifest_load_schema "$axis"
@@ -371,6 +395,27 @@ manifest_validate() {
     _MF_STATUS[$id]=$?
     return "${_MF_STATUS[$id]}"
 }
+
+# Every shipped provider's DIRECTORY, resolved here. Same subshell reason as
+# the schema loads above: provider_dir does two readlinks and a containment
+# check per call, caches the result, and is reached from inside
+# `$(manifest_get ...)` - so each of those subshells rebuilt the cache and
+# paid the forks again. There are a handful of providers and the resolution
+# cannot change during a run.
+#
+# Deliberately NOT the manifests. Parsing those means validating every value
+# in them, and most providers are not the selected one - warming all of them
+# measured slower than leaving them alone. bin/dejima warms the three it
+# actually selected instead, once it knows which those are.
+#
+# Failures are ignored: a missing or unreadable directory is not this loop's
+# to report, and provider_dir refuses it again when something asks.
+for _axis in forge workflow harness; do
+    for _name in $(provider_list "$_axis" 2>/dev/null); do
+        provider_dir "$_axis" "$_name" >/dev/null 2>&1 || true
+    done
+done
+unset _axis _name
 
 _manifest_parse() {
     local axis="$1" name="$2" dir="$3" id="$4" file line key value type line_count

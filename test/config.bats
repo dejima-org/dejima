@@ -467,6 +467,26 @@ write_config() {
     [ "$(printf '%s\n' "$output" | wc -l)" -eq "$expected" ]
 }
 
+@test "warming the config cache does not swallow the reason it is invalid" {
+    # bin/dejima parses the config once in its own shell before anything reads
+    # a key, so the parse survives into the subshells that do the reading. That
+    # warm redirects stderr away, and the parse status is cached - so caching a
+    # FAILED warm would let the real caller return the failure with the message
+    # already discarded, refusing a config without ever saying why.
+    #
+    # Asserted on a real launch rather than on --print-config, because the warm
+    # runs before either and this is the path an operator actually takes.
+    write_config '[core]' 'firewall = maybe'
+    local workspace; workspace="$(mktemp -d)"
+    run "$REPO_ROOT/bin/dejima" "$workspace"
+    rm -rf "$workspace"
+    [ "$status" -ne 0 ] || { echo "an invalid config launched"; return 1; }
+    [[ "$output" == *"invalid value"* ]] \
+        || { echo "refused without saying why: $output"; return 1; }
+    [[ "$output" == *firewall* ]] \
+        || { echo "the refusal does not name the key: $output"; return 1; }
+}
+
 @test "--print-config refuses an invalid config rather than printing defaults" {
     write_config '[audit]' 'keep = 0'
     run "$REPO_ROOT/bin/dejima" --print-config

@@ -205,8 +205,12 @@ emit_mount_at() {
     _guarded_stores
     _refuse_guarded_mount "harness state mount" "$src" \
         ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"}
+    # Resolved once, above the loop. It does not depend on $guarded, and
+    # inside the loop it was a fork per container path per mount.
+    local target_real
+    target_real="$(readlink -m "$target")"
     for guarded in $DEJIMA_CONTAINER_PATHS; do
-        if _paths_overlap "$(readlink -m "$target")" "$guarded"; then
+        if _paths_overlap "$target_real" "$guarded"; then
             echo "Refusing harness mount at $target: it overlaps $guarded," >&2
             echo "which the sandbox needs in place inside the container." >&2
             exit 1
