@@ -487,6 +487,49 @@ write_config() {
         || { echo "the refusal does not name the key: $output"; return 1; }
 }
 
+@test "--harness selects a harness for one launch without changing the default" {
+    # A host keeps one harness as its default and reaches another when it wants
+    # to. Everything else was already in place - harnesses configure side by
+    # side under their own [harness.<name>] sections, and the image layer is
+    # keyed on the harness name so switching switches images. Only the flag was
+    # missing, which is why this is one line beside --forge and --workflow.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only' \
+                 '[harness.cline]' 'model = m'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"core.harness=claude-code"* ]] \
+        || { echo "default not in effect: $output"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --harness cline --print-config
+    [[ "$output" == *"core.harness=cline"* ]] \
+        || { echo "the flag did not select it: $output"; return 1; }
+    # And the file is unchanged - a flag is for one launch.
+    grep -q '^harness = claude-code$' "$CONFIG_DIR/config" \
+        || { echo "the flag rewrote the config file"; return 1; }
+}
+
+@test "--harness refuses a harness that does not exist" {
+    # Validated against the same provider set the config key is, so a typo
+    # fails at the flag rather than at plugin load with a worse message.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only'
+    run "$REPO_ROOT/bin/dejima" --harness not-a-harness --print-config
+    [ "$status" -ne 0 ] || { echo "an unknown harness was accepted"; return 1; }
+    [[ "$output" == *"invalid value for --harness"* ]] || { echo "$output"; return 1; }
+}
+
+@test "--harness changes what the session is actually told, not just the printed config" {
+    # The flag has to reach the composed briefing, or it would select a harness
+    # for the container while the session was briefed about a different one.
+    # Cline's fragment names its own resume command, which Claude Code's does
+    # not, so the two are distinguishable.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only' \
+                 '[harness.cline]' 'model = m'
+    run "$REPO_ROOT/bin/dejima" --print-briefing
+    [[ "$output" != *"CLINE_DATA_DIR"* ]] || { echo "default briefed as cline"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --harness cline --print-briefing
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"CLINE_DATA_DIR"* ]] \
+        || { echo "the briefing is still the default harness's: $output"; return 1; }
+}
+
 @test "--print-config refuses an invalid config rather than printing defaults" {
     write_config '[audit]' 'keep = 0'
     run "$REPO_ROOT/bin/dejima" --print-config
