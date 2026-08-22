@@ -382,6 +382,36 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
+# Resolved here, with the workspace, rather than beside the other approval
+# reads further down: --print-briefing composes and exits well before those,
+# so a briefing printed for inspection would have silently lacked whatever
+# they decide. That is not hypothetical - the same ordering already caught
+# DEJIMA_RW_MOUNTS, whose sentence went missing from --print-briefing while
+# real sessions were told correctly.
+PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+
+# Whether this project has been approved to keep its history as evidence, and
+# so gets the commit-granularity paragraph in its briefing.
+#
+# Read from the APPROVAL STORE, never from the declaration in the workspace.
+# The workspace is session-writable, so a session that could turn this on
+# would be writing the next session's system prompt - the channel #104 is
+# about, and the reason nothing on the launch path reads a project's
+# declarations directly. The project declares, the operator approves, and this
+# reads what was approved. A static test holds that this file never names that
+# directory at all, which is why it is not spelled out here. Global entries
+# count too, for an operator who wants this everywhere.
+DEJIMA_CORPUS=off
+_corpus_approved="$(approved_entries "$(config_root)" corpus | tr '\n' ' ')"
+if [ -n "$PROJECT_STORE" ]; then
+    _corpus_approved="$_corpus_approved $(approved_entries "$PROJECT_STORE" corpus | tr '\n' ' ')"
+fi
+case " $_corpus_approved " in
+    *" commit-per-step "*) DEJIMA_CORPUS=on ;;
+esac
+unset _corpus_approved
+
+
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
 SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
@@ -590,11 +620,11 @@ fi
 # session widen its own firewall for the next run. The declaration is only
 # ever reported (see hooks/sandbox-context.sh) and approved by hand.
 ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
-PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
 if [ -n "$PROJECT_STORE" ]; then
     project_domains="$(approved_entries "$PROJECT_STORE" allowed-domains | tr '\n' ' ')"
     ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
+
 
 # The approval store, and the exit-audit's own report/baseline stores, are
 # only out of the container's reach while none of them are inside the

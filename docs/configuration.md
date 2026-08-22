@@ -87,6 +87,48 @@ A project can declare what it needs in two committed files:
                            # tarball:<name>@<sha256>:<url> release archive
 ```
 
+### Declaring that the history is evidence
+
+A third file, approved the same way as the two above:
+
+```
+.dejima/corpus             # one rule per line; today, commit-per-step
+```
+
+An approved `commit-per-step` adds a paragraph to the session briefing
+requiring **one commit per plan step that writes a file**, rather than one
+commit per task, and explaining why. Absent or unapproved, nothing is added
+and nothing changes, which is the default for every project that has not asked
+for it.
+
+It goes through approval despite granting no capability, and that is
+deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
+session able to turn this on by writing a file would be writing the *next*
+session's system prompt. `bin/dejima` reads the approval store and never a
+project's declarations - a static test holds that it does not so much as name
+that directory.
+
+An unknown rule is reported but never offered for approval. One that nothing
+implements would approve cleanly, sit in the store and do nothing, which reads
+as being in force when it is not.
+
+The reason is recoverability rather than tidiness. A step is only legible
+afterwards if the file's state immediately before it and immediately after it
+can both be read back from history: before from the commit's parent, after
+from the commit. One commit carrying several steps that touch the same file
+destroys that, because no step in it can be isolated any more, and
+reconstructing one would mean building a file state the repository never held.
+Nothing recovers that later, so it has to be recorded while the work happens.
+
+It lives in the project rather than in `~/.config/dejima/config` because it is
+a fact about the repository. Anyone who clones it and runs dejima gets the same
+commit discipline, which is what makes the history uniformly usable: a rule
+half the contributors follow produces a history nothing can be taken from.
+
+What dejima does not do is say what the history is *for*. Collecting it, and
+deciding whether to, is the operator's business; the briefing states the rule
+the project already adopted and stops there.
+
 ### Tarball dependencies
 
 For a toolchain no package ecosystem ships in a version you can use - a
