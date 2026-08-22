@@ -341,9 +341,14 @@ against Anthropic through dejima's own credential proxy and the key never
 enters the container. Pointed at someone else's hosted API there is no proxy
 that could hold a key back, so the key would have to go in - which is R5
 failing, not a network restriction. The plugin therefore accepts `base_url`
-only for a literal loopback or RFC 1918 address, where an open-weight model
-served locally needs no credential at all and R5 has nothing to protect. A
-provider-generic proxy would widen this; nobody has written one.
+only for a model the operator serves themselves - a loopback or RFC 1918
+address, or a host they have allowlisted - where an open-weight model needs no
+credential at all and R5 has nothing to protect. The allowlist is what
+qualifies a name, because it is the same store deciding what the container can
+reach: an endpoint failing the check is one the session could not have
+connected to anyway, and a model server on someone's own network normally has
+a name rather than a literal address. A provider-generic proxy would widen
+this to hosted providers; nobody has written one (#171).
 
 *Conversation logging works; epitaphs do not, and only one of those is
 Cline's fault.* Cline's transcripts are

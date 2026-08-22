@@ -921,6 +921,7 @@ _cline_cfg() {
 _cline_prepare() {
     DEJIMA_CONFIG_DIR="$1" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
+        source "$2/bin/dejima-project-lib.sh"
         source "$2/bin/dejima-harness-lib.sh"
         source "$2/bin/dejima-slug-lib.sh"
         harness_plugin_load cline
@@ -989,6 +990,32 @@ _cline_prepare() {
         run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -eq 0 ] || { echo "refused $addr: $output"; return 1; }
     done
+}
+
+@test "cline accepts an endpoint the operator has allowlisted by name" {
+    # A model server on someone's own network normally has a name, not a
+    # literal address. Requiring the literal made the local-endpoint path -
+    # the reason this harness is provider-agnostic at all - unusable for the
+    # ordinary case.
+    #
+    # The name qualifies because the operator allowlisted it, which is the
+    # same store that decides what the container can reach: an endpoint that
+    # fails this is one the session could not have connected to anyway.
+    local cfg
+    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    printf 'llm.example.test\n' > "$cfg/allowed-domains"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -eq 0 ] || { echo "refused an allowlisted endpoint: $output"; return 1; }
+}
+
+@test "cline refuses a name the operator has not allowlisted" {
+    # The same endpoint without the grant. Nothing about the URL changed;
+    # what changed is whether the operator asked for it.
+    local cfg
+    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "accepted an endpoint nothing granted"; return 1; }
+    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
 }
 
 @test "cline does not mistake a hostname for the private range it starts with" {
