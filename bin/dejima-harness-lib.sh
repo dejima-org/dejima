@@ -40,7 +40,7 @@
 # The hooks core will call. A plugin defines the ones its harness needs and
 # omits the rest; anything else it defines is a name core does not call, and
 # the static test refuses it rather than letting it look wired up.
-DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered"
+DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_register_notify harness_register_guards harness_host_exec_surfaces harness_config_dirs harness_staged_config harness_extract_epitaphs harness_transform_transcript harness_guards_registered harness_briefing_state_dir harness_transcript_files"
 
 # What an operator loses when a harness cannot host a given guard. The set
 # itself is DEJIMA_KNOWN_GUARDS in dejima-provider-lib.sh, next to the
@@ -51,8 +51,14 @@ DEJIMA_HARNESS_HOOKS="harness_prepare_config harness_state_mounts harness_regist
 _guard_description() {
     case "$1" in
         bash-deny)   printf 'obviously destructive shell commands are not refused' ;;
-        push-guard)  printf 'pushes to hosts and branches outside the allowed set are not refused' ;;
-        merge-guard) printf 'the agent can merge its own pull requests' ;;
+        # push-guard and merge-guard are enforced by the PATH shadows
+        # (docker/git-guard.sh, docker/forge-guard.sh) whatever the harness
+        # declares, so what a harness adds by hosting them is the invocation
+        # the shadow cannot see: one naming the binary by a path that skips
+        # PATH. Saying "pushes are not refused" here would have been true
+        # before those existed and is not now.
+        push-guard)  printf 'a push run as /usr/bin/git, around the PATH shadow, is not refused' ;;
+        merge-guard) printf 'a merge run by full path, around the PATH shadow, is not refused' ;;
         notify)      printf 'remote access gets no waiting/done notifications' ;;
         *)           printf 'unknown guard' ;;
     esac
@@ -97,8 +103,9 @@ harness_report_guards() {
     for guard in "${missing[@]}"; do
         printf '    %s%s%s - %s\n' "$C_KEY" "$guard" "$C_RESET" "$(_guard_description "$guard")" >&2
     done
-    printf '  The container still bounds this session; these are the fast-fail\n' >&2
-    printf '  guards it does not get. See docs/development.md.\n' >&2
+    printf '  The container still bounds this session, and the push and merge\n' >&2
+    printf '  guards hold on PATH regardless; these are the fast-fail guards\n' >&2
+    printf '  this harness does not add on top. See docs/development.md.\n' >&2
 }
 
 # Sources the selected harness's plugin. Hard error when it is missing:

@@ -1,9 +1,14 @@
 #!/bin/bash
 # Epitaph: what a session leaves behind when its context dies.
 #
-# Claude Code writes a summary each time a session is compacted. It is the
-# only durable account of what a long session worked out, and it goes with
-# the container. This keeps it.
+# A harness that compacts a session writes a summary of what it is about to
+# forget. It is the only durable account of what a long session worked out,
+# and it goes with the container. This keeps it.
+#
+# Nothing here knows what a transcript looks like. The selected harness's
+# plugin answers two questions - where this workspace's transcripts are
+# (harness_transcript_files) and what a compaction looks like inside one
+# (harness_extract_epitaphs) - and everything else below is dejima's.
 #
 # Runs entirely on the host, from bin/dejima's exit trap. Nothing in the
 # container writes here and the store is never mounted, so a session cannot
@@ -16,7 +21,7 @@
 # file it came from. This preserves what was recorded, it does not attest to
 # it.
 #
-# Usage: dejima-epitaph save <workspace> [transcripts-dir]
+# Usage: dejima-epitaph save <workspace>
 set -uo pipefail
 
 # shellcheck source=dejima-provider-lib.sh
@@ -27,11 +32,10 @@ source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
 source "$(dirname "$(readlink -f "$0")")/dejima-harness-lib.sh"
 config_validate || exit 1
 
-cmd="${1:-}"; ws_arg="${2:-}"; transcripts="${3:-}"
+cmd="${1:-}"; ws_arg="${2:-}"
 
 [ "$(config_get epitaph enabled)" = "on" ] || exit 0
 STORE="$(config_get epitaph dir)"
-[ -n "$transcripts" ] || transcripts="$(harness_config_get projects_dir)"
 
 harness_plugin_load "$(config_get core harness)"
 
@@ -54,7 +58,7 @@ ws="$(cd "$ws" 2>/dev/null && pwd)" || exit 0
 
 case "$cmd" in
     save) ;;
-    *) echo "usage: dejima-epitaph save <workspace> [transcripts-dir]" >&2; exit 2 ;;
+    *) echo "usage: dejima-epitaph save <workspace>" >&2; exit 2 ;;
 esac
 
 # One file per summary, named for the moment it was written, so a directory
@@ -64,30 +68,56 @@ esac
 mkdir -p "$STORE" 2>/dev/null || exit 0
 chmod 700 "$STORE" 2>/dev/null || true
 
-saved=0
+# The slugs this workspace owns, as a set. Every key a harness hands back is
+# checked against it before it becomes a directory under the store: the key
+# decides which project's epitaphs a transcript is filed under, so a plugin
+# that computed one wrong - or a harness whose state is keyed by something a
+# session can influence - would be writing into another project's history.
+# That is the exact shape of #104, and it is core's to refuse rather than each
+# plugin's to get right.
+declare -A own_slug=()
 while IFS= read -r slug; do
     [ -n "$slug" ] || continue
-    dir="$transcripts/$slug"
-    [ -d "$dir" ] || continue
-    out="$STORE/$slug"
-    # What a compaction looks like in a transcript is the harness's, so
-    # finding one - and which of its fields describe it - is the plugin's.
-    # Everything around it is dejima's: which slugs this workspace owns, that
-    # the store is never mounted, and that a directory appears only once
-    # something has been written into it.
-    n="$(harness_hook harness_extract_epitaphs "$dir" "$out")" || n=0
+    own_slug["$slug"]=1
+done < <(workspace_slugs_sorted "$ws")
+
+saved=0
+declare -A touched=()
+# Where the transcripts are and what they are called is the harness's - the
+# plugin answers with one "<key>\t<file>" line per transcript. What a
+# compaction looks like inside one is the harness's too. Everything else here
+# is dejima's: which keys are legitimate, that the store is never mounted,
+# that a directory appears only once something has been written into it, and
+# that a harness saying nothing means nothing was kept rather than an error.
+while IFS=$'\t' read -r key f; do
+    [ -n "$key" ] && [ -n "$f" ] || continue
+    if [ -z "${own_slug[$key]+set}" ]; then
+        echo "dejima epitaph: harness returned transcript key '$key', which is not" >&2
+        echo "                a slug of this workspace. Skipped." >&2
+        continue
+    fi
+    out="$STORE/$key"
+    n="$(harness_hook harness_extract_epitaphs "$f" "$out")" || n=0
     case "$n" in
         ''|*[!0-9]*) n=0 ;;
     esac
     saved=$((saved + n))
-    # The directory is made by the first write into it, not by looking at the
-    # slug: most worktree slugs have transcripts and no compaction summary in
-    # any of them, so creating one per slug up front filled the store with
-    # empty directories and made it look like it held something for each. The
-    # rmdir clears the ones earlier runs already left; it cannot touch a slug
-    # that kept anything.
-    rmdir "$out" 2>/dev/null || true
-done < <(workspace_slugs_sorted "$ws")
+    touched["$key"]=1
+done < <(harness_hook harness_transcript_files "$ws")
+
+# The directory is made by the first write into it, not by looking at the
+# key: most worktree slugs have transcripts and no compaction summary in any
+# of them, so creating one per key up front filled the store with empty
+# directories and made it look like it held something for each. The rmdir
+# clears the ones earlier runs already left; it cannot touch a key that kept
+# anything.
+# "${!touched[@]}" plainly, with no ${...+...} guard around it: on an empty
+# associative array this expands to nothing and is safe under `set -u`, while
+# the guarded form is not even valid - bash reads the "!" inside it as
+# indirect expansion of the values rather than of the keys, and errors.
+for key in "${!touched[@]}"; do
+    rmdir "$STORE/$key" 2>/dev/null || true
+done
 
 [ "$saved" -gt 0 ] || exit 0
 echo "dejima: wrote $saved epitaph(s) to $STORE" >&2

@@ -284,7 +284,8 @@ COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
 # The briefing renderer, which every harness needs and no harness owns. Baked
 # in rather than reached through the ~/.claude/hooks mount, because that mount
 # is Claude Code's configuration: sandbox-context.sh calls this, and so does
-# entrypoint.sh, which renders the briefing before the session starts.
+# entrypoint.sh, which renders the briefing before the session starts - to
+# hand to the harness as an argument, or to write to a file it reads.
 COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/dejima-briefing-render.sh
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of

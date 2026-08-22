@@ -217,15 +217,18 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
-# The briefing, rendered before the session starts, for a harness that takes it
-# as a command-line argument rather than through a session-start hook.
+# The briefing, rendered before the session starts, for a harness that is not
+# handed it by a session-start hook. Two routes and one rendering: the manifest
+# names a flag in `briefing_args` for a harness that takes the text on its
+# command line, or a `briefing_path` for one that reads a file.
 #
-# A hook is a size-limited channel. Claude Code persists a large SessionStart
-# payload to a file and injects a short preview in its place - 9KB arrived
-# whole here, 21KB did not - and a composed briefing plus a project's own
-# .dejima.md runs well past that, so most of the briefing silently never
-# reached the session. A system prompt has no such limit, and unlike anything
-# in the conversation it cannot be compacted away later either.
+# A hook is a size-limited channel, which is why the argument route exists at
+# all. Claude Code persists a large SessionStart payload to a file and injects
+# a short preview in its place - 9KB arrived whole here, 21KB did not - and a
+# composed briefing plus a project's own .dejima.md runs well past that, so
+# most of the briefing silently never reached the session. A system prompt has
+# no such limit, and unlike anything in the conversation it cannot be compacted
+# away later either.
 #
 # Rendered here rather than composed here. The text is composed host-side and
 # mounted read-only at DEJIMA_BRIEFING_FILE; what is added is only what the
@@ -233,11 +236,13 @@ fi
 # project declares it needs and what this image has, and the project's
 # .dejima.md. That is the same code the hook runs, for the same reason.
 #
-# A failure is fatal rather than skipped: a session that does not know it is
-# sandboxed is the one thing the briefing exists to prevent, and starting one
-# silently is worse than not starting it.
+# Root-owned and read-only, like the staged config above: a session that could
+# write this would be writing its own next briefing. A failure is fatal rather
+# than skipped - a session that does not know it is sandboxed is the one thing
+# the briefing exists to prevent, and starting one silently is worse than not
+# starting it.
 DEJIMA_BRIEFING_RENDERED=/etc/dejima/briefing-rendered
-if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
+if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ] || [ -n "${SANDBOX_HARNESS_BRIEFING_PATH:-}" ]; then
     mkdir -p /etc/dejima
     # Written and renamed, so a harness starting while this is written reads
     # either the whole briefing or no file at all.
@@ -251,11 +256,33 @@ if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
     chown root:root "$DEJIMA_BRIEFING_RENDERED.part"
     chmod 444 "$DEJIMA_BRIEFING_RENDERED.part"
     mv "$DEJIMA_BRIEFING_RENDERED.part" "$DEJIMA_BRIEFING_RENDERED"
-    # dejima-harness-wrapper reads the file and passes it with the flag the
-    # manifest names, so every invocation of the harness carries the briefing
-    # and not only the entrypoint's. The hook reads the second one and reduces
-    # itself to the session id, which is the one thing this cannot carry -
-    # the harness has not started here, so the id does not exist yet.
+fi
+
+# The file route. `briefing_path` is relative to the sandbox user's home.
+if [ -n "${SANDBOX_HARNESS_BRIEFING_PATH:-}" ]; then
+    # Already validated as a homepath in the manifest. Checked again because
+    # this is where it becomes a path, and the manifest is data that core is
+    # supposed to be the one enforcing against.
+    case "$SANDBOX_HARNESS_BRIEFING_PATH" in
+        /*|*..*)
+            echo "entrypoint: refusing harness briefing path '$SANDBOX_HARNESS_BRIEFING_PATH':" >&2
+            echo "it must be relative to the sandbox user's home and must not contain '..'." >&2
+            exit 1 ;;
+    esac
+    briefing_dest="$SANDBOX_HOME/$SANDBOX_HARNESS_BRIEFING_PATH"
+    mkdir -p "$(dirname "$briefing_dest")"
+    cp "$DEJIMA_BRIEFING_RENDERED" "$briefing_dest.part"
+    chown root:root "$briefing_dest.part"
+    chmod 444 "$briefing_dest.part"
+    mv "$briefing_dest.part" "$briefing_dest"
+fi
+
+# The argument route. dejima-harness-wrapper reads the file and passes it with
+# the flag the manifest names, so every invocation of the harness carries the
+# briefing and not only the entrypoint's. The hook reads the second variable
+# and reduces itself to the session id, which is the one thing this cannot
+# carry - the harness has not started here, so the id does not exist yet.
+if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
     export DEJIMA_BRIEFING_RENDERED
     export DEJIMA_BRIEFING_VIA_ARGS=1
 fi

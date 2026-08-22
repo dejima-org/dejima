@@ -21,6 +21,12 @@ list_scripts() {
         ls forges/*/bin/* 2>/dev/null || true
     } | sort -u | while read -r f; do
         [ -f "$f" ] || continue
+        # Harness plugins are sourced, not executed, so they carry no shebang
+        # and the discovery below would drop them - silently, which is the
+        # worst version of that. They are in the trusted computing base, so
+        # they are included by name and the -s bash below tells shellcheck
+        # what they are.
+        case "$f" in bin/harness/*.sh) printf '%s\n' "$f"; continue ;; esac
         head -1 "$f" | grep -qE '^#!.*(bash|sh)' && printf '%s\n' "$f"
     done
 }
@@ -37,4 +43,4 @@ cd "$root"
 # -S warning: info and style are largely taste, and a check whose output gets
 # skimmed is not a check. Severities and the disabled classes are in
 # .shellcheckrc, beside the reasoning for each.
-exec shellcheck -S warning "${scripts[@]}"
+exec shellcheck -S warning -s bash "${scripts[@]}"

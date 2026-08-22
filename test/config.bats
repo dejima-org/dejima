@@ -1655,7 +1655,11 @@ _epitaph_fixture() {
     EPI_WS="$(mktemp -d)"; git -C "$EPI_WS" init -q
     EPI_SLUG="$(printf '%s' "$EPI_WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$EPI_TR/$EPI_SLUG"
-    write_config '[epitaph]' "dir = $EPI_STORE"
+    # The transcripts directory reaches the tool through the harness's own
+    # config key now, not as an argument: where transcripts live is the
+    # harness's, and dejima-epitaph no longer knows the shape of it.
+    write_config '[epitaph]' "dir = $EPI_STORE" \
+        '[harness.claude-code]' "projects_dir = $EPI_TR"
 }
 
 # One compact_boundary carrying the metadata, then the summary itself.
@@ -1670,7 +1674,7 @@ _epitaph_transcript() {
 @test "an epitaph is written out of the container's reach" {
     _epitaph_fixture
     _epitaph_transcript s1 "the thing this session worked out"
-    run "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR"
+    run "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local saved; saved="$(find "$EPI_STORE" -name '*.md')"
     [ -n "$saved" ]
@@ -1685,8 +1689,8 @@ _epitaph_transcript() {
     # epitaphs an earlier run already wrote.
     _epitaph_fixture
     _epitaph_transcript s1 "once only"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 1 ]
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
@@ -1697,7 +1701,7 @@ _epitaph_transcript() {
     mkdir -p "$EPI_TR/-some-other-project"
     printf '{"type":"user","isCompactSummary":true,"uuid":"cccc","sessionId":"s-2","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"theirs"}}\n' \
         > "$EPI_TR/-some-other-project/s2.jsonl"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     run grep -rl 'theirs' "$EPI_STORE"
     [ "$status" -ne 0 ] || { echo "collected another project's summary"; return 1; }
     grep -rq 'mine' "$EPI_STORE"
@@ -1708,7 +1712,7 @@ _epitaph_transcript() {
     _epitaph_fixture
     write_config '[epitaph]' "dir = $EPI_STORE" 'enabled = off'
     _epitaph_transcript s1 "should not be kept"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ -z "$(find "$EPI_STORE" -name '*.md' 2>/dev/null)" ]
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
@@ -1730,7 +1734,7 @@ _epitaph_transcript() {
         > "$EPI_TR/$wt_slug/s2.jsonl"
     # A directory an earlier run already left behind goes too.
     mkdir -p "$EPI_STORE/$wt_slug"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ ! -d "$EPI_STORE/$wt_slug" ] \
         || { echo "empty directory left for $wt_slug"; return 1; }
     [ -n "$(find "$EPI_STORE/$EPI_SLUG" -name '*.md' 2>/dev/null)" ] \
@@ -1841,7 +1845,15 @@ _epitaph_transcript() {
     DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
     [[ "$output" == *"does not support 2 of dejima's guards"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"push-guard"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"merge the agent"* || "$output" == *"merge its own pull requests"* ]] \
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    # What is lost has to be what is actually lost. Since the push and merge
+    # guards became PATH shadows they hold whatever the harness declares, so
+    # a message saying pushes are not refused would send an operator looking
+    # for a hole that is not there. What a harness adds by hosting them is
+    # the invocation the shadow cannot see.
+    [[ "$output" == *"PATH shadow"* ]] \
+        || { echo "the message overstates what an undeclared guard costs:"; echo "$output"; return 1; }
+    [[ "$output" != *"pushes to hosts and branches outside the allowed set are not refused"* ]] \
         || { echo "$output"; return 1; }
     rm -rf "$workspace" "$proot"
 }
