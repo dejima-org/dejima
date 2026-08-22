@@ -224,3 +224,60 @@ harness_state_mounts() {
     mkdir -p "$dir" || return 0
     emit_mount_at "$dir" "$HOME/.cline/data"
 }
+
+# Where this workspace's transcripts are, and which store key each belongs
+# under. One "<key>\t<path>" line per file.
+#
+# Nothing like Claude Code's layout, which is the point of the hook. There is
+# no slug nesting to walk here: the data directory is already this workspace's
+# (see _cline_state_dir above), so the key is simply that workspace's own slug
+# and every session under it belongs to this project by construction. The
+# files are <data>/sessions/<session-id>/<session-id>.messages.json - one JSON
+# document per session, keyed by an id Cline mints at run time.
+#
+# The .messages.json sibling rather than the <id>.json beside it: the latter is
+# session metadata (pid, exit code, model), the former is the conversation.
+harness_transcript_files() {
+    local ws="$1" dir key f
+    dir="$(_cline_state_dir "$ws")" || return 0
+    key="$(ws_slug "$ws")"
+    for f in "$dir"/sessions/*/*.messages.json; do
+        [ -f "$f" ] || continue
+        printf '%s\t%s\n' "$key" "$f"
+    done
+}
+
+# Transcript in, conversation log lines out. Reads stdin, writes stdout.
+#
+# Ships prompts, assistant text, and tool *invocations* (name and input) -
+# never tool results or the system prompt. Same policy as Claude Code's, and
+# the content blocks turn out to be the same shape too (`text`, `tool_use`
+# with id/name/input, `tool_result`), so this differs from that one only in
+# the envelope: one JSON object with a `messages` array, rather than a line
+# per record.
+#
+# That envelope is why the manifest says `transcript_update = rewrite`. Cline
+# replaces the whole file each time it writes, so there are no complete lines
+# to consume incrementally and a byte offset into it would land mid-document.
+#
+# A user message arrives wrapped by Cline as <user_input mode="act">...</...>.
+# It is left exactly as written: the wrapper is what the model was actually
+# sent, and unwrapping it here would make the log disagree with the session.
+harness_transform_transcript() {
+    jq -c '
+        def clip(n): if length > n then .[:n] + "...[truncated]" else . end;
+        .sessionId as $s
+        | .messages[]?
+        | .role as $r
+        | .content
+        | if type == "array" then .[] else {type: "text", text: (. | tostring)} end
+        | if .type == "text" then
+            (.text // "")
+            | select(length > 0)
+            | {session: $s, role: $r, text: clip(16000)}
+          elif .type == "tool_use" then
+            {session: $s, role: "tool", tool: .name, input: (.input | tojson | clip(2000))}
+          else empty
+          end
+    ' 2>/dev/null
+}

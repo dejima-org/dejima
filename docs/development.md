@@ -345,17 +345,26 @@ only for a literal loopback or RFC 1918 address, where an open-weight model
 served locally needs no credential at all and R5 has nothing to protect. A
 provider-generic proxy would widen this; nobody has written one.
 
-*What is not integrated, and why.* Epitaphs and conversation logging are both
-absent, and the blocker is dejima's rather than Cline's: `bin/dejima-epitaph`
-and `bin/dejima-conversation-ship` both find transcripts by asking for the
-`projects_dir` key and walking `<dir>/<slug>/*.jsonl`, which is Claude Code's
-layout written into core. Cline's is `<data>/sessions/<id>/<id>.messages.json`
-- one JSON object rewritten in place, not appended lines, and already
-per-project because the data directory is. Both tools no-op cleanly for a
-harness that defines neither hook, so nothing misreports; making them work
-means giving core a way to ask a harness where its transcripts are and how
-they are enumerated, which is a change to those two tools and not to this
-harness.
+*Conversation logging works; epitaphs do not, and only one of those is
+Cline's fault.* Cline's transcripts are
+`<data>/sessions/<id>/<id>.messages.json` - one JSON document rewritten in
+place, not appended lines, and already per-project because the data directory
+is. Nothing about that fitted the two tools, which found transcripts by asking
+for a `projects_dir` key and walking `<dir>/<slug>/*.jsonl`; both now ask the
+harness instead, and the shipper knows the two update models rather than
+assuming the appending one. Its content blocks turn out to be Claude Code's
+shape (`text`, `tool_use` with id/name/input, `tool_result`), so the transform
+differs only in the envelope, and the same policy holds: prompts, assistant
+text and tool invocations, never tool results.
+
+Epitaphs stay absent because **no Cline compaction has been observed**. It has
+a `--compaction agentic|basic|off` flag, so summaries presumably exist in some
+form, but what one looks like in a `.messages.json` has not been seen - and a
+guess would produce a store that either silently keeps nothing or keeps the
+wrong record under dejima's promise that the artefact is what the session
+wrote. The hook is simply not defined, which `dejima-epitaph` treats as
+"nothing was kept" rather than as an error. Whoever sees a real compaction
+first should write it down.
 
 ### Where a harness's support lives: three tiers
 
@@ -462,8 +471,10 @@ harness-specific path resolving to nothing is the honest answer.
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
 | Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). In the plugin | `bin/harness/claude-code.sh` |
-| Transcript format | the transform from transcript lines to log lines. In the plugin; the shipping, batching and Loki labels stay core's | `bin/harness/claude-code.sh` |
-| Compaction format | what a compaction looks like in a transcript. In the plugin; the store, its modes and the provenance note stay core's | `bin/harness/claude-code.sh` |
+| Transcript discovery | where this workspace's transcripts are, what they are called and how they are nested. `harness_transcript_files` in the plugin, answering one `<key>\t<path>` line per file; core takes the key as the store it files under and refuses one that is not a slug this workspace owns. Both `dejima-epitaph` and `dejima-conversation-ship` used to carry Claude Code's layout directly | `bin/harness/<name>.sh`, `bin/dejima-epitaph`, `bin/dejima-conversation-ship` |
+| Transcript update model | whether a transcript is appended to or replaced wholesale. The manifest's `transcript_update`; the shipper implements both and neither is guessed | `harnesses/<name>/harness.conf` |
+| Transcript format | the transform from transcript bytes to log lines. In the plugin; the discovery, shipping, batching and Loki labels stay core's | `bin/harness/<name>.sh` |
+| Compaction format | what a compaction looks like in a transcript, given one file at a time. In the plugin; the store, which keys are legitimate, its modes and the provenance note stay core's | `bin/harness/<name>.sh` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
 | Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
 

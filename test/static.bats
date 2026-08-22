@@ -4414,14 +4414,69 @@ _harness_proxied_domain() {
     [ "$output" -eq 0 ] || { echo "a plugin phrases the provenance note itself"; return 1; }
 }
 
-@test "conversation shipping resolves transcripts by slug, not by matching a prefix" {
+@test "transcripts are resolved by slug, not by matching a prefix" {
     # A "<slug>-*" glob picks up this workspace's worktrees and also a
     # SIBLING project whose directory name merely extends its own (#105).
     # Every project's directory is present on the host, so nothing else
     # would catch the neighbour's conversation being shipped.
-    grep -q 'workspace_slugs_sorted "$ws"' "$REPO_ROOT/bin/dejima-conversation-ship"
-    run grep -nE '\$key-\*|\$\{key\}-\*' "$REPO_ROOT/bin/dejima-conversation-ship"
-    [ "$status" -ne 0 ] || { echo "prefix matching is back:"; echo "$output"; return 1; }
+    #
+    # In the plugin now rather than in the shipper, because which directories
+    # hold transcripts is the harness's answer - but the property is the same
+    # one and has to keep holding wherever it lives.
+    grep -q 'workspace_slugs_sorted "$ws"' "$REPO_ROOT/bin/harness/claude-code.sh"
+    local f
+    for f in bin/dejima-conversation-ship bin/harness/claude-code.sh; do
+        run grep -nE '\$slug-\*|\$\{slug\}-\*|\$key-\*' "$REPO_ROOT/$f"
+        [ "$status" -ne 0 ] || { echo "prefix matching is back in $f:"; echo "$output"; return 1; }
+    done
+}
+
+@test "neither transcript tool knows a harness's directory layout" {
+    # The decoupling itself. Where transcripts are, what they are called and
+    # how they are nested are all the harness's; a second harness keys its
+    # transcripts by session id under a per-project directory and shares none
+    # of Claude Code's shape. What the two tools keep is the store, the
+    # batching, the Loki push and the slug rule.
+    local f pat
+    for f in bin/dejima-epitaph bin/dejima-conversation-ship; do
+        for pat in 'projects_dir' '\.jsonl' 'messages\.json' '/sessions/'; do
+            run grep -nE "$pat" "$REPO_ROOT/$f"
+            [ "$status" -ne 0 ] \
+                || { echo "$f still knows a harness layout ($pat):"; echo "$output"; return 1; }
+        done
+    done
+    # And each tool asks for it instead.
+    grep -q 'harness_transcript_files' "$REPO_ROOT/bin/dejima-epitaph"
+    grep -q 'harness_transcript_files' "$REPO_ROOT/bin/dejima-conversation-ship"
+}
+
+@test "a transcript key that is not this workspace's slug is refused" {
+    # The key decides which project's epitaphs a transcript is filed under, so
+    # a plugin that computed one wrong would write into another project's
+    # history - the shape of #104. Core checks rather than trusting, which is
+    # the rule the whole plugin interface is built on.
+    #
+    # Asserted on the source: driving it needs a plugin that returns a bad key,
+    # and the only way to load one is to add a file under bin/harness/, which
+    # would be a real harness as far as every other test is concerned.
+    grep -q 'own_slug' "$REPO_ROOT/bin/dejima-epitaph"
+    grep -q 'a slug of this workspace' "$REPO_ROOT/bin/dejima-epitaph"
+}
+
+@test "the two transcript update models are declared, not sniffed" {
+    # Append semantics against a rewritten file ship the middle of a JSON
+    # document. Getting it wrong is not subtle, so it is a manifest value
+    # rather than something guessed from the bytes at runtime.
+    run bash -c 'source "$1"; _manifest_table harness' _ "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [[ "$output" == *"transcript_update"* ]] || { echo "no such manifest key"; return 1; }
+    grep -q 'MODE=' "$REPO_ROOT/bin/dejima-conversation-ship"
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        run lib manifest_get harness "$name" transcript_update
+        [[ "$output" == "append" || "$output" == "rewrite" ]] \
+            || { echo "$name declares transcript_update='$output'"; return 1; }
+    done < <(lib provider_list harness)
 }
 
 @test "the container's log shipper reads nothing the session writes" {

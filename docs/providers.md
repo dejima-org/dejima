@@ -230,6 +230,7 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
 | `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. Substitution is not recursive and the `template` type has no `=`, so a resume command that needs a second placeholder or an environment variable goes in the harness's briefing fragment instead, where both resolve. |
+| `transcript_update` | `enum:append\|rewrite` | `append` | How this harness's transcript files change, which decides how they can be read incrementally. `append` means the file only grows, one record per line, so the conversation shipper reads forward from a byte offset and consumes only whole lines. `rewrite` means the file is replaced wholesale, where an offset would land in the middle of a document - it is re-read when it changes and the records already shipped are skipped by count. Declared rather than sniffed, because append semantics against a rewritten file ship garbage. |
 | `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
 
 Worked example, `harnesses/claude-code/harness.conf`:

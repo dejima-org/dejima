@@ -176,6 +176,7 @@ no_confirm_args	?args
 settings_args	?args
 keys	?list:keyspec
 resume_command	?template
+transcript_update	enum:append|rewrite	append
 briefing	?relpath
 EOF
             ;;
