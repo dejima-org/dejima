@@ -10,13 +10,12 @@
 # mounts; executing it would make a typo a shell injection and would put the
 # config on the same footing as code.
 #
-# Every read validates the WHOLE file, not just the requested key - the same
-# stance the old remote.conf accessor took before this replaced it. A config
+# Every read validates the WHOLE file, not just the requested key. A config
 # that does not parse means the operator got something wrong, and the alternative to
 # refusing is launching a sandbox configured differently from what they
-# believe they configured. A launch performs on the order of thirty reads and
-# so re-parses thirty times; the file is tens of lines, and the cost buys the
-# property that no read can succeed against a file another read would reject.
+# believe they configured. The file is parsed once per process and every read
+# is answered from that parse, so a launch's thirty-odd reads cost one pass
+# and no read can succeed against a file another read would reject.
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -42,7 +41,7 @@ _config_table() {
 core.harness	provider:harness
 core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
-core.command	identifier	claude
+core.command	?identifier
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
@@ -152,8 +151,6 @@ _config_keys() {
     _config_extra_keys
 }
 
-# Moved here from dejima-project-lib.sh so this file has no dependencies and
-# can be the layer that one sources, rather than the other way round.
 config_root() {
     printf '%s' "${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}"
 }
@@ -163,18 +160,85 @@ config_path() {
 }
 
 # ---------------------------------------------------------------------------
+# Dependency specs
+#
+# Here rather than in dejima-project-lib.sh so this base layer sources
+# nothing, and so dejima-provider-lib.sh - which validates manifests and sits
+# below project-lib - can reach them. A harness declares what installs it as
+# one of these, and it is the same grammar an operator's approved dependency
+# goes through, checked by the same function.
+# ---------------------------------------------------------------------------
+
+# <ecosystem>:<name>. The character class is deliberately narrow: an
+# approved spec gets interpolated into a generated Dockerfile RUN line, so
+# anything shell-active here would be a root-context injection at build.
+# The name must start with an alphanumeric - without that, a leading dash
+# (e.g. "--allow-unauthenticated") validates as a name and lands in the
+# generated RUN line as an option instead, quietly weakening apt/pip/npm/
+# cargo's own signature/lockfile checks.
+valid_dep_spec() {
+    [[ "$1" =~ ^(apt|pip|cargo):[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] && return 0
+    # npm additionally allows a leading @scope/ and a trailing @version, which
+    # between them cover most of the registry. Neither `@` nor `/` is
+    # shell-active, so this widens what may be named without widening what a
+    # RUN line can be made to do.
+    [[ "$1" =~ ^npm:(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]] && return 0
+    valid_tarball_spec "$1"
+}
+
+# tarball:<name>@<sha256>:<url> - a release archive unpacked into the image,
+# for a toolchain no package ecosystem ships in a usable version.
+#
+# The digest is mandatory and is what makes this an approval at all. Without
+# it the operator would be approving a *name* whose contents the other end can
+# change afterwards, which is not a decision anyone can make once; with it,
+# what was approved is a specific archive and nothing else can take its place.
+# The generated build verifies it before unpacking, not after.
+#
+# The character classes are narrower than the URL grammar allows, for the same
+# reason as above: this string is interpolated into a Dockerfile RUN line that
+# runs as root. Everything shell-active is excluded rather than quoted around
+# - no $, backtick, quote, backslash, whitespace, or ;|&<>() - so there is no
+# quoting to get wrong later. https only: the digest already provides
+# integrity, but there is no reason to also accept a plaintext fetch.
+DEJIMA_MAX_TARBALL_URL=512
+valid_tarball_spec() {
+    local spec="$1" rest name sha url
+    [[ "$spec" == tarball:* ]] || return 1
+    rest="${spec#tarball:}"
+
+    name="${rest%%@*}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    # Becomes a directory under /opt/dejima; a name that walks out of it, or
+    # that is a relative-path token, is not a name.
+    case "$name" in .|..) return 1 ;; esac
+
+    rest="${rest#"$name"}"
+    [[ "$rest" == @* ]] || return 1
+    rest="${rest#@}"
+
+    sha="${rest%%:*}"
+    [[ "$sha" =~ ^[a-f0-9]{64}$ ]] || return 1
+
+    url="${rest#"$sha"}"
+    [[ "$url" == :* ]] || return 1
+    url="${url#:}"
+    [ ${#url} -le "$DEJIMA_MAX_TARBALL_URL" ] || return 1
+    [[ "$url" =~ ^https://[A-Za-z0-9._~/?=+%-]+$ ]] || return 1
+}
+
+
+# ---------------------------------------------------------------------------
 # Value validation
 #
-# Deliberately narrow, for the same reason the old remote.conf validator was:
-# these values reach a dnsmasq server= line, a curl -H header, a docker -v argument
+# Deliberately narrow: these values reach a dnsmasq server= line, a curl -H header, a docker -v argument
 # and a URL handed to a phone. Anything shell-active, any whitespace, and
 # anything that could split a header must not survive validation.
 # ---------------------------------------------------------------------------
 
-# Moved here from dejima-project-lib.sh, unchanged: a declared domain has to
-# survive being written into a dnsmasq server=/domain/ line. Defining it here
-# rather than in both files keeps one definition, which is what stops the two
-# drifting apart.
+# A declared domain has to survive being written into a dnsmasq
+# server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
+# there is one definition and no pair of them to drift apart.
 valid_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
 }
@@ -243,6 +307,8 @@ _config_valid_value() {
             case "$value" in
                 *:*|*$'\n'*) return 1 ;;
             esac
+            # A literal tilde is what is being matched, not expanded.
+            # shellcheck disable=SC2088
             [[ "$value" == /* || "$value" == "~/"* || "$value" == "~" ]]
             ;;
         list:*)
@@ -262,8 +328,8 @@ _config_valid_value() {
             valid_domain "$value"
             ;;
         url)
-            # The same character set the old remote.conf validator used, plus a
-            # required http(s) scheme. Deliberately narrower than RFC 3986: these values
+            # A restricted character set plus a required http(s) scheme.
+            # Deliberately narrower than RFC 3986: these values
             # reach a curl -H header, an nginx comparison, a firewall
             # allowlist and prose an agent reads, so ";", "&", "$", backticks
             # and parentheses must not survive even though a URL may legally
@@ -324,11 +390,10 @@ _config_trim() {
 
 # The same trim, in place, into the named variable. Identical semantics; the
 # difference is that it costs nothing. `$(_config_trim ...)` forks a subshell
-# per call, and the parser calls it twice per line - so on a thirty-line
-# config that was sixty forks per pass, and the file used to be walked twice
-# for every single config_get. printf -v is a builtin, so this forks not at
-# all. _config_trim is kept because it is a published shape other scripts and
-# tests call.
+# per call and the parser calls it twice per line, which is sixty forks per
+# pass over a thirty-line config. printf -v is a builtin, so this forks not
+# at all. _config_trim is kept because it is a published shape other scripts
+# and tests call.
 _config_trim_into() {
     local _s="${2-}"
     _s="${_s#"${_s%%[![:space:]]*}"}"
@@ -339,13 +404,13 @@ _config_trim_into() {
 # Validates the whole file. Returns 1 and explains the FIRST problem found -
 # reporting one actionable line beats a list the operator has to read
 # bottom-up.
-# Parsed once per process, into _CFG_VAL/_CFG_SEEN. Every read used to walk
-# the whole file twice - once to validate it and once to find the key - so a
-# launch's ~30 reads meant ~60 passes over the same unchanged bytes, each
-# forking twice per line. Parsing once preserves the property the header
-# describes exactly: every read still sees a fully validated file, and no read
-# can succeed against a file another read would reject, because within a
-# process there is now only one parse for them all to agree with.
+# Parsed once per process, into _CFG_VAL/_CFG_SEEN. A read that walked the
+# file itself would validate it and then search it - two passes over the same
+# unchanged bytes per read, forking twice per line, against a launch's ~30
+# reads. Parsing once preserves the property the header describes: every read
+# sees a fully validated file, and no read can succeed against a file another
+# read would reject, because within a process there is one parse for them all
+# to agree with.
 #
 # Keyed on the config path so a test that repoints DEJIMA_CONFIG_DIR mid-
 # process re-parses rather than answering from the previous file's cache.

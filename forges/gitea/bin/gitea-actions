@@ -33,9 +33,11 @@ function usage() {
     echo "       gitea-actions jobs [RUN]"
     echo "       gitea-actions logs [RUN] [--job NAME|INDEX] [--all] [--timestamps]"
     echo ""
-    echo "RUN is the number in a run's web URL (.../actions/runs/52). Left out,"
-    echo "it means the newest run for HEAD's commit - after a push, that is"
-    echo "almost always the one being asked about."
+    echo "RUN is either number a run has: the one 'runs' lists, or the one in"
+    echo "its web URL (.../actions/runs/11387). They are different numbers on"
+    echo "any instance that has run more than one workflow. Left out, RUN means"
+    echo "the newest run for HEAD's commit - after a push, that is almost"
+    echo "always the one being asked about."
     echo ""
     echo "'logs' prints the failed jobs of a run; --all prints every job, and"
     echo "--job picks one by name (a substring is enough) or by index."
@@ -98,6 +100,33 @@ function api_or_die() {
     fi
 }
 
+# Gitea paginates its list endpoints, and a caller that reads one page is
+# correct only while the list is short. Duplicated from gitea-pr rather than
+# shared, for the reason gitea-issue's header gives: these are self-contained
+# files copied into the image, and a library would be a third thing to keep in
+# step. Sets `json` to the concatenation of every page.
+#
+# Pages are followed until one comes back short. PAGE_MAX bounds the loop
+# rather than trusting that, since this runs unattended.
+PAGE_LIMIT=100
+PAGE_MAX=40
+function api_all_pages() {
+    local what="$1" url="$2" sep page=1 count acc='[]'
+    case "$url" in *\?*) sep='&' ;; *) sep='?' ;; esac
+    while [ "$page" -le "$PAGE_MAX" ]; do
+        api_or_die "$what" "${url}${sep}limit=${PAGE_LIMIT}&page=${page}"
+        count=$(echo "$json" | jq 'if type == "array" then length else 0 end')
+        acc=$(jq -n --argjson a "$acc" --argjson b "$json" \
+            '$a + (if ($b | type) == "array" then $b else [] end)')
+        [ "$count" -eq "$PAGE_LIMIT" ] || break
+        page=$((page + 1))
+    done
+    if [ "$page" -gt "$PAGE_MAX" ]; then
+        echo "warning: stopped reading $what after $PAGE_MAX pages - some may be missing" >&2
+    fi
+    json="$acc"
+}
+
 function gitea_owner_repo() {
     local remote_url host owner_repo
     remote_url=$(git remote get-url origin 2>/dev/null) || {
@@ -123,33 +152,55 @@ function fetch_tasks() {
     tasks_json="$json"
 }
 
-# Sets `run_number` and `run_sha`. With no number, HEAD's commit: a run list
-# is not what someone who just pushed is asking for. Matched on head_sha
-# rather than on branch because a pull_request run reports no branch at all -
-# its ref is refs/pull/N/head.
+# Sets `run_number`, `run_web_id` and `run_sha`. With no number, HEAD's
+# commit: a run list is not what someone who just pushed is asking for.
+# Matched on head_sha rather than on branch because a pull_request run reports
+# no branch at all - its ref is refs/pull/N/head.
+#
+# A run has TWO numbers and they are not interchangeable. `run_number` is the
+# per-workflow counter this tool lists and the web UI shows (225). The URLs -
+# a commit status's target_url, and the log endpoint - carry a different,
+# repo-wide index (11387), which is the number in a run's web address and the
+# only one those paths answer to. They started out equal on a fresh instance
+# and drift apart for good the first time a second workflow runs, which is why
+# filtering statuses by run_number silently matched nothing here: every job of
+# every run was discarded, and `jobs` reported a run with no jobs at all.
+#
+# Both are accepted as $1, because this tool has printed one and its own usage
+# has described the other. run_number wins a tie: it is the smaller space, so
+# an argument that is both is far likelier to be the one the list just showed.
 function resolve_run() {
-    local want="${1:-}" sha
+    local want="${1:-}" sha entry
     fetch_tasks
     if [ -n "$want" ]; then
-        run_sha=$(echo "$tasks_json" | jq -r --argjson n "$want" \
-            'first(.workflow_runs[] | select(.run_number == $n) | .head_sha) // empty')
-        if [ -z "$run_sha" ]; then
-            echo "No run numbered $want in the last $TASK_SCAN job records (see 'gitea-actions runs')" >&2
+        entry=$(echo "$tasks_json" | jq -c --arg w "$want" '
+            [.workflow_runs[] | select((.run_number | tostring) == $w)] as $bynum
+            | [.workflow_runs[] | select((.url | split("/") | last) == $w)] as $byweb
+            | (($bynum + $byweb)[0]) // empty')
+        if [ -z "$entry" ]; then
+            echo "No run $want in the last $TASK_SCAN job records (see 'gitea-actions runs')." >&2
+            echo "Both the number in the run list and the one in its web URL work." >&2
             exit 1
         fi
-        run_number="$want"
     else
         sha=$(git rev-parse HEAD 2>/dev/null) || {
             echo "Not in a git repository, so there is no HEAD to look up - pass a run number" >&2
             exit 1
         }
-        run_number=$(echo "$tasks_json" | jq -r --arg sha "$sha" \
-            'first(.workflow_runs[] | select(.head_sha == $sha) | .run_number) // empty')
-        if [ -z "$run_number" ]; then
+        entry=$(echo "$tasks_json" | jq -c --arg sha "$sha" \
+            'first(.workflow_runs[] | select(.head_sha == $sha)) // empty')
+        if [ -z "$entry" ]; then
             echo "No run for HEAD (${sha:0:8}) in the last $TASK_SCAN job records - unpushed, or still queued?" >&2
             exit 1
         fi
-        run_sha="$sha"
+    fi
+    run_number=$(echo "$entry" | jq -r '.run_number')
+    run_sha=$(echo "$entry" | jq -r '.head_sha')
+    run_web_id=$(echo "$entry" | jq -r '.url | split("/") | last')
+    if [ -z "$run_web_id" ] || [ "$run_web_id" = "null" ]; then
+        echo "Run $run_number reports no web URL, so there is no id to address its" >&2
+        echo "statuses or logs by. This is a Gitea API shape this tool does not know." >&2
+        exit 1
     fi
 }
 
@@ -163,9 +214,17 @@ function resolve_run() {
 # by run number as well as by commit, since a re-run puts a second run's
 # statuses on the same commit.
 function fetch_jobs() {
-    api_or_die "list jobs for run $run_number" \
-        "${GITEA_API}/repos/${owner}/${repo}/commits/${run_sha}/statuses?page=1&limit=100"
-    jobs_json=$(echo "$json" | jq --arg rn "$run_number" '
+    # Every page, not the first hundred. A job writes at least two statuses
+    # and a re-run stacks another set on the same commit, all BEFORE the
+    # run-number filter below - so on a re-run of a workflow with a dozen jobs
+    # the requested run's own statuses fall off page one. A failed job going
+    # missing that way is not a visible error: it leaves `logs` printing
+    # "all N jobs succeeded" to an agent that will act on it.
+    api_all_pages "list jobs for run $run_number" \
+        "${GITEA_API}/repos/${owner}/${repo}/commits/${run_sha}/statuses"
+    # $rn is the web id, not run_number: target_url carries the former. See
+    # resolve_run for why they differ.
+    jobs_json=$(echo "$json" | jq --arg rn "$run_web_id" '
         [.[] | select(.target_url | test("/actions/runs/" + $rn + "/jobs/[0-9]+$"))]
         | group_by(.context) | map(first)
         | map({
@@ -187,7 +246,7 @@ function print_job_log() {
     local index="$1" name="$2" result="$3"
     echo "=== $name ($result) ==="
     api_or_die "fetch logs for job $name" \
-        "${GITEA_WEB}/${owner}/${repo}/actions/runs/${run_number}/jobs/${index}/logs"
+        "${GITEA_WEB}/${owner}/${repo}/actions/runs/${run_web_id}/jobs/${index}/logs"
     if [ "$KEEP_TIMESTAMPS" = 1 ]; then
         echo "$json"
     else
@@ -254,9 +313,15 @@ case "$subcommand" in
                 event: .[0].event,
                 sha: (.[0].head_sha[0:8]),
                 title: .[0].display_title,
+                # "skipped" is a finished job. Counting it as unfinished, as
+                # anything-but-success did, leaves a run reading in_progress
+                # for good. Anything else unrecognised still reads
+                # in_progress, which is the safe direction for a status this
+                # does not know.
                 result: (if   any(.[]; .status == "failure")   then "failure"
                          elif any(.[]; .status == "cancelled") then "cancelled"
-                         elif any(.[]; .status != "success")   then "in_progress"
+                         elif any(.[]; .status as $s | ["success", "skipped"] | index($s) | not)
+                              then "in_progress"
                          else "success" end)
               })
             | sort_by(.run) | reverse | .[0:$limit] | .[]

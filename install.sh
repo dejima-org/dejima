@@ -1,6 +1,6 @@
 #!/bin/bash
-# Idempotent installer for dejima. Symlinks this repo's hooks into
-# ~/.claude/hooks, registers them in ~/.claude/settings.json, and puts
+# Idempotent installer for dejima. Registers the selected harness's guard
+# hooks wherever that harness reads them from, and puts
 # bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
 # bin/dejima-audit and the opt-in remote-access scripts on PATH. Safe to
 # re-run - every step is a no-op if already done, and every change is
@@ -33,113 +33,6 @@ if [ "${#missing[@]}" -gt 0 ]; then
     exit 1
 fi
 echo "Found required tools: docker, docker compose v2, jq, python3"
-echo
-
-mkdir -p "$HOME/.claude/hooks"
-
-link_hook() {
-    local name="$1" src="$SCRIPT_DIR/hooks/$1" dest="$HOME/.claude/hooks/$1"
-    if [ -L "$dest" ] && [ "$(readlink -f "$dest")" = "$(readlink -f "$src")" ]; then
-        echo "Skipping: $name already linked to this repo's copy"
-        return
-    fi
-    if [ -e "$dest" ] || [ -L "$dest" ]; then
-        mkdir -p "$BACKUP_DIR"
-        echo "Moving: existing ~/.claude/hooks/$name to $BACKUP_DIR/$name"
-        mv "$dest" "$BACKUP_DIR/$name"
-    fi
-    echo "Linking: $name ($src -> $dest)"
-    ln -s "$src" "$dest"
-}
-
-link_hook sandbox-context.sh
-link_hook git-push-guard.sh
-link_hook merge-guard.sh
-
-# Symlink from before the gitea-merge-guard.sh -> merge-guard.sh rename
-# points at a hooks/ path that no longer exists. Only remove it if it's
-# actually dangling - the same check the claude-sandbox-* cleanup below
-# uses for bin/, so an operator's own file at this name is left alone.
-old_merge_guard="$HOME/.claude/hooks/gitea-merge-guard.sh"
-if [ -L "$old_merge_guard" ] && [ ! -e "$old_merge_guard" ]; then
-    echo "Removing: dangling pre-rename symlink $old_merge_guard"
-    rm -f "$old_merge_guard"
-fi
-
-# Linked so it exists at a stable path for the read-only ~/.claude/hooks
-# mount, but deliberately NOT passed to register_hook below: bin/dejima
-# registers it per session, into a throwaway settings copy, and only when
-# remote access is configured. Registering it here would fire it for every
-# unsandboxed host session too, where it has no marker directory to write to.
-link_hook dejima-notify.sh
-
-# deny-dangerous-bash.sh is a general (non-sandbox-gated) hook that may
-# already be owned by another install (e.g. dotfiles) - only claim it if
-# nothing else already provides it, so this repo works fully standalone
-# without clobbering an existing setup.
-deny_dest="$HOME/.claude/hooks/deny-dangerous-bash.sh"
-if [ -e "$deny_dest" ] || [ -L "$deny_dest" ]; then
-    echo "Skipping: deny-dangerous-bash.sh already present at $deny_dest (leaving it as-is)"
-else
-    echo "Linking: deny-dangerous-bash.sh ($SCRIPT_DIR/hooks/deny-dangerous-bash.sh -> $deny_dest)"
-    ln -s "$SCRIPT_DIR/hooks/deny-dangerous-bash.sh" "$deny_dest"
-fi
-echo
-
-SETTINGS="$HOME/.claude/settings.json"
-if [ ! -f "$SETTINGS" ]; then
-    echo "Creating $SETTINGS"
-    echo '{}' > "$SETTINGS"
-fi
-
-# The registration that went with the symlink removed above. Two things
-# depend on it going: Claude Code reports a missing hook command on every
-# session start while it points at a path that no longer exists, and - until
-# the dedupe below stopped matching it - it also stood in for the
-# registration it was renamed from, so `register_hook merge-guard.sh`
-# skipped and the merge guard was registered nowhere at all. Dropped only
-# when the path it names is gone, so an operator's own file at that name
-# keeps its registration, matching the symlink check above.
-if [ ! -e "$old_merge_guard" ] && jq -e --arg s "/gitea-merge-guard.sh" \
-    '[.hooks.PreToolUse[]?.hooks[]?.command // empty] | any(endswith($s))' \
-    "$SETTINGS" >/dev/null 2>&1; then
-    echo "Removing: stale pre-rename gitea-merge-guard.sh registration from $SETTINGS"
-    settings_tmp=$(mktemp)
-    jq --arg s "/gitea-merge-guard.sh" \
-        '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
-            | map(.hooks = ((.hooks // []) | map(select((.command // "") | endswith($s) | not))))
-            | map(select((.hooks | length) > 0)))' \
-        "$SETTINGS" > "$settings_tmp" && mv "$settings_tmp" "$SETTINGS"
-fi
-
-register_hook() {
-    local event="$1" matcher="$2" script_name="$3" description="$4"
-    # endswith on the leading slash, not test(): test() is an unanchored
-    # regex, so a hook whose name merely ends in another's - which is what a
-    # rename like gitea-merge-guard.sh -> merge-guard.sh produces - read as
-    # already registered, and the new hook was silently never added.
-    if jq -e --arg s "/$script_name" \
-        "[.hooks.${event}[]?.hooks[]?.command // empty] | any(endswith(\$s))" \
-        "$SETTINGS" >/dev/null 2>&1; then
-        echo "Skipping: $script_name already registered as a $event hook"
-        return
-    fi
-    echo "Registering $script_name as a $event hook in $SETTINGS ($description)"
-    local tmp
-    tmp=$(mktemp)
-    jq --arg matcher "$matcher" --arg cmd "\$HOME/.claude/hooks/$script_name" \
-        ".hooks.${event} = ((.hooks.${event} // []) + [{\"matcher\": \$matcher, \"hooks\": [{\"type\": \"command\", \"command\": \$cmd}]}])" \
-        "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-}
-
-register_hook SessionStart "startup|resume|clear|compact" sandbox-context.sh \
-    "injects sandbox context on session start"
-register_hook PreToolUse Bash git-push-guard.sh \
-    "blocks pushes outside the allowed host(s)/branches"
-register_hook PreToolUse Bash merge-guard.sh \
-    "blocks the configured forge's merge command inside the sandbox"
-register_hook PreToolUse Bash deny-dangerous-bash.sh \
-    "blocks obviously destructive Bash commands"
 echo
 
 BIN_DIR="$HOME/.local/bin"
@@ -293,6 +186,32 @@ else
         done < <(_config_keys; [ -z "$_starter_extra_keys" ] || printf '%s\n' "$_starter_extra_keys")
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
+fi
+
+# Guard registration, after the starter config above rather than before it:
+# where dejima's guards go, and in what shape, is the selected harness's
+# business, and on a fresh install that selection is the one just seeded.
+# Registering before reading it would mean writing one harness's config for
+# an operator who has chosen another.
+#
+# Delegated to the harness's plugin, which is also what gates each guard on
+# the harness having declared it (see `guards` in its manifest).
+echo
+source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
+_harness="$(config_get core harness 2>/dev/null)" || _harness=""
+if [ -z "$_harness" ]; then
+    echo "No [core] harness is set in $CONFIG_FILE, so no guard hooks were"
+    echo "registered. Set one and re-run ./install.sh."
+else
+    DEJIMA_HARNESS_NAME="$_harness"
+    harness_plugin_load "$_harness"
+    if declare -F harness_register_guards >/dev/null 2>&1; then
+        echo "Registering $_harness's guard hooks"
+        harness_register_guards "$SCRIPT_DIR" "$BACKUP_DIR"
+    else
+        echo "Harness '$_harness' installs no guard hooks."
+        echo
+    fi
 fi
 
 if [ -f "$(config_root)/remote.conf" ]; then

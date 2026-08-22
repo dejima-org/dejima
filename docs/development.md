@@ -10,14 +10,15 @@ run them.
 
 | File | Purpose |
 | --- | --- |
-| `docker/Dockerfile` | Base image, dev tools, nvim, Claude Code + wrapper, `gitea-pr`/`gitea-issue` |
+| `docker/Dockerfile` | Base image: dev tools, nvim, Playwright, the sandbox user. Carries **no harness** - the selected one installs into a layer above it, from its manifest's `install` |
+| `docker/install-forge-bins.sh` | Installs each forge's CLIs into the image from its manifest's `install` list, and fails the build on a file that is shipped but not declared, or declared but not shipped |
 | `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
 | `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`); also ships session transcripts when conversation logging (`[logging] conversation`) is on |
+| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`). Container-side, because those files only exist there |
 | `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, then execs the session's command |
-| `docker/claude-wrapper.sh` | Shadows `claude` on `PATH` to always add `--dangerously-skip-permissions` |
+| `docker/harness-wrapper.sh` | Shadows the selected harness's command on `PATH` to add its no-confirm flags and dejima's settings layer. Named by no harness; `entrypoint.sh` links it into place |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
@@ -28,13 +29,18 @@ run them.
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
+| `bin/dejima-config-lib.sh` | The config file's schema, parser and value validators, plus the dependency-spec grammar. The base layer: it sources nothing, so everything else can source it. Not on PATH |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH: see [docs/providers.md](providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
+| `bin/dejima-conversation-ship` | Host-side: ships session transcripts to Loki when `[logging] conversation` is on. Reads them where they already are, so the session is not in the path of its own oversight log |
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. Run from `bin/dejima`'s exit trap |
+| `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
+| `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
+| `bin/dejima-color-lib.sh` | The colour and terminal-detection helpers the CLIs share. Not on PATH |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
@@ -91,7 +97,13 @@ parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
 since the fast CI job's container deliberately has no daemon), `providers.bats`
 covers the forge/workflow/harness manifest contract documented in
 [docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling.
+proxy's own request handling. `conversation.bats` runs
+`bin/dejima-conversation-ship` against a real transcript and a real HTTP
+endpoint standing in for Loki, and asserts on what arrives: that a session's
+lines ship, that a torn line waits until it is whole, that a sibling project
+whose directory name merely extends this one is not swept up with it, and
+that neither the in-memory batch nor the unread tail is lost to the kill that
+ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service bound to the host's
@@ -140,12 +152,323 @@ SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
 Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`project.bats`, `providers.bats`, `proxy.bats`, `remote.bats` and
-`static.bats`, runs anywhere a shell does, including inside a dejima sandbox
-itself, which has no Docker daemon by design.
+`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
+`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
+a dejima sandbox itself, which has no Docker daemon by design.
+
+`.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
+the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
+by shebang rather than enumerated, so a script added under `bin/`, `hooks/`,
+`docker/` or a forge's `bin/` is covered the day it lands. The severity floor
+and the two disabled checks are in `.shellcheckrc`, each with the reason
+beside it.
 
 `.gitea/workflows/tests.yml` runs all of it on every pull request and on every
 push to one, `runtime.bats` included. That job needs two things from the
 runner that an ordinary one doesn't (the host's Docker socket and the host
 network namespace), and it checks for both up front rather than failing
 obscurely partway through; the file says why each is needed.
+
+## Adding a new harness
+
+`[core] harness` picks a directory under `harnesses/`, and that harness's
+manifest declares eleven keys (see [providers.md](providers.md)). The
+inventory below is everything dejima does that is shaped by *which* harness is
+selected: which parts are the manifest's, which are the plugin's, and
+which are still written against Claude Code by name. Taken from a pass over
+the tree, so each row names the file rather than describing a sketch - and a
+row that says "in the plugin" is one a second harness supplies rather than one
+it has to argue about.
+
+### What a harness must be able to do
+
+Support is per harness and deliberate. A supported harness gets the same
+depth of integration Claude Code has - the same mounts, the same guards, the
+same audit surfaces - so a harness is not a manifest someone drops in. That
+is only possible if the harness can host what those protections need.
+
+These are the requirements. A harness that fails one of the first four cannot
+be supported, and that is a decision about the harness rather than a gap in
+dejima.
+
+| | Requirement | Why it is load-bearing |
+| --- | --- | --- |
+| **R1** | **Unattended execution.** A documented mode that runs tool calls without confirming each one. | The premise the project rests on. A harness that stops to ask is one an operator sits in front of, and the argument for accepting that mode is that the container makes being unattended survivable. |
+| **R3** | **Host-controlled context at session start.** A way to place text into the session's context at start, from a file the operator controls and the session cannot rewrite for the run in progress. | How the briefing and the project's `.dejima.md` arrive. It is also how the agent learns it is sandboxed, which is what makes it ask for a domain instead of working around the firewall. |
+| **R4** | **State dejima can locate or discard.** Per-project state must be computable on the host before launch, so it can be scoped per project - or safely discardable, so it can stay container-local. | #104. A store that is neither computable nor discardable cannot be scoped, and mounting it whole reintroduces cross-project context poisoning. |
+| **R5** | **A withholdable credential.** The model credential must live somewhere dejima can decline to mount, and the harness must accept a substitute: a staged fake, or an environment variable pointed at the host-side proxy. | The credential never entering the container is a headline property, not a nicety. |
+
+R2 is not missing from the table above: it moved into the one below, for the
+reason given after it. The numbering of the rest is left alone so that every
+reference to R1, R3, R4 and R5 elsewhere still points at the same thing.
+
+Four more are required, but may be declared absent in the manifest, in which
+case dejima says at launch what is not in force:
+
+| | Requirement | What is lost without it |
+| --- | --- | --- |
+| **D1** | **Tool-call interception.** *(was R2)* A supported mechanism to inspect a command before it runs and refuse it, without patching the harness. | `deny-dangerous-bash.sh`. The push guard and the merge guard do not depend on this any more - they are PATH shadows over `git` and the forge CLI, so they hold for every harness. What is left is the denylist, and it is the weakest of the three: a regex over a command string, evadable by anything that does not look like the pattern. |
+| **D2** | Session lifecycle signals - something that fires when the agent wants attention and when it stops. | Remote access notifications. The session still runs and is still attachable. |
+| **D3** | A parseable record of the session. | Epitaph, and conversation logging. |
+| **D4** | An enumerable config directory whose extension points can be mounted read-only. | Config parity, and the read-only mounts that stop a session installing a persistent hook for the next one. |
+
+R2 was a hard gate until the guards stopped needing it. Two of the three it
+hosted - the push guard and the merge guard - are now PATH shadows over `git`
+and the forge CLI (`docker/git-guard.sh`, `docker/forge-guard.sh`), which hold
+whatever the harness can or cannot intercept, and read argv rather than
+regex-matching a reconstructed command string. That left one guard depending
+on interception, and it is the one this repository already describes as "a
+fast-fail guard against an overeager agent doing something obviously
+destructive, not a boundary against one that's actively trying to get around
+them" (docs/security.md). A gate that costs a harness its support should be
+guarding more than that.
+
+Declaring one absent is a real decision with a visible cost, not a
+formality. It is there so a harness can be supported honestly at a smaller
+guard set rather than shipped with three protections quietly missing.
+
+**The guard rails are declared in the manifest and reported at launch.**
+`guards` lists which of `bash-deny`, `push-guard`, `merge-guard` and
+`notify` the harness can host. A name outside that set is refused, because a
+typo would otherwise turn a guard off in silence. The ones a harness does
+not declare are named once at launch, with what each costs - and nothing is
+printed at all when it hosts them all, so the message stays a signal rather
+than a line to scroll past.
+
+Core gates the work on the declaration rather than on whether a plugin
+happens to define the hook: a harness that forgot to declare a guard but
+implemented it would otherwise get a protection the launch message has just
+told the operator it does not have.
+
+### Worked example: aider, and what moving R2 changed
+
+aider clears R1 (`--yes-always`), R3 (`--read` places a file in context),
+R4 (its state is `.aider.*` inside the workspace, which is already mounted)
+and R5 (it takes an API key from the environment).
+
+It was declined on R2, which it fails outright: aider has no hook or event
+system, and the only occurrence of "hook" in its options is `--no-verify`,
+which controls git's own pre-commit hooks. There is no point at which a
+command can be inspected and refused.
+
+That is still true, and it no longer decides the question. The push guard and
+the merge guard reach aider through the PATH shadows like any other harness,
+so what it actually loses is `deny-dangerous-bash.sh` - one fast-fail guard,
+declared absent and named at launch. It also fails D2, so remote-access
+notifications would not fire.
+
+So aider is now supportable at a smaller guard set, honestly declared. It is
+not supported, because nobody has written the plugin and the tests - which is
+the real gate, and always was.
+
+One thing to settle first if that changes. R4 passes trivially because aider's
+state is `.aider.*` **inside the workspace** - and the workspace is the real
+project, bind-mounted read-write. `.aider.chat.history.md` is a transcript of
+prompts and model responses that, by aider's own documentation, can carry
+secrets from terminal output. aider ships a `.gitignore` entry for it, but a
+project that predates the entry, or has its own ignore file, gets a
+secrets-bearing file written into the checkout: it outlives the container,
+reaches the host, and shows up in the exit audit as a workspace change.
+
+So aider's plugin should move that file out of the workspace rather than rely
+on a `.gitignore` the project may not have - the same reasoning that keeps
+every other harness's state out of the project, arrived at from the opposite
+direction. That is what `image_dirs` and the state mounts are for.
+
+### Worked example: Cline
+
+Cline is provider-agnostic, which is what a second harness most needs to be:
+it can be pointed at any endpoint, including an open-weight model served
+locally. That is not a claim from its documentation - it was run here against
+a purpose-written OpenAI-compatible endpoint on loopback, which it used for
+every request and whose tool call it then executed.
+
+It needs AVX2, which is worth knowing before an integration begins: its CLI is
+a Bun-embedded compiled binary and Bun's default build requires it. A VM whose
+CPU model is `x86-64-v2-AES` - Proxmox's default for new guests - gets SIGILL
+and exit 132 before any output, and no baseline build is published. `x86-64-v3`
+or better is the requirement.
+
+| | Verified |
+| --- | --- |
+| **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
+| **D1** *(was R2)* | **Fails as a CLI, and this no longer decides it.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported. Declared absent, and named at launch. |
+| **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
+| **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
+| **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
+
+Two notes for whoever writes the integration. Cline's plugin manifest schema
+still carries a field described as "not read by Claude Code", so its plugin
+format is derived from Claude Code's, which is the reason to expect the
+existing `hooks/*.sh` to port rather than be rewritten if a refusal path does
+turn up. And
+`CLINE_SANDBOX=1` turns on an inner sandbox that relocates state under a
+`cline-sandbox` directory; like Claude Code's, it is redundant inside this
+container and wants turning off.
+
+There is a refusal point, but it is in the SDK rather than the CLI.
+`ClineCore.create()` takes a `requestToolApproval` capability - it receives
+`{toolName, input}` before the tool runs, returns `{approved: false}` to
+refuse, and the agent is told and moves on. Using it would mean dejima wrote
+and maintained a host program embedding Cline, making the container's main
+process dejima's own JavaScript rather than `cline`. That is a different shape
+from every other harness, and it is not necessary: with the push and merge
+guards on PATH, what the CLI costs is `deny-dangerous-bash.sh` alone.
+
+So Cline clears the four hard requirements, at a guard set short one fast-fail
+denylist - declared in its manifest and named at every launch. Its R4 is the
+part worth keeping in mind while integrating it: state goes where `--data-dir`
+puts it, so the per-project scoping #104 is about is a flag rather than
+something to be inferred.
+
+### Where a harness's support lives: three tiers
+
+| Tier | What | Rule |
+| --- | --- | --- |
+| **Core** | the mechanism, and every enforcement point | harness-agnostic, always |
+| **Manifest** | `harnesses/<name>/harness.conf` | data. Never sourced, never executed. Selects among named core mechanisms and supplies paths |
+| **Plugin** | `bin/harness/<name>.sh` | the harness-specific remainder, as code, in this repository |
+
+**A feature belongs in the manifest if it can be stated as a value.** It only
+moves to a plugin when it cannot. `projects_dir` and `file_history_dir` are
+both paths, so both are manifest keys; the rule that a *name* in the first
+selects an *entry* in the second is Claude Code's own and could not be
+written as a value, so that is the plugin. "Add a manifest key" is the
+answer until it demonstrably is not.
+
+**Plugins live under `bin/`, not beside the manifest.** `dejima-audit`'s
+`tcb_snapshot` covers `install.sh`, `bin/`, `hooks/`, `docker/` and `test/`,
+and not the provider directories. Host-side plugin code under `harnesses/`
+would be code that runs on the host and that a session could edit in
+dejima's own checkout without raising a CRITICAL - the exact class the audit
+exists to catch. Under `bin/` it is covered for free, and "manifests are
+data, never executed" stays true word for word.
+
+**Plugins are sourced, not invoked**, and are part of the trusted computing
+base. The risk worth designing against is not a careless plugin but three
+plugins implementing the security model three ways, so a plugin uses core's
+own primitives rather than re-deriving them. An invoked protocol would also
+put a new text parser on the launch path, and every parsing bug this
+repository has had is in that family.
+
+**The manifest may carry values that are only used as paths or compared as
+data. It must not carry text that becomes part of a parser's grammar, or the
+identity of a security surface.** `dejima-audit`'s `ack` recovers a finding's
+id by stripping a fixed label from the front of the finding text, anchored
+deliberately (#45). Those labels are grammar. Provider directories are not in
+`tcb_snapshot`'s list, so in the self-mount case a session can edit a
+manifest without raising a CRITICAL - which is why host-execution surfaces
+are a plugin hook (`harness_host_exec_surfaces`) rather than a manifest key.
+The label stays a literal in code the audit watches; it just lives with the
+harness that owns it.
+
+**A plugin computes; core enforces.** A plugin declares through `emit_mount`
+and `emit_env`, which validate at the point of declaration - `emit_mount`
+runs the guarded-store refusal there, so a harness state directory that
+overlapped the approval, audit or epitaph store is refused without each
+plugin having to remember. A plugin never touches `extra_mounts` itself, and
+a static test holds that. A plugin may *classify* an audit path; it may never
+suppress a finding.
+
+Every shipped harness has both a manifest and a plugin - a static test
+refuses one without the other, because a manifest alone would present as a
+supported harness while none of the work had been done.
+
+### What the manifest already covers
+
+`harnesses/<name>/harness.conf`, and the full contract is in
+[providers.md](providers.md):
+
+| Key | What it decides |
+| --- | --- |
+| `command` | the container's main process |
+| `keys` | this harness's own `[harness.<name>]` config schema |
+| `resume_command` | what the briefing tells a session to hand the operator |
+| `briefing` | this harness's fragment of the session briefing |
+
+### Reading a harness's own config
+
+`harness_config_get <key>` resolves whichever harness `[core] harness`
+names. Use it; do not spell a `[harness.<name>]` section out at a call site.
+
+`keys` is declared per harness, so a literal section name makes it a
+declaration only one harness can ever be read through - a second harness
+gets selected, gets validated, and is then handed the first one's paths with
+nothing erroring anywhere. Three call sites did exactly that, in
+`bin/dejima-audit` (twice) and `bin/dejima-epitaph`. A static test holds
+the rule.
+
+It returns empty when no harness is selected. `bin/dejima` refuses to start
+in that state, so that is reachable only from the standalone tools, where a
+harness-specific path resolving to nothing is the honest answer.
+
+### The inventory
+
+| Area | What is Claude Code specific | Where |
+| --- | --- | --- |
+| Install | which package installs the harness is the manifest's `install`, a dependency spec. That the image carries the selected harness **and no other**, that it is a layer keyed on the harness's name rather than part of the shared base, and that the spec is validated before it reaches a `RUN` line, are core's | `harnesses/<name>/harness.conf`, `bin/dejima` |
+| Permission bypass | the flag itself, `no_confirm_args` in the manifest; the wrapper is generic | `harnesses/<name>/harness.conf` |
+| Settings layering | that overrides arrive as an extra layer rather than a mount over the operator's file (#47) is core, as is the throwaway file itself; what the layer SAYS is the plugin's, written by `harness_prepare_config` - a settings schema is a parser's grammar, so a manifest cannot carry it. The flag that carries them is `settings_args` in the manifest | `bin/harness/claude-code.sh`, `harnesses/<name>/harness.conf` |
+| Config preconditions | which config files must exist before staging, and which unusable one refuses the launch (Claude Code ignores an unparseable `settings.json` wholesale, with only a warning). Declared and enforced by the plugin, in the same hook | `bin/harness/claude-code.sh` |
+| State directories | which directories must exist in the sandbox user's home, 0700 and owned by them, so Docker does not create a mount's missing parent root-owned. The manifest's `image_dirs`, created in that harness's own image layer | `harnesses/<name>/harness.conf` |
+| Seeded files | that a harness reading a credential from a fixed path needs something at it, since an absent file and an empty one are not reliably the same to it. The manifest's `image_files`, created empty and 0600 in that harness's layer, where a mounted credential shadows it - rather than by `entrypoint.sh`, which runs in every image including the base one alone | `harnesses/<name>/harness.conf` |
+| Image environment | anything the harness wants set for every session of its own - for Claude Code, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The manifest's `image_env`, in the same layer | `harnesses/<name>/harness.conf` |
+| Command | there is no default anywhere shared. `SANDBOX_CMD` comes from the manifest's `command` via `bin/dejima`, and `entrypoint.sh` refuses an empty one rather than naming a harness a given image may not contain | `harnesses/<name>/harness.conf`, `docker/entrypoint.sh` |
+| Proxied endpoint | which name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. The manifest's `proxied_api_domain`; a credential proxy with no domain declared is refused rather than started answering for nothing | `harnesses/<name>/harness.conf`, `docker/entrypoint.sh` |
+| Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. `api_domains` and `proxied_api_domain` in the manifest | `harnesses/<name>/harness.conf` |
+| Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
+| Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
+| Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. In the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
+| Briefing delivery | **by which route**, not whether. Claude Code takes the briefing as a system prompt, through the flag its manifest names in `briefing_args`, because a `SessionStart` payload past roughly nine kilobytes is persisted and replaced with a preview - so the hook route silently under-delivered a briefing carrying a project's `.dejima.md`. A harness naming no flag still gets it through the hook. What the briefing *says* is neither route's: composing it host-side is core's, and the container-side part - this container's id, the declared-versus-installed gap, the project's `.dejima.md` - is one script both call | `hooks/dejima-briefing-render.sh`, `hooks/sandbox-context.sh`, `docker/entrypoint.sh` |
+| Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
+| Config parity | which directories carry over and at what mode. Declared by the plugin, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
+| Staged config | which files are copied rather than mounted. Declared by the plugin; the staging tree mirrors the destination, so `entrypoint.sh` names no harness's paths | `bin/harness/claude-code.sh` |
+| App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
+| State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
+| Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). In the plugin | `bin/harness/claude-code.sh` |
+| Transcript format | the transform from transcript lines to log lines. In the plugin; the shipping, batching and Loki labels stay core's | `bin/harness/claude-code.sh` |
+| Compaction format | what a compaction looks like in a transcript. In the plugin; the store, its modes and the provenance note stay core's | `bin/harness/claude-code.sh` |
+| Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
+| Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
+
+### Two things worth deciding early
+
+**What runs on the host when the harness is configured.** `statusLine.command`
+is the one that exists today, and it is not a quirk: a harness that will
+execute an operator-configured command outside the container hands a session
+that writes that file a way onto the host. Find that surface in the new
+harness before supporting it, because it belongs in the audit from the first
+release rather than after someone finds it.
+
+**What the harness keeps, and who else can read it.** The per-project
+scoping of `projects/` and `file-history/` exists because a session that can
+write another project's memory can plant text a later session there reads as
+established background (#104). A new harness's state directory needs the same
+question asked of it, one directory at a time. Anything mounted host-wide
+should be there because it is keyed by session rather than by project, and
+because nothing loads it into a session's context at startup - which is the
+reasoning that leaves `tasks`, `plans`, `sessions` and `backups` mounted
+whole today.
+
+### Testing a new harness
+
+**Every supported harness is a dependency of this project**, declared in
+`.dejima/dependencies`, so a session working on dejima can run the one it is
+integrating rather than reason about it. A harness dejima claims to support
+and cannot exercise here is one whose guards are asserted rather than
+observed - and an untested guard is worse than a declared-absent one,
+because absent is visible to the operator and broken is not.
+
+`claude-code` is no exception to that: it is declared by its own manifest and
+built into its own layer like any other. The base image carries nothing of any
+harness's - not its package, not the directories it keeps state in, not its
+environment, and not its name as a default command. What is left on the
+harness axis is the credential proxy, which is Claude Code's shape throughout
+and is the R5 row above.
+
+`providers.bats` covers the manifest contract itself and is where a new
+`harness.conf` gets its parsing and validation tests. The suites that assert
+on Claude Code paths by name - `config.bats`, `audit.bats`, `static.bats`,
+`runtime.bats` - are the ones that will need a second set, and a green run
+against the existing harness proves nothing about a new one. Nothing in
+`test/` currently runs a second harness end to end.

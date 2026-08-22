@@ -27,6 +27,13 @@
   function ctrlSequence(key) {
     if (typeof key !== 'string' || key === '') return null;
     if (Object.prototype.hasOwnProperty.call(SPECIAL, key)) return SPECIAL[key];
+    // The config schema accepts "space" in any case (see ttyd_tmux_prefix),
+    // so a named key matches case-insensitively here too. Without this,
+    // `C-space` passed validation on the host and was then rejected on the
+    // page, which silently fell back to C-b - the outcome the launch-time
+    // refusal exists to prevent.
+    var named = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(SPECIAL, named)) return SPECIAL[named];
     if (key.length !== 1) return null;
     var code = key.toUpperCase().charCodeAt(0);
     if (code < 0x41 || code > 0x5a) return null;

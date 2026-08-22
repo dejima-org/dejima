@@ -235,6 +235,13 @@ engineering judgement or human review, and nothing here changes that.
 directly on your machine. A determined attacker, or one with a container
 escape, defeats all of it. Use it at your own risk.
 
+An escape does not leave the picture, though - it moves to the layer below,
+and dejima cannot bound that layer because it runs inside it.
+[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)
+is what bounds what an escape spreads to on the machine dejima runs on. See
+[docs/threat-model.md](docs/threat-model.md) for where each layer's
+compromise stops.
+
 **dejima's security says nothing about your software's.** Security isn't
 retrofittable: it's a property of how something was built, at every step. If
 what you build inside dejima turns out to be insecure, that isn't something a
@@ -290,11 +297,18 @@ sandbox escape if you get it wrong.
 
 ### Core (required)
 
-1. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
+1. **Install your harness on the host and sign in to it there**, before any
+   of the rest. dejima never authenticates anything: the credential proxy
+   holds the credential your harness wrote on the host and hands the
+   container a placeholder, so if there is nothing on the host there is
+   nothing to hold. A session in that state starts normally and then cannot
+   reach the model, which looks like a dejima fault and is not one. See
+   [Sign in on the host first](#sign-in-on-the-host-first).
+2. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
    `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
    exists yet. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
-2. Put `~/.local/bin` on your `PATH` if it isn't already.
+3. Put `~/.local/bin` on your `PATH` if it isn't already.
 That is enough to run `dejima`. No push credential is needed to get this far,
 because the default workflow does not push. The starter config `install.sh` writes has
 every key commented out at its default, which means `[core] forge = none` and
@@ -356,7 +370,7 @@ dejima ~/repos/some-project
 
 By default the container's entry point is bare `claude` (always running with
 `--dangerously-skip-permissions`, regardless of how it's invoked; see
-`docker/claude-wrapper.sh`), so a fresh clone of this repo works with no
+`docker/harness-wrapper.sh`), so a fresh clone of this repo works with no
 editor setup at all.
 
 The loop, in the part every workflow shares: point it at a project, ask for a
@@ -407,6 +421,36 @@ dejima --ro ~/other-project ~/myproject
 
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
+
+## Sign in on the host first
+
+**Install your harness on the host and authenticate it there before running
+dejima.** This is a prerequisite rather than a convenience, and nothing
+enforces it.
+
+dejima never signs in to anything. The credential proxy's whole design is
+that the credential stays on the host and the container gets a placeholder:
+a host-side process holds the real token, injects it per request, and owns
+the refresh. That only works if the host has a credential to hold. On a
+machine where the harness has never run and never logged in, there is
+nothing for the proxy to hold, so the proxy does not start and no credential
+is mounted.
+
+What that looks like is worth knowing, because it does not look like a
+missing prerequisite. `dejima` starts normally, the container comes up, the
+firewall self-checks pass - and then the session cannot reach the model.
+Authenticating from inside is not the fix: the container is where the
+credential deliberately never goes, and the egress allowlist is not built
+around completing a sign-in flow there.
+
+The same applies to the account state your harness keeps alongside the
+credential, which is read fresh from the host at every launch (see
+"Throwaway ~/.claude.json" in [docs/security.md](docs/security.md)). A host
+that has never run the harness has none of it.
+
+So: run your harness once on the host, sign in, confirm it answers, and then
+point dejima at a project. When a credential expires, refresh it the same
+way - on the host, not in a session.
 
 ## Config parity with your host Claude Code setup
 

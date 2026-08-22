@@ -91,10 +91,9 @@ fi
 # reporting on containers the caller did not ask about. --container is the
 # explicit opt-in to doing both.
 #
-# This is the only thing that decides. A DEJIMA_ALLOW_SKIP_SESSION env var
-# used to sit alongside it as a test-only escape hatch; session_wanted made it
-# redundant, and a firewall CLI with an environment-triggered no-op path is
-# not something to keep for no reason.
+# This is the only thing that decides. Deliberately not an environment
+# variable as well: a firewall CLI with an environment-triggered no-op path
+# is one an env var can silently disarm.
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0
@@ -135,6 +134,29 @@ if [ "$session_wanted" -eq 1 ]; then
     echo "Resolving $domain inside $container..."
     ips=$(docker exec "$container" dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
     if [ -z "$ips" ]; then
+        # An internally-routed name can't be added to a *running* session at
+        # all: dnsmasq's stop-dns-rebind drops a private answer for any domain
+        # not exempted when the container started, and dns-proxy.sh writes
+        # those rebind-domain-ok= lines only at startup - the servers-file this
+        # script SIGHUPs carries server= lines and nothing else. Asking the
+        # upstream resolver directly separates that dead end from a name that
+        # simply doesn't resolve, so the message can name the fix that works.
+        upstream=$(docker exec "$container" dig +short A "$domain" @127.0.0.11 2>/dev/null |
+            grep -E '^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' || true)
+        if [ -n "$upstream" ]; then
+            echo "$domain resolves to a private address (${upstream//$'\n'/ }), which the" >&2
+            echo "container's DNS rebind protection drops for any domain not allowlisted" >&2
+            echo "when it started." >&2
+            echo "" >&2
+            if [ -n "$project" ] || [ "$global" -eq 1 ]; then
+                echo "  (the approval recorded above already does this)" >&2
+            else
+                echo "  dejima-allow --global $domain" >&2
+            fi
+            echo "" >&2
+            echo "Relaunch the session to pick it up - a running one cannot be patched." >&2
+            exit 1
+        fi
         echo "Failed to resolve $domain inside the container." >&2
         exit 1
     fi
