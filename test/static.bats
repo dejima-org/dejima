@@ -2100,12 +2100,104 @@ registered_commands() {
     grep -qE '^name: dejima\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
+@test "a briefing bigger than a hook can carry does not go through one" {
+    # Measured in a dejima container: a SessionStart payload of 9KB arrived
+    # whole, one of 21KB was persisted to a file and replaced with a ~2KB
+    # preview. A composed briefing plus a project's own .dejima.md is
+    # comfortably past that, so most of the briefing silently never reached
+    # the session - the briefing failing in the quietest way available to it.
+    #
+    # Claude Code takes it as a system prompt instead: no size limit, and a
+    # compaction cannot reach it either.
+    run lib manifest_get harness claude-code briefing_args
+    [ -n "$output" ] || { echo "claude-code declares no briefing_args"; return 1; }
+    grep -q 'DEJIMA_BRIEFING_VIA_ARGS' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'DEJIMA_BRIEFING_VIA_ARGS' "$REPO_ROOT/docker/entrypoint.sh"
+}
+
+@test "the hook carries only the session id once the briefing goes by argument" {
+    # The one fact the entrypoint could not put in the system prompt, because
+    # the harness had not started and the id did not exist yet.
+    local out
+    out=$(printf '{"session_id":"sess-abc","cwd":"%s"}' "$BATS_TEST_TMPDIR" \
+        | DEJIMA=1 DEJIMA_BRIEFING_VIA_ARGS=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    run jq -r '.hookSpecificOutput.additionalContext' <<< "$out"
+    [[ "$output" == *"sess-abc"* ]] || { echo "the session id is missing: $output"; return 1; }
+    # Short. Duplicating the briefing here would spend the context window on a
+    # truncated copy of something already present in full.
+    [ "${#output}" -lt 400 ] || { echo "the hook still carries a briefing (${#output} bytes)"; return 1; }
+}
+
+@test "the hook still carries the whole briefing when nothing else does" {
+    # The fallback route, and the one every harness has until it declares
+    # otherwise. Without it a harness with no briefing_args gets nothing.
+    local ws out
+    ws="$(mktemp -d "$BATS_TEST_TMPDIR/ws.XXXXXX")"
+    printf 'BRIEFING-SENTINEL\n' > "$BATS_TEST_TMPDIR/briefing"
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
+        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$BATS_TEST_TMPDIR/briefing" \
+          bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    run jq -r '.hookSpecificOutput.additionalContext' <<< "$out"
+    [[ "$output" == *"BRIEFING-SENTINEL"* ]] \
+        || { echo "the briefing did not come through the hook: $output"; return 1; }
+}
+
+@test "the wrapper passes the briefing as one argument, not word-split" {
+    # It is prose, unlike every other value the wrapper forwards. Split on
+    # whitespace it would arrive as a few hundred arguments and the harness
+    # would reject the call.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/wrap.XXXXXX")"
+    printf 'first line\nsecond line with spaces\n' > "$d/rendered"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$#"\nprintf "[%%s]\\n" "$@"\n' > "$d/fake"
+    chmod +x "$d/fake"
+    run env SANDBOX_HARNESS_REAL="$d/fake" SANDBOX_HARNESS_ARGS= SANDBOX_HARNESS_SETTINGS= \
+        SANDBOX_HARNESS_BRIEFING_ARGS=--append-system-prompt \
+        DEJIMA_BRIEFING_RENDERED="$d/rendered" \
+        bash "$REPO_ROOT/docker/harness-wrapper.sh"
+    [ "$(head -1 <<< "$output")" = "2" ] \
+        || { echo "expected a flag and one value, got: $output"; return 1; }
+    [[ "$output" == *"second line with spaces"* ]] \
+        || { echo "the briefing did not survive: $output"; return 1; }
+}
+
+@test "a container started without dejima still runs its harness" {
+    # test/runtime.bats boots the image directly, so nothing renders a
+    # briefing and the file the wrapper would read is absent. The flag has to
+    # drop out rather than being passed with an empty value or a missing path.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/wrap2.XXXXXX")"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$#"\n' > "$d/fake"
+    chmod +x "$d/fake"
+    run env SANDBOX_HARNESS_REAL="$d/fake" SANDBOX_HARNESS_ARGS= SANDBOX_HARNESS_SETTINGS= \
+        SANDBOX_HARNESS_BRIEFING_ARGS=--append-system-prompt \
+        DEJIMA_BRIEFING_RENDERED="$d/absent" \
+        bash "$REPO_ROOT/docker/harness-wrapper.sh"
+    [ "$output" = "0" ] || { echo "expected no arguments, got: $output"; return 1; }
+}
+
+@test "the briefing renderer is baked into the image, not reached through ~/.claude" {
+    # A harness reaches this through the image, not through Claude Code's
+    # config mount - entrypoint.sh runs it before any harness starts, and a
+    # harness with no ~/.claude has no hooks mount to find it in.
+    grep -q 'COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/' "$REPO_ROOT/docker/Dockerfile"
+    grep -q '/usr/local/lib/dejima/dejima-briefing-render.sh' "$REPO_ROOT/docker/entrypoint.sh"
+    grep -q 'dejima-briefing-render.sh' "$REPO_ROOT/hooks/sandbox-context.sh"
+}
+
+@test "a failed briefing render stops the session rather than starting one blind" {
+    # The one failure the briefing cannot absorb. A session that starts without
+    # it does not know the firewall is load-bearing for it, does not know what
+    # is disposable, and has no dejima-allow instructions.
+    run bash -c 'sed -n "/could not render the session briefing/,+4p" "$1"' _ \
+        "$REPO_ROOT/docker/entrypoint.sh"
+    [[ "$output" == *"exit 1"* ]] || { echo "a render failure does not stop the launch: $output"; return 1; }
+}
+
 @test "sandbox-context.sh gives the agent its own container ID for dejima-allow" {
     # Agents used to guess their container ID and could hand back another
     # running sandbox's ID, making dejima-allow "succeed" against
     # the wrong container. /etc/hostname inside a container is its real ID.
-    grep -q '/etc/hostname' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q -- '--container' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q '/etc/hostname' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q -- '--container' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
 }
 
 @test "bin/dejima-allow ends with a real reachability check, not just config changes" {
@@ -2543,7 +2635,7 @@ STUB
     # absolute path only the container has, so this can't be driven from a
     # host-side test, and a file-wide grep would be satisfied by the same
     # expression appearing anywhere else.
-    run grep -n 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/sandbox-context.sh"
+    run grep -n 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
     [[ "$output" == *'grep -q "^server=/${dom//./\\.}/"'* ]]
@@ -2558,14 +2650,14 @@ STUB
 }
 
 @test "sandbox-context probes declared dependencies and never treats them as granted" {
-    grep -q 'dpkg-query' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q 'npm ls -g' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q 'pip list' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q 'cargo install --list' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'dpkg-query' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q 'npm ls -g' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q 'pip list' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q 'cargo install --list' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
     # domains are checked against what this container actually resolves,
     # not against the host-side approval store it cannot see
-    grep -q 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/sandbox-context.sh"
-    grep -q 'dejima-project approve' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q 'dejima-project approve' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
 }
 
 # The hook answers "is this installed?" per kind, and a tarball has no
@@ -2639,7 +2731,7 @@ STUB
 }
 
 @test "sandbox-context decides a tarball is present by its unpack directory" {
-    grep -q '\[ -d "/opt/dejima/\$name" \] && continue' "$REPO_ROOT/hooks/sandbox-context.sh"
+    grep -q '\[ -d "/opt/dejima/\$name" \] && continue' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
 }
 
 @test "sandbox-context reports nothing when no project declarations exist" {
