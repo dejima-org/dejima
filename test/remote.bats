@@ -1694,11 +1694,16 @@ EOF
 }
 
 @test "an argument that is not --once is refused rather than watched forever" {
-    # Anything unrecognized - a typo, --help - used to fall into the watch
-    # loop, which for an interactive invocation looks like a hang.
+    # Anything unrecognized - a typo - used to fall into the watch loop, which
+    # for an interactive invocation looks like a hang.
+    #
+    # --help was on this list until #64, which asked every tool to explain
+    # itself. It is now a recognized argument that prints and exits 0, so it
+    # belongs to the --help test rather than here. The property this one is
+    # about is unchanged: an argument the tool does not know is refused.
     conf_with_ntfy
     stub_curl
-    for bad in --help --onces -x once; do
+    for bad in --onces -x once; do
         run timeout 10 "$REPO_ROOT/bin/dejima-notify-watch" "$bad"
         [ "$status" -eq 2 ]
         [[ "$output" == *"usage:"* ]]

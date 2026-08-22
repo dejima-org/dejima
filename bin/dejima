@@ -30,7 +30,7 @@ Usage: dejima [options] [workspace] [-- args...]
   -- args...   everything after is passed to the harness command untouched
 
 Options (each overrides the config file for one launch only):
-  --forge <name>          forge integration: gitea, github, none
+  --forge <name>          which forge integration to use for this launch
   --workflow <name>       what the agent is told to do with its work
   --cmd <command>         run this instead of the harness's own command
   --ro,  --extra-readonly <path>    also mount this host path read-only
