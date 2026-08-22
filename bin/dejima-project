@@ -8,6 +8,43 @@
 # Usage: dejima-project <status|approve> [<path>]
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_PROJECT_HELP'
+dejima-project - review and approve what a project declares it needs
+
+Usage: dejima-project <status|approve> [path]
+
+  status [path]    what the project declares, and whether each entry is
+                   approved, pending, rejected as malformed, or beyond the cap
+  approve [path]   approve everything pending, after showing it and asking
+
+  path defaults to the current directory.
+
+A project declares its requirements in files inside its own checkout:
+
+  .dejima/dependencies      packages its image should carry
+  .dejima/allowed-domains   hosts its sessions may reach
+  .dejima/corpus            rules about how its history is recorded
+
+Those are declarations, not grants. They live in the workspace, which a session
+can write, so nothing they contain takes effect until it is approved here and
+recorded in a store outside the container's reach. That is the whole point of
+the split: a session can ask, and only an operator can agree.
+
+An entry that fails validation is reported as rejected and never offered for
+approval, so a malformed declaration cannot be waved through by answering yes.
+
+approve is interactive and shows everything before it asks once.
+
+See docs/configuration.md.
+DEJIMA_PROJECT_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
