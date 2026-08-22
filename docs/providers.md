@@ -224,6 +224,7 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the *fixed* allowlist rather than the extra one, which `dns-proxy.sh` exempts from stop-dns-rebind and `init-firewall.sh` treats as non-fatal when it fails to resolve. |
 | `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
+| `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
 | `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
 | `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
@@ -276,8 +277,30 @@ Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
-known until the container is actually running; `hooks/sandbox-context.sh`
-fills those two in at `SessionStart`.
+known until the container is actually running.
+
+### How the briefing reaches the session
+
+**A session-start hook is a size-limited channel, which is why it is no longer
+the only route.** Claude Code persists a large `SessionStart` payload to a file
+and injects a short preview in its place: measured in a dejima container, 9KB
+arrived whole and 21KB did not. A composed briefing plus a project's own
+`.dejima.md` runs well past that, so most of the briefing silently never
+reached the session - the briefing failing in the quietest way available to it.
+A system prompt has no such limit, and unlike anything in the conversation it
+cannot be compacted away later either.
+
+So a harness may name a flag in `briefing_args`, and
+`dejima-harness-wrapper` passes the briefing with it on every invocation.
+`entrypoint.sh` renders the briefing before the session starts, which is what
+resolves `@@CONTAINER_ID@@` and appends the dependency report and `.dejima.md`;
+`hooks/dejima-briefing-render.sh` is that renderer, and `sandbox-context.sh`
+calls the same one.
+
+The hook still runs for a harness using `briefing_args`, carrying only
+`@@SESSION_ID@@`'s value - the harness has not started when the entrypoint
+runs, so the id does not exist yet. A harness declaring no `briefing_args` gets
+the whole briefing through the hook as before.
 
 The result is mounted **read-only** into the container - so a session can
 never rewrite what the *next* session is told, even a session running

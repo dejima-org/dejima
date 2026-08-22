@@ -281,6 +281,11 @@ COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
 # nothing until something puts them on PATH.
 COPY docker/git-guard.sh /usr/local/lib/dejima/git-guard.sh
 COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
+# The briefing renderer, which every harness needs and no harness owns. Baked
+# in rather than reached through the ~/.claude/hooks mount, because that mount
+# is Claude Code's configuration: sandbox-context.sh calls this, and so does
+# entrypoint.sh, which renders the briefing before the session starts.
+COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/dejima-briefing-render.sh
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of
 # USER, so the copies above are unaffected, but the install(1) below is a RUN
@@ -295,7 +300,7 @@ COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
 RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall

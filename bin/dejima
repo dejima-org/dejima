@@ -989,9 +989,15 @@ fi
 # the audit's TCB list, so widening this unseen is a CRITICAL finding.
 SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domains)"
 SANDBOX_HARNESS_PROXIED_DOMAIN="$(manifest_get harness "$DEJIMA_HARNESS_NAME" proxied_api_domain)"
+# The flag that carries the briefing to a harness taking it on the command
+# line. A session-start hook cannot: Claude Code persists a large payload to a
+# file and injects a short preview in its place - measured in a dejima
+# container, 9KB arrived whole and 21KB did not - and a composed briefing plus
+# a project's .dejima.md is well past that. See docs/providers.md.
+SANDBOX_HARNESS_BRIEFING_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" briefing_args)"
 export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
     SANDBOX_HARNESS_SETTINGS SANDBOX_HARNESS_DOMAINS \
-    SANDBOX_HARNESS_PROXIED_DOMAIN
+    SANDBOX_HARNESS_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS
 
 # [core] command defaults to the selected harness's own command rather than
 # to a literal in core's schema.

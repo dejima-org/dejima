@@ -47,5 +47,22 @@ settings=()
 [ -n "${SANDBOX_HARNESS_SETTINGS:-}" ] && [ -f /etc/dejima-settings.json ] \
     && settings=(${SANDBOX_HARNESS_SETTINGS})
 
+# The briefing, for a harness that takes it as an argument. Two elements: the
+# flag the manifest names, then the rendered text as a single value - NOT
+# word-split like the two above, because this is prose rather than flags.
+#
+# Here rather than only in the entrypoint's own invocation, for the reason the
+# settings layer is: an interactive shell, an editor plugin or a nested run
+# starts the harness too, and a session that reaches the model without its
+# briefing does not know it is sandboxed. Conditional on the file so a
+# container started without bin/dejima - as test/runtime.bats does - still
+# runs the harness rather than failing on a path nothing wrote.
+briefing=()
+# shellcheck disable=SC2206
+[ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ] && [ -n "${DEJIMA_BRIEFING_RENDERED:-}" ] \
+    && [ -f "$DEJIMA_BRIEFING_RENDERED" ] \
+    && briefing=(${SANDBOX_HARNESS_BRIEFING_ARGS} "$(cat "$DEJIMA_BRIEFING_RENDERED")")
+
 exec "$SANDBOX_HARNESS_REAL" \
-    ${args[@]+"${args[@]}"} ${settings[@]+"${settings[@]}"} "$@"
+    ${args[@]+"${args[@]}"} ${settings[@]+"${settings[@]}"} \
+    ${briefing[@]+"${briefing[@]}"} "$@"

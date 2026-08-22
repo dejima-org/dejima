@@ -170,6 +170,7 @@ command_path	?path
 api_domains	?list:hostname
 proxied_api_domain	?hostname
 guards	?list:identifier
+briefing_args	?args
 no_confirm_args	?args
 settings_args	?args
 keys	?list:keyspec
