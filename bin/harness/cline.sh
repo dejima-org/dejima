@@ -53,13 +53,30 @@ harness_briefing_state_dir() {
 # to withhold, which is why an open-weight model served locally is supported
 # today and api.openai.com is not.
 #
-# A literal address or `localhost`, never a resolvable name: a name is a
-# promise about what DNS will say later, and this has to be decidable now.
-# The octets are compared as numbers rather than matched as text - `10.*`
-# would accept the hostname 10.example.com as readily as the network, and
-# a dotted quad written into this file at all is a shape the suite refuses
-# repo-wide because that is how an operator's real LAN address leaks into a
-# public repo.
+# Two ways an endpoint qualifies, and neither is about the URL's syntax.
+#
+# A literal loopback or RFC 1918 address is host-local by construction. The
+# octets are compared as numbers rather than matched as text - `10.*` would
+# accept the hostname 10.example.com as readily as the network - and a dotted
+# quad is never written into this file, because that is how an operator's real
+# LAN address leaks into a public repo.
+#
+# A NAME qualifies when the operator has already allowlisted it, through
+# `dejima-allow --project` or `--global`. That is the same set that decides
+# what the container can reach at all, so an endpoint failing this check is
+# one the session could not have connected to anyway. Requiring a literal
+# address instead was too strict by half: a model server on someone's own
+# network normally has a name, and refusing it made the local-endpoint path -
+# the reason this harness is provider-agnostic at all - unusable for the
+# ordinary case.
+#
+# What neither branch is doing is protecting the model credential. dejima
+# writes a placeholder into providers.json on this path whatever the endpoint
+# is, so no real credential enters the container either way. What this decides
+# is whether the configuration can WORK: an endpoint that needs a key would
+# get the placeholder and fail, and saying so at launch beats an auth error
+# three layers down. Pointing it somewhere is the operator's call, bounded by
+# an allowlist entry they made deliberately.
 _cline_host_local() {
     local url="$1" host a b
     host="${url#*://}"
@@ -74,23 +91,42 @@ _cline_host_local() {
     case "$host" in
         localhost|::1) return 0 ;;
     esac
-    # Four numeric octets, or it is a name.
+    # Four numeric octets means an address; anything else is a name, and is
+    # decided by the allowlist below rather than refused here.
     local -a oct=()
+    local numeric=1 o
     IFS=. read -ra oct <<< "$host"
-    [ "${#oct[@]}" -eq 4 ] || return 1
-    local o
     for o in "${oct[@]}"; do
-        case "$o" in ''|*[!0-9]*) return 1 ;; esac
-        [ "$o" -le 255 ] || return 1
+        case "$o" in ''|*[!0-9]*) numeric=0; break ;; esac
+        [ "$o" -le 255 ] || { numeric=0; break; }
     done
-    a="${oct[0]}" b="${oct[1]}"
-    # Loopback, and the three private ranges. The last of these is where
-    # Docker's own bridge gateway sits, which is how a container reaches a
-    # model server running on the host.
-    [ "$a" -eq 127 ] && return 0
-    [ "$a" -eq 10 ] && return 0
-    { [ "$a" -eq 192 ] && [ "$b" -eq 168 ]; } && return 0
-    { [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ]; } && return 0
+    if [ "${#oct[@]}" -eq 4 ] && [ "$numeric" -eq 1 ]; then
+        a="${oct[0]}" b="${oct[1]}"
+        # Loopback, and the three private ranges. The last of these is where
+        # Docker's own bridge gateway sits, which is how a container reaches a
+        # model server running on the host.
+        [ "$a" -eq 127 ] && return 0
+        [ "$a" -eq 10 ] && return 0
+        { [ "$a" -eq 192 ] && [ "$b" -eq 168 ]; } && return 0
+        { [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ]; } && return 0
+        return 1
+    fi
+    _cline_host_allowlisted "$host"
+}
+
+# Whether the operator has allowlisted this name, project or global. Read
+# through approved_entries so it is the same store, the same validator and the
+# same answer bin/dejima uses when it builds the container's allowlist - a
+# second reader of that file would be a second thing to keep in step.
+_cline_host_allowlisted() {
+    local host="$1" store entry
+    for store in "$(config_root)" "${PROJECT_STORE:-}"; do
+        [ -n "$store" ] || continue
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            [ "$entry" = "$host" ] && return 0
+        done < <(approved_entries "$store" allowed-domains 2>/dev/null)
+    done
     return 1
 }
 
@@ -176,9 +212,15 @@ harness_prepare_config() {
         echo "something the sandbox never sees." >&2
         echo "" >&2
         echo "Supported today: leave base_url unset for Anthropic through" >&2
-        echo "dejima's own credential proxy, or point it at a model served on" >&2
-        echo "the Docker host or the sandbox network, which needs no key -" >&2
-        echo "as a literal address or localhost, not a name." >&2
+        echo "dejima's own credential proxy, or point it at a model you serve" >&2
+        echo "yourself, which needs no key. That means a loopback or RFC 1918" >&2
+        echo "address, or a host you have allowlisted:" >&2
+        echo "" >&2
+        echo "  bin/dejima-allow --project <path> <host>" >&2
+        echo "" >&2
+        echo "The allowlist is what decides whether the container can reach it" >&2
+        echo "at all, so an endpoint that fails this check is one the session" >&2
+        echo "could not have connected to anyway." >&2
         return 1
     fi
 

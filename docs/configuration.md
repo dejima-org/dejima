@@ -357,14 +357,25 @@ not yours either. Two shapes are supported:
   proxy exactly as Claude Code is. What is written into the container is the
   placeholder `sandbox-credential-proxy-placeholder`; the real credential
   stays on the host.
-- **`base_url` set to a loopback or RFC 1918 address** - a model you are
-  serving yourself, on the Docker host or the sandbox network. Nothing needs
-  a credential, so there is nothing to withhold.
+- **`base_url` set to a model you serve yourself** - either a loopback or
+  RFC 1918 address, or a host you have allowlisted with `dejima-allow`.
+  Nothing needs a credential, so there is nothing to withhold.
 
-A hosted provider other than Anthropic is refused at launch. Its API key
-would have to go inside the container, and dejima has no proxy that could
-hold one back on its behalf - which is the one property the sandbox does not
-trade away. See [development.md](development.md#worked-example-cline).
+A name qualifies through the allowlist rather than through how it is spelled,
+because that is the same store deciding whether the container can reach the
+endpoint at all: one that fails the check is one the session could not have
+connected to anyway. A model server on your own network normally has a name,
+so requiring a literal address would have made this path unusable for the
+ordinary case.
+
+Anything else is refused at launch - a hosted provider's API key would have to
+go inside the container, and dejima has no proxy that could hold one back on
+its behalf. Note what the check is *not* doing: dejima writes a placeholder
+into the container on this path whatever the endpoint is, so no real
+credential enters it either way. What the check decides is whether the
+configuration can work at all, which is worth saying at launch rather than as
+an auth error three layers down. See
+[development.md](development.md#worked-example-cline).
 
 `[harness.cline] model` has no default and must be set. Any model id shipped
 here would go stale with the next Cline release, and choosing the model an
