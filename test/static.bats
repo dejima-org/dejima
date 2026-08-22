@@ -1051,6 +1051,40 @@ _cline_prepare() {
     [ "$output" = "unset" ] || { echo "a base URL was written: $output"; return 1; }
 }
 
+@test "cline's provider entry carries the timestamp cline requires" {
+    # Without updatedAt, Cline discards the entry and falls back to its own
+    # hosted endpoint - reporting a provider and model nobody configured, and
+    # failing to connect to a host the firewall was never asked to allow.
+    #
+    # Nothing about the file looks wrong when this is missing, which is why it
+    # survived every test that wrote providers.json by hand: those included the
+    # field, and the plugin did not. It took a run against a real endpoint.
+    local cfg ws f
+    cfg="$(_cline_cfg 'model = m')"
+    ws="$BATS_TEST_TMPDIR/ws-ts"
+    run _cline_prepare "$cfg" "$ws"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    f="$(find "$cfg/state" -name providers.json | head -1)"
+    [ -n "$f" ] || { echo "no providers.json"; return 1; }
+    run jq -r '.providers.anthropic.updatedAt // "missing"' "$f"
+    [ "$output" != "missing" ] || { echo "no updatedAt: cline will discard this"; return 1; }
+    # An ISO-8601 instant, which is the shape Cline writes itself.
+    [[ "$output" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]] \
+        || { echo "not an ISO-8601 instant: $output"; return 1; }
+}
+
+@test "cline's local-endpoint provider entry carries it too" {
+    # Same field, the other branch. The bug was found on this one.
+    local cfg ws f
+    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:8080/v1')"
+    ws="$BATS_TEST_TMPDIR/ws-ts2"
+    run _cline_prepare "$cfg" "$ws"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    f="$(find "$cfg/state" -name providers.json | head -1)"
+    run jq -r '.providers."openai-compatible".updatedAt // "missing"' "$f"
+    [ "$output" != "missing" ] || { echo "no updatedAt on the local branch"; return 1; }
+}
+
 @test "cline's state directory is one per workspace, not one for all of them" {
     # Cline indexes every session it has ever run in a single sessions.db, with
     # the project a session belonged to as a field inside the record rather

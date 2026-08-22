@@ -362,14 +362,30 @@ shape (`text`, `tool_use` with id/name/input, `tool_result`), so the transform
 differs only in the envelope, and the same policy holds: prompts, assistant
 text and tool invocations, never tool results.
 
-Epitaphs stay absent because **no Cline compaction has been observed**. It has
-a `--compaction agentic|basic|off` flag, so summaries presumably exist in some
-form, but what one looks like in a `.messages.json` has not been seen - and a
-guess would produce a store that either silently keeps nothing or keeps the
-wrong record under dejima's promise that the artefact is what the session
-wrote. The hook is simply not defined, which `dejima-epitaph` treats as
-"nothing was kept" rather than as an error. Whoever sees a real compaction
-first should write it down.
+Epitaphs stay absent, and now for a settled reason rather than an unexamined
+one. Cline's compaction has been observed, against a locally served model with
+the context window set small enough to force it: four completed
+`auto_compaction` cycles, each dropping the working context from five messages
+to three.
+
+**The persisted record was untouched by every one of them.** All five file
+reads remained in `.messages.json` in full, tool results included, at close to
+twenty kilobytes apiece - the same content the compaction had just removed from
+what was being sent to the model. There is no summary record, no marker, and no
+gap.
+
+So compaction here is a working-context operation and nothing more. Epitaphs
+exist because Claude Code's compaction *destroys* context that survives only as
+the summary written into its transcript; the container goes away and the
+summary is the only remaining account. Cline destroys nothing on disk, so there
+is nothing for an epitaph to preserve, and `harness_extract_epitaphs` stays
+undefined because that is the right answer rather than a missing piece.
+
+Worth knowing if this is revisited: the summary Cline builds during compaction
+is real but lives only in the event stream, as `auto_compaction` notices
+carrying token counts. A run with too small a budget reports
+`compaction_budget_emergency` and falls back from `agentic_summary` to plain
+trimming. Neither path writes anything to the session record.
 
 ### Where a harness's support lives: three tiers
 

@@ -230,25 +230,39 @@ harness_prepare_config() {
     # one would land if anything ever wrote one here by mistake.
     chmod 700 "$state" 2>/dev/null || true
 
+    # Cline DISCARDS a provider entry with no updatedAt and falls back to its
+    # own hosted endpoint, silently - the run reports provider "cline" and a
+    # model nobody configured, and the first sign of trouble is a connection
+    # failure to an endpoint the firewall was never asked to allow. Found by
+    # running it against a real local model; every earlier test wrote this file
+    # by hand and happened to include the field.
+    #
+    # The launch's own time, because that is what it is: the moment dejima
+    # wrote this configuration. The file is rewritten every launch anyway.
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
     local tmp
     tmp="$(mktemp "$settings/.providers.XXXXXX")" || return 1
     if [ -n "$base_url" ]; then
         jq -n --arg m "$model" --arg u "$base_url" \
+            --arg t "$now" \
             '{version: 1, lastUsedProvider: "openai-compatible", modes: {},
               providers: {"openai-compatible": {
                 settings: {provider: "openai-compatible", model: $m,
                            baseUrl: $u, apiKey: "dejima-no-credential-needed"},
-                tokenSource: "manual"}}}' > "$tmp"
+                updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
     else
         # The placeholder is what Cline sends; the host-side proxy replaces it
         # with the real credential on the way out. Same arrangement as Claude
         # Code's faked .credentials.json, confirmed end to end against the API.
         jq -n --arg m "$model" \
+            --arg t "$now" \
             '{version: 1, lastUsedProvider: "anthropic", modes: {},
               providers: {anthropic: {
                 settings: {provider: "anthropic", model: $m,
                            apiKey: "sandbox-credential-proxy-placeholder"},
-                tokenSource: "manual"}}}' > "$tmp"
+                updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
     fi || { rm -f "$tmp"; return 1; }
     chmod 600 "$tmp"
     mv "$tmp" "$settings/providers.json"

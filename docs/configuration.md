@@ -377,6 +377,13 @@ configuration can work at all, which is worth saying at launch rather than as
 an auth error three layers down. See
 [development.md](development.md#worked-example-cline).
 
+If the endpoint serves a model Cline has no catalogue entry for, Cline has no
+context budget for it either, and will keep growing the conversation until the
+server rejects the request rather than compacting. dejima does not set one:
+`contextWindow` belongs to the model you are serving, and a wrong value is
+worse than none. If you hit `exceeds the available context size`, that is what
+it is.
+
 `[harness.cline] model` has no default and must be set. Any model id shipped
 here would go stale with the next Cline release, and choosing the model an
 unattended agent runs on is yours to make.
