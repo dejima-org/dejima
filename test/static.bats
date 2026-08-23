@@ -1186,6 +1186,93 @@ _cline_prepare() {
         || { echo "the preamble no longer says what mode the session is in"; return 1; }
 }
 
+# Every command-line tool under bin/, discovered rather than listed. A tool
+# added later is covered the day it lands, which is the only version of this
+# that stays true - the same reasoning test/shellcheck.sh builds its list on.
+#
+# Libraries are excluded by name: they are sourced, not run, and have no
+# arguments to explain.
+_cli_tools() {
+    local f name
+    for f in "$REPO_ROOT"/bin/*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        name="$(basename "$f")"
+        case "$name" in *-lib.sh) continue ;; esac
+        printf '%s\n' "$name"
+    done
+}
+
+@test "every CLI explains itself with --help" {
+    # #64: bare invocation keeps its terse usage line, --help says what the
+    # arguments do. On stdout and exit 0, so it can be piped or paged, where
+    # usage() stays on stderr and exits nonzero so a mistyped invocation still
+    # fails a script.
+    local name out
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        run "$REPO_ROOT/bin/$name" --help
+        [ "$status" -eq 0 ] || { echo "$name --help exited $status"; return 1; }
+        [ -n "$output" ] || { echo "$name --help printed nothing"; return 1; }
+        # It has to be about the tool it belongs to, checked on the FIRST
+        # line rather than anywhere in the page. A copy-pasted help would
+        # still mention the right name incidentally - in a "started by
+        # systemd/<name>.service" line, say - so "appears somewhere" is
+        # satisfied by a page with the wrong title on it.
+        [[ "${lines[0]}" == *"$name"* ]] \
+            || { echo "$name --help opens with: ${lines[0]}"; return 1; }
+        # And -h reaches the same place - the same output, not merely another
+        # exit 0. A tool that ignored -h and happened to succeed would pass a
+        # status-only check while printing nothing like help.
+        local long="$output" short
+        short="$("$REPO_ROOT/bin/$name" -h 2>/dev/null)" \
+            || { echo "$name -h failed"; return 1; }
+        [ "$short" = "$long" ] \
+            || { echo "$name -h and --help disagree"; return 1; }
+    done < <(_cli_tools)
+}
+
+@test "no help page scrolls off a reasonable pane" {
+    # The budget is the constraint that forces a help page to choose what
+    # matters. Asserted rather than aspired to, so a later addition that pushes
+    # one past it fails here instead of quietly growing.
+    local name n
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        n="$("$REPO_ROOT/bin/$name" --help 2>/dev/null | wc -l)"
+        [ "$n" -le 30 ] || { echo "$name --help is $n lines, budget is 30"; return 1; }
+        # A help page that fits because it says nothing is not the goal either.
+        [ "$n" -ge 8 ] || { echo "$name --help is only $n lines"; return 1; }
+    done < <(_cli_tools)
+}
+
+@test "--help works when there is no config at all" {
+    # Which is exactly when someone reaches for it. Every tool dispatches
+    # --help before sourcing a library or reading the config, so a missing or
+    # malformed config cannot stop it printing.
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        run env DEJIMA_CONFIG_DIR="$BATS_TEST_TMPDIR/definitely-not-here" \
+            "$REPO_ROOT/bin/$name" --help
+        [ "$status" -eq 0 ] \
+            || { echo "$name --help needs a config to print (exit $status): $output"; return 1; }
+    done < <(_cli_tools)
+}
+
+@test "bare invocation still prints terse usage, not the help page" {
+    # #64 asks for both: the one-line usage stays for a mistyped invocation,
+    # and it stays on stderr with a nonzero exit so a script still fails.
+    # Checked on the tools that take a required argument.
+    local name
+    for name in dejima-allow dejima-dep dejima-project dejima-epitaph; do
+        run "$REPO_ROOT/bin/$name"
+        [ "$status" -ne 0 ] || { echo "$name with no arguments succeeded"; return 1; }
+        # Terse: the usage line, not the whole help page.
+        [ "${#lines[@]}" -le 4 ] \
+            || { echo "$name prints ${#lines[@]} lines bare; usage should stay terse"; return 1; }
+    done
+}
+
 @test "shellcheck covers harness plugins, which carry no shebang" {
     # Plugins are sourced, so they have no shebang, so the shebang-based
     # discovery dropped them - silently, while they sit in the trusted

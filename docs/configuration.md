@@ -16,6 +16,10 @@ set to get a working sandbox: uncomment what you need. `dejima --print-config`
 prints the resolved schema with real values, which is the fastest way to see
 what a given launch will actually use.
 
+Every tool takes `--help`, which describes its own arguments and what they do.
+That is the fastest answer to "what does this flag mean"; this page is for the
+config file behind them.
+
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection. Also settable per launch with `--harness`, which is how a host keeps one harness as its default and reaches another when it wants to |

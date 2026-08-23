@@ -17,6 +17,42 @@
 # for a project are the union of its global and project approvals.
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_DEP_HELP'
+dejima-dep - approve a package a project needs, so its image carries it
+
+Usage: dejima-dep <add|remove|list> [--global | --project [path]] [<spec>]
+
+  add <spec>       approve it; the image is rebuilt with it at the next launch
+  remove <spec>    withdraw the approval
+  list             show what is approved in the scope given
+
+Scope:
+  --project [path]   one project, every session in it. Path defaults to $PWD.
+  --global           every project on this host.
+  (none)             same as --project for the current directory.
+
+A spec is <apt|npm|pip|cargo>:<name>, optionally @<version>, or a release
+archive as tarball:<name>@<sha256>:<url>. The digest is required and checked at
+build time, because a tarball is code that will run in every future session.
+
+Approving is a separate act from declaring. A project declares what it needs in
+.dejima/dependencies, which is inside the workspace and therefore writable by
+the session; nothing is installed until an operator approves it here. Use
+`dejima-project status` to see what a project is asking for.
+
+Nothing is installed into a running container: a rebuild happens at the next
+launch, so an approval made mid-session takes effect on the one after it.
+
+See docs/configuration.md.
+DEJIMA_DEP_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"

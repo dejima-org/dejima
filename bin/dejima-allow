@@ -17,6 +17,41 @@
 # the thing running right now". Pass --container as well to do both.
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_ALLOW_HELP'
+dejima-allow - let a sandbox reach a domain the egress firewall blocks
+
+Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>
+
+Scope, which decides who the grant is for and how long it lasts:
+  (none)             the running container, right now, until it exits. Finds it
+                     if exactly one is running; refuses if none or several.
+  --container <id>   the same, for a named container. Use this when a session
+                     told you its own id rather than letting anything guess.
+  --project [path]   every future session in one project. Also writes the domain
+                     to that project's .dejima/allowed-domains, so it is shared
+                     with everyone working on it. Path defaults to $PWD.
+  --global           every future session in every project on this host.
+
+They combine. --project and --global deliberately do NOT touch a session that
+is already running: they are approvals for future ones. Pass --container as
+well to do both at once.
+
+Prefer --project to --global. A domain one project needs is that project's, and
+a global grant widens every other project's firewall too.
+
+With --container, the domain is verified reachable afterwards and a warning is
+printed if it is not, so a typo or a blocked port does not look like success.
+
+See docs/configuration.md; docs/security.md explains what the allowlist bounds.
+DEJIMA_ALLOW_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"

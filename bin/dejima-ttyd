@@ -28,6 +28,35 @@
 # must match the run-id shape before it is used as a path component.
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_TTYD_HELP'
+dejima-ttyd - serve the web terminal that fronts dejima-attach
+
+Usage: dejima-ttyd
+
+Takes no arguments. Started by systemd/dejima-ttyd.service; running it by hand
+is only useful for debugging.
+
+Reads ttyd_port from [remote-access] in the config so the port has exactly one
+source of truth - the systemd unit deliberately does not repeat it.
+
+Binds 127.0.0.1 only, and that is a requirement rather than a default worth
+overriding. Attaching gives a tmux session on the host, so a listener on any
+address a container can route to is an escape hatch out of the sandbox;
+loopback is not one. Put nginx in front of it, bound to one LAN address - see
+docs/nginx-dejima.conf.example.
+
+Serves nothing until [remote-access] enabled is on.
+
+See docs/remote-access.md.
+DEJIMA_TTYD_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"

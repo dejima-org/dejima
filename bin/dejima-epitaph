@@ -24,6 +24,41 @@
 # Usage: dejima-epitaph save <workspace>
 set -uo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_EPITAPH_HELP'
+dejima-epitaph - keep what a session worked out before its context was compacted
+
+Usage: dejima-epitaph save <workspace>
+
+  save <workspace>   extract any compaction summaries from that workspace's
+                     transcripts and keep them
+
+Run by bin/dejima when a session exits, not usually by hand.
+
+A harness that compacts a long session writes a summary of what it is about to
+forget. For some harnesses that summary is the only durable account of a long
+session's reasoning, and it goes away with the container. This keeps it.
+
+What a compaction looks like in a transcript is the harness's business, so the
+selected harness's plugin does the extracting; everything else here is dejima's:
+where the store is, that nothing mounts it, and that a directory appears only
+once something has been written into it.
+
+The store is host-side and never mounted, so one session cannot read what an
+earlier one concluded or edit what this one is about to record.
+
+Nothing is kept when the selected harness does not lose anything to compaction,
+which is not a failure - it means the transcript already holds it all.
+
+See docs/security.md.
+DEJIMA_EPITAPH_HELP
+        exit 0 ;;
+esac
+
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
