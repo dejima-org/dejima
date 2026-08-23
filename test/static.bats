@@ -2057,6 +2057,39 @@ _install_forge_bins() {
     rm -rf "$fake" "$dest"
 }
 
+@test "the release pass names every area whose check is manual" {
+    # This list is the only record of what the test suites cannot see, and it
+    # is the kind of list that rots by omission: an area gets a manual check
+    # because someone was burned, and then a refactor renames the path and the
+    # check silently stops being printed. Pinned against the paths themselves.
+    local script="$REPO_ROOT/test/release-pass.sh"
+    [ -x "$script" ]
+    local area
+    for area in bin/dejima docker/entrypoint forges/ docker/forge-guard \
+                hooks/merge-guard bin/dejima-tty-suspend web/ harnesses/ \
+                bin/dejima-ttyd '\.dejima/allowed-domains'; do
+        grep -q -- "$area" "$script" \
+            || { echo "release-pass.sh no longer mentions $area"; return 1; }
+    done
+    # And it must say what it could not run, rather than reporting a pass.
+    grep -q 'did NOT run' "$script" \
+        || { echo "a gate that could not run is reported as passing"; return 1; }
+    grep -q 'queued is not a job that passed' "$script" \
+        || { echo "nothing warns that a queued CI job is not a green one"; return 1; }
+}
+
+@test "docs/release.md exists and is pointed at from where a release starts" {
+    [ -f "$REPO_ROOT/docs/release.md" ]
+    grep -q 'docs/release.md' "$REPO_ROOT/.dejima.md" \
+        || { echo ".dejima.md does not point at the release pass"; return 1; }
+    # The two halves that make this project's review different from a generic
+    # one, and the two most likely to be dropped as boilerplate.
+    grep -q 'allowed-domains' "$REPO_ROOT/docs/release.md" \
+        || { echo "the release review does not mention the CI allowlist"; return 1; }
+    grep -q 'queue' "$REPO_ROOT/docs/release.md" \
+        || { echo "the release doc does not warn about the queued privileged job"; return 1; }
+}
+
 # --- Ctrl-Z (#179) ----------------------------------------------------------
 #
 # Driven through a real pty with a real interactive shell on it, because the

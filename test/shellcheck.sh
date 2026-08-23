@@ -40,6 +40,22 @@ mapfile -t scripts < <(list_scripts)
 [ "${#scripts[@]}" -gt 0 ] || { echo "found no shell scripts to check" >&2; exit 1; }
 
 cd "$root"
+
+# Said plainly rather than left to `exec` to fail with "not found", which reads
+# as a broken script rather than a missing tool - and, on a nonzero exit nobody
+# reads closely, as a check that ran.
+if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "shellcheck is not installed, so nothing was checked." >&2
+    echo >&2
+    echo "It is declared in .dejima/dependencies. In a sandbox that predates" >&2
+    echo "that declaration, approve it and relaunch so the image is rebuilt:" >&2
+    echo >&2
+    echo "  dejima-project approve" >&2
+    echo >&2
+    echo "Report the suite as not run rather than as passing." >&2
+    exit 127
+fi
+
 # -S warning: info and style are largely taste, and a check whose output gets
 # skimmed is not a check. Severities and the disabled classes are in
 # .shellcheckrc, beside the reasoning for each.
