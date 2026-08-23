@@ -494,7 +494,7 @@ contribution is delivering the drag.
 ### Toolbar
 
 ```
-ESC   CTRL   TAB   ←   ↓   ↑   →
+ESC   CTRL   TAB   ←   ↓   ↑   →   ⏎
 PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
 ```
 
@@ -513,6 +513,8 @@ PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
   markers when the application has asked for them. It needs a secure context;
   on an `http://` front door the browser refuses the read and the page says so
   rather than doing nothing.
+- `⏎` sends Enter, which is the key a session asks for most and the one a soft
+  keyboard puts furthest from a thumb.
 - `KBD` raises the soft keyboard, which is otherwise awkward to get back once
   it has been dismissed.
 

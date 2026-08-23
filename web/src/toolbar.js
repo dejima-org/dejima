@@ -107,6 +107,9 @@
         refreshLatches();
       },
       paste: paste,
+      // Carriage return, not a newline. A terminal's Enter key is CR; sending
+      // LF here would submit nothing in a shell and insert a line in an editor.
+      enter: function () { opts.sendText('\r'); },
       kbd: function () {
         opts.term.focus();
         if (opts.term.textarea) opts.term.textarea.focus();
