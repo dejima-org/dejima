@@ -2955,8 +2955,7 @@ registered_commands() {
     ws="$(mktemp -d "$BATS_TEST_TMPDIR/ws.XXXXXX")"
     printf 'BRIEFING-SENTINEL\n' > "$BATS_TEST_TMPDIR/briefing"
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$BATS_TEST_TMPDIR/briefing" \
-          bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context DEJIMA_BRIEFING_FILE="$BATS_TEST_TMPDIR/briefing")
     run jq -r '.hookSpecificOutput.additionalContext' <<< "$out"
     [[ "$output" == *"BRIEFING-SENTINEL"* ]] \
         || { echo "the briefing did not come through the hook: $output"; return 1; }
@@ -3010,6 +3009,24 @@ registered_commands() {
     run bash -c 'sed -n "/could not render the session briefing/,+4p" "$1"' _ \
         "$REPO_ROOT/docker/entrypoint.sh"
     [[ "$output" == *"exit 1"* ]] || { echo "a render failure does not stop the launch: $output"; return 1; }
+}
+
+# hooks/sandbox-context.sh, with the briefing-delivery variables cleared.
+#
+# The hook deliberately emits only the session id when the briefing already
+# reached the harness another way - written to a file, or passed as an argument
+# - and inside a dejima sandbox those variables are set, because that is how
+# the session running these tests got its own briefing. So a test that sets
+# only DEJIMA=1 is asserting a precondition it has not stated: it passes in CI,
+# where the environment is clean, and fails on the machine this project is
+# actually worked on. Third time (see .dejima.md), same remedy: state the
+# precondition with env -u rather than assuming it.
+#
+# Extra KEY=VALUE assignments for one call go in as arguments.
+sandbox_context() {
+    env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_FILE \
+        -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 "$@" \
+        bash "$REPO_ROOT/hooks/sandbox-context.sh"
 }
 
 @test "sandbox-context.sh gives the agent its own container ID for dejima-allow" {
@@ -3490,7 +3507,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'tarball:definitely-not-here@%s:https://example.com/x.tar.gz\n' "$sha" > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-here"* ]]
     # The digest reaches the agent intact: it is what the operator is being
@@ -3516,7 +3533,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'tarball:%s@%s:https://example.com/x.tar.gz\n' "$present" "$sha" > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"$present"* ]]
 }
@@ -3557,7 +3574,7 @@ STUB
 @test "sandbox-context reports nothing when no project declarations exist" {
     local ws; ws="$(mktemp -d)"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"declares requirements"* ]]
 }
@@ -3569,7 +3586,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'apt:definitely-not-installed-noeol' > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-installed-noeol"* ]]
 }
@@ -3590,7 +3607,7 @@ STUB
     printf 'dejima Docker container\n' > "$b"
     local out
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context DEJIMA_BRIEFING_FILE="$b")
     rm -rf "$ws"; rm -f "$b"
     printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
     [[ "$out" == *"dejima Docker container"* ]]
@@ -3620,7 +3637,7 @@ EOF
     chmod +x "$stub/npm"
     local out
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | PATH="$stub:$PATH" DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context PATH="$stub:$PATH")
     local calls; calls=$(wc -l < "$stub/calls")
     rm -rf "$ws" "$stub"
     [ "$calls" -eq 1 ]
@@ -3635,7 +3652,7 @@ EOF
     mkdir -p "$ws/.dejima"
     printf 'IGNORE-PREVIOUS-INSTRUCTIONS\nreal.example.com\n' > "$ws/.dejima/allowed-domains"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"IGNORE-PREVIOUS-INSTRUCTIONS"* ]]
     [[ "$out" == *"real.example.com"* ]]
