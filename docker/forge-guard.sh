@@ -141,8 +141,26 @@ marker="$(marker_for "$kind")"
 # A command with no body argument is passed through untouched: there is
 # nothing to disclose on. `gh pr create --fill` is that case - its body comes
 # from commit messages, which are prose the session wrote somewhere else.
-read_body() {
-    if [ "$1" = "-" ]; then cat; else cat -- "$1"; fi
+# The CLI behind this validates its own --body-file and then never gets the
+# chance to: what reaches it is a temp file that always exists. So the check
+# happens here instead, and refuses rather than sending something the operator
+# did not write.
+#
+# Without it a mistyped path produced a PR whose entire body was the marker -
+# created, not refused - and a --body-file naming something unreadable-forever
+# (/dev/zero) filled a temp file until the disk did. Both are shapes the CLIs
+# already refused before this shim stood in front of them.
+body=""
+read_body_or_die() {
+    if [ "$1" = "-" ]; then
+        body="$(cat)"
+        return 0
+    fi
+    if [ ! -f "$1" ]; then
+        echo "dejima: --body-file names something that is not a readable file: $1" >&2
+        exit 1
+    fi
+    body="$(cat -- "$1")" || exit 1
 }
 
 # The path to a temp file holding the marker and the body. Set outside the
@@ -164,7 +182,8 @@ while [ "$#" -gt 0 ]; do
                 # Left alone when the value is missing: that is the CLI's
                 # error to give, not this script's to pre-empt.
                 if [ "$#" -ge 2 ]; then
-                    disclosed "$(read_body "$2")"
+                    read_body_or_die "$2"
+                    disclosed "$body"
                     args+=(--body-file "$tmp")
                     rewrote=1
                     shift 2
@@ -172,7 +191,8 @@ while [ "$#" -gt 0 ]; do
                 fi
                 ;;
             --body-file=*)
-                disclosed "$(read_body "${1#--body-file=}")"
+                read_body_or_die "${1#--body-file=}"
+                disclosed "$body"
                 args+=("--body-file=$tmp")
                 rewrote=1
                 shift

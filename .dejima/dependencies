@@ -29,3 +29,8 @@ npm:cline
 
 apt:tmux
 apt:bats
+# The other half of what CI runs. The CI job installs it itself, so without
+# this line a sandbox is the one place the gate cannot be run at all - and a
+# base image that happens to carry it is not a guarantee, as one that stopped
+# carrying it demonstrated.
+apt:shellcheck

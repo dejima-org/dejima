@@ -2057,6 +2057,39 @@ _install_forge_bins() {
     rm -rf "$fake" "$dest"
 }
 
+@test "the release pass names every area whose check is manual" {
+    # This list is the only record of what the test suites cannot see, and it
+    # is the kind of list that rots by omission: an area gets a manual check
+    # because someone was burned, and then a refactor renames the path and the
+    # check silently stops being printed. Pinned against the paths themselves.
+    local script="$REPO_ROOT/test/release-pass.sh"
+    [ -x "$script" ]
+    local area
+    for area in bin/dejima docker/entrypoint forges/ docker/forge-guard \
+                hooks/merge-guard bin/dejima-tty-suspend web/ harnesses/ \
+                bin/dejima-ttyd '\.dejima/allowed-domains'; do
+        grep -q -- "$area" "$script" \
+            || { echo "release-pass.sh no longer mentions $area"; return 1; }
+    done
+    # And it must say what it could not run, rather than reporting a pass.
+    grep -q 'did NOT run' "$script" \
+        || { echo "a gate that could not run is reported as passing"; return 1; }
+    grep -q 'queued is not a job that passed' "$script" \
+        || { echo "nothing warns that a queued CI job is not a green one"; return 1; }
+}
+
+@test "docs/release.md exists and is pointed at from where a release starts" {
+    [ -f "$REPO_ROOT/docs/release.md" ]
+    grep -q 'docs/release.md' "$REPO_ROOT/.dejima.md" \
+        || { echo ".dejima.md does not point at the release pass"; return 1; }
+    # The two halves that make this project's review different from a generic
+    # one, and the two most likely to be dropped as boilerplate.
+    grep -q 'allowed-domains' "$REPO_ROOT/docs/release.md" \
+        || { echo "the release review does not mention the CI allowlist"; return 1; }
+    grep -q 'queue' "$REPO_ROOT/docs/release.md" \
+        || { echo "the release doc does not warn about the queued privileged job"; return 1; }
+}
+
 # --- Ctrl-Z (#179) ----------------------------------------------------------
 #
 # Driven through a real pty with a real interactive shell on it, because the
@@ -2360,6 +2393,33 @@ comment forge-cli issue comment"
     # blocked merge.
     out="$(_disclose_shim "$d" --repo o/r create --body "x")"
     [[ "$out" == *"LLM agent"* ]] || { echo "--repo hid the create: $out"; return 1; }
+}
+
+@test "a body file the CLI would have refused is refused here, not sent empty" {
+    # The shadow reads --body-file and hands the CLI a temp file, which always
+    # exists - so the CLI's own check on that argument can never fire again,
+    # and whatever the shadow read is what gets published. Before this, a
+    # mistyped path produced a PR whose entire body was the marker, created
+    # rather than refused, and /dev/zero filled a temp file until the disk did.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/disclosebody.XXXXXX")"
+    local DISCLOSE="pr forge-cli create"
+    local bad out
+    for bad in "$d/nope" /dev/zero "$d"; do
+        run timeout 5 env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" \
+            DEJIMA_DISCLOSE="$DISCLOSE" bash -c '
+                mkdir -p "$1/real"
+                printf "#!/bin/sh\necho CLI-RAN\n" > "$1/real/forge-cli"
+                chmod +x "$1/real/forge-cli"
+                cp "$2" "$1/forge-cli"; chmod +x "$1/forge-cli"
+                "$1/forge-cli" create --title T --body-file "$3"' \
+            _ "$d" "$SANDBOX_DIR/forge-guard.sh" "$bad"
+        [ "$status" -ne 124 ] || { echo "hung on $bad"; return 1; }
+        [ "$status" -ne 0 ] || { echo "accepted $bad: $output"; return 1; }
+        [[ "$output" == *"not a readable file"* ]] \
+            || { echo "refused $bad without saying why: $output"; return 1; }
+        [[ "$output" != *"CLI-RAN"* ]] \
+            || { echo "ran the CLI anyway for $bad"; return 1; }
+    done
 }
 
 @test "the body is marked once, not once per body argument" {
@@ -2928,8 +2988,7 @@ registered_commands() {
     ws="$(mktemp -d "$BATS_TEST_TMPDIR/ws.XXXXXX")"
     printf 'BRIEFING-SENTINEL\n' > "$BATS_TEST_TMPDIR/briefing"
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$BATS_TEST_TMPDIR/briefing" \
-          bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context DEJIMA_BRIEFING_FILE="$BATS_TEST_TMPDIR/briefing")
     run jq -r '.hookSpecificOutput.additionalContext' <<< "$out"
     [[ "$output" == *"BRIEFING-SENTINEL"* ]] \
         || { echo "the briefing did not come through the hook: $output"; return 1; }
@@ -2983,6 +3042,24 @@ registered_commands() {
     run bash -c 'sed -n "/could not render the session briefing/,+4p" "$1"' _ \
         "$REPO_ROOT/docker/entrypoint.sh"
     [[ "$output" == *"exit 1"* ]] || { echo "a render failure does not stop the launch: $output"; return 1; }
+}
+
+# hooks/sandbox-context.sh, with the briefing-delivery variables cleared.
+#
+# The hook deliberately emits only the session id when the briefing already
+# reached the harness another way - written to a file, or passed as an argument
+# - and inside a dejima sandbox those variables are set, because that is how
+# the session running these tests got its own briefing. So a test that sets
+# only DEJIMA=1 is asserting a precondition it has not stated: it passes in CI,
+# where the environment is clean, and fails on the machine this project is
+# actually worked on. Third time (see .dejima.md), same remedy: state the
+# precondition with env -u rather than assuming it.
+#
+# Extra KEY=VALUE assignments for one call go in as arguments.
+sandbox_context() {
+    env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_FILE \
+        -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 "$@" \
+        bash "$REPO_ROOT/hooks/sandbox-context.sh"
 }
 
 @test "sandbox-context.sh gives the agent its own container ID for dejima-allow" {
@@ -3463,7 +3540,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'tarball:definitely-not-here@%s:https://example.com/x.tar.gz\n' "$sha" > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-here"* ]]
     # The digest reaches the agent intact: it is what the operator is being
@@ -3489,7 +3566,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'tarball:%s@%s:https://example.com/x.tar.gz\n' "$present" "$sha" > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"$present"* ]]
 }
@@ -3530,7 +3607,7 @@ STUB
 @test "sandbox-context reports nothing when no project declarations exist" {
     local ws; ws="$(mktemp -d)"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"declares requirements"* ]]
 }
@@ -3542,7 +3619,7 @@ STUB
     mkdir -p "$ws/.dejima"
     printf 'apt:definitely-not-installed-noeol' > "$ws/.dejima/dependencies"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" == *"definitely-not-installed-noeol"* ]]
 }
@@ -3563,7 +3640,7 @@ STUB
     printf 'dejima Docker container\n' > "$b"
     local out
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context DEJIMA_BRIEFING_FILE="$b")
     rm -rf "$ws"; rm -f "$b"
     printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null
     [[ "$out" == *"dejima Docker container"* ]]
@@ -3593,7 +3670,7 @@ EOF
     chmod +x "$stub/npm"
     local out
     out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" \
-        | PATH="$stub:$PATH" DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+        | sandbox_context PATH="$stub:$PATH")
     local calls; calls=$(wc -l < "$stub/calls")
     rm -rf "$ws" "$stub"
     [ "$calls" -eq 1 ]
@@ -3608,7 +3685,7 @@ EOF
     mkdir -p "$ws/.dejima"
     printf 'IGNORE-PREVIOUS-INSTRUCTIONS\nreal.example.com\n' > "$ws/.dejima/allowed-domains"
     local out
-    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | DEJIMA=1 bash "$REPO_ROOT/hooks/sandbox-context.sh")
+    out=$(printf '{"session_id":"s1","cwd":"%s"}' "$ws" | sandbox_context)
     rm -rf "$ws"
     [[ "$out" != *"IGNORE-PREVIOUS-INSTRUCTIONS"* ]]
     [[ "$out" == *"real.example.com"* ]]
