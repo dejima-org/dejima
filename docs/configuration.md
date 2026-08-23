@@ -29,6 +29,10 @@ what a given launch will actually use.
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release |
+| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted |
+| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one |
+| `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
@@ -377,12 +381,23 @@ configuration can work at all, which is worth saying at launch rather than as
 an auth error three layers down. See
 [development.md](development.md#worked-example-cline).
 
-If the endpoint serves a model Cline has no catalogue entry for, Cline has no
-context budget for it either, and will keep growing the conversation until the
-server rejects the request rather than compacting. dejima does not set one:
-`contextWindow` belongs to the model you are serving, and a wrong value is
-worse than none. If you hit `exceeds the available context size`, that is what
-it is.
+If the endpoint serves a model Cline has no catalogue entry for - which is every
+model you serve yourself - Cline has no context budget for it either, and will
+grow the conversation until the *server* rejects it rather than compacting:
+
+```
+rpc error: ... request (16465 tokens) exceeds the available context size (16384 tokens)
+```
+
+Set `[harness.cline] context_window` to stop that. With it, Cline compacts
+before it reaches the limit instead of overflowing.
+
+Set it a little **under** whatever the server allows. Cline's accounting is
+approximate, and a compaction does not always land under target when a single
+tool result is large, so a value equal to the server's limit still overflows
+occasionally. There is no default: the right number belongs to the model being
+served, and a wrong one is worse than none - too high changes nothing, too low
+compacts constantly.
 
 `[harness.cline] model` has no default and must be set. Any model id shipped
 here would go stale with the next Cline release, and choosing the model an
