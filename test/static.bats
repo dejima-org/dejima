@@ -1085,6 +1085,30 @@ _cline_prepare() {
     [ "$output" != "missing" ] || { echo "no updatedAt on the local branch"; return 1; }
 }
 
+@test "cline gets a context window only when one is configured" {
+    # Cline budgets against its own model catalogue. For a model it does not
+    # recognise - every self-served one - it has no budget, so it grows the
+    # conversation until the SERVER rejects it rather than compacting. Setting
+    # this is what makes it compact instead.
+    #
+    # And absent when unset, deliberately: the right value belongs to the model
+    # being served, and dejima guessing one is worse than leaving Cline to its
+    # catalogue for a model it does know.
+    local cfg f
+    cfg="$(_cline_cfg 'model = m' 'context_window = 15000')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    f="$(find "$cfg/state" -name providers.json | head -1)"
+    run jq -r '.providers.anthropic.settings.contextWindow' "$f"
+    [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
+
+    cfg="$(_cline_cfg 'model = m')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
+    f="$(find "$cfg/state" -name providers.json | head -1)"
+    run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
+    [ "$output" = "absent" ] || { echo "invented a context window: $output"; return 1; }
+}
+
 @test "cline's state directory is one per workspace, not one for all of them" {
     # Cline indexes every session it has ever run in a single sessions.db, with
     # the project a session belonged to as a field inside the record rather

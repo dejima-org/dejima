@@ -167,6 +167,8 @@ harness_prepare_config() {
     fi
 
     base_url="$(harness_config_get base_url)"
+    local ctx
+    ctx="$(harness_config_get context_window)"
 
     # The Anthropic path is the credential proxy's path, and it only works in
     # the shape that was actually tested: the proxy on, terminating TLS for
@@ -246,22 +248,24 @@ harness_prepare_config() {
     tmp="$(mktemp "$settings/.providers.XXXXXX")" || return 1
     if [ -n "$base_url" ]; then
         jq -n --arg m "$model" --arg u "$base_url" \
-            --arg t "$now" \
+            --arg t "$now" --arg c "$ctx" \
             '{version: 1, lastUsedProvider: "openai-compatible", modes: {},
               providers: {"openai-compatible": {
-                settings: {provider: "openai-compatible", model: $m,
-                           baseUrl: $u, apiKey: "dejima-no-credential-needed"},
+                settings: ({provider: "openai-compatible", model: $m,
+                            baseUrl: $u, apiKey: "dejima-no-credential-needed"}
+                           + (if $c == "" then {} else {contextWindow: ($c|tonumber)} end)),
                 updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
     else
         # The placeholder is what Cline sends; the host-side proxy replaces it
         # with the real credential on the way out. Same arrangement as Claude
         # Code's faked .credentials.json, confirmed end to end against the API.
         jq -n --arg m "$model" \
-            --arg t "$now" \
+            --arg t "$now" --arg c "$ctx" \
             '{version: 1, lastUsedProvider: "anthropic", modes: {},
               providers: {anthropic: {
-                settings: {provider: "anthropic", model: $m,
-                           apiKey: "sandbox-credential-proxy-placeholder"},
+                settings: ({provider: "anthropic", model: $m,
+                            apiKey: "sandbox-credential-proxy-placeholder"}
+                           + (if $c == "" then {} else {contextWindow: ($c|tonumber)} end)),
                 updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
     fi || { rm -f "$tmp"; return 1; }
     chmod 600 "$tmp"

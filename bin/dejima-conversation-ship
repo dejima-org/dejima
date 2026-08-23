@@ -64,16 +64,29 @@ POLL_SECONDS=3
 
 push() {
     # $1 is a newline-terminated block of "<ns timestamp>\t<line>" records.
-    local raw="$1" values payload
+    local raw="$1" payload
     [ -n "$raw" ] || return 0
-    values="$(printf '%s' "$raw" | jq -R -s '
+    # One jq, and nothing through argv. A single argument is capped at 128 KiB
+    # (MAX_ARG_STRLEN), and both the intermediate --argjson value and the
+    # finished body used to be passed that way - so a batch of long lines
+    # failed with "argument list too long" and the batch was dropped.
+    #
+    # Twenty lines at up to sixteen kilobytes each is well past that cap, and
+    # the transform's own clip is what sets those numbers, so this was not a
+    # remote possibility: it is what a harness whose tool results are large
+    # produces as a matter of course. Found running Cline.
+    #
+    # The payload is built in one pass and handed to curl on stdin with -d @-.
+    # A shell variable is bounded by memory rather than by MAX_ARG_STRLEN, so
+    # holding it is fine; passing it is not.
+    payload="$(printf '%s' "$raw" | jq -R -s '
         split("\n") | map(select(length > 0))
         | map(split("\t") | [.[0], (.[1:] | join("\t"))])
+        | {streams: [{stream: {job: "dejima-conversation", source: "dejima"}, values: .}]}
     ')" || return 0
-    payload="$(jq -n --argjson values "$values" \
-        '{streams: [{stream: {job: "dejima-conversation", source: "dejima"}, values: $values}]}')" || return 0
-    curl -s -o /dev/null --max-time 5 -H "Content-Type: application/json" \
-        -XPOST "$LOKI_URL/loki/api/v1/push" -d "$payload" || true
+    printf '%s' "$payload" | curl -s -o /dev/null --max-time 5 \
+        -H "Content-Type: application/json" \
+        -XPOST "$LOKI_URL/loki/api/v1/push" -d @- || true
 }
 
 # Which transcript files belong to this workspace. The harness's plugin

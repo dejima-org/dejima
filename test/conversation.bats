@@ -124,6 +124,33 @@ await_shipped() {
 # The two loss paths a SIGTERM without a trap produces. bin/dejima kills this
 # immediately after the container exits, and the tail of a transcript is the
 # part worth having - it is usually the agent's final answer.
+@test "a batch too large for an argv argument still ships" {
+    # A single argument is capped at 128 KiB (MAX_ARG_STRLEN). The payload used
+    # to be passed to jq and then to curl that way, so a batch of long lines
+    # failed with "argument list too long" and was dropped silently - the
+    # shipper keeps running, and only the conversation goes missing.
+    #
+    # Not a remote possibility: the transform clips a message at sixteen
+    # kilobytes and the batch holds twenty, so any harness whose tool results
+    # are large produces this as a matter of course. Found running Cline.
+    start_loki
+    write_config
+    mkdir -p "$(slug_dir)"
+    local big
+    big="$(head -c 60000 /dev/zero | tr '\0' 'x')"
+    local i
+    for i in 1 2 3 4 5; do
+        say "chunk-$i-$big" >> "$(slug_dir)/s1.jsonl"
+    done
+    start_ship
+    # The marker is at the START of one of those lines, so finding it means the
+    # whole oversized batch was accepted rather than one small line sneaking
+    # through beside a dropped one.
+    await_shipped "chunk-5-" || { echo "an oversized batch never arrived"; return 1; }
+    run jq -r '.streams[0].stream.job' <<< "$(shipped | head -1)"
+    [ "$output" = "dejima-conversation" ] || { echo "malformed payload: $output"; return 1; }
+}
+
 @test "a batched line survives the kill that ends the session" {
     start_loki
     write_config
