@@ -3,7 +3,7 @@
 # and by test/static.bats, so the two cannot disagree about what is covered.
 #
 # The list is discovered, not enumerated: a script added under bin/, hooks/,
-# docker/ or a forge's bin/ is covered the day it lands, which is the only
+# docker/, test/ or a forge's bin/ is covered the day it lands, which is the only
 # version of this that stays true. Discovery is by shebang rather than by
 # extension, because most of this repo's scripts have no extension.
 #
@@ -19,6 +19,12 @@ list_scripts() {
         ls bin/dejima bin/dejima-* bin/harness/*.sh 2>/dev/null || true
         ls hooks/*.sh docker/*.sh install.sh 2>/dev/null || true
         ls forges/*/bin/* 2>/dev/null || true
+        # test/, for the reason .dejima.md gives for being careful what goes
+        # there: CI checks the commit out on a host and runs it, so a helper
+        # in a test file is code executing outside the sandbox. That makes
+        # these the last scripts that should go unchecked, not the first -
+        # and leaving them out hid a real fault in the release gate itself.
+        ls test/*.sh 2>/dev/null || true
     } | sort -u | while read -r f; do
         [ -f "$f" ] || continue
         # Harness plugins are sourced, not executed, so they carry no shebang

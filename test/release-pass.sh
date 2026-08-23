@@ -12,7 +12,10 @@ set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 base="${1:-main}"
 head="${2:-HEAD}"
-cd "$root"
+# Guarded, because everything below is relative to it: a cd that failed
+# silently would have this reporting on some other directory's suites and
+# diff, which for a release gate is the worst way to be wrong.
+cd "$root" || { echo "cannot enter $root" >&2; exit 1; }
 
 case "${1:-}" in
     -h|--help)
