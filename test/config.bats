@@ -2039,6 +2039,26 @@ _epitaph_transcript() {
         || { echo "wrote a harness config anyway"; return 1; }
 }
 
+@test "install.sh names the broken line rather than blaming the harness" {
+    # A config that does not parse leaves config_get empty for every key, so
+    # the harness read comes back empty too - and reporting that as "no
+    # harness is set" sends the operator to a line that is already correct.
+    # The key here is real: it is one a newer dejima accepts, which is how an
+    # operator arrives with a config their checkout does not know yet.
+    printf '[core]\nharness = claude-code\nforge = none\nworkflow = local-only\n' \
+        > "$CONFIG_DIR/config"
+    printf '[harness.claude-code]\nno_such_key = 1\n' >> "$CONFIG_DIR/config"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [[ "$output" == *"no_such_key"* ]] \
+        || { echo "did not name the offending key: $output"; return 1; }
+    [[ "$output" != *"No [core] harness is set"* ]] \
+        || { echo "blamed the harness line, which is correct: $output"; return 1; }
+    [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
+        || { echo "registered guards from a config it could not read"; return 1; }
+}
+
 @test "[mounts] readonly is refused when it names the filesystem root" {
     # Root contains every guarded store, so mounting it hands the session all
     # of them at once - the approval store, the audit reports, the epitaphs.
