@@ -281,7 +281,7 @@ _provider_valid_value() {
             # and what kind of artifact each one writes. Comma-separated
             # because every entry is multi-word, unlike every other list here.
             #
-            #   disclose = pr:gitea-pr create, issue:gitea-issue create
+            #   disclose = pr:<cli> create, issue:<other cli> create
             #
             # The kind selects the marker; the marker text itself is core's
             # (docker/forge-guard.sh), so that what dejima says about agent

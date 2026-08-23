@@ -9,6 +9,12 @@ set -euo pipefail
 
 GITEA_TOKEN_FILE="${GITEA_TOKEN_FILE:-$HOME/.config/gitea/token}"
 
+# The marker saying an agent wrote the body is deliberately not here. It is
+# applied by docker/forge-guard.sh, which shadows this command inside the
+# sandbox, so that it reaches every forge and not only the ones whose CLI
+# dejima happens to have written. Outside a sandbox this tool is being run by
+# a person, and a person's body is not agent-generated.
+
 function usage() {
     echo "Usage: gitea-issue list [--state open|closed|all] [--limit N]"
     echo "       gitea-issue view NUMBER"
@@ -214,10 +220,6 @@ case "$subcommand" in
             echo "gitea-issue create requires --title" >&2
             exit 1
         fi
-        body="**Filed by LLM agent**
-
-${body}"
-
         api_or_die "create issue" -X POST "$issues_api" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg title "$parsed_title" --arg body "$body" \
@@ -241,12 +243,7 @@ ${body}"
             payload=$(echo "$payload" | jq --arg t "$parsed_title" '. + {title: $t}')
         fi
         if [ -n "$body" ]; then
-            # The same marker create writes. It describes where the body came
-            # from rather than the event that wrote it, so an edited body
-            # keeps the disclosure instead of quietly shedding it.
-            payload=$(echo "$payload" | jq --arg b "**Filed by LLM agent**
-
-$body" '. + {body: $b}')
+            payload=$(echo "$payload" | jq --arg b "$body" '. + {body: $b}')
         fi
 
         api_or_die "edit issue #${number}" -X PATCH "${issues_api}/${number}" \
@@ -262,10 +259,6 @@ $body" '. + {body: $b}')
             echo "gitea-issue comment requires --body or --body-file" >&2
             exit 1
         fi
-        body="**Comment by LLM agent**
-
-${body}"
-
         api_or_die "comment on issue #${number}" -X POST "${issues_api}/${number}/comments" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "$body" '{body: $body}')"

@@ -119,8 +119,9 @@ fi
 
 # Every CLI the shadow has something to do about: the one whose merge a
 # workflow blocks, and every one that writes a body the session authored. More
-# than one, because a forge can have a CLI per artifact - gitea has two - and
-# because a forge with nothing blocked can still have something to disclose.
+# than one, because a forge can have a CLI per artifact rather than one with
+# subcommands, and because a forge with nothing blocked can still have
+# something to disclose.
 #
 # The first word of each record names the CLI. The real one is already behind
 # the symlink this replaces (see install-forge-bins.sh), so the guard has a

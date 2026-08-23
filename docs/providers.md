@@ -122,14 +122,15 @@ operator can set, resolved the same way as any other config key
 | `capabilities` | `?list:identifier` | (empty) | What this forge can do - `pr`, `issues`, etc. A workflow's own `requires` is checked against this set at launch; a workflow asking for a capability this forge lacks is refused. |
 | `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
-| `merge_block` | `?command` | (empty) | The literal command prefix `hooks/merge-guard.sh` refuses inside the sandbox (e.g. `gitea-pr merge`) - only when the workflow's `block_merge = on`. |
+| `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a command string, for the harnesses that can. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
+| `disclose` | `?disclosures` | (empty) | Which of this forge's commands send a body the session authored, as comma-separated `kind:command prefix` entries - `pr:gh pr create, issue:gh issue create, ...`. `docker/forge-guard.sh` prepends a marker to the body of a matching command, so a PR, issue or comment an agent wrote says so. The three kinds are `pr`, `issue` and `comment`; the wording of each marker is core's, not the manifest's, so that dejima says one thing about agent authorship whichever forge is selected. Unlike `merge_block` this does not depend on the workflow: what a workflow permits is a policy, who wrote the text is a fact. |
 | `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
 | `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work - checked at launch by two refusal rules (partly-configured, and none-configured-with-a-fixed-host) when the workflow pushes; see [Validation](#validation). A key with a non-empty schema default never counts as missing for either check. |
 | `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
 | `hosts_allowlisted_by_core` | `bool` | `off` | `on` means this forge's hosts are ones core already allowlists in its own right - GitHub's published ranges, which every session can read from over 443 whatever forge is selected. Core then keeps them out of `DEJIMA_FORGE_HOSTS` (the extra-domains path, which resolves a name into the port-unrestricted `allowed-domains` ipset and exempts it from DNS-rebind protection - right for an internal self-hosted host, a silent widening for a public one) and, when the workflow pushes, opens core's own GitHub push grant to them instead: port 22 to those same ranges, logged and verified by the firewall's startup self-check. They still reach `DEJIMA_PUSH_HOSTS`, so `git-push-guard.sh` permits the push. Name-free in core, but GitHub-specific in effect: this key means "core already allowlists these hosts in its own right", which today is only true of GitHub's ranges, so a future forge whose hosts are not among those must leave it `off` - setting it `on` for anything else grants no firewall allowance at all plus an irrelevant GitHub push grant. |
-| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into `/usr/local/bin` of the image - the only manifest key naming something that actually gets copied and executed. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build both when a declared file is missing and when a forge ships a file under its `bin/` that it does not declare. A forge with `install =` empty therefore puts nothing executable in the image. |
+| `install` | `?list:installspec` | (empty) | The CLIs this forge puts on PATH in the image - the only manifest key naming something that actually gets copied and executed. Either a path under the forge's own directory, or `system:<name>` for a command the image already provides from a package. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build when a declared file is missing, when a declared `system:` command is not in the image, and when a forge ships a file under its `bin/` that it does not declare. Every command a forge names anywhere - `pr_command`, `issue_command`, `merge_block`, `disclose` - has to appear here, because a CLI that is not behind the shadow is one the guards cannot reach: the entrypoint refuses to start rather than leave a block or a disclosure looking enforced. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
 Worked example, `forges/gitea/forge.conf`:
@@ -455,6 +456,21 @@ because a pushing workflow whose forge resolves to no host is refused (see
 that is true of every fresh install: this sandbox pushes nowhere yet.
 Pushing is opted into by naming both a pushing workflow and a forge that
 resolves.
+
+**A PR, issue or comment a session writes says an agent wrote it.** The body
+is prepended with a marker - "Summary generated by LLM agent" on a PR,
+"Filed by LLM agent" on an issue, "Comment by LLM agent" on a comment -
+before it reaches the forge. This happens in `docker/forge-guard.sh`, which
+shadows the forge's CLI on PATH, rather than in the CLIs themselves: dejima
+wrote two of the three and a marker living in the tools would mean the
+answer to "does dejima disclose this" depended on which forge an operator
+picked. It applies on edits as well as creates, because the marker describes
+where the text came from rather than the event that wrote it.
+
+Two things it does not cover. A command that sends no body has none added -
+`gh pr create --fill` takes its body from commit messages, and inventing one
+would be worse than leaving it. And running a forge CLI on the host, outside
+a sandbox, marks nothing: there the person running it wrote the body.
 
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
