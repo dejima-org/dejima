@@ -604,6 +604,28 @@ else
     DEJIMA_MERGE_BLOCK=""
 fi
 
+# Which of this forge's commands write a body the session authored, as one
+# record per line for the shadow to read: "<kind> <command prefix>".
+#
+# Not conditional on the workflow, unlike the merge block above. A merge block
+# is a policy about what a workflow permits; this is a statement about who
+# wrote the text, which is true of every session whatever it is allowed to do.
+# The comma-separated manifest form is turned into lines here rather than in
+# the shadow, so the parsing sits next to the schema that validates it.
+DEJIMA_DISCLOSE=""
+_disclose_spec="$(manifest_get forge "$DEJIMA_FORGE_NAME" disclose)"
+if [ -n "$_disclose_spec" ]; then
+    _old_ifs="$IFS"
+    IFS=,
+    for _entry in $_disclose_spec; do
+        _entry="${_entry#"${_entry%%[![:space:]]*}"}"
+        _entry="${_entry%"${_entry##*[![:space:]]}"}"
+        [ -n "$_entry" ] || continue
+        DEJIMA_DISCLOSE="${DEJIMA_DISCLOSE}${DEJIMA_DISCLOSE:+$'\n'}${_entry%%:*} ${_entry#*:}"
+    done
+    IFS="$_old_ifs"
+fi
+
 # WORKSPACE_DIR is resolved above, ahead of --print-briefing, since
 # briefing_compose needs DEJIMA_RW_MOUNTS (which needs WORKSPACE_DIR for its
 # own overlap guard) before that point.
@@ -1113,6 +1135,7 @@ extra_mounts+=(-e "DEJIMA_FORGE_HOSTS=$DEJIMA_FORGE_HOSTS")
 extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
 extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
 extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
+extra_mounts+=(-e "DEJIMA_DISCLOSE=$DEJIMA_DISCLOSE")
 
 # The harness's own configuration, mounted at the mode it declared, and -
 # for the directories it marked scannable - the symlink targets that have to
