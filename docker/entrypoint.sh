@@ -117,26 +117,43 @@ if [ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" ]; then
     ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
 fi
 
-if [ -n "${DEJIMA_MERGE_BLOCK:-}" ]; then
-    # The first word of the block names the CLI to shadow. The real one is
-    # already behind the symlink this replaces (see install-forge-bins.sh), so
-    # the guard has a fixed path to exec.
-    _blocked_cli="${DEJIMA_MERGE_BLOCK%% *}"
-    case "$_blocked_cli" in
-        */*|.*|'')
-            echo "entrypoint: refusing merge-block command name: $_blocked_cli" >&2
-            exit 1 ;;
-    esac
-    if [ -x "/usr/local/lib/dejima/forge/$_blocked_cli" ]; then
-        ln -sf /usr/local/lib/dejima/forge-guard.sh "/usr/local/bin/$_blocked_cli"
-    else
-        # A workflow blocking a command this forge does not ship is a
-        # misconfiguration that would otherwise be silent - the guard would
-        # never be reached and the block would look enforced.
-        echo "entrypoint: [workflow] merge_block names '$_blocked_cli', which forge" >&2
-        echo "'${DEJIMA_FORGE_NAME:-?}' does not install. Nothing is being blocked." >&2
-        exit 1
-    fi
+# Every CLI the shadow has something to do about: the one whose merge a
+# workflow blocks, and every one that writes a body the session authored. More
+# than one, because a forge can have a CLI per artifact - gitea has two - and
+# because a forge with nothing blocked can still have something to disclose.
+#
+# The first word of each record names the CLI. The real one is already behind
+# the symlink this replaces (see install-forge-bins.sh), so the guard has a
+# fixed path to exec.
+_shadow_clis() {
+    [ -z "${DEJIMA_MERGE_BLOCK:-}" ] || printf '%s\n' "${DEJIMA_MERGE_BLOCK%% *}"
+    # "<kind> <cli> <subcommand>...", so the CLI is the second word.
+    [ -z "${DEJIMA_DISCLOSE:-}" ] || printf '%s\n' "$DEJIMA_DISCLOSE" |
+        while read -r _ _cli _; do
+            [ -z "$_cli" ] || printf '%s\n' "$_cli"
+        done
+}
+
+_shadow_cli_list="$(_shadow_clis | sort -u)"
+if [ -n "$_shadow_cli_list" ]; then
+    while read -r _cli; do
+        [ -n "$_cli" ] || continue
+        case "$_cli" in
+            */*|.*|'')
+                echo "entrypoint: refusing forge command name: $_cli" >&2
+                exit 1 ;;
+        esac
+        if [ -x "/usr/local/lib/dejima/forge/$_cli" ]; then
+            ln -sf /usr/local/lib/dejima/forge-guard.sh "/usr/local/bin/$_cli"
+        else
+            # Naming a command this forge does not ship is a misconfiguration
+            # that would otherwise be silent - the guard would never be
+            # reached, and the block or the disclosure would look enforced.
+            echo "entrypoint: this forge's manifest names '$_cli', which forge" >&2
+            echo "'${DEJIMA_FORGE_NAME:-?}' does not install. Nothing is being enforced." >&2
+            exit 1
+        fi
+    done <<< "$_shadow_cli_list"
 fi
 
 # Put the harness wrapper on PATH under the harness's own command name,
