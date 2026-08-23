@@ -1902,12 +1902,25 @@ STUB
 @test "what ships into the image is what a manifest declares, both ways" {
     local dest
     dest="$(mktemp -d)"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
+    # Stubbed so this says nothing about the machine it runs on: the image
+    # guarantees gh, a contributor's checkout does not, and the question here
+    # is whether the declaration and the output agree.
+    mkdir -p "$dest/stub"
+    printf '#!/bin/sh\nexit 0\n' > "$dest/stub/gh"
+    chmod +x "$dest/stub/gh"
+    PATH="$dest/stub:$PATH" run bash "$REPO_ROOT/docker/install-forge-bins.sh" \
+        "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
     [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
     # Nothing under any forge's bin/ was skipped, and nothing else appeared.
+    # A file under a bin/ with no declaration is caught by the run above
+    # failing, which is what leaves this free to read the filesystem for the
+    # shipped-from-the-repo half rather than trusting the manifests for both.
     local shipped declared
     shipped="$(cd "$dest/bin" && ls | sort)"
-    declared="$(find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n' | sort)"
+    declared="$( { find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n'
+                   sed -n 's/^install *= *//p' "$REPO_ROOT"/forges/*/forge.conf \
+                       | tr ' ' '\n' | sed -n 's/^system://p'
+                 } | sort )"
     rm -rf "$dest"
     [ "$shipped" = "$declared" ] || {
         echo "installed:"; echo "$shipped"; echo "present under a bin/:"; echo "$declared"; return 1; }
@@ -2075,6 +2088,42 @@ _guard_repo() {
         [ -L "$f" ] || { echo "$(basename "$f") on PATH is not a symlink"; return 1; }
         [ -x "$d/lib/$(basename "$f")" ] || { echo "no real binary behind $(basename "$f")"; return 1; }
     done
+}
+
+@test "every command a forge names ends up behind the shadow" {
+    # The invariant #184 was a violation of. The entrypoint refuses to start
+    # when a workflow's merge block names a command that is not at
+    # /usr/local/lib/dejima/forge, so a forge naming one it never installs is
+    # not a degraded guard - it is a container that does not come up, in the
+    # only workflow that opens PRs.
+    #
+    # Checked against install-forge-bins.sh's real output rather than against
+    # the `install` list, because what matters is where a command ends up and
+    # not what a manifest says about it. gh is stubbed so this stays hermetic:
+    # the image guarantees the real one, a contributor's machine does not.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/shadow.XXXXXX")"
+    mkdir -p "$d/stub"
+    printf '#!/bin/sh\nexit 0\n' > "$d/stub/gh"
+    chmod +x "$d/stub/gh"
+    PATH="$d/stub:$PATH" run bash "$SANDBOX_DIR/install-forge-bins.sh" \
+        "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local conf forge key value cli checked=0
+    for conf in "$REPO_ROOT"/forges/*/forge.conf; do
+        forge="$(basename "$(dirname "$conf")")"
+        for key in pr_command issue_command merge_block; do
+            value="$(lib manifest_get forge "$forge" "$key")"
+            [ -n "$value" ] || continue
+            cli="${value%% *}"
+            [ -e "$d/lib/$cli" ] \
+                || { echo "forge $forge names '$value' but nothing installs '$cli'"; return 1; }
+            checked=$((checked + 1))
+        done
+    done
+    # gitea's three and github's three. A loop that silently matched nothing
+    # would pass this test while checking no forge at all.
+    [ "$checked" -ge 6 ] || { echo "only checked $checked commands"; return 1; }
 }
 
 @test "the entrypoint links each guard only when it has something to enforce" {
