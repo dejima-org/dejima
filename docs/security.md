@@ -324,6 +324,15 @@ can make; it is one the audit reports. See
   live on disk); a removed one stores nothing at all, because a deletion
   diff *is* the whole former file.
 
+  What it prints is chosen by what changed, which is not always what you
+  need in order to judge it - three changed lines in a hook script are only
+  judgeable by reading the script. `[o]` at the prompt opens the file in
+  `$VISUAL`/`$EDITOR`, read-only where the editor understands how, and
+  returns to the same decision. It opens the file **as it is now**, not the
+  text the report captured, for the same reason an approval pins the content
+  that is on disk at the moment it is recorded: approving something nobody
+  read would be the one outcome worse than not asking.
+
   Staging and retained diffs live under `$AUDIT_DIR`
   (`~/.local/share/dejima/audit`), never `/tmp`. That is the boundary the
   scheme rests on: nothing in `docker-compose.yml` covers it, so the

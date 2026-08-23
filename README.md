@@ -679,7 +679,10 @@ finding is something to read and clean up before your next `git` or `claude`
 in that repo. Its diff is also time-windowed: it reports that a path changed
 while the session was running, not that the session changed it.
 
-`dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it.
+`dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it,
+one finding at a time, with `[o]` to open the file before deciding. A report
+walked to the end stops being counted as waiting; it stays on disk as the
+record of what that session did, and rotation is what eventually removes it.
 Approving records the exact content, so any later change re-fires; ignoring
 records the surface, so that path is fine whatever it later contains; and
 skipping decides nothing, which means you are asked again next session.
