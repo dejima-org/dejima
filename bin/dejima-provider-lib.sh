@@ -149,7 +149,7 @@ host_keys	?list:identifier
 url_keys	?list:identifier
 fixed_hosts	?list:hostname
 hosts_allowlisted_by_core	bool	off
-install	?list:relpath
+install	?list:installspec
 env_export	?list:export
 EOF
             ;;
@@ -274,6 +274,25 @@ _provider_valid_value() {
             # Joined to a provider directory, so no absolute paths and no
             # traversal - a manifest may only name a file it ships.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$value" != *".."* ]]
+            ;;
+        installspec)
+            # A CLI this forge puts on PATH: either a file it ships, or
+            # "system:<name>" for one the image already provides.
+            #
+            # The second form exists because a forge CLI has to be reachable
+            # behind the shadow whether or not this repo wrote it - that is
+            # where docker/forge-guard.sh execs the real command through, and
+            # a forge naming a command that never gets there has a merge block
+            # that cannot be enforced. Declaring it here rather than special
+            # -casing the name in the image build is also what keeps the
+            # manifest a complete account of what this forge puts in /usr/local
+            # /bin, which is the reading the audit depends on.
+            case "$value" in
+                system:*)
+                    [[ "${value#system:}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+                    ;;
+                *)  _provider_valid_value relpath "$value" ;;
+            esac
             ;;
         homepath)
             # A directory the harness needs inside the sandbox user's home,
