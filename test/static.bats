@@ -2362,6 +2362,33 @@ comment forge-cli issue comment"
     [[ "$out" == *"LLM agent"* ]] || { echo "--repo hid the create: $out"; return 1; }
 }
 
+@test "a body file the CLI would have refused is refused here, not sent empty" {
+    # The shadow reads --body-file and hands the CLI a temp file, which always
+    # exists - so the CLI's own check on that argument can never fire again,
+    # and whatever the shadow read is what gets published. Before this, a
+    # mistyped path produced a PR whose entire body was the marker, created
+    # rather than refused, and /dev/zero filled a temp file until the disk did.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/disclosebody.XXXXXX")"
+    local DISCLOSE="pr forge-cli create"
+    local bad out
+    for bad in "$d/nope" /dev/zero "$d"; do
+        run timeout 5 env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" \
+            DEJIMA_DISCLOSE="$DISCLOSE" bash -c '
+                mkdir -p "$1/real"
+                printf "#!/bin/sh\necho CLI-RAN\n" > "$1/real/forge-cli"
+                chmod +x "$1/real/forge-cli"
+                cp "$2" "$1/forge-cli"; chmod +x "$1/forge-cli"
+                "$1/forge-cli" create --title T --body-file "$3"' \
+            _ "$d" "$SANDBOX_DIR/forge-guard.sh" "$bad"
+        [ "$status" -ne 124 ] || { echo "hung on $bad"; return 1; }
+        [ "$status" -ne 0 ] || { echo "accepted $bad: $output"; return 1; }
+        [[ "$output" == *"not a readable file"* ]] \
+            || { echo "refused $bad without saying why: $output"; return 1; }
+        [[ "$output" != *"CLI-RAN"* ]] \
+            || { echo "ran the CLI anyway for $bad"; return 1; }
+    done
+}
+
 @test "the body is marked once, not once per body argument" {
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/disclosetwice.XXXXXX")"
     local DISCLOSE="pr forge-cli create"
