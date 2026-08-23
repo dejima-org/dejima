@@ -1894,6 +1894,28 @@ STUB
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
+# install-forge-bins.sh, with every command a manifest declares as `system:`
+# stubbed onto PATH first.
+#
+# The image guarantees those commands - that is what declaring them means - but
+# a contributor's checkout and the CI runner do not, and CI is where this was
+# noticed: gh is present in a dejima container and absent on the runner, so
+# these tests passed locally and failed there. A test that reads the machine it
+# runs on is testing the machine.
+#
+# The names come from the manifests rather than a list here, so a forge that
+# declares another one later needs no change to this.
+_install_forge_bins() {
+    local stub="$BATS_TEST_TMPDIR/systemstub" name
+    mkdir -p "$stub"
+    for name in $(sed -n 's/^install *= *//p' "$REPO_ROOT"/forges/*/forge.conf \
+                    | tr ' ' '\n' | sed -n 's/^system://p'); do
+        printf '#!/bin/sh\nexit 0\n' > "$stub/$name"
+        chmod +x "$stub/$name"
+    done
+    PATH="$stub:$PATH" bash "$REPO_ROOT/docker/install-forge-bins.sh" "$@"
+}
+
 # forges/ is inside the audit's TCB, so `install =` in a forge manifest is a
 # claim an operator is entitled to read as "this forge puts nothing else
 # executable in the image". The image build enforces it, but that is the slow
@@ -1903,14 +1925,7 @@ STUB
 @test "what ships into the image is what a manifest declares, both ways" {
     local dest
     dest="$(mktemp -d)"
-    # Stubbed so this says nothing about the machine it runs on: the image
-    # guarantees gh, a contributor's checkout does not, and the question here
-    # is whether the declaration and the output agree.
-    mkdir -p "$dest/stub"
-    printf '#!/bin/sh\nexit 0\n' > "$dest/stub/gh"
-    chmod +x "$dest/stub/gh"
-    PATH="$dest/stub:$PATH" run bash "$REPO_ROOT/docker/install-forge-bins.sh" \
-        "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
+    run _install_forge_bins "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
     [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
     # Nothing under any forge's bin/ was skipped, and nothing else appeared.
     # A file under a bin/ with no declaration is caught by the run above
@@ -1933,8 +1948,12 @@ STUB
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     mkdir -p "$fake/github/bin"
     printf '#!/bin/sh\necho hi\n' > "$fake/github/bin/undeclared"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
+    # Stubbed like the rest: this has to fail because of the undeclared file,
+    # not because the machine happens to be missing a declared system command.
+    run _install_forge_bins "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "an undeclared CLI installed anyway"; rm -rf "$fake" "$dest"; return 1; }
+    [[ "$output" == *"does not declare it"* ]] \
+        || { echo "failed for another reason: $output"; rm -rf "$fake" "$dest"; return 1; }
     [ ! -e "$dest/undeclared" ]
     rm -rf "$fake" "$dest"
 }
@@ -1944,8 +1963,10 @@ STUB
     fake="$(mktemp -d)"; dest="$(mktemp -d)"
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     rm "$fake/gitea/bin/gitea-pr"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
+    run _install_forge_bins "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "a missing declared CLI passed"; rm -rf "$fake" "$dest"; return 1; }
+    [[ "$output" == *"which it does not ship"* ]] \
+        || { echo "failed for another reason: $output"; rm -rf "$fake" "$dest"; return 1; }
     rm -rf "$fake" "$dest"
 }
 
@@ -2249,7 +2270,7 @@ comment forge-cli issue comment"
     # what the indirection buys - and it is what lets entrypoint.sh swap the
     # PATH entry for the guard without moving anything at runtime.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgeinstall.XXXXXX")"
-    run bash "$SANDBOX_DIR/install-forge-bins.sh" "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    run _install_forge_bins "$REPO_ROOT/forges" "$d/lib" "$d/bin"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local f
     for f in "$d/bin"/*; do
@@ -2267,14 +2288,9 @@ comment forge-cli issue comment"
     #
     # Checked against install-forge-bins.sh's real output rather than against
     # the `install` list, because what matters is where a command ends up and
-    # not what a manifest says about it. gh is stubbed so this stays hermetic:
-    # the image guarantees the real one, a contributor's machine does not.
+    # not what a manifest says about it.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/shadow.XXXXXX")"
-    mkdir -p "$d/stub"
-    printf '#!/bin/sh\nexit 0\n' > "$d/stub/gh"
-    chmod +x "$d/stub/gh"
-    PATH="$d/stub:$PATH" run bash "$SANDBOX_DIR/install-forge-bins.sh" \
-        "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    run _install_forge_bins "$REPO_ROOT/forges" "$d/lib" "$d/bin"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 
     local conf forge key value cli checked=0
