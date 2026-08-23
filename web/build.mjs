@@ -29,6 +29,7 @@ const CLIENT_SOURCES = [
   'src/mouse.js',
   'src/gestures.js',
   'src/viewport.js',
+  'src/keyboard.js',
   'src/toolbar.js',
   'src/main.js'
 ];
@@ -43,6 +44,7 @@ const MANIFEST_SOURCES = [
   'package-lock.json',
   'src/config.js',
   'src/gestures.js',
+  'src/keyboard.js',
   'src/keys.js',
   'src/main.js',
   'src/modes.js',
