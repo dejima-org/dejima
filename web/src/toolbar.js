@@ -124,6 +124,9 @@
         if (opts.navigate) opts.navigate(D.config.pickerSearch(opts.search()));
       },
       kbd: function () {
+        // The one deliberate request for the keyboard, so it is the one place
+        // that unlocks it - see focusOnTapWanted.
+        if (opts.allowKeyboard) opts.allowKeyboard();
         opts.term.focus();
         if (opts.term.textarea) opts.term.textarea.focus();
       }

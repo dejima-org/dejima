@@ -28,7 +28,8 @@ function makeToolbar(overrides) {
     prefix: () => '\x02',
     notify: () => {},
     search: () => '',
-    navigate: () => {}
+    navigate: () => {},
+    allowKeyboard: () => {}
   }, overrides || {});
   const toolbar = createToolbar(opts);
   toolbar.attach();
@@ -80,6 +81,10 @@ test('stripping does not turn a multi-line paste into a silent one', () => {
   assert.equal(pasteSequence('single\n', false).warn, false);
 });
 
+// The two buttons added for a phone: Enter, because it is the key a harness
+// wants most and no soft keyboard row has it where a thumb is; and SESS, to
+// get back to the picker without closing the tab.
+
 test('ENTER sends a carriage return, not a newline', () => {
   // A terminal's Enter is CR. LF would submit nothing at a shell prompt and
   // insert a line in an editor, which is the kind of difference that reads as
@@ -101,4 +106,20 @@ test('SESS navigates to the picker, dropping only the run-id', () => {
   const p = new URLSearchParams(went[0]);
   assert.equal(p.get('arg'), null, 'the run-id is what sends it back to the picker');
   assert.equal(p.get('toolbar'), '1', 'page options survive the trip');
+});
+
+test('KBD is what unlocks the keyboard, and it does so before focusing', () => {
+  // The order matters: the focus handler that drops an unwanted focus reads
+  // the flag, so setting it afterwards would blur the focus KBD just asked for.
+  const order = [];
+  const t = makeToolbar({
+    allowKeyboard: () => order.push('allow'),
+    term: {
+      focus: () => order.push('focus'),
+      textarea: { focus: () => order.push('textarea') }
+    }
+  });
+  t.fire('kbd');
+  assert.equal(order[0], 'allow', 'the keyboard is unlocked first');
+  assert.ok(order.includes('focus'));
 });

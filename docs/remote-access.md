@@ -63,6 +63,7 @@ approvals):
 | `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
 | `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
 | `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
 | `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
 `ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
@@ -522,6 +523,15 @@ PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
   keyboard puts furthest from a thumb.
 - `KBD` raises the soft keyboard, which is otherwise awkward to get back once
   it has been dismissed.
+
+**Tapping the terminal does not raise the keyboard.** On a phone, tapping is
+also how you scroll and select, so every one of those taps used to summon the
+keyboard and cost a second tap to put it away. `KBD` is the deliberate way to
+ask for it. A desktop is unchanged - there is no soft keyboard to raise, and
+clicking to focus is what a terminal does.
+
+Set `ttyd_focus_on_tap = on` to get the old behaviour for every client, or add
+`?focus=1` to the URL for one. `?focus=0` forces it off on a desktop.
 
 Copying *out* works through OSC 52: anything that emits it - tmux with
 `set-clipboard on`, nvim, your own yank binding - lands in the phone's

@@ -68,6 +68,7 @@ remote-access.base_url	?url
 remote-access.ttyd_port	int:1:65535	7681
 remote-access.ttyd_font_size	?int:8:72
 remote-access.ttyd_tmux_prefix	?chord
+remote-access.ttyd_focus_on_tap	?bool
 remote-access.debounce	int:0:86400	60
 EOF
 }

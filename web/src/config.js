@@ -12,7 +12,7 @@
   // an xterm.js option and is handed to the terminal untouched, which is how
   // the existing TTYD_FONT_SIZE knob keeps working with no code here knowing
   // about it. isWindows is ttyd's own, always present, and not an xterm option.
-  var PAGE_KEYS = ['tmuxPrefix'];
+  var PAGE_KEYS = ['tmuxPrefix', 'focusOnTap'];
   var IGNORED_KEYS = ['isWindows'];
 
   // "C-b" -> "\x02", the byte tmux is actually listening for. Deliberately
@@ -52,6 +52,33 @@
     return !!coarsePointer;
   }
 
+  // Whether tapping the terminal should raise the soft keyboard.
+  //
+  // Off by default where the pointer is coarse, which is the whole reason this
+  // exists: on a phone, tapping is how you scroll and select, and every one of
+  // those taps used to summon the keyboard and cost a second tap to dismiss.
+  // The KBD button is the deliberate way to ask for it. On a fine pointer there
+  // is no soft keyboard to raise and focus-on-click is simply what a terminal
+  // does, so nothing changes there.
+  //
+  // ?focus=1 / ?focus=0 override per client, and focusOnTap in ttyd's
+  // preferences overrides for every client, the same shape as the toolbar
+  // switch above.
+  function focusOnTapWanted(search, coarsePointer, preference) {
+    var params = new URLSearchParams(search || '');
+    var value = params.get('focus');
+    if (value === '1') return true;
+    if (value === '0') return false;
+    // "on"/"off" first, because that is dejima's own bool spelling and what
+    // ttyd_focus_on_tap actually sends. The others are accepted because a
+    // preference can also arrive from anything that writes ttyd -t directly.
+    if (preference === 'on' || preference === true || preference === 'true' ||
+        preference === '1') return true;
+    if (preference === 'off' || preference === false || preference === 'false' ||
+        preference === '0') return false;
+    return !coarsePointer;
+  }
+
   // The address of the session picker: this page with the run-id dropped.
   //
   // ttyd passes ?arg=<run-id> to dejima-attach as argv (--url-arg), so a page
@@ -74,6 +101,7 @@
     parsePrefix: parsePrefix,
     splitPreferences: splitPreferences,
     toolbarWanted: toolbarWanted,
+    focusOnTapWanted: focusOnTapWanted,
     pickerSearch: pickerSearch
   };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));
