@@ -2061,6 +2061,30 @@ _guard_repo() {
         "$d/gitea-pr" --verbose "$blocked" 7
     [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
 
+    # Nor does a flag that takes a SEPARATE value, which is the form that got
+    # past this and is the ordinary way to name a PR from outside its checkout:
+    # `gh --repo owner/name pr merge N`. The value is indistinguishable from a
+    # subcommand here, so a match anchored at the first non-flag argument found
+    # `owner/name`, gave up, and handed the merge to the real CLI.
+    printf '#!/bin/bash\necho "real: $*"\n' > "$d/real/gh"
+    chmod +x "$d/real/gh"
+    cp "$SANDBOX_DIR/forge-guard.sh" "$d/gh"
+    chmod +x "$d/gh"
+    local form
+    for form in "--repo o/r pr merge 7" "--repo=o/r pr merge 7" "pr merge 7"; do
+        # shellcheck disable=SC2086
+        run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr merge" DEJIMA_FORGE_REAL_DIR="$d/real" \
+            "$d/gh" $form
+        [[ "$output" == *"human decision in the sandbox"* ]] \
+            || { echo "gh $form reached the real CLI: $output"; return 1; }
+    done
+
+    # And a command that merely mentions the blocked words out of order still
+    # reaches the real CLI - the run has to be consecutive.
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr merge" DEJIMA_FORGE_REAL_DIR="$d/real" \
+        "$d/gh" pr edit 7 --add-label merge
+    [[ "$output" == real:* ]] || { echo "a label named merge was blocked: $output"; return 1; }
+
     # Everything else reaches the real CLI, including a subcommand that merely
     # starts with the blocked word.
     local sub

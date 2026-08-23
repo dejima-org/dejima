@@ -45,18 +45,39 @@ if [ "${#want[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# argv has to begin with the blocked sequence. Flags before the subcommand are
-# skipped so `gitea-pr --verbose merge 7` is still a merge.
-args=("$@")
-j=0
-for w in "${want[@]}"; do
-    while [ "$j" -lt "${#args[@]}" ] && [ "${args[$j]#-}" != "${args[$j]}" ]; do
-        j=$((j + 1))
-    done
-    [ "$j" -lt "${#args[@]}" ] || exec "$real" "$@"
-    [ "${args[$j]}" = "$w" ] || exec "$real" "$@"
-    j=$((j + 1))
+# The blocked sequence has to appear as a run of consecutive non-flag
+# arguments. Flags are dropped first, so `gitea-pr --verbose merge 7` is still
+# a merge.
+#
+# Anywhere in that run rather than at the start of it, because a flag's value
+# is indistinguishable from a subcommand here: in `gh --repo o/r pr merge 7`
+# the first non-flag argument is `o/r`, and requiring the match to begin there
+# let the most ordinary way to name a PR from outside its checkout walk
+# straight past the block. Knowing which flags take a value would mean knowing
+# each CLI, which is the coupling this guard exists to avoid.
+#
+# The cost is a command that happens to pass the blocked words as consecutive
+# values - `--title pr --body merge` - being refused. That is a loud refusal
+# with a message saying why, against a merge going through unnoticed, so it is
+# the direction to be wrong in.
+plain=()
+for arg in "$@"; do
+    case "$arg" in -*) continue ;; esac
+    plain+=("$arg")
 done
+
+n="${#plain[@]}"
+m="${#want[@]}"
+i=0
+while [ "$((i + m))" -le "$n" ]; do
+    k=0
+    while [ "$k" -lt "$m" ] && [ "${plain[$((i + k))]}" = "${want[$k]}" ]; do
+        k=$((k + 1))
+    done
+    [ "$k" -lt "$m" ] || break
+    i=$((i + 1))
+done
+[ "$((i + m))" -le "$n" ] || exec "$real" "$@"
 
 echo "Blocked by dejima's forge guard: merging is a human decision in the sandbox - open a PR/MR, then the operator merges. Report its URL and stop." >&2
 exit 1
