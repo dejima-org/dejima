@@ -68,34 +68,22 @@
   // before the function that reads it.
   var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 
-  // Whether a tap may raise the soft keyboard.
-  //
-  // xterm.js focuses its textarea whenever the terminal is clicked, which on a
-  // desktop is exactly right and on a phone is not: tapping is how you scroll
-  // and select, so every one of those taps summoned the keyboard and cost a
-  // second tap to put it away. The keyboard is now asked for explicitly, with
-  // the KBD button.
-  //
-  // Implemented by blurring rather than by intercepting the tap. The focus
-  // arrives from inside xterm.js on several paths - pointer, selection,
-  // programmatic - and catching them all would mean knowing about each; letting
-  // focus land and immediately dropping it needs to know about none, and leaves
-  // selection and scrolling working exactly as they did. The toolbar does not
-  // go through the textarea at all, so its keys keep working while the keyboard
-  // is down.
-  //
-  // The flag resets on blur, so dismissing the keyboard by hand puts things
-  // back to tap-does-not-raise-it rather than latching open.
-  var keyboardAllowed = true;
-  function allowKeyboard() { keyboardAllowed = true; }
-  function applyTapFocusPolicy(wanted) {
-    keyboardAllowed = wanted;
-    if (wanted || !term.textarea) return;
-    term.textarea.addEventListener('focus', function () {
-      if (!keyboardAllowed && term.textarea) term.textarea.blur();
-    });
-    term.textarea.addEventListener('blur', function () { keyboardAllowed = false; });
+  var keyboard = D.keyboard.createKeyboardPolicy({
+    term: term,
+    element: terminalHost,
+    visualViewport: window.visualViewport,
+    layoutHeight: function () { return window.innerHeight; }
+  });
+  keyboard.attach();
+
+  // Decided at startup from the pointer type, and again below when ttyd's
+  // preferences arrive. Both are needed: the connection opens before the
+  // preferences do, and what happens on open depends on this.
+  function tapFocusPolicy(preference) {
+    keyboard.setRaiseOnTap(D.config.focusOnTapWanted(
+      window.location.search, coarsePointer, preference));
   }
+  tapFocusPolicy(undefined);
 
   function applyPreferences(prefs) {
     var split = D.config.splitPreferences(prefs);
@@ -117,11 +105,10 @@
     }
     prefixByte = parsed;
 
-    // Applied from the preferences as well as at startup: ttyd sends these
-    // after the connection opens, so a focusOnTap set server-side arrives
-    // later than the first policy decision and has to be able to change it.
-    applyTapFocusPolicy(D.config.focusOnTapWanted(
-      window.location.search, coarsePointer, split.page.focusOnTap));
+    // ttyd sends preferences after the connection opens, so a focusOnTap set
+    // server-side always arrives later than the startup decision and has to be
+    // able to change it.
+    tapFocusPolicy(split.page.focusOnTap);
 
     // A font size arriving in the preferences changes the cell size, so the
     // column count computed before it was applied is now wrong.
@@ -137,7 +124,9 @@
     onStatus: function (status) {
       if (status === 'open') {
         clearNotice();
-        term.focus();
+        // Focusing here is what put the keyboard up on a phone before a single
+        // tap: it happens on every connect, including reconnects.
+        if (keyboard.raisesOnTap()) term.focus();
       } else if (status === 'closed') {
         notify('Disconnected. Reconnecting...', true);
       }
@@ -204,7 +193,7 @@
       notify: notify,
       search: function () { return window.location.search; },
       navigate: function (search) { window.location.search = search; },
-      allowKeyboard: allowKeyboard
+      allowKeyboard: keyboard.allow
     });
     toolbar.attach();
 
