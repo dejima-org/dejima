@@ -143,6 +143,7 @@ capabilities	?list:identifier
 pr_command	?command
 issue_command	?command
 merge_block	?command
+disclose	?disclosures
 keys	?list:keyspec
 requires	?list:identifier
 host_keys	?list:identifier
@@ -274,6 +275,38 @@ _provider_valid_value() {
             # Joined to a provider directory, so no absolute paths and no
             # traversal - a manifest may only name a file it ships.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$value" != *".."* ]]
+            ;;
+        disclosures)
+            # Which of this forge's commands write a body a person authored,
+            # and what kind of artifact each one writes. Comma-separated
+            # because every entry is multi-word, unlike every other list here.
+            #
+            #   disclose = pr:gitea-pr create, issue:gitea-issue create
+            #
+            # The kind selects the marker; the marker text itself is core's
+            # (docker/forge-guard.sh), so that what dejima says about agent
+            # authorship cannot come out differently per forge.
+            # An empty entry is a typo, not an entry to skip - the same
+            # reading the list types take of a trailing separator. Checked on
+            # the raw string, because word splitting discards it silently.
+            case "$value" in ,*|*,) return 1 ;; esac
+            [[ "$value" =~ ,[[:space:]]*, ]] && return 1
+            local entry kind rest
+            local IFS=,
+            for entry in $value; do
+                # Leading and trailing space around each comma-separated entry.
+                entry="${entry#"${entry%%[![:space:]]*}"}"
+                entry="${entry%"${entry##*[![:space:]]}"}"
+                [ -n "$entry" ] || return 1
+                case "$entry" in
+                    pr:*|issue:*|comment:*) ;;
+                    *) return 1 ;;
+                esac
+                kind="${entry%%:*}"
+                rest="${entry#*:}"
+                [ -n "$kind" ] || return 1
+                _provider_valid_value command "$rest" || return 1
+            done
             ;;
         installspec)
             # A CLI this forge puts on PATH: either a file it ships, or
