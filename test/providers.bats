@@ -482,9 +482,14 @@ assert_remedy_forges_exist() {
 }
 
 @test "the hook substitutes only the two runtime placeholders" {
+    # env -u, because these run inside a dejima sandbox as often as not, and
+    # there the briefing-delivery variables are set - the hook then emits only
+    # the session id and never reads the file under test. That made this one
+    # fail and the next one pass for the wrong reason, its assertion being
+    # satisfied by the session id the stub carries anyway. See .dejima.md.
     b="$(mktemp)"
     printf 'session=@@SESSION_ID@@ container=@@CONTAINER_ID@@\n' > "$b"
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
         'printf "{\"session_id\":\"abc123\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
         "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
@@ -507,7 +512,7 @@ assert_remedy_forges_exist() {
     printf 'resume-cmd: dejima --resume @@SESSION_ID@@\ncontainer=@@CONTAINER_ID@@\n' > "$b"
     # Session id crafted to test each special case in the replacement context.
     # Use printf %s so the value is never interpreted by the shell.
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
         'printf "{\"session_id\":%s,\"cwd\":\"%s\"}" "$(printf "%s" "$1" | jq -Rs .)" "$PWD" | bash "$2"' _ \
         'pr-42&rm -rf /tmp\test/path' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
@@ -522,7 +527,7 @@ assert_remedy_forges_exist() {
 }
 
 @test "a missing briefing file degrades rather than failing the session" {
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
         'printf "{\"session_id\":\"x\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
         "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
