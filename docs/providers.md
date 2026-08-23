@@ -446,6 +446,43 @@ can be pointed at any endpoint, including a model you serve yourself - and
 expect to be the person who finds the next crack.
 
 
+### Forge integration maturity
+
+The same caveat the harnesses get, for the same reason: two forges listed in
+one table invites the reading that each got the same consideration, and they
+did not.
+
+**gitea is the forge dejima is developed on.** Every PR in this repo was
+opened through it, every issue filed through it, and its three CLIs are
+dejima's own - which is why they do things `gh` does not, like showing only
+the review threads still outstanding. Its rough edges were found by using it.
+
+**GitHub has never been run end to end.** It was built from the manifest
+outward and tested at the config layer, and what that missed is instructive:
+`forge = github` could not start a container at all under `worktree-pr`, the
+only workflow that opens PRs, because the merge shadow had no `gh` to shadow.
+Ten tests exercised the forge and none of them reached the entrypoint. Fixing
+that immediately turned up a second thing, that `gh --repo owner/name pr merge
+N` walked straight past the merge block. Neither was a hard bug to find once
+anyone looked.
+
+Two known differences remain, both filed rather than fixed:
+
+- **Review feedback is thinner.** `gitea-pr comments` shows unresolved review
+  threads and hides the rest; GitHub does not expose thread resolution through
+  the REST API `gh` uses for this, so working through PR feedback there
+  re-reads threads already dealt with, with no signal that it is doing so.
+- **`gh --repo` reaches past the sandboxed repository.** The gitea CLIs refuse
+  an origin that is not on the configured host, so they can only act on the
+  repo the sandbox was launched against. `gh` takes `--repo` on nearly every
+  subcommand, and `forge = github` supplies a deliberately write-capable
+  token. A per-repository fine-grained PAT is the shape of `push_token_file`
+  that makes this moot.
+
+So: if you have a choice, `gitea` is the better-worn path. Choose `github`
+because that is where your repositories are, which is a good reason - and
+expect to be the person who finds the next crack.
+
 **The shipped defaults are deliberately the non-pushing pair**
 (`forge = none`, `workflow = local-only`). A fresh install has no forge host
 and no forge credential, so any default naming a real forge would be an
