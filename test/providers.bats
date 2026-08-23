@@ -794,8 +794,11 @@ assert_remedy_forges_exist() {
     # would promote a deliberately read-only PAT to a pushing credential.
     [ "$(lib manifest_get forge github requires)" = "push_token_file" ]
     [[ "$(lib manifest_get forge github env_export)" == *"GH_TOKEN=@push_token_file"* ]]
-    # Ships no CLI: gh is already in the image.
-    [ -z "$(lib manifest_get forge github install)" ]
+    # gh comes from a package rather than from this repo, but it is still
+    # declared: the entrypoint links the merge shadow only over a command that
+    # is behind /usr/local/lib/dejima/forge, and refuses to start otherwise.
+    # This forge shipping nothing of its own is what "system:" says.
+    [ "$(lib manifest_get forge github install)" = "system:gh" ]
 }
 
 @test "the briefing does not call GitHub read-only when the forge can push to it" {

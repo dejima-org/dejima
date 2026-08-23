@@ -57,7 +57,33 @@ for conf in "$root"/*/forge.conf; do
 
     declared=""
     for rel in $value; do
+        # "system:<name>" is a CLI the image already provides - `gh`, which
+        # comes from a package rather than from this repo. It still has to sit
+        # behind the shadow, because that is the fixed path forge-guard.sh
+        # execs the real command through, and a forge whose CLI never gets
+        # there has a merge block the entrypoint cannot enforce. A symlink
+        # rather than a copy: it is not ours, and it can be large.
         case "$rel" in
+            system:*)
+                name="${rel#system:}"
+                case "$name" in
+                    ''|*/*|*..*)
+                        echo "forge $forge declares a bad system command: $rel" >&2
+                        exit 1 ;;
+                esac
+                # Resolved now rather than trusted: a name that is not in the
+                # image yet would otherwise become a dangling symlink, and the
+                # first sign of it would be the guard exiting 127 mid-session.
+                path="$(command -v "$name" 2>/dev/null || true)"
+                if [ -z "$path" ]; then
+                    echo "forge $forge declares $rel, which this image does not provide" >&2
+                    exit 1
+                fi
+                ln -sf "$path" "$real/$name"
+                ln -sf "$real/$name" "$dest/$name"
+                declared="$declared $name"
+                declared_any=1
+                continue ;;
             /*|*..*|"")
                 echo "forge $forge declares an out-of-tree install path: $rel" >&2
                 exit 1 ;;

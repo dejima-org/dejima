@@ -1893,6 +1893,28 @@ STUB
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
+# install-forge-bins.sh, with every command a manifest declares as `system:`
+# stubbed onto PATH first.
+#
+# The image guarantees those commands - that is what declaring them means - but
+# a contributor's checkout and the CI runner do not, and CI is where this was
+# noticed: gh is present in a dejima container and absent on the runner, so
+# these tests passed locally and failed there. A test that reads the machine it
+# runs on is testing the machine.
+#
+# The names come from the manifests rather than a list here, so a forge that
+# declares another one later needs no change to this.
+_install_forge_bins() {
+    local stub="$BATS_TEST_TMPDIR/systemstub" name
+    mkdir -p "$stub"
+    for name in $(sed -n 's/^install *= *//p' "$REPO_ROOT"/forges/*/forge.conf \
+                    | tr ' ' '\n' | sed -n 's/^system://p'); do
+        printf '#!/bin/sh\nexit 0\n' > "$stub/$name"
+        chmod +x "$stub/$name"
+    done
+    PATH="$stub:$PATH" bash "$REPO_ROOT/docker/install-forge-bins.sh" "$@"
+}
+
 # forges/ is inside the audit's TCB, so `install =` in a forge manifest is a
 # claim an operator is entitled to read as "this forge puts nothing else
 # executable in the image". The image build enforces it, but that is the slow
@@ -1902,12 +1924,18 @@ STUB
 @test "what ships into the image is what a manifest declares, both ways" {
     local dest
     dest="$(mktemp -d)"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
+    run _install_forge_bins "$REPO_ROOT/forges" "$dest/lib" "$dest/bin"
     [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$dest"; return 1; }
     # Nothing under any forge's bin/ was skipped, and nothing else appeared.
+    # A file under a bin/ with no declaration is caught by the run above
+    # failing, which is what leaves this free to read the filesystem for the
+    # shipped-from-the-repo half rather than trusting the manifests for both.
     local shipped declared
     shipped="$(cd "$dest/bin" && ls | sort)"
-    declared="$(find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n' | sort)"
+    declared="$( { find "$REPO_ROOT/forges" -type f -path '*/bin/*' -printf '%f\n'
+                   sed -n 's/^install *= *//p' "$REPO_ROOT"/forges/*/forge.conf \
+                       | tr ' ' '\n' | sed -n 's/^system://p'
+                 } | sort )"
     rm -rf "$dest"
     [ "$shipped" = "$declared" ] || {
         echo "installed:"; echo "$shipped"; echo "present under a bin/:"; echo "$declared"; return 1; }
@@ -1919,8 +1947,12 @@ STUB
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     mkdir -p "$fake/github/bin"
     printf '#!/bin/sh\necho hi\n' > "$fake/github/bin/undeclared"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
+    # Stubbed like the rest: this has to fail because of the undeclared file,
+    # not because the machine happens to be missing a declared system command.
+    run _install_forge_bins "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "an undeclared CLI installed anyway"; rm -rf "$fake" "$dest"; return 1; }
+    [[ "$output" == *"does not declare it"* ]] \
+        || { echo "failed for another reason: $output"; rm -rf "$fake" "$dest"; return 1; }
     [ ! -e "$dest/undeclared" ]
     rm -rf "$fake" "$dest"
 }
@@ -1930,8 +1962,10 @@ STUB
     fake="$(mktemp -d)"; dest="$(mktemp -d)"
     cp -r "$REPO_ROOT"/forges/. "$fake/"
     rm "$fake/gitea/bin/gitea-pr"
-    run bash "$REPO_ROOT/docker/install-forge-bins.sh" "$fake" "$dest/lib" "$dest/bin"
+    run _install_forge_bins "$fake" "$dest/lib" "$dest/bin"
     [ "$status" -ne 0 ] || { echo "a missing declared CLI passed"; rm -rf "$fake" "$dest"; return 1; }
+    [[ "$output" == *"which it does not ship"* ]] \
+        || { echo "failed for another reason: $output"; rm -rf "$fake" "$dest"; return 1; }
     rm -rf "$fake" "$dest"
 }
 
@@ -2048,6 +2082,30 @@ _guard_repo() {
         "$d/gitea-pr" --verbose "$blocked" 7
     [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
 
+    # Nor does a flag that takes a SEPARATE value, which is the form that got
+    # past this and is the ordinary way to name a PR from outside its checkout:
+    # `gh --repo owner/name pr merge N`. The value is indistinguishable from a
+    # subcommand here, so a match anchored at the first non-flag argument found
+    # `owner/name`, gave up, and handed the merge to the real CLI.
+    printf '#!/bin/bash\necho "real: $*"\n' > "$d/real/gh"
+    chmod +x "$d/real/gh"
+    cp "$SANDBOX_DIR/forge-guard.sh" "$d/gh"
+    chmod +x "$d/gh"
+    local form
+    for form in "--repo o/r pr merge 7" "--repo=o/r pr merge 7" "pr merge 7"; do
+        # shellcheck disable=SC2086
+        run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr merge" DEJIMA_FORGE_REAL_DIR="$d/real" \
+            "$d/gh" $form
+        [[ "$output" == *"human decision in the sandbox"* ]] \
+            || { echo "gh $form reached the real CLI: $output"; return 1; }
+    done
+
+    # And a command that merely mentions the blocked words out of order still
+    # reaches the real CLI - the run has to be consecutive.
+    run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr merge" DEJIMA_FORGE_REAL_DIR="$d/real" \
+        "$d/gh" pr edit 7 --add-label merge
+    [[ "$output" == real:* ]] || { echo "a label named merge was blocked: $output"; return 1; }
+
     # Everything else reaches the real CLI, including a subcommand that merely
     # starts with the blocked word.
     local sub
@@ -2068,13 +2126,44 @@ _guard_repo() {
     # what the indirection buys - and it is what lets entrypoint.sh swap the
     # PATH entry for the guard without moving anything at runtime.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgeinstall.XXXXXX")"
-    run bash "$SANDBOX_DIR/install-forge-bins.sh" "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    run _install_forge_bins "$REPO_ROOT/forges" "$d/lib" "$d/bin"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local f
     for f in "$d/bin"/*; do
         [ -L "$f" ] || { echo "$(basename "$f") on PATH is not a symlink"; return 1; }
         [ -x "$d/lib/$(basename "$f")" ] || { echo "no real binary behind $(basename "$f")"; return 1; }
     done
+}
+
+@test "every command a forge names ends up behind the shadow" {
+    # The invariant #184 was a violation of. The entrypoint refuses to start
+    # when a workflow's merge block names a command that is not at
+    # /usr/local/lib/dejima/forge, so a forge naming one it never installs is
+    # not a degraded guard - it is a container that does not come up, in the
+    # only workflow that opens PRs.
+    #
+    # Checked against install-forge-bins.sh's real output rather than against
+    # the `install` list, because what matters is where a command ends up and
+    # not what a manifest says about it.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/shadow.XXXXXX")"
+    run _install_forge_bins "$REPO_ROOT/forges" "$d/lib" "$d/bin"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local conf forge key value cli checked=0
+    for conf in "$REPO_ROOT"/forges/*/forge.conf; do
+        forge="$(basename "$(dirname "$conf")")"
+        for key in pr_command issue_command merge_block; do
+            value="$(lib manifest_get forge "$forge" "$key")"
+            [ -n "$value" ] || continue
+            cli="${value%% *}"
+            [ -e "$d/lib/$cli" ] \
+                || { echo "forge $forge names '$value' but nothing installs '$cli'"; return 1; }
+            checked=$((checked + 1))
+        done
+    done
+    # gitea's three and github's three. A loop that silently matched nothing
+    # would pass this test while checking no forge at all.
+    [ "$checked" -ge 6 ] || { echo "only checked $checked commands"; return 1; }
 }
 
 @test "the entrypoint links each guard only when it has something to enforce" {
