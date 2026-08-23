@@ -61,6 +61,42 @@
 
   var viewport = D.viewport.createViewport({ app: app, onFit: fitNow });
 
+  // Whether this is a touch device, which decides both the toolbar below and
+  // the keyboard policy that follows. Probed here rather than beside its first
+  // use because applyPreferences needs it, and that runs on a message from
+  // ttyd - later in wall-clock time, but easier to reason about declared
+  // before the function that reads it.
+  var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
+  // Whether a tap may raise the soft keyboard.
+  //
+  // xterm.js focuses its textarea whenever the terminal is clicked, which on a
+  // desktop is exactly right and on a phone is not: tapping is how you scroll
+  // and select, so every one of those taps summoned the keyboard and cost a
+  // second tap to put it away. The keyboard is now asked for explicitly, with
+  // the KBD button.
+  //
+  // Implemented by blurring rather than by intercepting the tap. The focus
+  // arrives from inside xterm.js on several paths - pointer, selection,
+  // programmatic - and catching them all would mean knowing about each; letting
+  // focus land and immediately dropping it needs to know about none, and leaves
+  // selection and scrolling working exactly as they did. The toolbar does not
+  // go through the textarea at all, so its keys keep working while the keyboard
+  // is down.
+  //
+  // The flag resets on blur, so dismissing the keyboard by hand puts things
+  // back to tap-does-not-raise-it rather than latching open.
+  var keyboardAllowed = true;
+  function allowKeyboard() { keyboardAllowed = true; }
+  function applyTapFocusPolicy(wanted) {
+    keyboardAllowed = wanted;
+    if (wanted || !term.textarea) return;
+    term.textarea.addEventListener('focus', function () {
+      if (!keyboardAllowed && term.textarea) term.textarea.blur();
+    });
+    term.textarea.addEventListener('blur', function () { keyboardAllowed = false; });
+  }
+
   function applyPreferences(prefs) {
     var split = D.config.splitPreferences(prefs);
     Object.keys(split.terminal).forEach(function (key) {
@@ -80,6 +116,12 @@
       parsed = D.config.parsePrefix(D.config.DEFAULT_TMUX_PREFIX);
     }
     prefixByte = parsed;
+
+    // Applied from the preferences as well as at startup: ttyd sends these
+    // after the connection opens, so a focusOnTap set server-side arrives
+    // later than the first policy decision and has to be able to change it.
+    applyTapFocusPolicy(D.config.focusOnTapWanted(
+      window.location.search, coarsePointer, split.page.focusOnTap));
 
     // A font size arriving in the preferences changes the cell size, so the
     // column count computed before it was applied is now wrong.
@@ -147,7 +189,6 @@
 
   // Touch affordances only where there is a touch. A desktop browser gets a
   // plain terminal, which is what lets this ship as the default frontend.
-  var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   if (D.config.toolbarWanted(window.location.search, coarsePointer)) {
     document.body.classList.add('touch');
     toolbar = D.toolbar.createToolbar({
@@ -160,7 +201,10 @@
       // ASCII, which UTF-8 leaves alone.
       sendText: function (text) { client.sendInput(text); },
       prefix: function () { return prefixByte; },
-      notify: notify
+      notify: notify,
+      search: function () { return window.location.search; },
+      navigate: function (search) { window.location.search = search; },
+      allowKeyboard: allowKeyboard
     });
     toolbar.attach();
 

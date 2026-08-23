@@ -625,6 +625,15 @@ remote_ttyd_font_size() {
 # interpolated into the page's client options, and a named-chord set is one
 # fewer place an escaping question can be got wrong. A stock tmux does not
 # use either of those two anyway.
+# Whether tapping the terminal page raises the soft keyboard. Unset is the
+# useful default and is deliberately NOT a bool default of off: the page
+# decides per client from the pointer type, which a host-wide setting cannot
+# see. Only a value the operator actually wrote is passed on.
+remote_ttyd_focus_on_tap() {
+    config_is_set remote-access ttyd_focus_on_tap || return 0
+    config_get remote-access ttyd_focus_on_tap
+}
+
 remote_ttyd_tmux_prefix() {
     config_get remote-access ttyd_tmux_prefix
 }

@@ -53,16 +53,28 @@ body.touch #terminal {
   touch-action: manipulation;
 }
 
+/* Flex rather than a grid with a column count in it. The count was 7, which
+   was the number of buttons at the time - adding one wrapped the row and broke
+   both. Equal-basis flex children divide the row however many there are, so a
+   button added later needs no change here. */
 #toolbar .row {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  display: flex;
   gap: 4px;
+}
+
+#toolbar .row > button {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 #toolbar button {
   min-height: 40px;
   padding: 0 2px;
-  font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Clamped rather than fixed: eight buttons on a narrow phone leave about
+     forty pixels each, and the longest label is six characters. The lower
+     bound is where a monospace PREFIX still fits; the upper is the size this
+     has always been, so a wide screen is unchanged. */
+  font: 600 clamp(10px, 2.8vw, 13px)/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #d7dce3;
   background: #232830;
   border: 1px solid #343b45;

@@ -63,6 +63,7 @@ approvals):
 | `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
 | `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
 | `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
 | `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
 `ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
@@ -494,8 +495,8 @@ contribution is delivering the drag.
 ### Toolbar
 
 ```
-ESC   CTRL   TAB   ←   ↓   ↑   →
-PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
+ESC   CTRL   TAB   ←   ↓   ↑   →   ⏎
+PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
 ```
 
 - `CTRL` is sticky: one tap arms it for the next key, a second tap locks it on,
@@ -507,14 +508,30 @@ PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
 - `◀W` and `W▶` are prefix + `p` / prefix + `n`. They are the answer to the
   window names in the status bar being unhittable on a phone: two large targets
   that are always in the same place.
+- `SESS` goes back to the session picker, for switching to another sandbox
+  without closing the tab. It reloads the page without the run-id, which is
+  what makes `dejima-attach` show the list again. The session you leave is
+  unaffected: each client gets its own tmux session grouped onto the real one,
+  and only that view is reaped when you detach.
 - `ZOOM` is prefix + `z`, toggling tmux's pane zoom - the fastest way to make
   one pane usable on a small screen.
 - `PASTE` reads the phone's clipboard and sends it, wrapped in bracketed-paste
   markers when the application has asked for them. It needs a secure context;
   on an `http://` front door the browser refuses the read and the page says so
   rather than doing nothing.
+- `⏎` sends Enter, which is the key a session asks for most and the one a soft
+  keyboard puts furthest from a thumb.
 - `KBD` raises the soft keyboard, which is otherwise awkward to get back once
   it has been dismissed.
+
+**Tapping the terminal does not raise the keyboard.** On a phone, tapping is
+also how you scroll and select, so every one of those taps used to summon the
+keyboard and cost a second tap to put it away. `KBD` is the deliberate way to
+ask for it. A desktop is unchanged - there is no soft keyboard to raise, and
+clicking to focus is what a terminal does.
+
+Set `ttyd_focus_on_tap = on` to get the old behaviour for every client, or add
+`?focus=1` to the URL for one. `?focus=0` forces it off on a desktop.
 
 Copying *out* works through OSC 52: anything that emits it - tmux with
 `set-clipboard on`, nvim, your own yank binding - lands in the phone's
