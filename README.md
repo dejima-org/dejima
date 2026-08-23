@@ -422,6 +422,26 @@ dejima --ro ~/other-project ~/myproject
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
 
+### Ctrl-Z backgrounds the whole thing
+
+Suspending a session backgrounds all of dejima - the container, the credential
+proxy, the conversation shipper - and `fg` brings back a working session, with
+the terminal put back the way the harness had it.
+
+That takes doing, because a container run holds the terminal in raw mode, where
+Ctrl-Z is not a signal at all: it is a byte, delivered to whatever is running
+inside. A harness that implements Ctrl-Z itself then stops itself, and nothing
+in a container can continue it - there is no job-control shell in there. So
+dejima takes that one character back for the host while a session runs
+(`bin/dejima-tty-suspend`). Ctrl-C and Ctrl-\ are deliberately left alone and
+still reach the session, which is how a harness expects to be interrupted.
+
+Suspending is not the same as detaching: a suspended session is stopped, so it
+makes no progress until you resume it, and it belongs to the terminal you
+started it from. For a session that keeps working while you are away, or that
+you want to pick up from somewhere else, run dejima inside tmux and use
+[`dejima-attach`](docs/remote-access.md).
+
 ## Sign in on the host first
 
 **Install your harness on the host and authenticate it there before running
