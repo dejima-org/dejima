@@ -3,8 +3,8 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 require('../src/keys.js'); // config.js parses the tmux prefix through it
 require('../src/config.js');
-const { DEFAULT_TMUX_PREFIX, parsePrefix, splitPreferences, toolbarWanted } =
-  globalThis.DEJIMA.config;
+const { DEFAULT_TMUX_PREFIX, parsePrefix, splitPreferences, toolbarWanted,
+        pickerSearch } = globalThis.DEJIMA.config;
 
 test('a tmux prefix is parsed into the byte tmux would receive', () => {
   assert.equal(parsePrefix('C-b'), '\x02');
@@ -52,4 +52,25 @@ test('the toolbar follows the pointer type unless the query string overrides it'
   assert.equal(toolbarWanted('?toolbar=1', false), true);
   assert.equal(toolbarWanted('?arg=x&toolbar=1', false), true);
   assert.equal(toolbarWanted('?toolbar=maybe', false), false, 'an unparseable value is not an override');
+});
+
+// The session picker is this page with the run-id dropped: ttyd passes ?arg=
+// to dejima-attach as argv, and dejima-attach with no argument is the picker.
+
+test('the picker address drops the run-id', () => {
+  assert.equal(pickerSearch('?arg=abc123'), '');
+});
+
+test('the picker address keeps every other parameter', () => {
+  // ?toolbar=1 configures this page, not the command. Losing it on the way
+  // back to the picker would silently change the UI.
+  const r = pickerSearch('?arg=abc123&toolbar=1');
+  const p = new URLSearchParams(r);
+  assert.equal(p.get('arg'), null, 'the run-id is what we are dropping');
+  assert.equal(p.get('toolbar'), '1');
+});
+
+test('the picker address is already the picker when there is no run-id', () => {
+  assert.equal(pickerSearch(''), '');
+  assert.equal(pickerSearch('?toolbar=1'), '?toolbar=1');
 });

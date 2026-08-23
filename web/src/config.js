@@ -52,11 +52,28 @@
     return !!coarsePointer;
   }
 
+  // The address of the session picker: this page with the run-id dropped.
+  //
+  // ttyd passes ?arg=<run-id> to dejima-attach as argv (--url-arg), so a page
+  // loaded without it runs dejima-attach with no argument, which is the picker.
+  // Every other parameter is kept, because they configure this page rather than
+  // the command - losing ?toolbar=1 on the way back would be a surprise.
+  //
+  // Returns a search string, "" when nothing is left, so a caller can build a
+  // URL without knowing whether to write the "?".
+  function pickerSearch(search) {
+    var params = new URLSearchParams(search || '');
+    params.delete('arg');
+    var rest = params.toString();
+    return rest ? '?' + rest : '';
+  }
+
   D.config = {
     DEFAULT_TMUX_PREFIX: DEFAULT_TMUX_PREFIX,
     PAGE_KEYS: PAGE_KEYS,
     parsePrefix: parsePrefix,
     splitPreferences: splitPreferences,
-    toolbarWanted: toolbarWanted
+    toolbarWanted: toolbarWanted,
+    pickerSearch: pickerSearch
   };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));

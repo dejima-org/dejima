@@ -1,6 +1,8 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
+require('../src/keys.js');   // config.js parses the tmux prefix through it
+require('../src/config.js'); // toolbar.js asks it for the picker address
 require('../src/toolbar.js');
 const { pasteSequence, createToolbar } = globalThis.DEJIMA.toolbar;
 
@@ -24,7 +26,9 @@ function makeToolbar(overrides) {
     latch: { state: () => 'off', armed: () => false, tap: () => {}, consume: () => {}, reset: () => {} },
     sendText: () => {},
     prefix: () => '\x02',
-    notify: () => {}
+    notify: () => {},
+    search: () => '',
+    navigate: () => {}
   }, overrides || {});
   const toolbar = createToolbar(opts);
   toolbar.attach();
@@ -84,4 +88,17 @@ test('ENTER sends a carriage return, not a newline', () => {
   const t = makeToolbar({ sendText: (s) => sent.push(s) });
   t.fire('enter');
   assert.deepEqual(sent, ['\r']);
+});
+
+test('SESS navigates to the picker, dropping only the run-id', () => {
+  const went = [];
+  const t = makeToolbar({
+    search: () => '?arg=run-7&toolbar=1',
+    navigate: (s) => went.push(s)
+  });
+  t.fire('sessions');
+  assert.equal(went.length, 1);
+  const p = new URLSearchParams(went[0]);
+  assert.equal(p.get('arg'), null, 'the run-id is what sends it back to the picker');
+  assert.equal(p.get('toolbar'), '1', 'page options survive the trip');
 });

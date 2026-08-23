@@ -495,7 +495,7 @@ contribution is delivering the drag.
 
 ```
 ESC   CTRL   TAB   ←   ↓   ↑   →   ⏎
-PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
+PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
 ```
 
 - `CTRL` is sticky: one tap arms it for the next key, a second tap locks it on,
@@ -507,6 +507,11 @@ PREFIX  ◀W   W▶   ZOOM   DRAG   PASTE   KBD
 - `◀W` and `W▶` are prefix + `p` / prefix + `n`. They are the answer to the
   window names in the status bar being unhittable on a phone: two large targets
   that are always in the same place.
+- `SESS` goes back to the session picker, for switching to another sandbox
+  without closing the tab. It reloads the page without the run-id, which is
+  what makes `dejima-attach` show the list again. The session you leave is
+  unaffected: each client gets its own tmux session grouped onto the real one,
+  and only that view is reaped when you detach.
 - `ZOOM` is prefix + `z`, toggling tmux's pane zoom - the fastest way to make
   one pane usable on a small screen.
 - `PASTE` reads the phone's clipboard and sends it, wrapped in bracketed-paste

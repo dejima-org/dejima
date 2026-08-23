@@ -160,7 +160,9 @@
       // ASCII, which UTF-8 leaves alone.
       sendText: function (text) { client.sendInput(text); },
       prefix: function () { return prefixByte; },
-      notify: notify
+      notify: notify,
+      search: function () { return window.location.search; },
+      navigate: function (search) { window.location.search = search; }
     });
     toolbar.attach();
 

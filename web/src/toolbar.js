@@ -5,6 +5,8 @@
 // whole reason tapping a button neither moves focus nor dismisses the soft
 // keyboard - the default action of a pointerdown on a button is to focus it,
 // which blurs the terminal's textarea and takes the keyboard down with it.
+// Requires config.js, for the picker address the SESS button navigates to.
+
 (function (D) {
   'use strict';
 
@@ -110,6 +112,17 @@
       // Carriage return, not a newline. A terminal's Enter key is CR; sending
       // LF here would submit nothing in a shell and insert a line in an editor.
       enter: function () { opts.sendText('\r'); },
+      // Back to dejima-attach with no run-id, which is the picker. A full
+      // navigation rather than anything cleverer: the run-id reaches the
+      // command through ttyd's --url-arg on the WebSocket URL, so the only way
+      // to run a different one is a new connection.
+      //
+      // Safe for the session being left. dejima-attach gives each client its
+      // own tmux session grouped onto the real one and sets destroy-unattached
+      // on THAT, so detaching reaps the view and leaves the sandbox pane alone.
+      sessions: function () {
+        if (opts.navigate) opts.navigate(D.config.pickerSearch(opts.search()));
+      },
       kbd: function () {
         opts.term.focus();
         if (opts.term.textarea) opts.term.textarea.focus();
