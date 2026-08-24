@@ -2120,7 +2120,7 @@ _install_forge_bins() {
     [ -x "$script" ]
     local area
     for area in bin/dejima docker/entrypoint forges/ docker/forge-guard \
-                hooks/merge-guard web/ harnesses/ \
+                hooks/merge-guard bin/dejima-tty-suspend web/ harnesses/ \
                 bin/dejima-ttyd '\.dejima/allowed-domains'; do
         grep -q -- "$area" "$script" \
             || { echo "release-pass.sh no longer mentions $area"; return 1; }
@@ -2218,6 +2218,86 @@ _install_forge_bins() {
         || { echo "the briefing does not mention the browser"; return 1; }
     [[ "$out" == *"~/shared"* ]] \
         || { echo "it does not say where to leave what it sees"; return 1; }
+}
+
+# --- Ctrl-Z (#179) ----------------------------------------------------------
+#
+# Driven through a real pty with a real interactive shell on it, because the
+# question is not what a signal does - it is whether the terminal turns the
+# keystroke into a signal at all. Under `docker compose run` it does not: raw
+# mode has ISIG off, so Ctrl-Z is the byte 0x1a and it goes to the container.
+#
+# The stand-in for the container run is in test/fixtures. Docker is not
+# available here and is not what is under test; the terminal handling is.
+
+@test "Ctrl-Z suspends the whole launch instead of vanishing into the container" {
+    command -v python3 >/dev/null 2>&1 || skip "needs python3"
+    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttysuspend.XXXXXX")"
+    run env TTY_SUSPEND_WORK="$work" python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
+        "$REPO_ROOT/bin/dejima-tty-suspend" bash
+    [ "$status" -ne 77 ] || skip "no pty available here"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Named rather than counted, so a harness that silently stopped checking
+    # something cannot pass this by reporting fewer results.
+    local name
+    for name in cycle1-suspends-the-job cycle1-nothing-reached-the-container \
+                cycle1-raw-mode-restored cycle1-redraw-poked \
+                cycle2-suspends-the-job cycle2-raw-mode-restored \
+                input-reaches-the-resumed-session ctrl-c-still-reaches-the-session; do
+        [[ "$output" == *"PASS $name"* ]] \
+            || { echo "$name was not checked:"; echo "$output"; return 1; }
+    done
+}
+
+@test "the Ctrl-Z harness sees the bug when the fix is not there" {
+    # The control. A test that cannot fail is not evidence, and this one is
+    # made entirely of timing and terminal state - the two things most likely
+    # to quietly stop testing anything.
+    command -v python3 >/dev/null 2>&1 || skip "needs python3"
+    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttycontrol.XXXXXX")"
+    run env TTY_SUSPEND_WORK="$work" TTY_SUSPEND_NO_HELPER=1 python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
+        "$REPO_ROOT/bin/dejima-tty-suspend" bash
+    [ "$status" -ne 77 ] || skip "no pty available here"
+    [ "$status" -ne 0 ] || { echo "the control passed, so it proves nothing:"; echo "$output"; return 1; }
+    [[ "$output" == *"FAIL cycle1-suspends-the-job"* ]] \
+        || { echo "$output"; return 1; }
+    # The byte itself, which is the whole bug: it reached the container.
+    [[ "$output" == *"FAIL cycle1-nothing-reached-the-container b'\\x1a'"* ]] \
+        || { echo "the container did not receive the keystroke:"; echo "$output"; return 1; }
+}
+
+@test "the launcher never lets the container client see SIGTSTP" {
+    # The whole of #179, in the end. The client survives SIGSTOP and does not
+    # survive SIGTSTP: a catchable stop signal interrupts the read it is
+    # blocked in, its input forwarding never recovers, and the session comes
+    # back alive but deaf. Measured against a real container run, holding
+    # everything else equal.
+    #
+    # So the client is started with the signal ignored - inherited, and kept
+    # across exec - and the keystroke is converted into an explicit SIGSTOP
+    # for it. Losing any one of these three lines puts the wedge back.
+    local d="$REPO_ROOT/bin/dejima"
+    grep -q "trap '' TSTP" "$d" \
+        || { echo "the client no longer inherits SIGTSTP ignored"; return 1; }
+    grep -qE 'kill -STOP "\$SANDBOX_CLIENT_PID"' "$d" \
+        || { echo "the keystroke is no longer converted into a SIGSTOP"; return 1; }
+    grep -q "sandbox \"\$@\" < /dev/tty &" "$d" \
+        || { echo "the client is backgrounded without a terminal, so it reads EOF"; return 1; }
+    # And the launcher itself must still stop, or the job never fully stops
+    # and the prompt never comes back.
+    grep -q 'kill -TSTP \$\$' "$d" \
+        || { echo "the launcher no longer stops itself, so ^Z suspends nothing"; return 1; }
+}
+
+@test "a launch with no terminal skips the suspend handling entirely" {
+    # CI, or output redirected: there is nothing to suspend and /dev/tty would
+    # not open. The plain foreground run has to stay reachable.
+    grep -q 'SANDBOX_TTY_MODES="$(stty -g < /dev/tty 2>/dev/null)"' "$REPO_ROOT/bin/dejima" \
+        || { echo "the terminal is no longer probed before any of this"; return 1; }
+    grep -c 'docker compose -f "$COMPOSE_FILE" run --rm' "$REPO_ROOT/bin/dejima" | grep -q '^2$' \
+        || { echo "there is no longer one run for a terminal and one without"; return 1; }
 }
 
 # --- guards that do not need the harness ------------------------------------
@@ -2894,7 +2974,10 @@ registered_commands() {
 
 @test "bin/dejima's exit-time audit still runs when the container run fails or is interrupted" {
     local run_line trap_line
-    run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    # The EARLIEST run, because there are two now - one for a terminal and
+    # one without - and the trap has to precede both. Taking the last would
+    # let a run creep in above the trap and still pass.
+    run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$run_line" ]
     [ -n "$trap_line" ]
@@ -2905,10 +2988,25 @@ registered_commands() {
     # ran.
     [ "$trap_line" -lt "$run_line" ]
     sed -n "1,${trap_line}p" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
-    # The compose invocation must not itself be a bare command under set -e
-    # either - a nonzero/interrupted exit there would otherwise skip the
-    # credential-proxy check and the propagated exit code below it.
-    grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/dejima")
+    # No compose invocation may be a bare command under set -e either - a
+    # nonzero or interrupted exit there would skip the credential-proxy check
+    # and the propagated exit code below it.
+    #
+    # Two spellings satisfy that and both are checked, because there are two
+    # runs: the no-terminal one takes `|| compose_status=$?`, and the one that
+    # supports Ctrl-Z is backgrounded, where the status comes from a guarded
+    # `wait` instead (see the SIGTSTP handling above it). What matters is that
+    # neither can abort the script, not which form says so.
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            *"|| compose_status=\$?"*) ;;
+            *"sandbox \"\$@\" < /dev/tty &"*) ;;
+            *) echo "an unguarded compose run: $line"; return 1 ;;
+        esac
+    done < <(grep 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima")
+    grep -q 'if wait "\$SANDBOX_CLIENT_PID"; then' "$REPO_ROOT/bin/dejima" \
+        || { echo "the backgrounded run's status is no longer captured from a guarded wait"; return 1; }
     sed -n "1,${run_line}p" "$REPO_ROOT/bin/dejima" | grep -q 'compose_status=0'
     tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q 'exit "\$compose_status"'
 }
@@ -5469,9 +5567,23 @@ _emit_mount_at() {
     run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
     [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
     grep -qE '^  sandbox:' "$y"
-    # And bin/dejima refers to the service by the same name in both places.
-    [ "$(grep -c 'compose -f "$COMPOSE_FILE" \(build\|run\).* sandbox' "$REPO_ROOT/bin/dejima")" -eq 2 ] \
-        || { echo "bin/dejima does not use the service name in both places"; return 1; }
+    # And EVERY compose invocation in bin/dejima names that same service, with
+    # at least one build and one run. Counted by shape rather than pinned to a
+    # number: the count changed the moment a second run appeared for the
+    # no-terminal case, which says nothing about whether the naming is right.
+    local line builds=0 runs=0
+    while IFS= read -r line; do
+        case "$line" in
+            *" sandbox "*|*" sandbox") ;;
+            *) echo "a compose invocation that does not name the service: $line"; return 1 ;;
+        esac
+        case "$line" in
+            *"compose -f \"\$COMPOSE_FILE\" build"*) builds=$((builds + 1)) ;;
+            *"compose -f \"\$COMPOSE_FILE\" run"*) runs=$((runs + 1)) ;;
+        esac
+    done < <(grep 'compose -f "$COMPOSE_FILE" \(build\|run\)' "$REPO_ROOT/bin/dejima")
+    [ "$builds" -ge 1 ] || { echo "no compose build names the service"; return 1; }
+    [ "$runs" -ge 1 ] || { echo "no compose run names the service"; return 1; }
 }
 
 @test "the TLS terminator answers for the harness's declared domain, not a literal" {
