@@ -2194,6 +2194,32 @@ _install_forge_bins() {
         || { echo "a tier rule is below the latch rules, so a latched key looks unlatched"; return 1; }
 }
 
+@test "a global package is importable in either module system, not just require()" {
+    # NODE_PATH only ever applied to require(). ESM resolution ignores it and
+    # walks up from the importing file looking for node_modules, so the modern
+    # form of the same import fails from every directory a script is likely to
+    # be written in - and what an agent sees is ERR_MODULE_NOT_FOUND, which
+    # reads as "this image has no browser" rather than "wrong module system".
+    # The root symlink is what ends that walk somewhere useful.
+    local dockerfile="$SANDBOX_DIR/Dockerfile"
+    grep -q 'ENV NODE_PATH=/usr/local/share/npm-global/lib/node_modules' "$dockerfile" \
+        || { echo "NODE_PATH is no longer set, so require() from anywhere is broken"; return 1; }
+    grep -q 'ln -s /usr/local/share/npm-global/lib/node_modules /node_modules' "$dockerfile" \
+        || { echo "no root node_modules, so an ESM import resolves nowhere"; return 1; }
+}
+
+@test "the briefing says a browser is here, because agents keep concluding otherwise" {
+    # The point of saying it is that it changes what gets done: a user
+    # interface that was changed and then described rather than looked at is
+    # the failure this is aimed at.
+    local out
+    out="$(lib briefing_compose none local-only claude-code)" || { echo "$out"; return 1; }
+    [[ "$out" == *"playwright"* ]] \
+        || { echo "the briefing does not mention the browser"; return 1; }
+    [[ "$out" == *"~/shared"* ]] \
+        || { echo "it does not say where to leave what it sees"; return 1; }
+}
+
 # --- Ctrl-Z (#179) ----------------------------------------------------------
 #
 # Driven through a real pty with a real interactive shell on it, because the
