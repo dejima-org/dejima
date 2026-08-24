@@ -487,6 +487,49 @@ write_config() {
         || { echo "the refusal does not name the key: $output"; return 1; }
 }
 
+@test "--harness selects a harness for one launch without changing the default" {
+    # A host keeps one harness as its default and reaches another when it wants
+    # to. Everything else was already in place - harnesses configure side by
+    # side under their own [harness.<name>] sections, and the image layer is
+    # keyed on the harness name so switching switches images. Only the flag was
+    # missing, which is why this is one line beside --forge and --workflow.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only' \
+                 '[harness.cline]' 'model = m'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"core.harness=claude-code"* ]] \
+        || { echo "default not in effect: $output"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --harness cline --print-config
+    [[ "$output" == *"core.harness=cline"* ]] \
+        || { echo "the flag did not select it: $output"; return 1; }
+    # And the file is unchanged - a flag is for one launch.
+    grep -q '^harness = claude-code$' "$CONFIG_DIR/config" \
+        || { echo "the flag rewrote the config file"; return 1; }
+}
+
+@test "--harness refuses a harness that does not exist" {
+    # Validated against the same provider set the config key is, so a typo
+    # fails at the flag rather than at plugin load with a worse message.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only'
+    run "$REPO_ROOT/bin/dejima" --harness not-a-harness --print-config
+    [ "$status" -ne 0 ] || { echo "an unknown harness was accepted"; return 1; }
+    [[ "$output" == *"invalid value for --harness"* ]] || { echo "$output"; return 1; }
+}
+
+@test "--harness changes what the session is actually told, not just the printed config" {
+    # The flag has to reach the composed briefing, or it would select a harness
+    # for the container while the session was briefed about a different one.
+    # Cline's fragment names its own resume command, which Claude Code's does
+    # not, so the two are distinguishable.
+    write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only' \
+                 '[harness.cline]' 'model = m'
+    run "$REPO_ROOT/bin/dejima" --print-briefing
+    [[ "$output" != *"CLINE_DATA_DIR"* ]] || { echo "default briefed as cline"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --harness cline --print-briefing
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"CLINE_DATA_DIR"* ]] \
+        || { echo "the briefing is still the default harness's: $output"; return 1; }
+}
+
 @test "--print-config refuses an invalid config rather than printing defaults" {
     write_config '[audit]' 'keep = 0'
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -1465,6 +1508,62 @@ EOF
     rm -rf "$rw"
 }
 
+@test "declaring corpus does not turn it on; approving it does" {
+    # The security half, and the reason this is not simply "does the file
+    # exist". .dejima/ is in the workspace, which is session-writable - so a
+    # session that could turn this on by writing a file would be writing the
+    # next session's system prompt. The project declares, the operator
+    # approves, and bin/dejima reads only what was approved.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-step\n' > "$ws/.dejima/corpus"
+
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"its own commit"* ]] \
+        || { echo "a declaration alone put the rule in force"; return 1; }
+
+    yes | "$REPO_ROOT/bin/dejima-project" approve "$ws" >/dev/null 2>&1
+
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"its own commit"* ]] \
+        || { echo "approving it did not put the rule in force: $output"; return 1; }
+    rm -rf "$ws"
+}
+
+@test "an unknown corpus rule is refused rather than approved and ignored" {
+    # A rule nothing implements would approve cleanly, sit in the store, and
+    # do nothing - which reads as being in force when it is not.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-hour\n' > "$ws/.dejima/corpus"
+    run "$REPO_ROOT/bin/dejima-project" status "$ws"
+    [[ "$output" == *"commit-per-hour"* ]] || { echo "not reported at all: $output"; return 1; }
+    [[ "$output" != *"pending   commit-per-hour"* ]] \
+        || { echo "an unimplemented rule is offered for approval: $output"; return 1; }
+    rm -rf "$ws"
+}
+
+@test "the corpus rule is resolved before --print-briefing exits" {
+    # --print-briefing composes and exits early, so anything it needs has to
+    # be resolved above it. DEJIMA_RW_MOUNTS was caught by exactly this once,
+    # its sentence missing from the printed briefing while real sessions were
+    # told correctly - a diagnostic that disagrees with the session is worse
+    # than no diagnostic.
+    local ws; ws="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only'
+    mkdir -p "$ws/.dejima"
+    printf 'commit-per-step\n' > "$ws/.dejima/corpus"
+    yes | "$REPO_ROOT/bin/dejima-project" approve "$ws" >/dev/null 2>&1
+    run bash -c 'cd "$1" && "$2" --print-briefing' _ "$ws" "$REPO_ROOT/bin/dejima"
+    [[ "$output" == *"its own commit"* ]] \
+        || { echo "--print-briefing disagrees with what a session would get"; return 1; }
+    rm -rf "$ws"
+}
+
 @test "a read_write entry overlapping a protected path is refused, not warned" {
     _rw_setup
     workspace="$(mktemp -d)"
@@ -1655,7 +1754,11 @@ _epitaph_fixture() {
     EPI_WS="$(mktemp -d)"; git -C "$EPI_WS" init -q
     EPI_SLUG="$(printf '%s' "$EPI_WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$EPI_TR/$EPI_SLUG"
-    write_config '[epitaph]' "dir = $EPI_STORE"
+    # The transcripts directory reaches the tool through the harness's own
+    # config key now, not as an argument: where transcripts live is the
+    # harness's, and dejima-epitaph no longer knows the shape of it.
+    write_config '[epitaph]' "dir = $EPI_STORE" \
+        '[harness.claude-code]' "projects_dir = $EPI_TR"
 }
 
 # One compact_boundary carrying the metadata, then the summary itself.
@@ -1670,7 +1773,7 @@ _epitaph_transcript() {
 @test "an epitaph is written out of the container's reach" {
     _epitaph_fixture
     _epitaph_transcript s1 "the thing this session worked out"
-    run "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR"
+    run "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local saved; saved="$(find "$EPI_STORE" -name '*.md')"
     [ -n "$saved" ]
@@ -1685,8 +1788,8 @@ _epitaph_transcript() {
     # epitaphs an earlier run already wrote.
     _epitaph_fixture
     _epitaph_transcript s1 "once only"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 1 ]
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
@@ -1697,7 +1800,7 @@ _epitaph_transcript() {
     mkdir -p "$EPI_TR/-some-other-project"
     printf '{"type":"user","isCompactSummary":true,"uuid":"cccc","sessionId":"s-2","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"theirs"}}\n' \
         > "$EPI_TR/-some-other-project/s2.jsonl"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     run grep -rl 'theirs' "$EPI_STORE"
     [ "$status" -ne 0 ] || { echo "collected another project's summary"; return 1; }
     grep -rq 'mine' "$EPI_STORE"
@@ -1708,7 +1811,7 @@ _epitaph_transcript() {
     _epitaph_fixture
     write_config '[epitaph]' "dir = $EPI_STORE" 'enabled = off'
     _epitaph_transcript s1 "should not be kept"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ -z "$(find "$EPI_STORE" -name '*.md' 2>/dev/null)" ]
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
@@ -1730,7 +1833,7 @@ _epitaph_transcript() {
         > "$EPI_TR/$wt_slug/s2.jsonl"
     # A directory an earlier run already left behind goes too.
     mkdir -p "$EPI_STORE/$wt_slug"
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ ! -d "$EPI_STORE/$wt_slug" ] \
         || { echo "empty directory left for $wt_slug"; return 1; }
     [ -n "$(find "$EPI_STORE/$EPI_SLUG" -name '*.md' 2>/dev/null)" ] \
@@ -1841,7 +1944,15 @@ _epitaph_transcript() {
     DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
     [[ "$output" == *"does not support 2 of dejima's guards"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"push-guard"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"merge the agent"* || "$output" == *"merge its own pull requests"* ]] \
+    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
+    # What is lost has to be what is actually lost. Since the push and merge
+    # guards became PATH shadows they hold whatever the harness declares, so
+    # a message saying pushes are not refused would send an operator looking
+    # for a hole that is not there. What a harness adds by hosting them is
+    # the invocation the shadow cannot see.
+    [[ "$output" == *"PATH shadow"* ]] \
+        || { echo "the message overstates what an undeclared guard costs:"; echo "$output"; return 1; }
+    [[ "$output" != *"pushes to hosts and branches outside the allowed set are not refused"* ]] \
         || { echo "$output"; return 1; }
     rm -rf "$workspace" "$proot"
 }
@@ -1926,6 +2037,26 @@ _epitaph_transcript() {
     [[ "$output" == *"No [core] harness is set"* ]] || { echo "$output"; return 1; }
     [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
         || { echo "wrote a harness config anyway"; return 1; }
+}
+
+@test "install.sh names the broken line rather than blaming the harness" {
+    # A config that does not parse leaves config_get empty for every key, so
+    # the harness read comes back empty too - and reporting that as "no
+    # harness is set" sends the operator to a line that is already correct.
+    # The key here is real: it is one a newer dejima accepts, which is how an
+    # operator arrives with a config their checkout does not know yet.
+    printf '[core]\nharness = claude-code\nforge = none\nworkflow = local-only\n' \
+        > "$CONFIG_DIR/config"
+    printf '[harness.claude-code]\nno_such_key = 1\n' >> "$CONFIG_DIR/config"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [[ "$output" == *"no_such_key"* ]] \
+        || { echo "did not name the offending key: $output"; return 1; }
+    [[ "$output" != *"No [core] harness is set"* ]] \
+        || { echo "blamed the harness line, which is correct: $output"; return 1; }
+    [ ! -f "$CONFIG_DIR/.claude/settings.json" ] \
+        || { echo "registered guards from a config it could not read"; return 1; }
 }
 
 @test "[mounts] readonly is refused when it names the filesystem root" {

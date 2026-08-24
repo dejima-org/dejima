@@ -416,6 +416,34 @@ harness_staged_config() {
     done
 }
 
+# Where this workspace's transcripts are, and which store key each belongs
+# under. One "<key>\t<path>" line per file.
+#
+# This is the layout knowledge that used to sit in bin/dejima-epitaph and
+# bin/dejima-conversation-ship directly: the `projects_dir` key name, the
+# <dir>/<slug>/ nesting and the .jsonl extension are all Claude Code's, and a
+# second harness keys its transcripts nothing like this. What those two tools
+# keep is what is dejima's - the store, the batching, the Loki push, and the
+# rule that a key must be a slug this workspace actually owns.
+#
+# Through dejima-slug-lib, never by matching a slug prefix: slugs cannot
+# distinguish a worktree under this workspace from a SIBLING project whose
+# directory name merely extends its own, so a "<slug>-*" glob would reach the
+# neighbour's transcripts too (#105). Every project's directory is present in
+# projects/, so nothing else would catch it.
+harness_transcript_files() {
+    local ws="$1" projects slug f
+    projects="$(harness_config_get projects_dir)"
+    [ -n "$projects" ] || return 0
+    while IFS= read -r slug; do
+        [ -n "$slug" ] || continue
+        for f in "$projects/$slug"/*.jsonl; do
+            [ -f "$f" ] || continue
+            printf '%s\t%s\n' "$slug" "$f"
+        done
+    done < <(workspace_slugs_sorted "$ws")
+}
+
 # Compaction summaries out of this harness's transcripts.
 #
 # Claude Code writes line-delimited JSON, one record per line, with the
@@ -424,20 +452,21 @@ harness_staged_config() {
 # rather than sed: the payload contains embedded newlines, and it is already
 # a hard dependency (install.sh refuses without it).
 #
-# $1 is the directory of transcripts for one project, $2 where to write. The
-# count written goes to stdout; bin/dejima-epitaph owns everything around
-# this - the store, which slugs belong to the workspace, the 0700 directory,
-# and clearing one that stayed empty.
+# $1 is ONE transcript file, $2 where to write. The count written goes to
+# stdout; bin/dejima-epitaph owns everything around this - the store, which
+# slugs belong to the workspace, the 0700 directory, and clearing one that
+# stayed empty. It owns the iteration too, because which files exist is
+# harness_transcript_files' answer above rather than a directory shape this
+# could glob.
 #
 # Keyed on the summary record's own uuid: `save` runs on every exit, and a
 # session compacted three times has three epitaphs, two of which an earlier
 # run already wrote. The name is the timestamp first so a directory listing
 # reads as a timeline.
 harness_extract_epitaphs() {
-    local dir="$1" out="$2" f total=0 n
-    for f in "$dir"/*.jsonl; do
-        [ -f "$f" ] || continue
-        n="$(python3 - "$f" "$out" "$DEJIMA_EPITAPH_NOTE" <<'PY'
+    local f="$1" out="$2"
+    [ -f "$f" ] || { printf '0'; return 0; }
+    python3 - "$f" "$out" "$DEJIMA_EPITAPH_NOTE" <<'PY'
 import json, os, sys
 
 path, out, note = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -498,10 +527,6 @@ for line in open(path, errors="replace"):
 
 print(written)
 PY
-)" || n=0
-        total=$((total + ${n:-0}))
-    done
-    printf '%s' "$total"
 }
 
 # Transcript lines in, conversation log lines out. Reads stdin, writes stdout.

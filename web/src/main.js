@@ -61,6 +61,30 @@
 
   var viewport = D.viewport.createViewport({ app: app, onFit: fitNow });
 
+  // Whether this is a touch device, which decides both the toolbar below and
+  // the keyboard policy that follows. Probed here rather than beside its first
+  // use because applyPreferences needs it, and that runs on a message from
+  // ttyd - later in wall-clock time, but easier to reason about declared
+  // before the function that reads it.
+  var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
+  var keyboard = D.keyboard.createKeyboardPolicy({
+    term: term,
+    element: terminalHost,
+    visualViewport: window.visualViewport,
+    layoutHeight: function () { return window.innerHeight; }
+  });
+  keyboard.attach();
+
+  // Decided at startup from the pointer type, and again below when ttyd's
+  // preferences arrive. Both are needed: the connection opens before the
+  // preferences do, and what happens on open depends on this.
+  function tapFocusPolicy(preference) {
+    keyboard.setRaiseOnTap(D.config.focusOnTapWanted(
+      window.location.search, coarsePointer, preference));
+  }
+  tapFocusPolicy(undefined);
+
   function applyPreferences(prefs) {
     var split = D.config.splitPreferences(prefs);
     Object.keys(split.terminal).forEach(function (key) {
@@ -81,6 +105,17 @@
     }
     prefixByte = parsed;
 
+    // ttyd sends preferences after the connection opens, so a focusOnTap set
+    // server-side always arrives later than the startup decision and has to be
+    // able to change it.
+    tapFocusPolicy(split.page.focusOnTap);
+
+    // A class rather than per-button styling: what the page decides is
+    // whether there is a palette at all, and the stylesheet owns which button
+    // gets which part of it.
+    document.body.classList.toggle(
+      'mono-keys', !D.config.buttonColorsWanted(split.page.buttonColors));
+
     // A font size arriving in the preferences changes the cell size, so the
     // column count computed before it was applied is now wrong.
     viewport.refresh();
@@ -95,7 +130,9 @@
     onStatus: function (status) {
       if (status === 'open') {
         clearNotice();
-        term.focus();
+        // Focusing here is what put the keyboard up on a phone before a single
+        // tap: it happens on every connect, including reconnects.
+        if (keyboard.raisesOnTap()) term.focus();
       } else if (status === 'closed') {
         notify('Disconnected. Reconnecting...', true);
       }
@@ -147,7 +184,6 @@
 
   // Touch affordances only where there is a touch. A desktop browser gets a
   // plain terminal, which is what lets this ship as the default frontend.
-  var coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   if (D.config.toolbarWanted(window.location.search, coarsePointer)) {
     document.body.classList.add('touch');
     toolbar = D.toolbar.createToolbar({
@@ -160,7 +196,10 @@
       // ASCII, which UTF-8 leaves alone.
       sendText: function (text) { client.sendInput(text); },
       prefix: function () { return prefixByte; },
-      notify: notify
+      notify: notify,
+      search: function () { return window.location.search; },
+      navigate: function (search) { window.location.search = search; },
+      allowKeyboard: keyboard.allow
     });
     toolbar.attach();
 

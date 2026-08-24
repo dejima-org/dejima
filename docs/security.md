@@ -324,6 +324,15 @@ can make; it is one the audit reports. See
   live on disk); a removed one stores nothing at all, because a deletion
   diff *is* the whole former file.
 
+  What it prints is chosen by what changed, which is not always what you
+  need in order to judge it - three changed lines in a hook script are only
+  judgeable by reading the script. `[o]` at the prompt opens the file in
+  `$VISUAL`/`$EDITOR`, read-only where the editor understands how, and
+  returns to the same decision. It opens the file **as it is now**, not the
+  text the report captured, for the same reason an approval pins the content
+  that is on disk at the moment it is recorded: approving something nobody
+  read would be the one outcome worse than not asking.
+
   Staging and retained diffs live under `$AUDIT_DIR`
   (`~/.local/share/dejima/audit`), never `/tmp`. That is the boundary the
   scheme rests on: nothing in `docker-compose.yml` covers it, so the
@@ -965,11 +974,16 @@ takes a `permissions.deny` entry for a tool name, and dejima already writes a
 settings overlay it could go in. It is not written there by default, because
 the tool is useful and the exposure is a search query rather than a file.
 
-**This is not a Claude Code quirk, it is a harness question.** Any harness may
-ship a tool whose fetch happens somewhere other than the container - Cline's
-tool set includes `fetch_web_content`, and which side executes it is a thing
-its integration has to establish rather than assume. A harness's own network
-reach belongs in its worked example in
+**This is not a Claude Code quirk, it is a harness question**, and the second
+harness answers it the other way. Cline ships a web-fetch tool too, and it was
+put to the same test in the same container: asked to fetch that same
+`aider.chat` page, the tool ran and came back "Unable to connect", exactly as
+`curl` does. The fetch happens in the container, so the allowlist bounds it,
+and for Cline the paragraphs above simply do not apply.
+
+So which side a harness's network tools run on is a per-harness fact that has
+to be established by running them, not inferred from the tool having a similar
+name. It belongs in that harness's worked example in
 [development.md](development.md#adding-a-new-harness) alongside the rest of
 what it can and cannot do.
 

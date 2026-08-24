@@ -8,6 +8,43 @@
 # Usage: dejima-project <status|approve> [<path>]
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_PROJECT_HELP'
+dejima-project - review and approve what a project declares it needs
+
+Usage: dejima-project <status|approve> [path]
+
+  status [path]    what the project declares, and whether each entry is
+                   approved, pending, rejected as malformed, or beyond the cap
+  approve [path]   approve everything pending, after showing it and asking
+
+  path defaults to the current directory.
+
+A project declares its requirements in files inside its own checkout:
+
+  .dejima/dependencies      packages its image should carry
+  .dejima/allowed-domains   hosts its sessions may reach
+  .dejima/corpus            rules about how its history is recorded
+
+Those are declarations, not grants. They live in the workspace, which a session
+can write, so nothing they contain takes effect until it is approved here and
+recorded in a store outside the container's reach. That is the whole point of
+the split: a session can ask, and only an operator can agree.
+
+An entry that fails validation is reported as rejected and never offered for
+approval, so a malformed declaration cannot be waved through by answering yes.
+
+approve is interactive and shows everything before it asks once.
+
+See docs/configuration.md.
+DEJIMA_PROJECT_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
@@ -125,11 +162,14 @@ case "$action" in
         report dependencies valid_dep_spec
         echo "allowed-domains:"
         report allowed-domains valid_domain
+        echo "corpus:"
+        report corpus valid_corpus_rule
         ;;
     approve)
         pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
         pending_doms=$(classify allowed-domains valid_domain | sed -n 's/^pending //p')
-        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; } | sed -n 's/^rejected //p')
+        pending_corpus=$(classify corpus valid_corpus_rule | sed -n 's/^pending //p')
+        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; classify corpus valid_corpus_rule; } | sed -n 's/^rejected //p')
         trunc_deps=$(classify dependencies valid_dep_spec | sed -n 's/^truncated //p')
         trunc_doms=$(classify allowed-domains valid_domain | sed -n 's/^truncated //p')
         if [ -n "$trunc_deps" ]; then
@@ -143,13 +183,14 @@ case "$action" in
             sed 's/^/  /' <<< "$rejected" >&2
             echo >&2
         fi
-        if [ -z "$pending_deps" ] && [ -z "$pending_doms" ]; then
+        if [ -z "$pending_deps" ] && [ -z "$pending_doms" ] && [ -z "$pending_corpus" ]; then
             echo "Nothing pending approval for $project."
             exit 0
         fi
         echo "Declared but not approved for $project:"
         [ -n "$pending_deps" ] && printf '  dependency: %s\n' $pending_deps
         [ -n "$pending_doms" ] && printf '  domain:     %s\n' $pending_doms
+        [ -n "$pending_corpus" ] && printf '  corpus:     %s\n' $pending_corpus
         echo
         printf 'Approve all of the above? [y/N] '
         read -r reply || reply=n
@@ -187,7 +228,27 @@ case "$action" in
                 failed="$failed $dom"
             fi
         done
+        # Written through approve_entry directly, unlike the two above. Those
+        # go through their own CLIs because approving them can also patch a
+        # RUNNING container's firewall or image; a corpus rule changes what the
+        # next session is told and nothing about a live one, so there is
+        # nothing to patch and no CLI to route through.
+        corpus_failed=""
+        corpus_approved=0
+        for rule in $pending_corpus; do
+            if approve_entry "$(ensure_project_store "$project")" corpus "$rule"; then
+                corpus_approved=1
+            else
+                corpus_failed="$corpus_failed $rule"
+            fi
+        done
         echo
+        if [ -n "$corpus_failed" ]; then
+            echo "NOT approved for $project (could not record):$corpus_failed" >&2
+        fi
+        if [ "$corpus_approved" = 1 ]; then
+            echo "Approved corpus rules for $project. They take effect at the next launch."
+        fi
         if [ -n "$dep_failed" ]; then
             echo "NOT approved for $project (dejima-dep failed):$dep_failed" >&2
             echo "Fix the cause and re-run; nothing was recorded for those." >&2

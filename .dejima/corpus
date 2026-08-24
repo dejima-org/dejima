@@ -1,0 +1,13 @@
+# This project keeps its history as usable evidence of how the work was done.
+#
+# One rule per line, from the set dejima implements. Declaring it here is not
+# enough on its own: .dejima/ is in the workspace and a session can write it,
+# so the operator approves it with `dejima-project approve` and dejima reads
+# only what was approved.
+#
+# commit-per-step: every plan step that writes a file gets its own commit,
+# rather than one commit per task. A step is only legible afterwards if the
+# file's state before and after it can both be read back from history, and one
+# commit carrying several steps that touch the same file destroys that
+# irrecoverably.
+commit-per-step

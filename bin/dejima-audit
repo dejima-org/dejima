@@ -8,6 +8,44 @@
 # `claude` in that repo again. See docs/security.md.
 set -uo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_AUDIT_HELP'
+dejima-audit - report what a session changed outside its workspace
+
+Usage: dejima-audit <snapshot|compare|show|ack> [workspace] [state-file]
+
+  snapshot         record the current state of everything watched
+  compare          compare against the last snapshot and file a report
+  show [--full]    index of reports waiting to be read; --full prints one
+  ack              walk a report finding by finding and record a decision
+                   ([o] at the prompt opens the file in $VISUAL/$EDITOR)
+
+  workspace defaults to the enclosing git repository, else $PWD.
+
+snapshot and compare are run by bin/dejima around a session, not usually by
+hand. show and ack are for reading what they found.
+
+What is watched is the part a container boundary cannot protect: dejima's own
+trusted code, the harness configuration a later host session would execute,
+and anything else on the host a session could have reached. A finding is
+CRITICAL when it names something that runs unsandboxed on the host.
+
+ack records a decision per finding, so an approved change stops being reported
+until the thing it approved changes again. Acknowledging is per value, not per
+path: the same file with different content is a new finding.
+
+Reports and baselines live under ~/.local/share/dejima, outside every mount, so
+a session cannot read what was concluded about it or edit what is pending.
+
+See docs/security.md.
+DEJIMA_AUDIT_HELP
+        exit 0 ;;
+esac
+
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-color-lib.sh
@@ -105,17 +143,78 @@ report_key() {
     printf '%s' "${b%-CRITICAL.txt}.txt" | sed 's/\.txt\.txt$/.txt/'
 }
 
+# How many reports are on disk regardless of whether anything is outstanding.
+# The two numbers answer different questions and both get asked: an operator
+# told "no reports" while looking at a directory of them is being told
+# something false, even when nothing there wants a decision.
+count_reports_total() {
+    find "$1" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l
+}
+
+# A report walked to its end is done with, and stays on disk as the record of
+# what that session did - rotation evicts it, not `ack`. Everything below
+# therefore has to distinguish "on disk" from "still wants a decision", or the
+# operator is told work is waiting that no keystroke can clear. That was #195:
+# five reports waiting, "nothing new - 32 already dealt with", forever, with
+# the other four unreachable because selection kept returning the same one.
+report_dealt_with() {
+    baseline_reviewed "$(report_key "$1")"
+}
+
+# Reports that still want a decision, oldest first. The caller gets a list
+# rather than one path so counting and choosing cannot disagree about what is
+# outstanding.
+outstanding_reports() {
+    local dir="$1" r
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        report_dealt_with "$r" || printf '%s\n' "$r"
+    done < <(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort)
+}
+
 count_reports() {
-    local dir="$1"
-    printf '%s %s\n' \
-        "$(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l)" \
-        "$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | wc -l)"
+    local dir="$1" all crit r
+    all=0; crit=0
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        all=$((all + 1))
+        case "$r" in *-CRITICAL.txt) crit=$((crit + 1)) ;; esac
+    done < <(outstanding_reports "$dir")
+    printf '%s %s\n' "$all" "$crit"
+}
+
+# Like select_report, but skipping whatever this run has already been
+# through. A report can be left outstanding on purpose - the operator skipped
+# a finding in it, and skipping means ask again next time - and without this
+# the run would be handed that same report back, decide it is not a new one,
+# and stop, leaving every report behind it unread. That is the shape of #195
+# again, one step along: not "cannot retire" but "cannot move on".
+#
+# Reads the walked_this_run array the ack loop maintains; harmless where that
+# array does not exist, which is every other caller.
+select_next_report() {
+    local dir="$1" r out unwalked=""
+    out="$(outstanding_reports "$dir")"
+    [ -n "$out" ] || return 1
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        [ -n "${walked_this_run[$r]:-}" ] && continue
+        unwalked="${unwalked}${unwalked:+$'\n'}$r"
+    done <<< "$out"
+    [ -n "$unwalked" ] || return 1
+    r="$(printf '%s\n' "$unwalked" | grep -- '-CRITICAL\.txt$' | head -1)"
+    [ -n "$r" ] || r="$(printf '%s\n' "$unwalked" | tail -1)"
+    printf '%s\n' "$r"
 }
 
 select_report() {
-    local dir="$1" r
-    r="$(find "$dir" -maxdepth 1 -name '*-CRITICAL.txt' 2>/dev/null | sort | head -1)"
-    [ -n "$r" ] || r="$(find "$dir" -maxdepth 1 -name '*.txt' 2>/dev/null | sort | tail -1)"
+    local dir="$1" r out
+    out="$(outstanding_reports "$dir")"
+    [ -n "$out" ] || return 1
+    # An unacknowledged CRITICAL first, whatever its age, then the newest of
+    # the rest - the same order as before, over the outstanding ones only.
+    r="$(printf '%s\n' "$out" | grep -- '-CRITICAL\.txt$' | head -1)"
+    [ -n "$r" ] || r="$(printf '%s\n' "$out" | tail -1)"
     [ -n "$r" ] || return 1
     printf '%s\n' "$r"
 }
@@ -1044,6 +1143,46 @@ show_capped() {
     fi
 }
 
+# The file a finding is about, as it is on disk now, or empty when the finding
+# is not about a file at all - a git config key has no path, and a surface that
+# has since been removed has nothing to open.
+#
+# Deliberately the current file rather than the text the report captured: the
+# question `ack` asks is about what is on the host now, and an approval pins
+# the content that is there at the moment it is recorded. Reading a stale copy
+# and approving would be approving something nobody read.
+path_for_id() {
+    local id="$1" f _hp
+    if _hp="$(host_exec_path_for_id "$id")"; then
+        f="$_hp"
+    else
+        case "$id" in
+            gitconfig:*) return 1 ;;
+            tcb:*)       f="$ws/${id#tcb:}" ;;
+            *)           f="$ws/$id" ;;
+        esac
+    fi
+    [ -f "$f" ] || return 1
+    printf '%s\n' "$f"
+}
+
+# The operator's own editor, read-only where the editor understands how.
+#
+# Read-only is the default because the file being opened is the thing under
+# audit: editing it mid-decision changes what an approval would then pin, and
+# an approval recorded against content the session did not write is a worse
+# record than no approval. -R is only added for the vi family, whose spelling
+# of it is known; anything else is run as the operator configured it.
+open_in_editor() {
+    local file="$1" ed base
+    ed="${VISUAL:-${EDITOR:-vi}}"
+    base="$(basename "${ed%% *}")"
+    case "$base" in
+        vi|vim|nvim|view) "$ed" -R "$file" <&3 || true ;;
+        *)                "$ed" "$file" <&3 || true ;;
+    esac
+}
+
 # Where the operator can read the whole thing, when the display was capped.
 # Never sanitized through a path that would make it unfindable: it is the
 # audit's OWN text about a location, not workspace-controlled content.
@@ -1498,8 +1637,17 @@ case "$cmd" in
     show)
         color_init 1
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
-        report="$(select_report "$report_dir")" \
-            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        report="$(select_report "$report_dir")" || {
+            _total="$(count_reports_total "$report_dir")"
+            if [ "$_total" -gt 0 ]; then
+                printf 'dejima audit: nothing waiting for %s.\n' "$ws" >&2
+                printf '  %s report(s) kept in %s as the record of what those sessions did.\n' \
+                    "$_total" "$report_dir" >&2
+            else
+                echo "dejima audit: no reports for $ws" >&2
+            fi
+            exit 0
+        }
         # Default is an index, not a dump. `cat` of one report was a wall of
         # text that answered neither question an operator actually has - how
         # much is waiting, and which of it still needs a decision - and it
@@ -1537,8 +1685,16 @@ case "$cmd" in
         color_init 1
         report_dir="$AUDIT_DIR/$(ws_slug "$ws")"
         bf="$BASELINE_DIR/$(ws_slug "$ws")"
-        report="$(select_report "$report_dir")" \
-            || { echo "dejima audit: no reports for $ws" >&2; exit 0; }
+        report="$(select_report "$report_dir")" || {
+            _total="$(count_reports_total "$report_dir")"
+            if [ "$_total" -gt 0 ]; then
+                printf 'dejima audit: nothing waiting - every finding in %s report(s) has been dealt with.\n' \
+                    "$_total" >&2
+            else
+                echo "dejima audit: no reports for $ws" >&2
+            fi
+            exit 0
+        }
         read -r n_all n_crit <<< "$(count_reports "$report_dir")"
         if [ "$n_all" -gt 1 ]; then
             printf '%s reports waiting' "$n_all"
@@ -1546,10 +1702,25 @@ case "$cmd" in
                 "$C_CRIT" "$n_crit" "$C_RESET"
             printf '.\n\n'
         fi
+        # What has already been put in front of the operator during THIS
+        # invocation, keyed by surface and the content that is on disk now.
+        #
+        # Reports overlap: the same file can appear in several, and `ack`
+        # walks them in one run. Once its current content has been shown, an
+        # older report asking about the same file is asking about a version
+        # that no longer exists - the operator has seen what is there and
+        # decided, or declined to. Approving covers this through the baseline
+        # already; skipping does not, and that is the case this handles.
+        declare -A shown_this_run=()
+        # Reports this invocation has already walked, so it moves on rather
+        # than being handed one of them again.
+        declare -A walked_this_run=()
+
         # One report per pass, every report in one invocation. Walking one and
         # exiting meant clearing a backlog took as many runs as there were
         # reports, with nothing on screen to say another was behind it.
         while :; do
+        walked_this_run["$report"]=1
         sc="$(sidecar_dir "$report")"
         # Removed only at the end, and only for findings actually
         # acknowledged - an abort must leave the operator exactly where they
@@ -1572,6 +1743,11 @@ case "$cmd" in
         # Like unackable_shown, it means the report has been dealt with as far
         # as it can be, so it earns a `reviewed` marker.
         removed_cleared=0
+        # Findings the operator chose to be asked about again, and un-ackable
+        # ones that were shown but could not be recorded either way. The first
+        # keeps the report outstanding; the second must not, or it re-prompts
+        # forever - which is the distinction the reviewed marker turns on.
+        left_undecided=0
         # Findings passed over because the baseline already covers them, or
         # because this report has been walked before - counted so a run that
         # displays nothing can say why instead of looking broken.
@@ -1712,6 +1888,23 @@ case "$cmd" in
                 if [ "$tier" = CRITICAL ]; then crit_acked=$((crit_acked + 1)); fi
                 continue
             fi
+            # Already shown this run, for the content that is on disk now.
+            # Counted as dealt with rather than silently dropped, so a report
+            # that displays nothing still says why.
+            #
+            # crit_acked is deliberately NOT advanced: nothing was approved,
+            # so a report whose CRITICAL was only superseded must keep its
+            # -CRITICAL.txt. And left_undecided is set, so this report is not
+            # retired on the strength of a question that was never answered -
+            # it comes back on the next run, where the operator meets it once.
+            if [ "$ackable" -eq 1 ]; then
+                _seen_key="$rid"$'\t'"$(current_sha_for_id "$rid")"
+                if [ -n "${shown_this_run[$_seen_key]:-}" ]; then
+                    already=$((already + 1))
+                    left_undecided=1
+                    continue
+                fi
+            fi
             # A finding cleared on an earlier pass because its surface was
             # gone. Nothing was recorded for it - there is no content to pin -
             # so baseline_suppresses cannot cover it, and it is ackable, so
@@ -1744,7 +1937,10 @@ case "$cmd" in
             else
                 printf '  %s[%s]%s %s\n' "$(tier_color "$tier")" "$tier" "$C_RESET" "$body"
             fi
-            [ "$ackable" -eq 1 ] && render_finding "$rid" "$sc"
+            if [ "$ackable" -eq 1 ]; then
+                render_finding "$rid" "$sc"
+                shown_this_run["$rid"$'\t'"$(current_sha_for_id "$rid")"]=1
+            fi
             # Each option says what it does to FUTURE findings, because that
             # is the whole difference between the two that record something
             # and it was not visible: approve pins this exact content and
@@ -1761,16 +1957,46 @@ case "$cmd" in
             esac
             k_a="${C_KEY}[a]$C_RESET"; k_i="${C_KEY}[i]$C_RESET"
             k_s="${C_KEY}[s]$C_RESET"; k_q="${C_KEY}[q]$C_RESET"
+            k_o="${C_KEY}[o]$C_RESET"
+            # Offered only where there is a file to open. The report shows the
+            # part that changed, which is chosen by what changed and not by
+            # what a person needs in order to judge it - three changed lines in
+            # a hook script are only judgeable by reading the script.
+            open_path="$(path_for_id "$rid")" || open_path=""
+            [ "$ackable" -eq 1 ] || open_path=""
+            open_hint=""
+            [ -n "$open_path" ] && open_hint="  $k_o open the file"
+            # Looped, so opening the file returns to the same decision rather
+            # than counting as one.
+            key=""
+            while :; do
             if [ "$ackable" -ne 1 ]; then
                 printf '  %s skip  %s quit (this finding cannot be acknowledged): ' "$k_s" "$k_q"
             elif [ "$tier" = CRITICAL ]; then
-                printf '  %s approve this exact content  %s skip (ask again next time)  %s quit: ' \
-                    "$k_a" "$k_s" "$k_q"
+                printf '  %s approve this exact content%s  %s skip (ask again next time)  %s quit: ' \
+                    "$k_a" "$open_hint" "$k_s" "$k_q"
             else
-                printf '  %s approve this exact content  %s ignore this %s from now on  %s skip (ask again next time)  %s quit: ' \
-                    "$k_a" "$k_i" "$ign_noun" "$k_s" "$k_q"
+                printf '  %s approve this exact content%s  %s ignore this %s from now on  %s skip (ask again next time)  %s quit: ' \
+                    "$k_a" "$open_hint" "$k_i" "$ign_noun" "$k_s" "$k_q"
             fi
-            { read -r key <&3; } 2>/dev/null || { aborted=1; break; }
+            { read -r key <&3; } 2>/dev/null || { aborted=1; break 2; }
+            case "$key" in
+                o)
+                    if [ -z "$open_path" ]; then
+                        echo "  nothing to open: this finding is not about a file that exists."
+                        continue
+                    fi
+                    open_in_editor "$open_path"
+                    # Re-read after the editor: the content may have moved on,
+                    # and what gets approved below is whatever is there when
+                    # the key is pressed, not what was rendered above.
+                    render_finding "$rid" "$sc"
+                    shown_this_run["$rid"$'\t'"$(current_sha_for_id "$rid")"]=1
+                    continue ;;
+            esac
+            break
+            done
+            [ "$aborted" -eq 1 ] && break
             case "$key" in
                 q|$'\e'|'') aborted=1; break ;;
                 i)
@@ -1783,7 +2009,7 @@ case "$cmd" in
                         sc_done+=("$rid")
                     fi
                     ;;
-                s) ;;
+                s) [ "$ackable" -eq 1 ] && left_undecided=1 ;;
                 a)
                     if [ "$ackable" -ne 1 ]; then
                         echo "  cannot acknowledge: this finding cannot be acknowledged."
@@ -1826,11 +2052,19 @@ case "$cmd" in
             echo ""; echo "dejima audit: nothing recorded."
             exit 0
         fi
-        # Written once the report has been walked to its end, and only when
-        # it actually showed something that cannot be acknowledged - there is
-        # nothing else to stop those from re-prompting forever.
-        if { [ "$unackable_shown" -eq 1 ] || [ "$removed_cleared" -eq 1 ]; } \
-           && [ "$report_reviewed" -eq 0 ]; then
+        # Written once the report has been walked to its end with nothing
+        # left undecided. It used to be written only for a report carrying
+        # something that cannot be acknowledged, which left a report whose
+        # findings were all approved with no record that it had been finished
+        # - so selection kept returning it and the ones behind it were never
+        # reached (#195).
+        #
+        # The undecided check is what keeps "skip (ask again next time)"
+        # honest. Retiring the report retires every finding in it, so a marker
+        # written over a skipped finding would turn that promise into "never
+        # ask again" - silently, and for a finding the operator had looked at
+        # and declined to approve.
+        if [ "$report_reviewed" -eq 0 ] && [ "$left_undecided" -eq 0 ]; then
             pending+=("reviewed $(report_key "$report")")
         fi
         if [ "${#pending[@]}" -gt 0 ]; then
@@ -1873,7 +2107,7 @@ case "$cmd" in
         # Next report, if there is one. Asked rather than assumed: an operator
         # who has decided enough for now should not have to abort out of a
         # report they have not read to stop.
-        next_report="$(select_report "$report_dir")" || next_report=""
+        next_report="$(select_next_report "$report_dir")" || next_report=""
         if [ -n "$next_report" ] && [ "$next_report" != "$report" ]; then
             read -r n_all n_crit <<< "$(count_reports "$report_dir")"
             printf '\n%s report(s) still waiting' "$n_all"

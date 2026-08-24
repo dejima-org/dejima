@@ -284,7 +284,8 @@ COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
 # The briefing renderer, which every harness needs and no harness owns. Baked
 # in rather than reached through the ~/.claude/hooks mount, because that mount
 # is Claude Code's configuration: sandbox-context.sh calls this, and so does
-# entrypoint.sh, which renders the briefing before the session starts.
+# entrypoint.sh, which renders the briefing before the session starts - to
+# hand to the harness as an argument, or to write to a file it reads.
 COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/dejima-briefing-render.sh
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of
@@ -299,6 +300,17 @@ COPY forges/ /tmp/forges/
 COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
 RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
+
+# The other half of NODE_PATH, which only ever applied to require(): ESM
+# resolution ignores it entirely and walks up from the importing file looking
+# for node_modules, so `import { chromium } from "playwright"` fails from
+# every directory a script is likely to be written in while require() of the
+# same package succeeds. At the root, that walk always ends here.
+#
+# It is worth a line because of how the failure reads. An agent writing the
+# modern form gets ERR_MODULE_NOT_FOUND, concludes the image has no browser,
+# and describes what a page should look like instead of going and seeing.
+RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
 
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh

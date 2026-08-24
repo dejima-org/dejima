@@ -651,6 +651,129 @@ EOF
     [[ "$output" == *"settings.json"* ]]      # the second report, same run
 }
 
+@test "ack retires a report it has finished, and reaches the ones behind it" {
+    # #195, as reported: "5 reports waiting" followed immediately by "nothing
+    # new - 32 finding(s) already dealt with", and the five stay waiting
+    # however many times ack is run. Selection kept returning a report it had
+    # already finished, so every other report was unreachable.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    snap; mkdir -p "$WS/.claude"; echo '{}' > "$WS/.claude/settings.json"; cmp_ >/dev/null 2>&1
+    [ "$(find "$AUDITDIR/$slug" -name '*.txt' | wc -l)" -eq 2 ]
+
+    # Approve through both, in one run.
+    run bash -c "printf 'a\ny\na\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *".envrc"* ]] && [[ "$output" == *"settings.json"* ]] \
+        || { echo "did not reach both reports: $output"; return 1; }
+
+    # Nothing outstanding now. The reports stay on disk - they are the record
+    # of what those sessions did, and rotation evicts them, not ack - but
+    # neither ack nor show may claim work is waiting.
+    [ "$(find "$AUDITDIR/$slug" -name '*.txt' | wc -l)" -eq 2 ]
+    run bash -c "'$AUDIT' ack '$WS' 2>&1"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nothing waiting"* ]] || { echo "ack: $output"; return 1; }
+    [[ "$output" != *"reports waiting"* ]] || { echo "still claims work: $output"; return 1; }
+    run bash -c "'$AUDIT' show '$WS' 2>&1"
+    [[ "$output" == *"nothing waiting"* ]] || { echo "show: $output"; return 1; }
+    # And it says what is still there, rather than "no reports" over a
+    # directory holding two.
+    [[ "$output" == *"2 report(s) kept"* ]] || { echo "show: $output"; return 1; }
+}
+
+@test "a report still holding an undecided finding is not retired with the rest" {
+    # The marker retires the report, not the decision. A finding the operator
+    # skipped is unbaselined and must come back - otherwise "ask again next
+    # time" silently becomes "never ask again".
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS' 2>&1"
+    [[ "$output" == *".envrc"* ]] \
+        || { echo "a skipped finding did not come back: $output"; return 1; }
+}
+
+@test "a file already shown this run is not asked about again from an older report" {
+    # Two reports about the same file, walked in one invocation. Skipping it in
+    # the first leaves nothing in the baseline, so the second used to ask again
+    # - about content that is no longer what is on disk, which is a question
+    # with no useful answer.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    snap; echo 'export X=2' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    [ "$(find "$AUDITDIR/$slug" -name '*.txt' | wc -l)" -eq 2 ]
+
+    # skip, continue, then the second report must not re-ask.
+    run bash -c "printf 's\ny\ns\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c '\[CRITICAL\]\|\[WARNING\]' <<< "$output")" -eq 1 ] \
+        || { echo "asked more than once about one file:"; echo "$output"; return 1; }
+    [[ "$output" == *"already dealt with"* ]] \
+        || { echo "dropped it silently instead of saying why: $output"; return 1; }
+
+    # Skipping is still skipping: it comes back on the next run.
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS' 2>&1"
+    [[ "$output" == *".envrc"* ]] \
+        || { echo "a skipped finding did not come back: $output"; return 1; }
+}
+
+@test "ack opens the current file in the operator's editor, and comes back to the decision" {
+    # The report shows the part that changed. What a person needs in order to
+    # judge it is the file, and there was no way to get at it from the prompt.
+    slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    snap; printf 'export X=1\n' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    local ed="$BATS_TEST_TMPDIR/fake-editor"
+    cat > "$ed" <<'EOF'
+#!/bin/bash
+# Records what it was asked to open, and what was in it at the time.
+printf '%s\n' "$*" >> "$FAKE_EDITOR_LOG"
+tail -n +1 -- "${@: -1}" >> "$FAKE_EDITOR_LOG"
+EOF
+    chmod +x "$ed"
+    export FAKE_EDITOR_LOG="$BATS_TEST_TMPDIR/editor.log"
+
+    # open, then approve.
+    run bash -c "printf 'o\na\n' | VISUAL='$ed' '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$FAKE_EDITOR_LOG" ] || { echo "the editor was never run: $output"; return 1; }
+    # The file on disk, not the text the report captured.
+    grep -q "$WS/.envrc" "$FAKE_EDITOR_LOG" \
+        || { echo "opened something else: $(cat "$FAKE_EDITOR_LOG")"; return 1; }
+    grep -q 'export X=1' "$FAKE_EDITOR_LOG" \
+        || { echo "did not open the current content: $(cat "$FAKE_EDITOR_LOG")"; return 1; }
+    # Opening is not a decision: the approve that followed it is what recorded.
+    [ "$(grep -c '^safe .envrc' "$BASEDIR/$slug")" -eq 1 ] \
+        || { echo "opening did not return to the decision"; cat "$BASEDIR/$slug"; return 1; }
+}
+
+@test "ack offers no editor for a file that has since been removed" {
+    # The surface is gone, so there is nothing to read - and offering to open
+    # it would either fail or, worse, open an empty buffer that looks like the
+    # file's current content and gets approved on that basis.
+    snap; printf 'export X=1\n' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
+    rm -f "$WS/.envrc"
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *".envrc"* ]] || { echo "no finding to test: $output"; return 1; }
+    [[ "$output" != *"open the file"* ]] \
+        || { echo "offered to open a file that is gone: $output"; return 1; }
+}
+
+@test "ack offers no editor for a finding with no file to open" {
+    # A git config key has no path. Offering to open one, and then failing to,
+    # is worse than not offering.
+    snap
+    git -C "$WS" config core.pager 'sh -c cat'
+    cmp_ >/dev/null 2>&1
+    run bash -c "printf 's\n' | '$AUDIT' ack '$WS'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"git config"* ]] || { echo "no gitconfig finding to test: $output"; return 1; }
+    [[ "$output" != *"open the file"* ]] \
+        || { echo "offered to open a file that does not exist: $output"; return 1; }
+}
+
 @test "ack stops at one report when told not to continue" {
     slug="$(printf '%s' "$WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     snap; echo 'export X=1' > "$WS/.envrc"; cmp_ >/dev/null 2>&1
@@ -834,7 +957,12 @@ REPORT
 
     run bash -c "printf 'a\n' | '$AUDIT' ack '$WS'"
     [[ "$output" != *".envrc"* ]]
-    [[ "$output" == *"already dealt with"* ]]
+    # The second run does not re-walk a report it finished: it says the work
+    # is done and stops. That message used to come from walking the report
+    # again and finding every finding covered, which is what left a finished
+    # report selectable forever and the ones behind it unreachable (#195).
+    [[ "$output" == *"nothing waiting"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"has been dealt with"* ]] || { echo "$output"; return 1; }
     # And no second entry for the same decision.
     [ "$(grep -c '^safe .envrc' "$BASEDIR/$slug")" -eq 1 ]
 }

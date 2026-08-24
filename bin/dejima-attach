@@ -11,6 +11,37 @@
 #   --list         one tab-separated row per live session, for scripting
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_ATTACH_HELP'
+dejima-attach - list live dejima sessions and attach to one
+
+Usage: dejima-attach [run-id | --list]
+
+  (no argument)  numbered picker of live sessions; attaches to the choice
+  run-id         attach to one directly, which is what a notification's deep
+                 link and ttyd's --url-arg both produce
+  --list         one tab-separated row per live session, for scripting
+
+This is the shared core behind both remote front doors: it runs as a forced SSH
+command and as ttyd's command, so what an SSH key can reach and what the web
+terminal can reach are the same thing described once.
+
+Attaching gives a tmux session on the HOST, not a shell inside the container.
+That is deliberate - it is how an operator watches or steers a session - but it
+means the tmux prefix key opens a window outside the sandbox, so exposing it is
+exposing host access.
+
+A session appears here only while its container is running.
+
+See docs/remote-access.md.
+DEJIMA_ATTACH_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
