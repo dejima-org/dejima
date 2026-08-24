@@ -951,6 +951,10 @@ What this means:
   briefing.{{writable_mounts}} Everything else is disposable: installed system
   packages, anything outside the mounted paths, and the container itself go
   away when this run ends.
+- A headless browser is installed: playwright, with chromium, importable
+  from any directory in either module system. If you change something with a
+  user interface, look at it rather than describing what it should look like,
+  and leave the screenshot in ~/shared.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, {{network_allowlist}}, plus anything
   approved via dejima-allow). Requests to anything else will simply

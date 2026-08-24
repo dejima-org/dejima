@@ -301,6 +301,17 @@ COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
 RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
+# The other half of NODE_PATH, which only ever applied to require(): ESM
+# resolution ignores it entirely and walks up from the importing file looking
+# for node_modules, so `import { chromium } from "playwright"` fails from
+# every directory a script is likely to be written in while require() of the
+# same package succeeds. At the root, that walk always ends here.
+#
+# It is worth a line because of how the failure reads. An agent writing the
+# modern form gets ERR_MODULE_NOT_FOUND, concludes the image has no browser,
+# and describes what a page should look like instead of going and seeing.
+RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
+
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 

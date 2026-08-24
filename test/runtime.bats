@@ -1086,6 +1086,26 @@ EOF'
     [[ "$output" == *"PLAYWRIGHT_LAUNCH_OK"* ]]
 }
 
+@test "a global package imports as ESM too, from a directory of its own" {
+    # The test above proves the browser works, in the module system that
+    # already resolved. NODE_PATH covers require() and nothing else: ESM walks
+    # up from the importing file, so the modern form failed everywhere while
+    # this suite stayed green. What an agent got was ERR_MODULE_NOT_FOUND,
+    # which reads as an image without a browser.
+    #
+    # Written somewhere with no node_modules of its own, because anywhere
+    # inside a project with one would resolve for the wrong reason.
+    dexec_node bash -c 'mkdir -p /tmp/esm-probe && cat > /tmp/esm-probe/probe.mjs <<'"'"'EOF'"'"'
+import { chromium } from "playwright";
+const browser = await chromium.launch({});
+await browser.close();
+console.log("ESM_IMPORT_OK");
+EOF'
+    run dexec_node node /tmp/esm-probe/probe.mjs
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"ESM_IMPORT_OK"* ]] || { echo "$output"; return 1; }
+}
+
 @test "the firewall applies to Playwright's browser traffic, not just curl/git" {
     # The whole point of pre-baking the browser at build time is that a
     # session never needs new network access for it - confirm the egress
