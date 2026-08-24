@@ -80,9 +80,13 @@ fi
 
 touches() { grep -qE "$1" <<< "$changed"; }
 
-note "Manual checks this release calls for"
+# Not a checklist to complete: an inventory of what nothing has checked. The
+# gate for a release here is the security review plus the maintainer running
+# the build - see docs/release.md. Printed anyway, because a release whose
+# unverified paths are written down is one somebody can debug later.
+note "Nothing has verified these, and this release touches them"
 printed=0
-manual() { printf '   [ ] %s\n' "$1"; printed=1; }
+manual() { printf '   -  %s\n' "$1"; printed=1; }
 
 touches '^(bin/dejima$|docker/entrypoint|docker/Dockerfile|docker/docker-compose)' &&
     manual "Launch a real session. Nothing else exercises the mounts, the
@@ -106,11 +110,46 @@ touches '^\.dejima/allowed-domains$' &&
        future CI job on that runner. Say in the PR what it is for."
 [ "$printed" = 1 ] || echo "   (none - this release touches nothing with a manual check)"
 
-note "Reviews"
+note "Required before this merges"
 echo "   [ ] Security review of the whole $base...$head diff, against this"
-echo "       project's own invariants - see docs/release.md."
+echo "       project's own invariants - see docs/release.md. This is the gate."
 echo "   [ ] Documentation review: every changed behaviour has its doc changed,"
 echo "       and no doc describes something that no longer exists."
+echo "   [ ] The maintainer runs the build: normal usage for a while, and a"
+echo "       launch on the other configured harness to confirm it starts."
+
+# A config key added in a release makes the PREVIOUS main refuse to start once
+# an operator has adopted it, because an unknown key fails validation. That
+# turns the obvious rollback into a second outage, so it is worth knowing
+# before rather than after.
+note "Config keys this release adds (a rollback refuses a config using them)"
+added="$(comm -13 \
+    <(git show "$base:bin/dejima-config-lib.sh" 2>/dev/null | grep -oE "^[a-z-]+\\.[a-z_]+" | sort -u) \
+    <(grep -oE "^[a-z-]+\\.[a-z_]+" bin/dejima-config-lib.sh | sort -u))"
+# Providers too, and this is the sharper half: a [harness.<name>] section for
+# a harness the older dejima does not ship is an unknown SECTION, which fails
+# validation exactly as an unknown key does. So adopting a new provider is
+# itself the thing that makes the rollback refuse.
+# The singular is spelled out rather than derived: "harnesses" does not lose
+# an s to become "harness", and a manifest is named for the singular.
+new_providers=""
+for pair in harnesses:harness forges:forge workflows:workflow; do
+    axis="${pair%%:*}"
+    one="${pair#*:}"
+    [ -d "$axis" ] || continue
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        git cat-file -e "$base:$axis/$name/$one.conf" 2>/dev/null ||
+            new_providers="$new_providers $one.$name"
+    done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+done
+
+if [ -n "$added" ] || [ -n "$new_providers" ]; then
+    [ -z "$added" ] || printf '   %s\n' $added
+    [ -z "$new_providers" ] || printf '   [%s] as a config section\n' $new_providers
+else
+    echo "   (none - a rollback accepts any config this release accepts)"
+fi
 
 note "Then"
 echo "   Say in the release PR what was run and what was not. A privileged job"
