@@ -8,6 +8,25 @@ consists of.
 `test/release-pass.sh` runs the parts that can be run and prints the parts that
 cannot, chosen from what the release actually changes. Start there.
 
+## What is actually required, at this size
+
+This project has one maintainer and few users, and a release gate nobody has
+the bandwidth to complete is a gate that gets skipped rather than met. So the
+bar is deliberately two things:
+
+1. **An agentic security review of the whole diff**, against the invariants in
+   section 2. This is the gate. It is cheap, it is repeatable, and it is the
+   one thing that catches the class of mistake this project cannot afford.
+2. **The maintainer runs the build.** Normal usage for a while, and a launch on
+   the other configured harness to confirm it starts. That is the smoke test,
+   and it is stated as what it is rather than dressed up as coverage.
+
+Everything in section 4 is what a mature version of this project would verify
+and this one does not. It is printed by `release-pass.sh` and kept in this
+document because knowing what is unverified is worth more than pretending
+otherwise - not because a release is blocked on it. When there are more users
+than one person can apologise to, that changes.
+
 ## Why a pass at all
 
 Every check below exists because something got through without it. The pattern
@@ -66,10 +85,12 @@ what this repository is defending.
   case, say so where a reader will meet it - the forge and harness maturity
   sections in [providers.md](providers.md) are what this looks like.
 
-## 4. Manual testing
+## 4. Manual testing, which is mostly not done
 
-`test/release-pass.sh` prints the list for the paths this release touches. The
-standing entries, and why each is not a test:
+`test/release-pass.sh` prints the list for the paths this release touches. It
+is an inventory of what nothing has checked, not a checklist that must be
+completed - see "What is actually required" above. The standing entries, and
+why each is not a test:
 
 | Touched | What to do, and why no test does it |
 | --- | --- |
@@ -82,7 +103,15 @@ standing entries, and why each is not a test:
 
 ## 5. The release pull request
 
-Say what was run and what was not, in the body. A queued privileged job, a
+Say what was run and what was not, in the body. At this size that will mostly
+be "not", and writing it down is the whole point: an unverified path that is
+named is one somebody can reach for when a bug turns up, and an unverified
+path that is implied to be tested costs a day of looking in the wrong place.
+
+Worth its own line: **whether the release can be rolled back.** A config key
+added in a release makes the previous `main` refuse to start once an operator
+adopts it, because an unknown key fails validation - so the rollback that
+looks like the safety net is not one. Name the keys. A queued privileged job, a
 manual check that was skipped, a forge that has still never been launched -
 those are the things a reader of `main` is entitled to know, and the release
 PR is where they are still true and still remembered.
