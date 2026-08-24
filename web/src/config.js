@@ -12,7 +12,7 @@
   // an xterm.js option and is handed to the terminal untouched, which is how
   // the existing TTYD_FONT_SIZE knob keeps working with no code here knowing
   // about it. isWindows is ttyd's own, always present, and not an xterm option.
-  var PAGE_KEYS = ['tmuxPrefix', 'focusOnTap'];
+  var PAGE_KEYS = ['tmuxPrefix', 'focusOnTap', 'buttonColors'];
   var IGNORED_KEYS = ['isWindows'];
 
   // "C-b" -> "\x02", the byte tmux is actually listening for. Deliberately
@@ -79,6 +79,19 @@
     return !coarsePointer;
   }
 
+  // Whether the toolbar is colour-coded by what each button is for.
+  //
+  // On unless the operator says otherwise: the hierarchy is the point of it,
+  // and a toolbar where every key looks the same is one where the key you
+  // need most is found by counting positions. "off" restores exactly the grey
+  // it had before, for a terminal colour scheme this clashes with or an
+  // operator who would rather it were quiet.
+  function buttonColorsWanted(preference) {
+    if (preference === 'off' || preference === false || preference === 'false' ||
+        preference === '0') return false;
+    return true;
+  }
+
   // The address of the session picker: this page with the run-id dropped.
   //
   // ttyd passes ?arg=<run-id> to dejima-attach as argv (--url-arg), so a page
@@ -102,6 +115,7 @@
     splitPreferences: splitPreferences,
     toolbarWanted: toolbarWanted,
     focusOnTapWanted: focusOnTapWanted,
+    buttonColorsWanted: buttonColorsWanted,
     pickerSearch: pickerSearch
   };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));

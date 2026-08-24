@@ -63,6 +63,7 @@ approvals):
 | `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
 | `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
 | `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_button_colors` | unset | whether the toolbar is colour-coded by what each button does, in the same gruvbox palette the session picker uses. Unset means yes; `off` restores the grey every key had before. See "Reading it on a phone" |
 | `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
 | `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
@@ -523,6 +524,23 @@ PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
   keyboard puts furthest from a thumb.
 - `KBD` raises the soft keyboard, which is otherwise awkward to get back once
   it has been dismissed.
+
+**The buttons are colour-coded by what they are for**, in the same gruvbox
+palette `dejima-attach` uses for the session picker - the two sit either side
+of one attach and should not look like different programs.
+
+The colours are a hierarchy, not decoration. `KBD` is filled orange because on
+a phone it is how you type at all, and it is the one key that has to be
+findable without looking for it. `⏎` is filled green, being the key a session
+asks for most. The window and arrow keys are outlined in blue: reached for
+constantly, but never the thing you are hunting for. Everything else is
+furniture and stays grey. A latched `CTRL` or `DRAG` still overrides whichever
+tier its button is in, because the state a key is in matters more than the job
+it does.
+
+Set `ttyd_button_colors = off` for the grey every key had before - for a
+terminal colour scheme this clashes with, or if you would rather it were
+quiet.
 
 **Tapping the terminal does not raise the keyboard.** On a phone, tapping is
 also how you scroll and select, so every one of those taps used to summon the
