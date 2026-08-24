@@ -1673,6 +1673,41 @@ STUB
 # What was in the -d of the last gitea_cli call.
 cli_payload() { cat "$BATS_TEST_TMPDIR/cli/payload"; }
 
+@test "gitea-pr says which base it is opening against, and takes one per repo" {
+    # Every pull request this project opened for a fortnight went to the
+    # repository's default branch while being reported as targeting another,
+    # and the only reason anyone found out is that a person retargeted each
+    # one by hand. Nothing gitea-pr printed said otherwise: a URL looks the
+    # same whichever branch it is against.
+    local d="$BATS_TEST_TMPDIR/cli/repo"
+
+    # No --base and nothing configured: whatever the repository's default is,
+    # said out loud.
+    run gitea_cli gitea-pr create --title T --body B
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"opening against"* ]] \
+        || { echo "did not say which base: $output"; return 1; }
+
+    # Configured once per repository, for a project whose work does not target
+    # its default branch. This is the case that was silently getting it wrong.
+    git -C "$d" config gitea.prBase development
+    run gitea_cli gitea-pr create --title T --body B
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cli_payload | jq -r '.base')" = "development" ] \
+        || { echo "sent base $(cli_payload | jq -r '.base')"; return 1; }
+    [[ "$output" == *"opening against 'development'"* ]] \
+        || { echo "did not name the configured base: $output"; return 1; }
+
+    # An explicit --base still wins, and is still announced.
+    run gitea_cli gitea-pr create --title T --body B --base other
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cli_payload | jq -r '.base')" = "other" ] \
+        || { echo "--base was ignored: $(cli_payload | jq -r '.base')"; return 1; }
+    [[ "$output" == *"opening against 'other'"* ]] \
+        || { echo "did not name the explicit base: $output"; return 1; }
+    git -C "$d" config --unset gitea.prBase
+}
+
 # curl normalises dot-segments, so a PR "number" that is really a path
 # reaches a different repo's endpoint with this token on it. `edit` always
 # checked; the other two took the argument as given.
