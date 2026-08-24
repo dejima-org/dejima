@@ -16,6 +16,39 @@
 # Usage: dejima-conversation-ship <workspace>
 set -uo pipefail   # not -e: a torn line or a Loki hiccup must not kill the tailer
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_CONVERSATION_SHIP_HELP'
+dejima-conversation-ship - ship a session's conversation to Loki
+
+Usage: dejima-conversation-ship <workspace>
+
+Started and stopped by bin/dejima around a session. Running it by hand is only
+useful for debugging.
+
+Ships prompts, replies and tool invocations - never tool output, which is most
+of the volume and was not asked for. Runs on the host rather than in the
+container, because a log of a session that the session shares a filesystem and
+a signal namespace with is one it can silence.
+
+What that does not buy is trust in the contents. The transcript is written by
+the session, so this ships what was recorded without attesting to it.
+
+Off unless [logging] loki_url is set AND [logging] conversation is on. Both are
+required because session content is a different sensitivity class from the DNS
+and firewall logs, which ship on loki_url alone.
+
+Where the transcripts are, and how one becomes a log line, are the selected
+harness's business; the batching and the shipping are dejima's.
+
+See docs/configuration.md.
+DEJIMA_CONVERSATION_SHIP_HELP
+        exit 0 ;;
+esac
+
 # shellcheck source=dejima-provider-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-slug-lib.sh
@@ -35,10 +68,28 @@ LOKI_URL="$(config_get logging loki_url)"
 [ -n "$LOKI_URL" ] || exit 0
 
 harness_plugin_load "$(config_get core harness)"
+# Both are needed and neither is assumed: a harness that cannot say where its
+# transcripts are, or cannot turn one into log lines, ships nothing rather
+# than having core guess at a layout. Exiting 0 because that is a harness
+# without this feature, not a failure.
 declare -F harness_transform_transcript >/dev/null 2>&1 || exit 0
+declare -F harness_transcript_files >/dev/null 2>&1 || exit 0
 
-TRANSCRIPTS="$(harness_config_get projects_dir)"
-[ -n "$TRANSCRIPTS" ] || exit 0
+# How a transcript file changes, which decides how it can be read
+# incrementally. Two shapes exist and they are not interchangeable:
+#
+#   append  - the file only grows, one record per line. Byte offsets work, and
+#             only whole lines are consumed, so a line still mid-write is
+#             picked up complete on a later pass instead of being shipped torn.
+#   rewrite - the file is replaced wholesale each time, so a byte offset means
+#             nothing and would ship the middle of a JSON document. The file is
+#             re-read entirely when it changes and the records already shipped
+#             are skipped by count.
+#
+# The manifest says which. Getting it wrong is not a subtle failure - append
+# semantics against a rewritten file ship garbage - so it is a declared value
+# rather than something sniffed at runtime.
+MODE="$(manifest_get harness "$(config_get core harness)" transcript_update)"
 
 BATCH_MAX_LINES=20
 BATCH_MAX_SECONDS=2
@@ -46,63 +97,121 @@ POLL_SECONDS=3
 
 push() {
     # $1 is a newline-terminated block of "<ns timestamp>\t<line>" records.
-    local raw="$1" values payload
+    local raw="$1" payload
     [ -n "$raw" ] || return 0
-    values="$(printf '%s' "$raw" | jq -R -s '
+    # One jq, and nothing through argv. A single argument is capped at 128 KiB
+    # (MAX_ARG_STRLEN), and both the intermediate --argjson value and the
+    # finished body used to be passed that way - so a batch of long lines
+    # failed with "argument list too long" and the batch was dropped.
+    #
+    # Twenty lines at up to sixteen kilobytes each is well past that cap, and
+    # the transform's own clip is what sets those numbers, so this was not a
+    # remote possibility: it is what a harness whose tool results are large
+    # produces as a matter of course. Found running Cline.
+    #
+    # The payload is built in one pass and handed to curl on stdin with -d @-.
+    # A shell variable is bounded by memory rather than by MAX_ARG_STRLEN, so
+    # holding it is fine; passing it is not.
+    payload="$(printf '%s' "$raw" | jq -R -s '
         split("\n") | map(select(length > 0))
         | map(split("\t") | [.[0], (.[1:] | join("\t"))])
+        | {streams: [{stream: {job: "dejima-conversation", source: "dejima"}, values: .}]}
     ')" || return 0
-    payload="$(jq -n --argjson values "$values" \
-        '{streams: [{stream: {job: "dejima-conversation", source: "dejima"}, values: $values}]}')" || return 0
-    curl -s -o /dev/null --max-time 5 -H "Content-Type: application/json" \
-        -XPOST "$LOKI_URL/loki/api/v1/push" -d "$payload" || true
+    printf '%s' "$payload" | curl -s -o /dev/null --max-time 5 \
+        -H "Content-Type: application/json" \
+        -XPOST "$LOKI_URL/loki/api/v1/push" -d @- || true
 }
 
-# Which transcript files belong to this workspace.
+# Which transcript files belong to this workspace. The harness's plugin
+# answers, one "<key>\t<path>" line per file; only the path is wanted here,
+# since a conversation line carries its session id inside the record rather
+# than as a Loki label. dejima-epitaph uses the key.
 #
-# Through dejima-slug-lib, never by matching a slug prefix: slugs cannot
-# distinguish a worktree under this workspace from a SIBLING project whose
-# directory name merely extends its own, so a "<slug>-*" glob ships the
-# neighbour's conversation too (#105). Every project's directory is present
-# here, so nothing else would catch it.
+# Where those paths come from is the plugin's business and deliberately not
+# visible here. The two shipped harnesses agree on nothing about it: one nests
+# by workspace slug under a configured directory, the other keys by session id
+# under a directory that is already this project's. Naming either shape here,
+# even in a comment, is how a glob for it comes back.
 transcript_files() {
-    local slug f
-    while IFS= read -r slug; do
-        [ -n "$slug" ] || continue
-        for f in "$TRANSCRIPTS/$slug"/*.jsonl; do
-            [ -f "$f" ] && printf '%s\n' "$f"
-        done
-    done < <(workspace_slugs_sorted "$ws")
+    harness_hook harness_transcript_files "$ws" | cut -f2-
 }
 
-declare -A offset
+declare -A offset    # append mode: bytes of complete lines already consumed
+declare -A emitted   # rewrite mode: log lines already shipped out of this file
+declare -A stamp     # rewrite mode: the size:mtime last transformed
 batch=""
 batch_lines=0
 last_flush="$(date +%s)"
 PARENT_PID="$PPID"
 
-# One pass over every transcript, appending whatever is newly complete to the
-# batch. Byte offsets per file rather than `tail -F`: transcripts appear
-# during a session (a new session, /clear, a subagent), and only whole lines
-# are consumed - one still mid-write is picked up complete on a later pass
-# instead of being shipped torn.
-scan_once() {
-    local f size cur chunk complete out
+# Adds a transform's output, read from stdin, to the batch - skipping the
+# first $1 lines, which rewrite mode has already shipped. The total number of
+# lines the transform produced is left in $_emit_count.
+#
+# Through a global rather than stdout, and read through a redirect rather than
+# a pipe, because both alternatives put this in a subshell and the batch it
+# appends to would go with it. That is the same reason the loop below reads
+# from a process substitution.
+_emit_count=0
+_emit() {
+    local skip="${1:-0}" out
+    _emit_count=0
+    while IFS= read -r out; do
+        [ -n "$out" ] || continue
+        _emit_count=$((_emit_count + 1))
+        [ "$_emit_count" -gt "$skip" ] || continue
+        batch+="$(date +%s%N)"$'\t'"$out"$'\n'
+        batch_lines=$((batch_lines + 1))
+    done
+}
+
+# Byte offsets per file rather than `tail -F`: transcripts appear during a
+# session (a new session, /clear, a subagent), so there is no fixed set of
+# files to follow.
+_scan_append() {
+    local f="$1" size cur chunk complete
     local LC_ALL=C   # byte-accurate ${#...} for the offset arithmetic below
+    size="$(stat -c %s "$f" 2>/dev/null)" || return 0
+    cur="${offset[$f]:-0}"
+    [ "$size" -gt "$cur" ] || return 0
+    chunk="$(tail -c "+$((cur + 1))" "$f" | head -c "$((size - cur))"; printf x)"
+    chunk="${chunk%x}"
+    complete="${chunk%"${chunk##*$'\n'}"}"
+    [ -n "$complete" ] || return 0
+    offset[$f]=$((cur + ${#complete}))
+    _emit 0 < <(printf '%s' "$complete" | harness_transform_transcript)
+}
+
+# The whole file each time it changes, with what was already shipped skipped
+# by count. Sound because a conversation only ever gains records: the file is
+# rewritten, but its earlier entries are the same earlier entries, so the
+# transform's first N output lines are the N already sent. That count is what
+# makes this correct, and it is the only thing that does.
+#
+# The size:mtime check is an optimisation and nothing more - removing it ships
+# exactly the same records, just after re-reading and re-transforming every
+# transcript on every poll. It is here because that cost is per file per three
+# seconds for the length of a session. size:mtime rather than a content hash
+# for the same reason: hashing would read the file it is trying not to read.
+_scan_rewrite() {
+    local f="$1" sig
+    sig="$(stat -c '%s:%Y' "$f" 2>/dev/null)" || return 0
+    [ "$sig" != "${stamp[$f]:-}" ] || return 0
+    stamp[$f]="$sig"
+    _emit "${emitted[$f]:-0}" < <(harness_transform_transcript < "$f")
+    emitted[$f]="$_emit_count"
+}
+
+# One pass over every transcript, appending whatever is new to the batch.
+scan_once() {
+    local f
     while IFS= read -r f; do
-        size="$(stat -c %s "$f" 2>/dev/null)" || continue
-        cur="${offset[$f]:-0}"
-        [ "$size" -gt "$cur" ] || continue
-        chunk="$(tail -c "+$((cur + 1))" "$f" | head -c "$((size - cur))"; printf x)"
-        chunk="${chunk%x}"
-        complete="${chunk%"${chunk##*$'\n'}"}"
-        [ -n "$complete" ] || continue
-        offset[$f]=$((cur + ${#complete}))
-        while IFS= read -r out; do
-            [ -n "$out" ] || continue
-            batch+="$(date +%s%N)"$'\t'"$out"$'\n'
-            batch_lines=$((batch_lines + 1))
-        done < <(printf '%s' "$complete" | harness_transform_transcript)
+        [ -f "$f" ] || continue
+        if [ "$MODE" = rewrite ]; then
+            _scan_rewrite "$f"
+        else
+            _scan_append "$f"
+        fi
     done < <(transcript_files)
 }
 

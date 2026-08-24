@@ -9,6 +9,51 @@
 #   dejima ~/repos/myproject
 set -euo pipefail
 
+# --help, before anything else runs.
+#
+# Deliberately ahead of the library sourcing and the config parse below: the
+# moment someone reaches for --help is often the moment the config is missing
+# or wrong, and a help page that needs a working config to print is no help.
+# Nothing here but `cat`.
+#
+# stdout and exit 0, unlike usage(), which stays on stderr with a nonzero exit
+# so a mistyped invocation still fails a script. That split is the whole of
+# what #64 asked for: bare invocation keeps its terse line, --help explains.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_HELP'
+dejima - run an agent harness in a container that cannot reach your machine
+
+Usage: dejima [options] [workspace] [-- args...]
+
+  workspace    project directory to mount read-write (default: current directory)
+  -- args...   everything after is passed to the harness command untouched
+
+Options (each overrides the config file for one launch only):
+  --forge <name>          which forge integration to use for this launch
+  --workflow <name>       what the agent is told to do with its work
+  --cmd <command>         run this instead of the harness's own command
+  --ro,  --extra-readonly <path>    also mount this host path read-only
+  --rw,  --extra-read-write <path>  also mount this host path read-write
+  --allow-github-push     open GitHub's push path (port 22) for this launch
+  --no-firewall           disable the egress firewall entirely (debugging only)
+  --print-config          print the resolved configuration and exit
+  --print-briefing        print the session briefing the agent will get, and exit
+  -h, --help              this message
+
+--ro and --rw may be given more than once. Both refuse a path that overlaps
+dejima's own approval, audit or epitaph stores.
+
+Configuration lives in ~/.config/dejima/config and [core] harness must be set
+before a launch will start. --print-config shows what is actually in effect,
+including which flag overrode which key.
+
+See docs/configuration.md for every key, docs/security.md for what the
+container can and cannot reach.
+DEJIMA_HELP
+        exit 0 ;;
+esac
+
 # readlink -f resolves through the ~/.local/bin/dejima symlink
 # install.sh sets up - without it, BASH_SOURCE[0] is the symlink's own path
 # when invoked by name via PATH, so dirname finds ~/.local/bin instead of
@@ -156,6 +201,7 @@ while [ $# -gt 0 ]; do
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
+        --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
         --extra-readonly|--ro)
@@ -382,6 +428,36 @@ fi
 
 WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 
+# Resolved here, with the workspace, rather than beside the other approval
+# reads further down: --print-briefing composes and exits well before those,
+# so a briefing printed for inspection would have silently lacked whatever
+# they decide. That is not hypothetical - the same ordering already caught
+# DEJIMA_RW_MOUNTS, whose sentence went missing from --print-briefing while
+# real sessions were told correctly.
+PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+
+# Whether this project has been approved to keep its history as evidence, and
+# so gets the commit-granularity paragraph in its briefing.
+#
+# Read from the APPROVAL STORE, never from the declaration in the workspace.
+# The workspace is session-writable, so a session that could turn this on
+# would be writing the next session's system prompt - the channel #104 is
+# about, and the reason nothing on the launch path reads a project's
+# declarations directly. The project declares, the operator approves, and this
+# reads what was approved. A static test holds that this file never names that
+# directory at all, which is why it is not spelled out here. Global entries
+# count too, for an operator who wants this everywhere.
+DEJIMA_CORPUS=off
+_corpus_approved="$(approved_entries "$(config_root)" corpus | tr '\n' ' ')"
+if [ -n "$PROJECT_STORE" ]; then
+    _corpus_approved="$_corpus_approved $(approved_entries "$PROJECT_STORE" corpus | tr '\n' ' ')"
+fi
+case " $_corpus_approved " in
+    *" commit-per-step "*) DEJIMA_CORPUS=on ;;
+esac
+unset _corpus_approved
+
+
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
 SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
@@ -573,6 +649,28 @@ else
     DEJIMA_MERGE_BLOCK=""
 fi
 
+# Which of this forge's commands write a body the session authored, as one
+# record per line for the shadow to read: "<kind> <command prefix>".
+#
+# Not conditional on the workflow, unlike the merge block above. A merge block
+# is a policy about what a workflow permits; this is a statement about who
+# wrote the text, which is true of every session whatever it is allowed to do.
+# The comma-separated manifest form is turned into lines here rather than in
+# the shadow, so the parsing sits next to the schema that validates it.
+DEJIMA_DISCLOSE=""
+_disclose_spec="$(manifest_get forge "$DEJIMA_FORGE_NAME" disclose)"
+if [ -n "$_disclose_spec" ]; then
+    _old_ifs="$IFS"
+    IFS=,
+    for _entry in $_disclose_spec; do
+        _entry="${_entry#"${_entry%%[![:space:]]*}"}"
+        _entry="${_entry%"${_entry##*[![:space:]]}"}"
+        [ -n "$_entry" ] || continue
+        DEJIMA_DISCLOSE="${DEJIMA_DISCLOSE}${DEJIMA_DISCLOSE:+$'\n'}${_entry%%:*} ${_entry#*:}"
+    done
+    IFS="$_old_ifs"
+fi
+
 # WORKSPACE_DIR is resolved above, ahead of --print-briefing, since
 # briefing_compose needs DEJIMA_RW_MOUNTS (which needs WORKSPACE_DIR for its
 # own overlap guard) before that point.
@@ -590,11 +688,11 @@ fi
 # session widen its own firewall for the next run. The declaration is only
 # ever reported (see hooks/sandbox-context.sh) and approved by hand.
 ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains | tr '\n' ' ')"
-PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
 if [ -n "$PROJECT_STORE" ]; then
     project_domains="$(approved_entries "$PROJECT_STORE" allowed-domains | tr '\n' ' ')"
     ALLOWED_DOMAINS="${ALLOWED_DOMAINS}${project_domains:+ $project_domains}"
 fi
+
 
 # The approval store, and the exit-audit's own report/baseline stores, are
 # only out of the container's reach while none of them are inside the
@@ -1013,15 +1111,22 @@ fi
 # the audit's TCB list, so widening this unseen is a CRITICAL finding.
 SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domains)"
 SANDBOX_HARNESS_PROXIED_DOMAIN="$(manifest_get harness "$DEJIMA_HARNESS_NAME" proxied_api_domain)"
-# The flag that carries the briefing to a harness taking it on the command
-# line. A session-start hook cannot: Claude Code persists a large payload to a
-# file and injects a short preview in its place - measured in a dejima
-# container, 9KB arrived whole and 21KB did not - and a composed briefing plus
-# a project's .dejima.md is well past that. See docs/providers.md.
+# The two ways a briefing reaches a harness that is not handed it by a
+# session-start hook. A hook cannot carry a large one: Claude Code persists a
+# big payload to a file and injects a short preview in its place - measured in
+# a dejima container, 9KB arrived whole and 21KB did not - and a composed
+# briefing plus a project's .dejima.md is well past that.
+#
+# briefing_args names the flag that carries the text on the command line;
+# briefing_path names a file the harness reads instead, for one that takes no
+# such flag. A homepath in the manifest, so it is already relative and
+# traversal-free before it gets here. See docs/providers.md.
 SANDBOX_HARNESS_BRIEFING_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" briefing_args)"
+SANDBOX_HARNESS_BRIEFING_PATH="$(manifest_get harness "$DEJIMA_HARNESS_NAME" briefing_path)"
 export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
     SANDBOX_HARNESS_SETTINGS SANDBOX_HARNESS_DOMAINS \
-    SANDBOX_HARNESS_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS
+    SANDBOX_HARNESS_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS \
+    SANDBOX_HARNESS_BRIEFING_PATH
 
 # [core] command defaults to the selected harness's own command rather than
 # to a literal in core's schema.
@@ -1075,6 +1180,7 @@ extra_mounts+=(-e "DEJIMA_FORGE_HOSTS=$DEJIMA_FORGE_HOSTS")
 extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
 extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
 extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
+extra_mounts+=(-e "DEJIMA_DISCLOSE=$DEJIMA_DISCLOSE")
 
 # The harness's own configuration, mounted at the mode it declared, and -
 # for the directories it marked scannable - the symlink targets that have to

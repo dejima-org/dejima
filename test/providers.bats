@@ -469,12 +469,12 @@ assert_remedy_forges_exist() {
         while IFS= read -r ph; do
             [ -n "$ph" ] || continue
             found=1
-            case "$ph" in
-                pr_command|issue_command|forge_name|forge_ssh_host|blocked_branches) ;;
-                container_id|project_dir|workspace_dir|session_id) ;;
-                resume_command|writable_mounts) ;;
-                *) echo "$f uses unknown placeholder: $ph"; return 1 ;;
-            esac
+            # Against the real whitelist, not a copy of it. A second list here
+            # would have to be edited in step with the first, and the failure
+            # mode of forgetting is this test passing on a placeholder
+            # composition then refuses - which is the launch, not the suite.
+            lib _briefing_whitelisted "$ph" \
+                || { echo "$f uses unknown placeholder: $ph"; return 1; }
         done < <(grep -oE '\{\{[a-z_]+\}\}' "$f" | tr -d '{}')
     done < <(find "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$REPO_ROOT/forges" -name '*.md' -o -name '*.conf')
     # Guards against a grep that silently matches nothing.
@@ -482,9 +482,14 @@ assert_remedy_forges_exist() {
 }
 
 @test "the hook substitutes only the two runtime placeholders" {
+    # env -u, because these run inside a dejima sandbox as often as not, and
+    # there the briefing-delivery variables are set - the hook then emits only
+    # the session id and never reads the file under test. That made this one
+    # fail and the next one pass for the wrong reason, its assertion being
+    # satisfied by the session id the stub carries anyway. See .dejima.md.
     b="$(mktemp)"
     printf 'session=@@SESSION_ID@@ container=@@CONTAINER_ID@@\n' > "$b"
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
         'printf "{\"session_id\":\"abc123\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
         "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
@@ -507,7 +512,7 @@ assert_remedy_forges_exist() {
     printf 'resume-cmd: dejima --resume @@SESSION_ID@@\ncontainer=@@CONTAINER_ID@@\n' > "$b"
     # Session id crafted to test each special case in the replacement context.
     # Use printf %s so the value is never interpreted by the shell.
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE="$b" bash -c \
         'printf "{\"session_id\":%s,\"cwd\":\"%s\"}" "$(printf "%s" "$1" | jq -Rs .)" "$PWD" | bash "$2"' _ \
         'pr-42&rm -rf /tmp\test/path' "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
@@ -522,7 +527,7 @@ assert_remedy_forges_exist() {
 }
 
 @test "a missing briefing file degrades rather than failing the session" {
-    run env DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
+    run env -u DEJIMA_BRIEFING_VIA_ARGS -u DEJIMA_BRIEFING_RENDERED DEJIMA=1 DEJIMA_BRIEFING_FILE=/nonexistent/briefing bash -c \
         'printf "{\"session_id\":\"x\",\"cwd\":\"$PWD\"}" | bash "$1"' _ \
         "$REPO_ROOT/hooks/sandbox-context.sh"
     [ "$status" -eq 0 ]
@@ -686,6 +691,57 @@ assert_remedy_forges_exist() {
     [[ "$output" == *"say so in your reply"* ]]
 }
 
+@test "a project that declares corpus gets the commit-granularity rule" {
+    DEJIMA_CORPUS=on run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Matched against the text with its line breaks flattened. The briefing is
+    # wrapped prose, so any assertion on more than a couple of words is
+    # otherwise hostage to where a line happens to end - which is how the
+    # first version of this test failed on text that was present.
+    local flat
+    flat="$(printf '%s' "$output" | tr '\n' ' ' | tr -s ' ')"
+    [[ "$flat" == *"its own commit"* ]] || { echo "no per-step commit rule"; return 1; }
+    # The reason travels with the rule. A convention with no reason attached is
+    # one an agent talks itself out of the first time it is inconvenient.
+    [[ "$flat" == *"state before it and after it can both be read back"* ]] \
+        || { echo "the rule is stated without its reason"; return 1; }
+    [[ "$flat" == *"inventing a file state the repository never held"* ]] \
+        || { echo "does not say why splitting the diff is not an option"; return 1; }
+    # And the two edges that stop it becoming ceremony.
+    [[ "$flat" == *"needs no commit"* ]] \
+        || { echo "does not exempt steps that only read"; return 1; }
+    [[ "$flat" == *"squash"* ]] \
+        || { echo "says nothing about squashing the step commits away"; return 1; }
+    # And names the act that actually destroys the record. A squash-merge with
+    # the branch retained leaves the step commits reachable, because a clone
+    # fetches remote branches; deleting the branch removes the last pointer to
+    # them. Naming only squashing would let a project follow every rule and
+    # still yield nothing, under a forge default it never chose.
+    [[ "$flat" == *"DELETED"* ]] \
+        || { echo "does not name branch deletion as the destructive act"; return 1; }
+}
+
+@test "a project declaring no corpus gets no commit-granularity rule" {
+    # Off by default, and the default is the absence of a file rather than a
+    # setting - so this is what every project that has not asked for it sees.
+    run lib briefing_compose gitea worktree-pr claude-code
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"own commit"* ]] \
+        || { echo "the corpus rule leaked into an undeclared project"; return 1; }
+}
+
+@test "the corpus rule says nothing about who collects it or why" {
+    # dejima ships the rule, not the argument for it. A briefing that made the
+    # case would be dejima lobbying for a use the project already opted into,
+    # in every session, for every user of that project.
+    DEJIMA_CORPUS=on run lib briefing_compose gitea worktree-pr claude-code
+    local forbidden
+    for forbidden in benchmark corpus-building training "machine learning" dataset; do
+        [[ "${output,,}" != *"${forbidden,,}"* ]] \
+            || { echo "the briefing argues for the use: $forbidden"; return 1; }
+    done
+}
+
 # Two points from docs/responsible-use.md that an agent can act on, as
 # opposed to the majority which are the operator's to follow. Kept short on
 # purpose: this text is in every session's context, for every user.
@@ -743,8 +799,11 @@ assert_remedy_forges_exist() {
     # would promote a deliberately read-only PAT to a pushing credential.
     [ "$(lib manifest_get forge github requires)" = "push_token_file" ]
     [[ "$(lib manifest_get forge github env_export)" == *"GH_TOKEN=@push_token_file"* ]]
-    # Ships no CLI: gh is already in the image.
-    [ -z "$(lib manifest_get forge github install)" ]
+    # gh comes from a package rather than from this repo, but it is still
+    # declared: the entrypoint links the merge shadow only over a command that
+    # is behind /usr/local/lib/dejima/forge, and refuses to start otherwise.
+    # This forge shipping nothing of its own is what "system:" says.
+    [ "$(lib manifest_get forge github install)" = "system:gh" ]
 }
 
 @test "the briefing does not call GitHub read-only when the forge can push to it" {

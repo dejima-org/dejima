@@ -16,9 +16,13 @@ set to get a working sandbox: uncomment what you need. `dejima --print-config`
 prints the resolved schema with real values, which is the fastest way to see
 what a given launch will actually use.
 
+Every tool takes `--help`, which describes its own arguments and what they do.
+That is the fastest answer to "what does this flag mean"; this page is for the
+config file behind them.
+
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection |
+| `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection. Also settable per launch with `--harness`, which is how a host keeps one harness as its default and reaches another when it wants to |
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
@@ -29,6 +33,10 @@ what a given launch will actually use.
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release |
+| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted |
+| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one |
+| `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
@@ -86,6 +94,62 @@ A project can declare what it needs in two committed files:
 .dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line, or a
                            # tarball:<name>@<sha256>:<url> release archive
 ```
+
+### Declaring that the history is evidence
+
+A third file, approved the same way as the two above:
+
+```
+.dejima/corpus             # one rule per line; today, commit-per-step
+```
+
+An approved `commit-per-step` adds a paragraph to the session briefing
+requiring **one commit per plan step that writes a file**, rather than one
+commit per task, and explaining why. Absent or unapproved, nothing is added
+and nothing changes, which is the default for every project that has not asked
+for it.
+
+It goes through approval despite granting no capability, and that is
+deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
+session able to turn this on by writing a file would be writing the *next*
+session's system prompt. `bin/dejima` reads the approval store and never a
+project's declarations - a static test holds that it does not so much as name
+that directory.
+
+An unknown rule is reported but never offered for approval. One that nothing
+implements would approve cleanly, sit in the store and do nothing, which reads
+as being in force when it is not.
+
+**Check the forge's merge policy before relying on this.** The briefing tells
+the agent how to commit, but the setting that can undo all of it is yours: a
+squash-merge is survivable, because a clone fetches remote branches and the
+step commits stay reachable through the branch ref, but deleting the branch
+afterwards removes the last thing pointing at them. Several forges offer
+"delete branch on merge" and some default it on. Measured both ways on a
+throwaway repository: squash-merge with the branch retained left every step
+commit reachable in a fresh clone; the same merge with the branch deleted first
+left none.
+
+So a project can adopt the rule, write every plan correctly, and still yield
+nothing, with no error anywhere - a squash-merged `main` looks perfectly
+healthy. dejima's own history is intact because it merges with merge commits.
+
+The reason is recoverability rather than tidiness. A step is only legible
+afterwards if the file's state immediately before it and immediately after it
+can both be read back from history: before from the commit's parent, after
+from the commit. One commit carrying several steps that touch the same file
+destroys that, because no step in it can be isolated any more, and
+reconstructing one would mean building a file state the repository never held.
+Nothing recovers that later, so it has to be recorded while the work happens.
+
+It lives in the project rather than in `~/.config/dejima/config` because it is
+a fact about the repository. Anyone who clones it and runs dejima gets the same
+commit discipline, which is what makes the history uniformly usable: a rule
+half the contributors follow produces a history nothing can be taken from.
+
+What dejima does not do is say what the history is *for*. Collecting it, and
+deciding whether to, is the operator's business; the briefing states the rule
+the project already adopted and stops there.
 
 ### Tarball dependencies
 
@@ -221,7 +285,8 @@ parent's; global approvals apply everywhere regardless.
 
 What carries over from your host into the container, and what deliberately
 does not. The mechanism is the same whichever harness `[core] harness`
-selects; the specific paths below belong to the one harness shipped today.
+selects; the specific paths below are per harness, and the two shipped ones
+differ more than the mechanism does.
 
 ### Claude Code
 
@@ -275,6 +340,76 @@ Your global `~/.gitconfig` also carries over (as a throwaway copy, so commits
 made inside the sandbox get the right identity, but nothing written to it
 during a session reaches your real file). Falls back to an empty config if
 you don't have one.
+
+### Cline
+
+Almost nothing carries over, and that is the design rather than a gap.
+
+Cline keeps one `sessions.db` indexing every session it has ever run, with
+the project a session belonged to as a field inside the record rather than a
+directory above it. There is no per-project slice of your `~/.cline/data` to
+mount, so mounting it at all would put every project's transcripts into every
+session. dejima instead gives each workspace its own Cline data directory
+under `[harness.cline] state_dir` (default `~/.local/share/dejima/cline`),
+mounted at `~/.cline/data` in the container. Sessions persist across runs of
+the same project and are invisible to every other project.
+
+Because that directory is dejima's rather than yours, resuming on the host
+needs `CLINE_DATA_DIR` set to it. The exact command is at the end of every
+session's briefing.
+
+The provider configuration is written fresh by dejima at each launch and is
+not yours either. Two shapes are supported:
+
+- **`base_url` unset** - Anthropic, reached through dejima's own credential
+  proxy exactly as Claude Code is. What is written into the container is the
+  placeholder `sandbox-credential-proxy-placeholder`; the real credential
+  stays on the host.
+- **`base_url` set to a model you serve yourself** - either a loopback or
+  RFC 1918 address, or a host you have allowlisted with `dejima-allow`.
+  Nothing needs a credential, so there is nothing to withhold.
+
+A name qualifies through the allowlist rather than through how it is spelled,
+because that is the same store deciding whether the container can reach the
+endpoint at all: one that fails the check is one the session could not have
+connected to anyway. A model server on your own network normally has a name,
+so requiring a literal address would have made this path unusable for the
+ordinary case.
+
+Anything else is refused at launch - a hosted provider's API key would have to
+go inside the container, and dejima has no proxy that could hold one back on
+its behalf. Note what the check is *not* doing: dejima writes a placeholder
+into the container on this path whatever the endpoint is, so no real
+credential enters it either way. What the check decides is whether the
+configuration can work at all, which is worth saying at launch rather than as
+an auth error three layers down. See
+[development.md](development.md#worked-example-cline).
+
+If the endpoint serves a model Cline has no catalogue entry for - which is every
+model you serve yourself - Cline has no context budget for it either, and will
+grow the conversation until the *server* rejects it rather than compacting:
+
+```
+rpc error: ... request (16465 tokens) exceeds the available context size (16384 tokens)
+```
+
+Set `[harness.cline] context_window` to stop that. With it, Cline compacts
+before it reaches the limit instead of overflowing.
+
+Set it a little **under** whatever the server allows. Cline's accounting is
+approximate, and a compaction does not always land under target when a single
+tool result is large, so a value equal to the server's limit still overflows
+occasionally. There is no default: the right number belongs to the model being
+served, and a wrong one is worse than none - too high changes nothing, too low
+compacts constantly.
+
+`[harness.cline] model` has no default and must be set. Any model id shipped
+here would go stale with the next Cline release, and choosing the model an
+unattended agent runs on is yours to make.
+
+Cline's CLI needs a CPU with AVX2. It is a Bun-embedded compiled binary and
+Bun's default build requires it, so a VM whose CPU model is `x86-64-v2-AES`
+gets SIGILL before printing anything. `x86-64-v3` or better works.
 
 Caveat: MCP servers or hooks that shell out to host-specific binaries (a
 browser, a language runtime not installed here) will not work until that

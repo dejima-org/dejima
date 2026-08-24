@@ -198,8 +198,16 @@ fi
 # the harness having declared it (see `guards` in its manifest).
 echo
 source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
-_harness="$(config_get core harness 2>/dev/null)" || _harness=""
-if [ -z "$_harness" ]; then
+# A config that does not parse leaves config_get empty for EVERY key, so
+# without this the operator is told no harness is set while looking at the
+# harness line they just wrote. config_validate names the line actually at
+# fault, on stderr, which is the answer to a question this cannot answer.
+_harness=""
+if config_exists && ! config_validate; then
+    echo "$CONFIG_FILE could not be read, so no guard hooks were registered."
+    echo "Fix what is reported above and re-run ./install.sh."
+elif ! _harness="$(config_get core harness 2>/dev/null)" || [ -z "$_harness" ]; then
+    _harness=""
     echo "No [core] harness is set in $CONFIG_FILE, so no guard hooks were"
     echo "registered. Set one and re-run ./install.sh."
 else

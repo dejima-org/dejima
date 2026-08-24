@@ -122,14 +122,15 @@ operator can set, resolved the same way as any other config key
 | `capabilities` | `?list:identifier` | (empty) | What this forge can do - `pr`, `issues`, etc. A workflow's own `requires` is checked against this set at launch; a workflow asking for a capability this forge lacks is refused. |
 | `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
-| `merge_block` | `?command` | (empty) | The literal command prefix `hooks/merge-guard.sh` refuses inside the sandbox (e.g. `gitea-pr merge`) - only when the workflow's `block_merge = on`. |
+| `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a command string, for the harnesses that can. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
+| `disclose` | `?disclosures` | (empty) | Which of this forge's commands send a body the session authored, as comma-separated `kind:command prefix` entries - `pr:gh pr create, issue:gh issue create, ...`. `docker/forge-guard.sh` prepends a marker to the body of a matching command, so a PR, issue or comment an agent wrote says so. The three kinds are `pr`, `issue` and `comment`; the wording of each marker is core's, not the manifest's, so that dejima says one thing about agent authorship whichever forge is selected. Unlike `merge_block` this does not depend on the workflow: what a workflow permits is a policy, who wrote the text is a fact. |
 | `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
 | `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work - checked at launch by two refusal rules (partly-configured, and none-configured-with-a-fixed-host) when the workflow pushes; see [Validation](#validation). A key with a non-empty schema default never counts as missing for either check. |
 | `host_keys` | `?list:identifier` | (empty) | Config keys (from `keys`) that hold a literal hostname - unioned by `forge_hosts` into the firewall allowlist and the push guard's allowed hosts. |
 | `url_keys` | `?list:identifier` | (empty) | Config keys that hold a URL - `forge_hosts` strips scheme and path and unions the bare host in the same way as `host_keys`. |
 | `fixed_hosts` | `?list:hostname` | (empty) | Hostnames this forge always needs reachable, independent of any config value (`github` uses this - `github.com`, `ssh.github.com`, `api.github.com` are the same three hosts for every operator, so there's nothing to configure and nothing to get wrong). |
 | `hosts_allowlisted_by_core` | `bool` | `off` | `on` means this forge's hosts are ones core already allowlists in its own right - GitHub's published ranges, which every session can read from over 443 whatever forge is selected. Core then keeps them out of `DEJIMA_FORGE_HOSTS` (the extra-domains path, which resolves a name into the port-unrestricted `allowed-domains` ipset and exempts it from DNS-rebind protection - right for an internal self-hosted host, a silent widening for a public one) and, when the workflow pushes, opens core's own GitHub push grant to them instead: port 22 to those same ranges, logged and verified by the firewall's startup self-check. They still reach `DEJIMA_PUSH_HOSTS`, so `git-push-guard.sh` permits the push. Name-free in core, but GitHub-specific in effect: this key means "core already allowlists these hosts in its own right", which today is only true of GitHub's ranges, so a future forge whose hosts are not among those must leave it `off` - setting it `on` for anything else grants no firewall allowance at all plus an irrelevant GitHub push grant. |
-| `install` | `?list:relpath` | (empty) | Files under this forge's own directory that ship into `/usr/local/bin` of the image - the only manifest key naming something that actually gets copied and executed. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build both when a declared file is missing and when a forge ships a file under its `bin/` that it does not declare. A forge with `install =` empty therefore puts nothing executable in the image. |
+| `install` | `?list:installspec` | (empty) | The CLIs this forge puts on PATH in the image - the only manifest key naming something that actually gets copied and executed. Either a path under the forge's own directory, or `system:<name>` for a command the image already provides from a package. The list is the gate, not a description of one: `docker/install-forge-bins.sh` installs exactly what is declared, and fails the build when a declared file is missing, when a declared `system:` command is not in the image, and when a forge ships a file under its `bin/` that it does not declare. Every command a forge names anywhere - `pr_command`, `issue_command`, `merge_block`, `disclose` - has to appear here, because a CLI that is not behind the shadow is one the guards cannot reach: the entrypoint refuses to start rather than leave a block or a disclosure looking enforced. |
 | `env_export` | `?list:export` | (empty) | `NAME=key` (the config key's resolved value) or `NAME=@key` (the *contents* of the file the config key names) pairs - the environment variables `bin/dejima` passes into the container for this forge. The `@` form is how a token reaches the container without its path being mistaken for the secret. |
 
 Worked example, `forges/gitea/forge.conf`:
@@ -225,10 +226,12 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
 | `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
+| `briefing_path` | `?homepath` | (empty) | Where this harness reads its briefing from, relative to `$HOME`, for a harness that has no session-start hook to be handed it through. Set, `entrypoint.sh` renders the briefing into that path root-owned and read-only before the session starts, and refuses to start it at all if that fails. Empty for a harness that registers a hook instead, which is how Claude Code gets it. |
 | `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
 | `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
-| `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. |
+| `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. Substitution is not recursive and the `template` type has no `=`, so a resume command that needs a second placeholder or an environment variable goes in the harness's briefing fragment instead, where both resolve. |
+| `transcript_update` | `enum:append\|rewrite` | `append` | How this harness's transcript files change, which decides how they can be read incrementally. `append` means the file only grows, one record per line, so the conversation shipper reads forward from a byte offset and consumes only whole lines. `rewrite` means the file is replaced wholesale, where an offset would land in the middle of a document - it is re-read when it changes and the records already shipped are skipped by count. Declared rather than sniffed, because append semantics against a rewritten file ship garbage. |
 | `briefing` | `?relpath` | (empty) | This harness's briefing fragment file, relative to its own directory. |
 
 Worked example, `harnesses/claude-code/harness.conf`:
@@ -266,14 +269,23 @@ opposite of "providers are data, never sourced." In reading order:
    for the agent too) - fixed prose, not overridable by any provider.
 2. The selected workflow's fragment, with its worktree/capability/autonomy
    markers resolved.
-3. The core closing text (how to hand a task back to the operator when the
+3. The commit-granularity rule, when the project ships a `.dejima/corpus`
+   file - see [configuration.md](configuration.md#declaring-that-the-history-is-evidence).
+   Conditional core prose, gated the same way the GitHub-push paragraph is,
+   and absent for every project that has not declared it.
+4. The core closing text (how to hand a task back to the operator when the
    sandbox genuinely can't do it).
-4. The selected harness's fragment (today, just the resume command).
+5. The selected harness's fragment: how to resume this session on the host,
+   and where the history it would resume from lives. Both are the harness's
+   own facts rather than core's - Claude Code resumes from a bind-mounted
+   `~/.claude`, Cline from a per-project state directory the command has to
+   name - so the closing sentence is in the fragment and not in the preamble.
 
 Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
-`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`) - an unrecognized one is a
+`session_id`, `resume_command`, `writable_mounts`, `network_allowlist`,
+`no_confirm_args`, `harness_state_dir`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
@@ -301,6 +313,16 @@ The hook still runs for a harness using `briefing_args`, carrying only
 `@@SESSION_ID@@`'s value - the harness has not started when the entrypoint
 runs, so the id does not exist yet. A harness declaring no `briefing_args` gets
 the whole briefing through the hook as before.
+
+Substitution is one pass over the assembled text, not a fixed point: a value
+that itself contains a `{{placeholder}}` leaves it unresolved and the whole
+composition is refused. That is why a harness whose resume command needs more
+than `{{session_id}}` puts the command in its fragment rather than in
+`resume_command`.
+
+A third route exists for a harness that neither registers a hook nor takes a
+flag: `briefing_path` names a file it reads, which `entrypoint.sh` writes from
+the same rendering, root-owned and read-only.
 
 The result is mounted **read-only** into the container - so a session can
 never rewrite what the *next* session is told, even a session running
@@ -388,7 +410,78 @@ every launch:
 | workflow | `worktree-pr` | worktree → push → PR, stops at the PR |
 | workflow | `branch-push` | worktree → push, stops at the branch |
 | workflow | `local-only` | **default** - commits locally, pushes nothing |
-| harness | `claude-code` | the only harness today, and **not a default** - `[core] harness` must be set |
+| harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
+| harness | `cline` | provider-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
+
+### Harness integration maturity
+
+Both harnesses are supported, and supported means the same thing for each: a
+manifest, a plugin, tests, and the capability bar in
+[development.md](development.md) either met or declared unmet. It does not mean
+they have had the same amount of use, and the gap is wide enough to say so
+rather than let the word "supported" imply otherwise.
+
+**Claude Code is the harness dejima was built around.** Nearly every mechanism
+here - the credential proxy, the briefing, the per-project state mounts, the
+exit audit - was designed against it and generalised afterwards. It hosts all
+four guards. Its rough edges were found by running it for real work, over and
+over, which is a kind of coverage no test suite substitutes for.
+
+**Cline is new, and has barely been used.** Its integration was built
+deliberately and is tested, but a test only covers what someone thought to
+check. The first run against a live model immediately turned up a bug no test
+had: Cline silently discards a provider entry with no `updatedAt` and falls back
+to its own hosted endpoint, which presents as a connection failure to a host
+nobody configured. The first real session turned up a second, in a component
+Cline does not own at all - the conversation shipper passed its payload as a
+command-line argument, which Cline's larger tool results overflow. It hosts no
+guards, so every launch names what is not in force.
+
+Neither of those was a bad integration. That is the normal rate of discovery
+for something this new, and it is the reason to expect more.
+
+So: if you are choosing between them with no other reason to prefer one, choose
+`claude-code`. Choose `cline` for what it offers that the other does not - it
+can be pointed at any endpoint, including a model you serve yourself - and
+expect to be the person who finds the next crack.
+
+
+### Forge integration maturity
+
+The same caveat the harnesses get, for the same reason: two forges listed in
+one table invites the reading that each got the same consideration, and they
+did not.
+
+**gitea is the forge dejima is developed on.** Every PR in this repo was
+opened through it, every issue filed through it, and its three CLIs are
+dejima's own - which is why they do things `gh` does not, like showing only
+the review threads still outstanding. Its rough edges were found by using it.
+
+**GitHub has never been run end to end.** It was built from the manifest
+outward and tested at the config layer, and what that missed is instructive:
+`forge = github` could not start a container at all under `worktree-pr`, the
+only workflow that opens PRs, because the merge shadow had no `gh` to shadow.
+Ten tests exercised the forge and none of them reached the entrypoint. Fixing
+that immediately turned up a second thing, that `gh --repo owner/name pr merge
+N` walked straight past the merge block. Neither was a hard bug to find once
+anyone looked.
+
+Two known differences remain, both filed rather than fixed:
+
+- **Review feedback is thinner.** `gitea-pr comments` shows unresolved review
+  threads and hides the rest; GitHub does not expose thread resolution through
+  the REST API `gh` uses for this, so working through PR feedback there
+  re-reads threads already dealt with, with no signal that it is doing so.
+- **`gh --repo` reaches past the sandboxed repository.** The gitea CLIs refuse
+  an origin that is not on the configured host, so they can only act on the
+  repo the sandbox was launched against. `gh` takes `--repo` on nearly every
+  subcommand, and `forge = github` supplies a deliberately write-capable
+  token. A per-repository fine-grained PAT is the shape of `push_token_file`
+  that makes this moot.
+
+So: if you have a choice, `gitea` is the better-worn path. Choose `github`
+because that is where your repositories are, which is a good reason - and
+expect to be the person who finds the next crack.
 
 **The shipped defaults are deliberately the non-pushing pair**
 (`forge = none`, `workflow = local-only`). A fresh install has no forge host
@@ -400,6 +493,21 @@ because a pushing workflow whose forge resolves to no host is refused (see
 that is true of every fresh install: this sandbox pushes nowhere yet.
 Pushing is opted into by naming both a pushing workflow and a forge that
 resolves.
+
+**A PR, issue or comment a session writes says an agent wrote it.** The body
+is prepended with a marker - "Summary generated by LLM agent" on a PR,
+"Filed by LLM agent" on an issue, "Comment by LLM agent" on a comment -
+before it reaches the forge. This happens in `docker/forge-guard.sh`, which
+shadows the forge's CLI on PATH, rather than in the CLIs themselves: dejima
+wrote two of the three and a marker living in the tools would mean the
+answer to "does dejima disclose this" depended on which forge an operator
+picked. It applies on edits as well as creates, because the marker describes
+where the text came from rather than the event that wrote it.
+
+Two things it does not cover. A command that sends no body has none added -
+`gh pr create --fill` takes its body from commit messages, and inventing one
+would be worse than leaving it. And running a forge CLI on the host, outside
+a sandbox, marks nothing: there the person running it wrote the body.
 
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access

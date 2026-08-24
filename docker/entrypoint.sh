@@ -117,26 +117,44 @@ if [ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" ]; then
     ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
 fi
 
-if [ -n "${DEJIMA_MERGE_BLOCK:-}" ]; then
-    # The first word of the block names the CLI to shadow. The real one is
-    # already behind the symlink this replaces (see install-forge-bins.sh), so
-    # the guard has a fixed path to exec.
-    _blocked_cli="${DEJIMA_MERGE_BLOCK%% *}"
-    case "$_blocked_cli" in
-        */*|.*|'')
-            echo "entrypoint: refusing merge-block command name: $_blocked_cli" >&2
-            exit 1 ;;
-    esac
-    if [ -x "/usr/local/lib/dejima/forge/$_blocked_cli" ]; then
-        ln -sf /usr/local/lib/dejima/forge-guard.sh "/usr/local/bin/$_blocked_cli"
-    else
-        # A workflow blocking a command this forge does not ship is a
-        # misconfiguration that would otherwise be silent - the guard would
-        # never be reached and the block would look enforced.
-        echo "entrypoint: [workflow] merge_block names '$_blocked_cli', which forge" >&2
-        echo "'${DEJIMA_FORGE_NAME:-?}' does not install. Nothing is being blocked." >&2
-        exit 1
-    fi
+# Every CLI the shadow has something to do about: the one whose merge a
+# workflow blocks, and every one that writes a body the session authored. More
+# than one, because a forge can have a CLI per artifact rather than one with
+# subcommands, and because a forge with nothing blocked can still have
+# something to disclose.
+#
+# The first word of each record names the CLI. The real one is already behind
+# the symlink this replaces (see install-forge-bins.sh), so the guard has a
+# fixed path to exec.
+_shadow_clis() {
+    [ -z "${DEJIMA_MERGE_BLOCK:-}" ] || printf '%s\n' "${DEJIMA_MERGE_BLOCK%% *}"
+    # "<kind> <cli> <subcommand>...", so the CLI is the second word.
+    [ -z "${DEJIMA_DISCLOSE:-}" ] || printf '%s\n' "$DEJIMA_DISCLOSE" |
+        while read -r _ _cli _; do
+            [ -z "$_cli" ] || printf '%s\n' "$_cli"
+        done
+}
+
+_shadow_cli_list="$(_shadow_clis | sort -u)"
+if [ -n "$_shadow_cli_list" ]; then
+    while read -r _cli; do
+        [ -n "$_cli" ] || continue
+        case "$_cli" in
+            */*|.*|'')
+                echo "entrypoint: refusing forge command name: $_cli" >&2
+                exit 1 ;;
+        esac
+        if [ -x "/usr/local/lib/dejima/forge/$_cli" ]; then
+            ln -sf /usr/local/lib/dejima/forge-guard.sh "/usr/local/bin/$_cli"
+        else
+            # Naming a command this forge does not ship is a misconfiguration
+            # that would otherwise be silent - the guard would never be
+            # reached, and the block or the disclosure would look enforced.
+            echo "entrypoint: this forge's manifest names '$_cli', which forge" >&2
+            echo "'${DEJIMA_FORGE_NAME:-?}' does not install. Nothing is being enforced." >&2
+            exit 1
+        fi
+    done <<< "$_shadow_cli_list"
 fi
 
 # Put the harness wrapper on PATH under the harness's own command name,
@@ -259,15 +277,18 @@ for _rel in ${SANDBOX_HARNESS_SEED:-}; do
     fi
 done
 
-# The briefing, rendered before the session starts, for a harness that takes it
-# as a command-line argument rather than through a session-start hook.
+# The briefing, rendered before the session starts, for a harness that is not
+# handed it by a session-start hook. Two routes and one rendering: the manifest
+# names a flag in `briefing_args` for a harness that takes the text on its
+# command line, or a `briefing_path` for one that reads a file.
 #
-# A hook is a size-limited channel. Claude Code persists a large SessionStart
-# payload to a file and injects a short preview in its place - 9KB arrived
-# whole here, 21KB did not - and a composed briefing plus a project's own
-# .dejima.md runs well past that, so most of the briefing silently never
-# reached the session. A system prompt has no such limit, and unlike anything
-# in the conversation it cannot be compacted away later either.
+# A hook is a size-limited channel, which is why the argument route exists at
+# all. Claude Code persists a large SessionStart payload to a file and injects
+# a short preview in its place - 9KB arrived whole here, 21KB did not - and a
+# composed briefing plus a project's own .dejima.md runs well past that, so
+# most of the briefing silently never reached the session. A system prompt has
+# no such limit, and unlike anything in the conversation it cannot be compacted
+# away later either.
 #
 # Rendered here rather than composed here. The text is composed host-side and
 # mounted read-only at DEJIMA_BRIEFING_FILE; what is added is only what the
@@ -275,11 +296,13 @@ done
 # project declares it needs and what this image has, and the project's
 # .dejima.md. That is the same code the hook runs, for the same reason.
 #
-# A failure is fatal rather than skipped: a session that does not know it is
-# sandboxed is the one thing the briefing exists to prevent, and starting one
-# silently is worse than not starting it.
+# Root-owned and read-only, like the staged config above: a session that could
+# write this would be writing its own next briefing. A failure is fatal rather
+# than skipped - a session that does not know it is sandboxed is the one thing
+# the briefing exists to prevent, and starting one silently is worse than not
+# starting it.
 DEJIMA_BRIEFING_RENDERED=/etc/dejima/briefing-rendered
-if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
+if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ] || [ -n "${SANDBOX_HARNESS_BRIEFING_PATH:-}" ]; then
     mkdir -p /etc/dejima
     # Written and renamed, so a harness starting while this is written reads
     # either the whole briefing or no file at all.
@@ -293,11 +316,33 @@ if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
     chown root:root "$DEJIMA_BRIEFING_RENDERED.part"
     chmod 444 "$DEJIMA_BRIEFING_RENDERED.part"
     mv "$DEJIMA_BRIEFING_RENDERED.part" "$DEJIMA_BRIEFING_RENDERED"
-    # dejima-harness-wrapper reads the file and passes it with the flag the
-    # manifest names, so every invocation of the harness carries the briefing
-    # and not only the entrypoint's. The hook reads the second one and reduces
-    # itself to the session id, which is the one thing this cannot carry -
-    # the harness has not started here, so the id does not exist yet.
+fi
+
+# The file route. `briefing_path` is relative to the sandbox user's home.
+if [ -n "${SANDBOX_HARNESS_BRIEFING_PATH:-}" ]; then
+    # Already validated as a homepath in the manifest. Checked again because
+    # this is where it becomes a path, and the manifest is data that core is
+    # supposed to be the one enforcing against.
+    case "$SANDBOX_HARNESS_BRIEFING_PATH" in
+        /*|*..*)
+            echo "entrypoint: refusing harness briefing path '$SANDBOX_HARNESS_BRIEFING_PATH':" >&2
+            echo "it must be relative to the sandbox user's home and must not contain '..'." >&2
+            exit 1 ;;
+    esac
+    briefing_dest="$SANDBOX_HOME/$SANDBOX_HARNESS_BRIEFING_PATH"
+    mkdir -p "$(dirname "$briefing_dest")"
+    cp "$DEJIMA_BRIEFING_RENDERED" "$briefing_dest.part"
+    chown root:root "$briefing_dest.part"
+    chmod 444 "$briefing_dest.part"
+    mv "$briefing_dest.part" "$briefing_dest"
+fi
+
+# The argument route. dejima-harness-wrapper reads the file and passes it with
+# the flag the manifest names, so every invocation of the harness carries the
+# briefing and not only the entrypoint's. The hook reads the second variable
+# and reduces itself to the session id, which is the one thing this cannot
+# carry - the harness has not started here, so the id does not exist yet.
+if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
     export DEJIMA_BRIEFING_RENDERED
     export DEJIMA_BRIEFING_VIA_ARGS=1
 fi

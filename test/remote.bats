@@ -1694,11 +1694,16 @@ EOF
 }
 
 @test "an argument that is not --once is refused rather than watched forever" {
-    # Anything unrecognized - a typo, --help - used to fall into the watch
-    # loop, which for an interactive invocation looks like a hang.
+    # Anything unrecognized - a typo - used to fall into the watch loop, which
+    # for an interactive invocation looks like a hang.
+    #
+    # --help was on this list until #64, which asked every tool to explain
+    # itself. It is now a recognized argument that prints and exits 0, so it
+    # belongs to the --help test rather than here. The property this one is
+    # about is unchanged: an argument the tool does not know is refused.
     conf_with_ntfy
     stub_curl
-    for bad in --help --onces -x once; do
+    for bad in --onces -x once; do
         run timeout 10 "$REPO_ROOT/bin/dejima-notify-watch" "$bad"
         [ "$status" -eq 2 ]
         [[ "$output" == *"usage:"* ]]
@@ -1937,6 +1942,8 @@ expect_ttyd_argv() {
     printf '%s\n' --index "$(dirname "$(readlink -f "$REPO_ROOT/bin")")/web/index.html"
     [ -z "${2:-}" ] || printf '%s\n' -t "fontSize=$2"
     [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
+    [ -z "${4:-}" ] || printf '%s\n' -t "focusOnTap=$4"
+    [ -z "${5:-}" ] || printf '%s\n' -t "buttonColors=$5"
     printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -2224,6 +2231,70 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345 20 C-Space
+}
+
+@test "ttyd_button_colors reaches ttyd, and unset sends nothing so the page decides" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # Unset is not "off": the page colours the toolbar unless told not to, and
+    # a host-wide "off" written here would be a different thing from silence.
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    run grep -c 'buttonColors' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "0" ]
+
+    local value
+    for value in on off; do
+        : > "$STUB_DIR/ttyd-argv"
+        write_remote_config 'ttyd_port = 12345' "ttyd_button_colors = $value"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -eq 0 ]
+        assert_ttyd_argv 12345 '' '' '' "$value"
+    done
+
+    # Alongside every other -t knob, since they share one splice.
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_font_size = 20' \
+        'ttyd_tmux_prefix = C-a' 'ttyd_focus_on_tap = on' 'ttyd_button_colors = off'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 20 C-a on off
+}
+
+@test "ttyd_focus_on_tap reaches ttyd, and unset sends nothing so the page decides" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # Unset is not "off". The page picks from the pointer type, which is a
+    # property of the client and not of the host, so a host-wide default here
+    # would be wrong for whichever half of the clients it did not match.
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    run grep -c 'focusOnTap' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "0" ]
+
+    # Both settings, spelled the way the config's bool type produces them -
+    # "off" has to survive the trip, and an is-it-empty test would drop it.
+    local value
+    for value in on off; do
+        : > "$STUB_DIR/ttyd-argv"
+        write_remote_config 'ttyd_port = 12345' "ttyd_focus_on_tap = $value"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -eq 0 ]
+        assert_ttyd_argv 12345 '' '' "$value"
+    done
+
+    # Alongside the other -t knobs, since they share one splice and the wrong
+    # order would still leave each of them present.
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_font_size = 20' \
+        'ttyd_tmux_prefix = C-a' 'ttyd_focus_on_tap = on'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 20 C-a on
 }
 
 @test "dejima-ttyd refuses a ttyd_tmux_prefix it cannot parse rather than launching with one" {
@@ -2846,7 +2917,8 @@ remote_doc() {
     # config schema (_config_table in bin/dejima-config-lib.sh). Pinned here
     # rather than derived so this still catches the doc losing one of them.
     local keys key
-    keys='enabled ntfy_url base_url ttyd_port ttyd_font_size ttyd_tmux_prefix'
+    keys='enabled ntfy_url base_url ttyd_port ttyd_font_size ttyd_tmux_prefix
+           ttyd_focus_on_tap ttyd_button_colors'
     for key in $keys; do has -F "\`$key\`"; done
 
     # The port default, taken from the library so the two cannot drift.

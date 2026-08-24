@@ -27,6 +27,35 @@
 # markers can abort it and silence every other session's notifications.
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_NOTIFY_WATCH_HELP'
+dejima-notify-watch - turn a session's notifications into phone pushes
+
+Usage: dejima-notify-watch [--once]
+
+  (no argument)  watch until killed, which is what the systemd unit runs
+  --once         one scan, then exit
+
+Started by a systemd USER unit on the host. Never as root, never inside a
+container.
+
+A session's hooks drop marker files when it wants attention or has finished;
+this turns those into ntfy pushes. It runs host-side because it is the trust
+boundary: a possibly-compromised session writes the markers, and the phone they
+reach is outside the sandbox. Nothing the session writes is used as a command,
+a URL or a topic - the marker only says which of a fixed set of events happened.
+
+Does nothing unless [remote-access] enabled is on and a notify URL is set.
+
+See docs/remote-access.md.
+DEJIMA_NOTIFY_WATCH_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"

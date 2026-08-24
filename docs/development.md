@@ -32,6 +32,7 @@ run them.
 | `bin/dejima-config-lib.sh` | The config file's schema, parser and value validators, plus the dependency-spec grammar. The base layer: it sources nothing, so everything else can source it. Not on PATH |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH: see [docs/providers.md](providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
+| `docs/release.md` | The pass a `development` -> `main` release goes through, and why each part of it is not a test |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
@@ -293,9 +294,10 @@ or better is the requirement.
 | --- | --- |
 | **R1** | **Yes, by running it.** `--auto-approve` defaults to true; a one-shot prompt executed a shell tool call with no prompting and exited 0. |
 | **D1** *(was R2)* | **Fails as a CLI, and this no longer decides it.** Its plugin hooks - `beforeTool`, `afterTool`, `beforeRun` and the rest - are documented as observation only: "Use lifecycle hooks for observation (logging, metrics, auditing), not for modifying agent behavior." Nothing documents a return value that refuses a call, and eight attempted hook registrations produced no refusal. Auto-approve is positive-only categories with no denylist, no per-command rule and no pattern that can refuse a shell command. The binary does carry `preToolUse`, `permissionDecision` and `allow`/`deny`/`block`/`ask`, so a refusal path exists somewhere in the codebase - but undocumented is not the same as supported. Declared absent, and named at launch. |
-| **R3** | Partly. `agent_start` exists as an event and `--system` overrides the system prompt outright, but injecting operator-controlled text at session start was not demonstrated - it depends on the same unresolved hook registration. |
+| **R3** | **Yes, by running it, and the documentation is wrong about how.** A rules file at `~/Documents/Cline/Rules/00-dejima.md` reached the model: asked for a codeword only that file contained, the session answered with it. `~/.agents/AGENTS.md` works too. `~/Cline/Rules`, which the documentation names, is **not** read on Linux, and `CLINE_RULES` pointing at a file did nothing. So the briefing is a file rather than a hook, which is what `briefing_path` in the manifest is for. |
+| **Network reach** | **In the container, unlike Claude Code's.** Not a requirement, but the thing [security.md](security.md#the-firewall-bounds-the-container-not-the-harness) says has to be established per harness rather than assumed. Asked to fetch a page the allowlist does not carry, Cline's web-fetch tool ran and returned "Unable to connect" - the same answer `curl` gives. So the egress allowlist bounds what reaches a Cline session, which is not true of Claude Code's `WebSearch`. |
 | **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
-| **R5** | **Yes.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount it. The assessment authenticated purely by writing that file, and `-k/--key` plus a wide set of `*_API_KEY` variables are alternatives. |
+| **R5** | **Yes, and confirmed end to end.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount the operator's. The substitute is the one that already exists: Cline configured for `anthropic` with the placeholder key `sandbox-credential-proxy-placeholder`, pointed at the real hostname, ran a real completion through dejima's in-container terminator and host-side proxy. No base-URL override and no new proxy work - the same arrangement as Claude Code's faked `.credentials.json`, and the session is indistinguishable from a stock install. |
 
 Two notes for whoever writes the integration. Cline's plugin manifest schema
 still carries a field described as "not read by Claude Code", so its plugin
@@ -316,10 +318,75 @@ from every other harness, and it is not necessary: with the push and merge
 guards on PATH, what the CLI costs is `deny-dangerous-bash.sh` alone.
 
 So Cline clears the four hard requirements, at a guard set short one fast-fail
-denylist - declared in its manifest and named at every launch. Its R4 is the
-part worth keeping in mind while integrating it: state goes where `--data-dir`
-puts it, so the per-project scoping #104 is about is a flag rather than
-something to be inferred.
+denylist - declared in its manifest and named at every launch.
+
+**It is now supported**, in `harnesses/cline/` and `bin/harness/cline.sh`.
+Three things the integration settled that the assessment had not.
+
+*Where its state goes is not a choice.* R4 reads as Cline's strongest
+requirement and it is, but not because `--data-dir` is convenient. Cline
+indexes every session it has ever run in one `sessions.db`, and the project a
+session belonged to is a field inside the record rather than a directory above
+it. There is no per-project subtree to mount, so mounting the operator's data
+directory would put every project's transcripts into every session - #104
+exactly. dejima gives each workspace its own data directory under
+`[harness.cline] state_dir`, the way `epitaph.dir` and `audit.dir` already
+work. That is also why its resume command has to name a directory, and why
+that command lives in the harness's briefing fragment rather than in
+`resume_command`: briefing substitution is one pass, so a placeholder inside
+a substituted value is never resolved.
+
+*Provider-agnostic is not the same as endpoint-agnostic.* Cline can be pointed
+anywhere; dejima cannot follow it everywhere. With `base_url` unset it runs
+against Anthropic through dejima's own credential proxy and the key never
+enters the container. Pointed at someone else's hosted API there is no proxy
+that could hold a key back, so the key would have to go in - which is R5
+failing, not a network restriction. The plugin therefore accepts `base_url`
+only for a model the operator serves themselves - a loopback or RFC 1918
+address, or a host they have allowlisted - where an open-weight model needs no
+credential at all and R5 has nothing to protect. The allowlist is what
+qualifies a name, because it is the same store deciding what the container can
+reach: an endpoint failing the check is one the session could not have
+connected to anyway, and a model server on someone's own network normally has
+a name rather than a literal address. A provider-generic proxy would widen
+this to hosted providers; nobody has written one (#171).
+
+*Conversation logging works; epitaphs do not, and only one of those is
+Cline's fault.* Cline's transcripts are
+`<data>/sessions/<id>/<id>.messages.json` - one JSON document rewritten in
+place, not appended lines, and already per-project because the data directory
+is. Nothing about that fitted the two tools, which found transcripts by asking
+for a `projects_dir` key and walking `<dir>/<slug>/*.jsonl`; both now ask the
+harness instead, and the shipper knows the two update models rather than
+assuming the appending one. Its content blocks turn out to be Claude Code's
+shape (`text`, `tool_use` with id/name/input, `tool_result`), so the transform
+differs only in the envelope, and the same policy holds: prompts, assistant
+text and tool invocations, never tool results.
+
+Epitaphs stay absent, and now for a settled reason rather than an unexamined
+one. Cline's compaction has been observed, against a locally served model with
+the context window set small enough to force it: four completed
+`auto_compaction` cycles, each dropping the working context from five messages
+to three.
+
+**The persisted record was untouched by every one of them.** All five file
+reads remained in `.messages.json` in full, tool results included, at close to
+twenty kilobytes apiece - the same content the compaction had just removed from
+what was being sent to the model. There is no summary record, no marker, and no
+gap.
+
+So compaction here is a working-context operation and nothing more. Epitaphs
+exist because Claude Code's compaction *destroys* context that survives only as
+the summary written into its transcript; the container goes away and the
+summary is the only remaining account. Cline destroys nothing on disk, so there
+is nothing for an epitaph to preserve, and `harness_extract_epitaphs` stays
+undefined because that is the right answer rather than a missing piece.
+
+Worth knowing if this is revisited: the summary Cline builds during compaction
+is real but lives only in the event stream, as `auto_compaction` notices
+carrying token counts. A run with too small a budget reports
+`compaction_budget_emergency` and falls back from `agentic_summary` to plain
+trimming. Neither path writes anything to the session record.
 
 ### Where a harness's support lives: three tiers
 
@@ -419,7 +486,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-anthropic-proxy`, `docker/anthropic-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
 | Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. In the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
-| Briefing delivery | **by which route**, not whether. Claude Code takes the briefing as a system prompt, through the flag its manifest names in `briefing_args`, because a `SessionStart` payload past roughly nine kilobytes is persisted and replaced with a preview - so the hook route silently under-delivered a briefing carrying a project's `.dejima.md`. A harness naming no flag still gets it through the hook. What the briefing *says* is neither route's: composing it host-side is core's, and the container-side part - this container's id, the declared-versus-installed gap, the project's `.dejima.md` - is one script both call | `hooks/dejima-briefing-render.sh`, `hooks/sandbox-context.sh`, `docker/entrypoint.sh` |
+| Briefing delivery | **by which of three routes**, not whether. Claude Code takes the briefing as a system prompt, through the flag its manifest names in `briefing_args`, because a `SessionStart` payload past roughly nine kilobytes is persisted and replaced with a preview - so the hook route silently under-delivered a briefing carrying a project's `.dejima.md`. Cline takes no such flag and registers no hook, so it declares a `briefing_path` and reads a file `entrypoint.sh` writes root-owned and read-only. A harness doing neither still gets it through the hook. What the briefing *says* is none of theirs: composing it host-side is core's, and the container-side part - this container's id, the declared-versus-installed gap, the project's `.dejima.md` - is one script every route calls | `hooks/dejima-briefing-render.sh`, `hooks/sandbox-context.sh`, `docker/entrypoint.sh` |
 | Notifications | `Notification`/`Stop` hooks, registered per session into the settings layer, are what drop the markers remote access watches | `hooks/dejima-notify.sh`, `bin/dejima` |
 | Config parity | which directories carry over and at what mode. Declared by the plugin, since `docker-compose.yml` is static YAML and could only name one harness's | `bin/harness/claude-code.sh` |
 | Seeded state | which of the harness's own state it must be able to REWRITE, carried in as a writable copy owned by the session. Declared by the plugin through `emit_seed_from` and `emit_seed_dir`; the seed tree mirrors the destination, like staged config, so `entrypoint.sh` names no harness's paths. The distinction from the other two is what a session may do to it, and mounting the wrong thing read-only breaks a harness rather than protecting anything - see the plugin tree | `bin/harness/<name>.sh`, `docker/entrypoint.sh` |
@@ -427,8 +494,10 @@ harness-specific path resolving to nothing is the honest answer.
 | App state | `~/.claude.json` is copied rather than mounted, because it mixes live state with `mcpServers` config | `bin/dejima` |
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
 | Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). In the plugin | `bin/harness/claude-code.sh` |
-| Transcript format | the transform from transcript lines to log lines. In the plugin; the shipping, batching and Loki labels stay core's | `bin/harness/claude-code.sh` |
-| Compaction format | what a compaction looks like in a transcript. In the plugin; the store, its modes and the provenance note stay core's | `bin/harness/claude-code.sh` |
+| Transcript discovery | where this workspace's transcripts are, what they are called and how they are nested. `harness_transcript_files` in the plugin, answering one `<key>\t<path>` line per file; core takes the key as the store it files under and refuses one that is not a slug this workspace owns. Both `dejima-epitaph` and `dejima-conversation-ship` used to carry Claude Code's layout directly | `bin/harness/<name>.sh`, `bin/dejima-epitaph`, `bin/dejima-conversation-ship` |
+| Transcript update model | whether a transcript is appended to or replaced wholesale. The manifest's `transcript_update`; the shipper implements both and neither is guessed | `harnesses/<name>/harness.conf` |
+| Transcript format | the transform from transcript bytes to log lines. In the plugin; the discovery, shipping, batching and Loki labels stay core's | `bin/harness/<name>.sh` |
+| Compaction format | what a compaction looks like in a transcript, given one file at a time. In the plugin; the store, which keys are legitimate, its modes and the provenance note stay core's | `bin/harness/<name>.sh` |
 | Audit surfaces | `.claude/settings.json` is CRITICAL and the rest of `.claude/` is a WARNING, because that is where this harness keeps things that run | `bin/dejima-audit` |
 | Host code execution | `statusline.sh` is audited as its own CRITICAL surface because `settings.json`'s `statusLine.command` runs it **unsandboxed on the host**. Declared by the plugin, since a finding's label is a parser's grammar rather than data | `bin/harness/claude-code.sh` |
 

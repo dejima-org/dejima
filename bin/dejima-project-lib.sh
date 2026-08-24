@@ -235,8 +235,25 @@ _approved_validator() {
     case "$1" in
         allowed-domains) printf 'valid_domain' ;;
         dependencies)    printf 'valid_dep_spec' ;;
+        corpus)          printf 'valid_corpus_rule' ;;
         *) return 1 ;;
     esac
+}
+
+# The rules a project can declare in .dejima/corpus, each of which changes
+# what the session briefing tells the agent about how to record its work.
+#
+# A fixed set rather than a free identifier, and refusing the unknown is the
+# point: an entry nothing implements would approve cleanly, appear in the
+# store, and do nothing - which reads as the rule being in force when it is
+# not. There is one today.
+DEJIMA_CORPUS_RULES="commit-per-step"
+
+valid_corpus_rule() {
+    case " $DEJIMA_CORPUS_RULES " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
 }
 
 # Approvals are host-side and trusted, so an entry that fails validation
@@ -608,6 +625,23 @@ remote_ttyd_font_size() {
 # interpolated into the page's client options, and a named-chord set is one
 # fewer place an escaping question can be got wrong. A stock tmux does not
 # use either of those two anyway.
+# Whether tapping the terminal page raises the soft keyboard. Unset is the
+# useful default and is deliberately NOT a bool default of off: the page
+# decides per client from the pointer type, which a host-wide setting cannot
+# see. Only a value the operator actually wrote is passed on.
+# Whether the terminal page colour-codes its toolbar. Unset means on, which
+# the page decides for itself - so, like the tap setting above, only a value
+# the operator actually wrote is passed on.
+remote_ttyd_button_colors() {
+    config_is_set remote-access ttyd_button_colors || return 0
+    config_get remote-access ttyd_button_colors
+}
+
+remote_ttyd_focus_on_tap() {
+    config_is_set remote-access ttyd_focus_on_tap || return 0
+    config_get remote-access ttyd_focus_on_tap
+}
+
 remote_ttyd_tmux_prefix() {
     config_get remote-access ttyd_tmux_prefix
 }

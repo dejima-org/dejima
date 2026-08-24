@@ -143,13 +143,14 @@ capabilities	?list:identifier
 pr_command	?command
 issue_command	?command
 merge_block	?command
+disclose	?disclosures
 keys	?list:keyspec
 requires	?list:identifier
 host_keys	?list:identifier
 url_keys	?list:identifier
 fixed_hosts	?list:hostname
 hosts_allowlisted_by_core	bool	off
-install	?list:relpath
+install	?list:installspec
 env_export	?list:export
 EOF
             ;;
@@ -174,10 +175,12 @@ api_domains	?list:hostname
 proxied_api_domain	?hostname
 guards	?list:identifier
 briefing_args	?args
+briefing_path	?homepath
 no_confirm_args	?args
 settings_args	?args
 keys	?list:keyspec
 resume_command	?template
+transcript_update	enum:append|rewrite	append
 briefing	?relpath
 EOF
             ;;
@@ -272,6 +275,57 @@ _provider_valid_value() {
             # Joined to a provider directory, so no absolute paths and no
             # traversal - a manifest may only name a file it ships.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$value" != *".."* ]]
+            ;;
+        disclosures)
+            # Which of this forge's commands write a body a person authored,
+            # and what kind of artifact each one writes. Comma-separated
+            # because every entry is multi-word, unlike every other list here.
+            #
+            #   disclose = pr:<cli> create, issue:<other cli> create
+            #
+            # The kind selects the marker; the marker text itself is core's
+            # (docker/forge-guard.sh), so that what dejima says about agent
+            # authorship cannot come out differently per forge.
+            # An empty entry is a typo, not an entry to skip - the same
+            # reading the list types take of a trailing separator. Checked on
+            # the raw string, because word splitting discards it silently.
+            case "$value" in ,*|*,) return 1 ;; esac
+            [[ "$value" =~ ,[[:space:]]*, ]] && return 1
+            local entry kind rest
+            local IFS=,
+            for entry in $value; do
+                # Leading and trailing space around each comma-separated entry.
+                entry="${entry#"${entry%%[![:space:]]*}"}"
+                entry="${entry%"${entry##*[![:space:]]}"}"
+                [ -n "$entry" ] || return 1
+                case "$entry" in
+                    pr:*|issue:*|comment:*) ;;
+                    *) return 1 ;;
+                esac
+                kind="${entry%%:*}"
+                rest="${entry#*:}"
+                [ -n "$kind" ] || return 1
+                _provider_valid_value command "$rest" || return 1
+            done
+            ;;
+        installspec)
+            # A CLI this forge puts on PATH: either a file it ships, or
+            # "system:<name>" for one the image already provides.
+            #
+            # The second form exists because a forge CLI has to be reachable
+            # behind the shadow whether or not this repo wrote it - that is
+            # where docker/forge-guard.sh execs the real command through, and
+            # a forge naming a command that never gets there has a merge block
+            # that cannot be enforced. Declaring it here rather than special
+            # -casing the name in the image build is also what keeps the
+            # manifest a complete account of what this forge puts in /usr/local
+            # /bin, which is the reading the audit depends on.
+            case "$value" in
+                system:*)
+                    [[ "${value#system:}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+                    ;;
+                *)  _provider_valid_value relpath "$value" ;;
+            esac
             ;;
         homepath)
             # A directory the harness needs inside the sandbox user's home,
@@ -870,7 +924,7 @@ BRIEFING_FRAGMENT_MAX=16384
 # is a hard refusal (_briefing_substitute below), not a literal passthrough -
 # an unrecognized {{key}} reaching an agent's context verbatim is exactly the
 # kind of silent drift this whole function exists to prevent.
-_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist"
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist no_confirm_args harness_state_dir"
 
 _briefing_whitelisted() {
     _set_contains "$_BRIEFING_WHITELIST" "$1"
@@ -884,19 +938,23 @@ _briefing_core_preamble() {
     cat <<'BRIEFING_EOF'
 You are running inside the dejima Docker container, not directly on
 the user's machine, with
---dangerously-skip-permissions active (no tool-use confirmations).
+{{no_confirm_args}} active (no tool-use confirmations).
 
 What this means:
 - The workspace directory is bind-mounted read-write and is the real
   project. ~/shared is also a real, persistent host directory (not part of
   the project) - use it to hand the user a file (a screenshot, a temp
   script) without touching the project checkout, or to pick up something
-  they left there for you. ~/.claude is bind-mounted too, so this session's
-  transcript and its project memory outlive the container - the work is
-  recoverable on the host with the `--resume` command at the end of this
+  they left there for you. Your harness keeps its own state on the host too,
+  so this session's transcript outlives the container - the work is
+  recoverable on the host with the command at the end of this
   briefing.{{writable_mounts}} Everything else is disposable: installed system
   packages, anything outside the mounted paths, and the container itself go
   away when this run ends.
+- A headless browser is installed: playwright, with chromium, importable
+  from any directory in either module system. If you change something with a
+  user interface, look at it rather than describing what it should look like,
+  and leave the screenshot in ~/shared.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, {{network_allowlist}}, plus anything
   approved via dejima-allow). Requests to anything else will simply
@@ -969,6 +1027,62 @@ BRIEFING_EOF
 # has done something the operator was supposed to decide, and added to a queue
 # maintainers are already drowning in. Saying so here is cheaper than
 # discovering it afterwards, and the flag is exactly when it becomes possible.
+# What a project gets for declaring .dejima/corpus: a rule about commit
+# granularity, and the reason for it.
+#
+# The reason is not style. A plan step is only usable as evidence if the file's
+# state immediately before it and immediately after it can both be recovered
+# from history - before from the commit's parent, after from the commit. One
+# commit carrying several steps that touch the same file destroys that: the
+# third step's "after" already contains the fourth's and the fifth's, and
+# splitting the diff to attribute a hunk per step would mean constructing a
+# file state that never existed in the repository. So the information has to
+# be put into the history when the work is done, or it is not recoverable
+# afterwards by any amount of cleverness.
+#
+# Measured rather than assumed, on two repositories with the same author and
+# the same planning workflow: the one committing per step yielded usable
+# material from its steps, and the one committing once per task yielded none,
+# with every step after the first to touch a given file discarded.
+#
+# The bullet about deletion is measured too, and names branch deletion rather
+# than squashing on purpose. Verified here: a squash-merge with the branch
+# retained leaves both step commits reachable in a fresh clone, because a clone
+# fetches remote branches; the same squash-merge with the branch deleted first
+# leaves none. Squashing is what an operator notices; deleting the branch is
+# what several forges do by default, and it is the one that destroys the
+# record.
+#
+# Deliberately says nothing about what the corpus is for or who collects it.
+# That is the operator's business, and a briefing that argued for it would be
+# dejima making a case rather than stating a rule the project already adopted.
+_briefing_core_corpus() {
+    cat <<'BRIEFING_EOF'
+This project keeps its history as usable evidence of how the work was done
+(it declares .dejima/corpus). That puts one requirement on how you commit:
+
+- Give every plan step that changes a file its own commit, and say so in the
+  step. Not one commit at the end covering five steps.
+- A step that only reads files or runs tests needs no commit. This is about
+  steps that write, not ceremony.
+- Do not squash a task's step commits together before committing them. What
+  happens at merge time is survivable: a clone fetches remote branches, so a
+  squash-merge still leaves the step commits reachable through the branch ref.
+  What does not survive is the branch being DELETED afterwards, which removes
+  the last thing pointing at them. Several forges offer that as a
+  merge-time default. If this one does, say so rather than assuming the record
+  is safe, because everything above can be done perfectly and still yield
+  nothing.
+
+The reason is that a step is only legible later if the file's state before it
+and after it can both be read back from history: before from the commit's
+parent, after from the commit. When one commit carries several steps that
+touch the same file, no step in it can be isolated any more, and reconstructing
+one would mean inventing a file state the repository never held. Nothing can
+recover that afterwards, which is why it has to be done while the work is.
+BRIEFING_EOF
+}
+
 _briefing_core_github_push() {
     cat <<'BRIEFING_EOF'
 - GitHub push is enabled for this session, for the repository you were
@@ -989,17 +1103,6 @@ GUI/hardware access - stop and explain clearly to the user what you need
 and why, instead of trying to work around the firewall or sandbox yourself.
 They can continue this exact session outside the container by running on
 the host:
-BRIEFING_EOF
-}
-
-# $requirements and $project_doc (the missing-dependency report and
-# .dejima.md) stay hook-computed and hook-appended after this - they read
-# container-local and workspace-local state a host-side compose has no
-# business resolving, and moving them is Task 5's job, not this one.
-_briefing_core_closing_b() {
-    cat <<'BRIEFING_EOF'
-(session history is shared via the bind-mounted ~/.claude, so it will pick
-up right where this left off).
 BRIEFING_EOF
 }
 
@@ -1144,6 +1247,20 @@ _briefing_resolve_key() {
         project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;
         workspace_dir)    printf '%s' "${WORKSPACE_DIR:-}" ;;
         resume_command)   manifest_get harness "$harness" resume_command ;;
+        # The flags that put the harness in no-confirmation mode. From the
+        # manifest rather than written into the preamble, because the
+        # preamble's sentence is about the state the session is in and every
+        # harness names that state differently - claiming
+        # --dangerously-skip-permissions to a Cline session would be telling
+        # it about a flag it does not have.
+        no_confirm_args)  manifest_get harness "$harness" no_confirm_args ;;
+        # Where this harness keeps this workspace's state on the host. Only
+        # the plugin can say: it is the plugin that decides how state is
+        # sliced per project, and for a harness that keeps one index over
+        # every session it has ever run, that slicing is the whole of R4.
+        # Empty when the harness has no such directory, which is why the
+        # resolver is a hook call rather than a config key.
+        harness_state_dir) harness_hook harness_briefing_state_dir "${WORKSPACE_DIR:-}" ;;
         writable_mounts)
             if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
                 printf '\n  These host directories are bind-mounted read-write at their own paths and\n  outlive the container too: %s.\n ' "$DEJIMA_RW_MOUNTS"
@@ -1245,11 +1362,24 @@ briefing_compose() {
         text+="$(_briefing_core_github_push)"
         text+=$'\n\n'
     fi
+    if [ "${DEJIMA_CORPUS:-off}" = "on" ]; then
+        text+="$(_briefing_core_corpus)"
+        text+=$'\n\n'
+    fi
+    # The harness fragment closes the briefing: it supplies both the resume
+    # command closing_a has just promised and the sentence about where the
+    # session history it resumes from actually lives. Both are the harness's
+    # own facts - Claude Code resumes from a bind-mounted ~/.claude, Cline
+    # from a per-project state directory named in the command itself - and
+    # core stating either one meant stating Claude Code's.
+    #
+    # $requirements and $project_doc (the missing-dependency report and
+    # .dejima.md) stay hook-computed and hook-appended after this - they read
+    # container-local and workspace-local state a host-side compose has no
+    # business resolving.
     text+="$(_briefing_core_closing_a)"
     text+=$'\n\n'
     text+="$harness_frag"
-    text+=$'\n\n'
-    text+="$(_briefing_core_closing_b)"
 
     _briefing_substitute "$text" "$forge" "$workflow" "$harness"
 }

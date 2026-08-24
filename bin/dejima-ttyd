@@ -28,6 +28,35 @@
 # must match the run-id shape before it is used as a path component.
 set -euo pipefail
 
+# --help before anything else runs: no libraries sourced, no config read. The
+# moment someone reaches for it is often the moment the config is wrong.
+# stdout and exit 0, where usage() stays on stderr and exits nonzero.
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_TTYD_HELP'
+dejima-ttyd - serve the web terminal that fronts dejima-attach
+
+Usage: dejima-ttyd
+
+Takes no arguments. Started by systemd/dejima-ttyd.service; running it by hand
+is only useful for debugging.
+
+Reads ttyd_port from [remote-access] in the config so the port has exactly one
+source of truth - the systemd unit deliberately does not repeat it.
+
+Binds 127.0.0.1 only, and that is a requirement rather than a default worth
+overriding. Attaching gives a tmux session on the host, so a listener on any
+address a container can route to is an escape hatch out of the sandbox;
+loopback is not one. Put nginx in front of it, bound to one LAN address - see
+docs/nginx-dejima.conf.example.
+
+Serves nothing until [remote-access] enabled is on.
+
+See docs/remote-access.md.
+DEJIMA_TTYD_HELP
+        exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
@@ -61,6 +90,16 @@ font_size="$(remote_ttyd_font_size)"
 # pixels wide on a phone-width screen. Unset means the page uses stock tmux's
 # C-b; see docs/remote-access.md.
 tmux_prefix="$(remote_ttyd_tmux_prefix)"
+
+# Whether a tap on the terminal raises the soft keyboard. Passed on only when
+# the operator set it: unset means the page decides from the pointer type,
+# which is right for almost everyone and is something a host-wide setting
+# cannot see. See docs/remote-access.md.
+focus_on_tap="$(remote_ttyd_focus_on_tap)"
+
+# Whether the toolbar is colour-coded. Passed on only when set, for the same
+# reason as the line above: the page has a default and it is the right one.
+button_colors="$(remote_ttyd_button_colors)"
 
 # Checked rather than left to exec, whose failure is bash's "ttyd: not found"
 # on a line number - true, and useless to an operator who needs to know that
@@ -134,9 +173,15 @@ font_opt=()
 
 prefix_opt=()
 [ -z "$tmux_prefix" ] || prefix_opt=(-t "tmuxPrefix=$tmux_prefix")
+focus_opt=()
+[ -z "$focus_on_tap" ] || focus_opt=(-t "focusOnTap=$focus_on_tap")
+colors_opt=()
+[ -z "$button_colors" ] || colors_opt=(-t "buttonColors=$button_colors")
 
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
     --index "$index_html" \
     ${font_opt[@]+"${font_opt[@]}"} \
     ${prefix_opt[@]+"${prefix_opt[@]}"} \
+    ${focus_opt[@]+"${focus_opt[@]}"} \
+    ${colors_opt[@]+"${colors_opt[@]}"} \
     "$SCRIPT_DIR/dejima-attach"
