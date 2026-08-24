@@ -2281,8 +2281,12 @@ _install_forge_bins() {
     local d="$REPO_ROOT/bin/dejima"
     grep -q "trap '' TSTP" "$d" \
         || { echo "the client no longer inherits SIGTSTP ignored"; return 1; }
-    grep -qE 'kill -STOP "\$SANDBOX_CLIENT_PID"' "$d" \
+    grep -q '_stop_tree "$SANDBOX_CLIENT_PID"' "$d" \
         || { echo "the keystroke is no longer converted into a SIGSTOP"; return 1; }
+    # The whole subtree, not one pid: `docker compose run` is the CLI plus the
+    # plugin it runs, and the child is the one holding the terminal.
+    grep -q 'for kid in $(pgrep -P "$p" 2>/dev/null); do _stop_tree "$kid"; done' "$d" \
+        || { echo "only the top pid is stopped, so a child keeps the terminal"; return 1; }
     grep -q "sandbox \"\$@\" < /dev/tty &" "$d" \
         || { echo "the client is backgrounded without a terminal, so it reads EOF"; return 1; }
     # And the launcher itself must still stop, or the job never fully stops

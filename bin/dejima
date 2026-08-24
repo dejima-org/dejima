@@ -1891,14 +1891,34 @@ if [ -n "$SANDBOX_TTY_MODES" ]; then
     SANDBOX_CLIENT_PID=$!
     trap - TSTP
 
+    # The pid $! names is the docker CLI; `docker compose run` then runs the
+    # compose plugin as a child of it, and the child is what holds the
+    # terminal. Stopping only the pid leaves that child in raw mode with the
+    # shell also on the terminal - a cursorless prompt that resumes to
+    # nothing, which is what the first version of this fix produced.
+    #
+    # Deepest first, so nothing is left running long enough to fork again;
+    # shallowest first on the way back, so a parent is ready before its child
+    # resumes.
+    _stop_tree() {
+        local p="$1" kid
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _stop_tree "$kid"; done
+        kill -STOP "$p" 2>/dev/null || true
+    }
+    _cont_tree() {
+        local p="$1" kid
+        kill -CONT "$p" 2>/dev/null || true
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _cont_tree "$kid"; done
+    }
+
     _on_tstp() {
-        kill -STOP "$SANDBOX_CLIENT_PID" 2>/dev/null || true
+        _stop_tree "$SANDBOX_CLIENT_PID"
         # Default disposition to actually stop, then put the handler back for
         # the next time. Everything after the re-raise runs on resume.
         trap - TSTP
         kill -TSTP $$
         trap _on_tstp TSTP
-        kill -CONT "$SANDBOX_CLIENT_PID" 2>/dev/null || true
+        _cont_tree "$SANDBOX_CLIENT_PID"
     }
     trap _on_tstp TSTP
 
