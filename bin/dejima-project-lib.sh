@@ -629,6 +629,14 @@ remote_ttyd_font_size() {
 # useful default and is deliberately NOT a bool default of off: the page
 # decides per client from the pointer type, which a host-wide setting cannot
 # see. Only a value the operator actually wrote is passed on.
+# Whether the terminal page colour-codes its toolbar. Unset means on, which
+# the page decides for itself - so, like the tap setting above, only a value
+# the operator actually wrote is passed on.
+remote_ttyd_button_colors() {
+    config_is_set remote-access ttyd_button_colors || return 0
+    config_get remote-access ttyd_button_colors
+}
+
 remote_ttyd_focus_on_tap() {
     config_is_set remote-access ttyd_focus_on_tap || return 0
     config_get remote-access ttyd_focus_on_tap

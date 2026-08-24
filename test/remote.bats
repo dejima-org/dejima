@@ -1943,6 +1943,7 @@ expect_ttyd_argv() {
     [ -z "${2:-}" ] || printf '%s\n' -t "fontSize=$2"
     [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
     [ -z "${4:-}" ] || printf '%s\n' -t "focusOnTap=$4"
+    [ -z "${5:-}" ] || printf '%s\n' -t "buttonColors=$5"
     printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -2230,6 +2231,36 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345 20 C-Space
+}
+
+@test "ttyd_button_colors reaches ttyd, and unset sends nothing so the page decides" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # Unset is not "off": the page colours the toolbar unless told not to, and
+    # a host-wide "off" written here would be a different thing from silence.
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    run grep -c 'buttonColors' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "0" ]
+
+    local value
+    for value in on off; do
+        : > "$STUB_DIR/ttyd-argv"
+        write_remote_config 'ttyd_port = 12345' "ttyd_button_colors = $value"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -eq 0 ]
+        assert_ttyd_argv 12345 '' '' '' "$value"
+    done
+
+    # Alongside every other -t knob, since they share one splice.
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_font_size = 20' \
+        'ttyd_tmux_prefix = C-a' 'ttyd_focus_on_tap = on' 'ttyd_button_colors = off'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 20 C-a on off
 }
 
 @test "ttyd_focus_on_tap reaches ttyd, and unset sends nothing so the page decides" {
@@ -2887,7 +2918,7 @@ remote_doc() {
     # rather than derived so this still catches the doc losing one of them.
     local keys key
     keys='enabled ntfy_url base_url ttyd_port ttyd_font_size ttyd_tmux_prefix
-           ttyd_focus_on_tap'
+           ttyd_focus_on_tap ttyd_button_colors'
     for key in $keys; do has -F "\`$key\`"; done
 
     # The port default, taken from the library so the two cannot drift.

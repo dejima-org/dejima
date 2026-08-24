@@ -4,7 +4,7 @@ const assert = require('node:assert');
 require('../src/keys.js'); // config.js parses the tmux prefix through it
 require('../src/config.js');
 const { DEFAULT_TMUX_PREFIX, parsePrefix, splitPreferences, toolbarWanted,
-        focusOnTapWanted, pickerSearch } = globalThis.DEJIMA.config;
+        focusOnTapWanted, pickerSearch, buttonColorsWanted } = globalThis.DEJIMA.config;
 
 test('a tmux prefix is parsed into the byte tmux would receive', () => {
   assert.equal(parsePrefix('C-b'), '\x02');
@@ -115,4 +115,33 @@ test('the picker address keeps every other parameter', () => {
 test('the picker address is already the picker when there is no run-id', () => {
   assert.equal(pickerSearch(''), '');
   assert.equal(pickerSearch('?toolbar=1'), '?toolbar=1');
+});
+
+// The toolbar's colours are on unless the operator turns them off: the
+// hierarchy is the point of them, and a toolbar where every key looks alike is
+// one where the key you need most is found by counting positions.
+
+test('the toolbar is coloured when nothing says otherwise', () => {
+  assert.equal(buttonColorsWanted(undefined), true);
+  assert.equal(buttonColorsWanted(''), true);
+  assert.equal(buttonColorsWanted('on'), true);
+});
+
+test('off turns the toolbar grey, in dejima\'s own bool spelling', () => {
+  // ttyd_button_colors is a dejima bool, so what reaches the page is "off" -
+  // not "false". Accepting only the latter would ship a documented key that
+  // does nothing, which is exactly what focusOnTap nearly did.
+  assert.equal(buttonColorsWanted('off'), false);
+  assert.equal(buttonColorsWanted(false), false);
+  assert.equal(buttonColorsWanted('false'), false);
+  assert.equal(buttonColorsWanted('0'), false);
+});
+
+test('buttonColors is a page option, not one xterm is handed', () => {
+  // Every page key that reached term.options would be an unknown option to
+  // xterm.js, which is the failure splitPreferences exists to prevent.
+  const split = splitPreferences({ buttonColors: 'off', fontSize: 14 });
+  assert.equal(split.page.buttonColors, 'off');
+  assert.equal(split.terminal.buttonColors, undefined);
+  assert.equal(split.terminal.fontSize, 14);
 });

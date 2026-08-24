@@ -110,6 +110,12 @@
     // able to change it.
     tapFocusPolicy(split.page.focusOnTap);
 
+    // A class rather than per-button styling: what the page decides is
+    // whether there is a palette at all, and the stylesheet owns which button
+    // gets which part of it.
+    document.body.classList.toggle(
+      'mono-keys', !D.config.buttonColorsWanted(split.page.buttonColors));
+
     // A font size arriving in the preferences changes the cell size, so the
     // column count computed before it was applied is now wrong.
     viewport.refresh();

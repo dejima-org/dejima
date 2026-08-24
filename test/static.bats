@@ -2144,6 +2144,56 @@ _install_forge_bins() {
         || { echo "the release doc does not warn about the queued privileged job"; return 1; }
 }
 
+@test "the terminal page and the session picker use the same gruvbox values" {
+    # They sit either side of one attach - pick a session, then use it - and a
+    # palette that drifts on one side makes them look like different programs.
+    # Both files carry the hex, so both can be read.
+    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-attach"
+    local hex checked=0
+    while IFS= read -r hex; do
+        grep -qi -- "$hex" "$attach" \
+            || { echo "$hex is in the page's palette but not the picker's"; return 1; }
+        checked=$((checked + 1))
+    done < <(sed -n 's/^  --gb-[a-z0-9-]*: *\(#[0-9a-fA-F]\{6\}\).*/\1/p' "$css" \
+             | grep -viE '#1d2021|#282828|#3c3836|#504945')
+    # The accents and the light text, which is what both actually share. The
+    # backgrounds are excluded above because the picker paints none.
+    [ "$checked" -ge 5 ] \
+        || { echo "only $checked palette values were compared"; return 1; }
+}
+
+@test "turning the toolbar's colours off restores every one of them" {
+    # A half-applied override is worse than none: it leaves an operator who
+    # asked for the old grey with a toolbar that is neither. Every --key-*
+    # the palette defines has to be answered by the mono block.
+    local css="$REPO_ROOT/web/src/page.css" name missing=""
+    while IFS= read -r name; do
+        sed -n '/^body.mono-keys {/,/^}/p' "$css" | grep -q -- "$name:" \
+            || missing="$missing $name"
+    done < <(sed -n '/^:root {/,/^}/p' "$css" | sed -n 's/^ *\(--key-[a-z0-9-]*\):.*/\1/p')
+    [ -z "$missing" ] || { echo "mono-keys does not restore:$missing"; return 1; }
+}
+
+@test "the toolbar hierarchy names the buttons it is a hierarchy of" {
+    # The order is a decision about what an operator hunts for, and it is only
+    # legible if each tier names its keys. A rename in template.html that is
+    # not made here turns a tiered button silently grey.
+    local css="$REPO_ROOT/web/src/page.css" action
+    for action in kbd enter prev-window next-window left down up right; do
+        grep -q "data-action=\"$action\"" "$css" \
+            || { echo "$action has no tier in the stylesheet"; return 1; }
+        grep -q "data-action=\"$action\"" "$REPO_ROOT/web/src/template.html" \
+            || { echo "$action is styled but is not a button"; return 1; }
+    done
+    # And the state a button is in has to beat the job it does, which is
+    # source order at equal specificity.
+    local tier latch
+    tier="$(grep -n 'data-action="kbd"' "$css" | head -1 | cut -d: -f1)"
+    latch="$(grep -n 'button.is-armed' "$css" | head -1 | cut -d: -f1)"
+    [ "$tier" -lt "$latch" ] \
+        || { echo "a tier rule is below the latch rules, so a latched key looks unlatched"; return 1; }
+}
+
 # --- Ctrl-Z (#179) ----------------------------------------------------------
 #
 # Driven through a real pty with a real interactive shell on it, because the
