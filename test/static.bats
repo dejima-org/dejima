@@ -1273,6 +1273,25 @@ _cli_tools() {
     done
 }
 
+@test "shellcheck covers the test scripts, which CI runs on a host" {
+    # .dejima.md's point, applied to the checker itself: pushing runs this
+    # commit on a machine outside the sandbox, so a shell script under test/
+    # is code executing there. Leaving them out was not a considered scope -
+    # it hid an unguarded cd in the release gate, which would have had it
+    # reporting on some other directory's suites.
+    local f found=0
+    while IFS= read -r f; do
+        case "$f" in test/*) found=1 ;; esac
+    done < <(bash "$REPO_ROOT/test/shellcheck.sh" --list)
+    [ "$found" = 1 ] || { echo "no test/ script is shellchecked"; return 1; }
+    # Named, so a rename that drops one from the glob is visible.
+    for f in test/shellcheck.sh test/run-confined.sh test/release-pass.sh; do
+        [ -f "$REPO_ROOT/$f" ] || continue
+        bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "$f" \
+            || { echo "$f is not shellchecked"; return 1; }
+    done
+}
+
 @test "shellcheck covers harness plugins, which carry no shebang" {
     # Plugins are sourced, so they have no shebang, so the shebang-based
     # discovery dropped them - silently, while they sit in the trusted
