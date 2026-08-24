@@ -54,6 +54,8 @@ if _ign & (1 << (signal.SIGTSTP - 1)):
     sys.stdout.write("CONTAINER-TSTP-IGNORED\\r\\n")
     sys.stdout.flush()
 tty.setraw(fd)
+# What a full-screen harness does on startup, and does not undo on a suspend.
+sys.stdout.write("\\033[?25l")
 sys.stdout.write("CONTAINER-ATTACHED\\r\\n"); sys.stdout.flush()
 open(%r, "wb").close()
 try:
@@ -99,6 +101,7 @@ client=$!
 trap - TSTP
 on_tstp() {
     kill -STOP "$client" 2>/dev/null || true
+    printf '\\033[?25h' > /dev/tty 2>/dev/null || true
     trap - TSTP
     kill -TSTP $$
     trap on_tstp TSTP
@@ -236,6 +239,12 @@ try:
 
     # The finding, asserted: the client is stopped by SIGSTOP, which it cannot
     # observe, and never by SIGTSTP, which it cannot survive.
+    # A suspended session must not leave the prompt with an invisible cursor:
+    # the harness hid it and a suspend is not an exit, so somebody has to.
+    check("the-cursor-is-shown-again-when-suspended",
+          "\033[?25h" in transcript_all,
+          "the prompt inherits a hidden cursor, like a dead ssh session")
+
     check("the-client-was-started-with-sigtstp-ignored",
           "CONTAINER-TSTP-IGNORED" in transcript_all,
           "it would be stopped by the one signal it cannot survive")

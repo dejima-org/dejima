@@ -931,6 +931,9 @@ cleanup() {
     # behind is a terminal with no interrupt character.
     if [ -n "${SANDBOX_TTY_MODES:-}" ]; then
         stty "$SANDBOX_TTY_MODES" < /dev/tty 2>/dev/null || true
+        # And the cursor, for the same reason the modes are restored here: a
+        # run that was killed rather than exited put neither back.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
     fi
     if [ -n "${SANDBOX_TTY_SUSPEND_PID:-}" ]; then
         kill "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
@@ -1913,6 +1916,12 @@ if [ -n "$SANDBOX_TTY_MODES" ]; then
 
     _on_tstp() {
         _stop_tree "$SANDBOX_CLIENT_PID"
+        # Show the cursor again. A full-screen harness hides it (DECTCEM,
+        # \033[?25l) and puts it back when it exits - but a suspend is not an
+        # exit, so the shell prompt inherits an invisible cursor and the
+        # terminal looks like a connection that died. The harness hides it
+        # again on resume, when the SIGWINCH below makes it repaint.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
         # Default disposition to actually stop, then put the handler back for
         # the next time. Everything after the re-raise runs on resume.
         trap - TSTP

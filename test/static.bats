@@ -2293,6 +2293,10 @@ _install_forge_bins() {
     # and the prompt never comes back.
     grep -q 'kill -TSTP \$\$' "$d" \
         || { echo "the launcher no longer stops itself, so ^Z suspends nothing"; return 1; }
+    # A suspend is not an exit, so the harness never puts the cursor back and
+    # the prompt inherits an invisible one - which reads as a dead connection.
+    [ "$(grep -c '033\[?25h' "$d")" -ge 2 ] \
+        || { echo "the cursor is not restored on suspend and on exit"; return 1; }
 }
 
 @test "a launch with no terminal skips the suspend handling entirely" {
