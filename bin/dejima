@@ -876,8 +876,6 @@ SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 SANDBOX_CONVERSATION_SHIP_PID=""
-SANDBOX_TTY_SUSPEND_PID=""
-SANDBOX_TTY_MODES=""
 
 # Names each host-side task in cleanup() as it starts. Between the container
 # exiting and the operator's shell prompt returning, dejima audits every
@@ -924,18 +922,6 @@ cleanup() {
     # rather than dying with the batch. Reaped for the same reason the proxy
     # is: an unreaped child reparents to PID 1 and stays a zombie wherever
     # PID 1 does not reap.
-    # The terminal first, and its settings before its watcher: the container
-    # run restores what it saved when it attached, but a run that was killed
-    # rather than exited restores nothing, and what it would leave behind is a
-    # terminal where Ctrl-C is undefined. Cheap, and only does anything when
-    # there was a terminal to save.
-    if [ -n "${SANDBOX_TTY_MODES:-}" ]; then
-        stty "$SANDBOX_TTY_MODES" < /dev/tty 2>/dev/null || true
-    fi
-    if [ -n "${SANDBOX_TTY_SUSPEND_PID:-}" ]; then
-        kill "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
-        wait "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
-    fi
     if [ -n "${SANDBOX_CONVERSATION_SHIP_PID:-}" ]; then
         kill "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
         wait "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
@@ -1856,19 +1842,6 @@ compose_status=0
 # session, so a shipper that cannot start must not stop the session running.
 "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
 SANDBOX_CONVERSATION_SHIP_PID=$!
-
-# Ctrl-Z, which without this is not a signal at all: the container run puts
-# the terminal in raw mode, so 0x1a is delivered into the container, where a
-# harness that implements suspend stops itself with no job-control shell in
-# there to continue it. See bin/dejima-tty-suspend and #179. Started here so
-# that the terminal is only altered while a session is on it, and backgrounded
-# into this same process group so the kernel stops and continues it with
-# everything else.
-SANDBOX_TTY_MODES="$(stty -g < /dev/tty 2>/dev/null)" || SANDBOX_TTY_MODES=""
-if [ -n "$SANDBOX_TTY_MODES" ]; then
-    "$SCRIPT_DIR/dejima-tty-suspend" &
-    SANDBOX_TTY_SUSPEND_PID=$!
-fi
 
 docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then

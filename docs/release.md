@@ -97,7 +97,6 @@ why each is not a test:
 | `bin/dejima`, the entrypoint, compose | Launch a real session: mounts, proxy and exit audit only meet each other here |
 | `forges/`, the forge guard | Open a pull request through each forge and read the body that arrived |
 | any guard | Try the refused thing by the route an agent would take, not by the route the test takes |
-| `bin/dejima-tty-suspend` | Ctrl-Z a real session and `fg` it: the tests use a stand-in for the container run |
 | `web/` | Load it on a phone; nothing here can see a soft keyboard |
 | `harnesses/` | Launch the harness against a real model |
 
