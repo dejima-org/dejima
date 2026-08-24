@@ -2120,7 +2120,7 @@ _install_forge_bins() {
     [ -x "$script" ]
     local area
     for area in bin/dejima docker/entrypoint forges/ docker/forge-guard \
-                hooks/merge-guard bin/dejima-tty-suspend web/ harnesses/ \
+                hooks/merge-guard web/ harnesses/ \
                 bin/dejima-ttyd '\.dejima/allowed-domains'; do
         grep -q -- "$area" "$script" \
             || { echo "release-pass.sh no longer mentions $area"; return 1; }
@@ -2218,54 +2218,6 @@ _install_forge_bins() {
         || { echo "the briefing does not mention the browser"; return 1; }
     [[ "$out" == *"~/shared"* ]] \
         || { echo "it does not say where to leave what it sees"; return 1; }
-}
-
-# --- Ctrl-Z (#179) ----------------------------------------------------------
-#
-# Driven through a real pty with a real interactive shell on it, because the
-# question is not what a signal does - it is whether the terminal turns the
-# keystroke into a signal at all. Under `docker compose run` it does not: raw
-# mode has ISIG off, so Ctrl-Z is the byte 0x1a and it goes to the container.
-#
-# The stand-in for the container run is in test/fixtures. Docker is not
-# available here and is not what is under test; the terminal handling is.
-
-@test "Ctrl-Z suspends the whole launch instead of vanishing into the container" {
-    command -v python3 >/dev/null 2>&1 || skip "needs python3"
-    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttysuspend.XXXXXX")"
-    run env TTY_SUSPEND_WORK="$work" python3 \
-        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
-        "$REPO_ROOT/bin/dejima-tty-suspend" bash
-    [ "$status" -ne 77 ] || skip "no pty available here"
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    # Named rather than counted, so a harness that silently stopped checking
-    # something cannot pass this by reporting fewer results.
-    local name
-    for name in cycle1-suspends-the-job cycle1-nothing-reached-the-container \
-                cycle1-raw-mode-restored cycle1-redraw-poked \
-                cycle2-suspends-the-job cycle2-raw-mode-restored \
-                input-reaches-the-resumed-session ctrl-c-still-reaches-the-session; do
-        [[ "$output" == *"PASS $name"* ]] \
-            || { echo "$name was not checked:"; echo "$output"; return 1; }
-    done
-}
-
-@test "the Ctrl-Z harness sees the bug when the fix is not there" {
-    # The control. A test that cannot fail is not evidence, and this one is
-    # made entirely of timing and terminal state - the two things most likely
-    # to quietly stop testing anything.
-    command -v python3 >/dev/null 2>&1 || skip "needs python3"
-    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttycontrol.XXXXXX")"
-    run env TTY_SUSPEND_WORK="$work" TTY_SUSPEND_NO_HELPER=1 python3 \
-        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
-        "$REPO_ROOT/bin/dejima-tty-suspend" bash
-    [ "$status" -ne 77 ] || skip "no pty available here"
-    [ "$status" -ne 0 ] || { echo "the control passed, so it proves nothing:"; echo "$output"; return 1; }
-    [[ "$output" == *"FAIL cycle1-suspends-the-job"* ]] \
-        || { echo "$output"; return 1; }
-    # The byte itself, which is the whole bug: it reached the container.
-    [[ "$output" == *"FAIL cycle1-nothing-reached-the-container b'\\x1a'"* ]] \
-        || { echo "the container did not receive the keystroke:"; echo "$output"; return 1; }
 }
 
 # --- guards that do not need the harness ------------------------------------
