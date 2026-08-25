@@ -26,6 +26,7 @@ config file behind them.
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
+| `[core] identity` | unset | which `[identity.<name>]` section supplies this project's credentials and git name; also settable per launch with `--identity`. A name with no section is refused rather than falling back |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
@@ -421,6 +422,55 @@ tooling is installed in the image. Add it with `dejima-dep` rather than by
 editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
+
+## Identities
+
+One machine, several accounts. A `[identity.<name>]` section groups the things
+that belong to a **person** rather than to a project - the SSH key, the forge
+token, the name on the commits - so that selecting an account is one word
+rather than four edits.
+
+```ini
+[identity.work]
+ssh_key    = ~/.ssh/id_work
+user_name  = A Name
+user_email = name@work.example
+token_file = ~/.config/gitea/work-token
+
+[identity.oss]
+ssh_key                = ~/.ssh/id_oss
+user_email             = name@personal.example
+push_token_file        = ~/.config/gh/oss-push
+```
+
+Select one with `[core] identity = work`, or per launch with
+`--identity oss`.
+
+**What an identity may set** is deliberately narrow: `ssh_key`, `user_name`,
+`user_email`, and whichever keys the forges declare as a person's. A forge
+says which of its own keys those are (`identity_keys` in its manifest), so
+`token_file` belongs to an identity on the gitea path and `push_token_file`
+does on the GitHub one, and neither is a list core keeps its own copy of.
+
+**A key an identity does not set falls through to the file.** The `oss`
+identity above names no `token_file`, so `[forge.gitea] token_file` answers
+for it. An identity is an override for what it names, not a replacement for
+the section.
+
+**A name with no section is refused.** `[core] identity = wrok` does not
+quietly use this machine's own credentials - it stops the launch and says so.
+Pushing under the wrong key fails loudly; pushing under your default key when
+you asked for another one does not fail at all, which is the direction worth
+being careful about.
+
+**`user_name` and `user_email` reach the container's git config**, appended to
+the copy dejima already makes of your `~/.gitconfig`. Your real one is not
+touched, which was already true and is what the copy exists for.
+
+This is the half of per-project configuration that a project cannot carry: a
+project's `.dejima/` is committed and shared with everyone working on it, and
+a key path is yours and your machine's. A project can say which identity it
+wants; only you can say where that identity's key lives.
 
 ## Headless git push without agent forwarding
 

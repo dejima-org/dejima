@@ -487,6 +487,100 @@ write_config() {
         || { echo "the refusal does not name the key: $output"; return 1; }
 }
 
+# --- identities: the half of a project's config that belongs to a person -----
+#
+# A project's .dejima/ is committed and shared; an ssh key path and a token
+# path are per-user and per-machine. An identity is where those live, so a
+# project can name an account without naming a path.
+
+_identity_fixture() {
+    ID_DIR="$(mktemp -d)"
+    : > "$ID_DIR/default-key"; : > "$ID_DIR/work-key"; : > "$ID_DIR/oss-key"
+    : > "$ID_DIR/default-token"; : > "$ID_DIR/work-token"
+    write_config '[core]' 'forge = gitea' "ssh_key = $ID_DIR/default-key" \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        "token_file = $ID_DIR/default-token" \
+        '[identity.work]' "ssh_key = $ID_DIR/work-key" 'user_name = A Name' \
+        'user_email = name@work.example' "token_file = $ID_DIR/work-token" \
+        '[identity.oss]' "ssh_key = $ID_DIR/oss-key"
+}
+
+@test "an identity supplies the ssh key and the forge credential" {
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    grep -qx "forge.gitea.token_file=$ID_DIR/work-token" <<< "$output" \
+        || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a key the identity does not name falls through to the file" {
+    # An identity overrides what it names. Treating it as a replacement for
+    # the whole section would make a half-filled one silently unset the rest.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity oss --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/oss-key" <<< "$output" || { echo "$output"; return 1; }
+    grep -qx "forge.gitea.token_file=$ID_DIR/default-token" <<< "$output" \
+        || { echo "oss has no token_file and did not fall through: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity that names nothing is refused, not ignored" {
+    # The whole point of the refusal: falling through to this machine's own
+    # credentials would push under the wrong account with nothing saying so.
+    # Pushing under the wrong key fails loudly; pushing under the default key
+    # when you asked for another does not fail at all.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity wrok --print-config
+    [ "$status" -ne 0 ] || { echo "a nonexistent identity was accepted"; return 1; }
+    [[ "$output" == *"wrok"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"core.ssh_key="* ]] \
+        || { echo "printed a resolved config under an identity that does not exist"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a flag beats the identity, and the identity beats the file" {
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    # [core] identity in the file, overridden by the flag.
+    write_config '[core]' 'identity = work' "ssh_key = $ID_DIR/default-key" \
+        '[identity.work]' "ssh_key = $ID_DIR/work-key" \
+        '[identity.oss]' "ssh_key = $ID_DIR/oss-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --identity oss --print-config
+    grep -qx "core.ssh_key=$ID_DIR/oss-key" <<< "$output" \
+        || { echo "--identity did not beat [core] identity: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity may only set what a person owns" {
+    # Not a second config file with different rules about what may be in it.
+    _identity_fixture
+    write_config '[core]' 'forge = gitea' '[identity.work]' 'firewall = off'
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -ne 0 ] || { echo "an identity set [core] firewall"; return 1; }
+    [[ "$output" == *"firewall"* ]] || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity's git name reaches the container's gitconfig copy" {
+    # Appended to the COPY dejima already makes, so the real ~/.gitconfig is
+    # untouched - which was already true and is what the copy is for.
+    _identity_fixture
+    grep -q 'identity_git_field' "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer reads the identity's git name"; return 1; }
+    # Written with git itself rather than printf: the value is the operator's
+    # own text, and a name with a quote or a backslash in it has to survive
+    # into a file git reads back the same way.
+    grep -q 'git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig"' "$REPO_ROOT/bin/dejima" \
+        || { echo "the git name is no longer written with git"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
 @test "--harness selects a harness for one launch without changing the default" {
     # A host keeps one harness as its default and reaches another when it wants
     # to. Everything else was already in place - harnesses configure side by

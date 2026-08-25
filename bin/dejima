@@ -240,6 +240,7 @@ while [ $# -gt 0 ]; do
                           _defer_harness_key --context-window context_window "$2"; shift 2 ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
+        --identity) _need_value --identity "${2:-}"; _set_override core.identity "$2"; shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
         --extra-readonly|--ro)
@@ -257,12 +258,24 @@ done
 # Defined here rather than in the library because an override is a property
 # of one invocation of this launcher, not of the config file.
 config_get() {
-    local key="$1.$2" entry
+    local key="$1.$2" entry value
     for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
         [ "${entry%%=*}" = "$key" ] || continue
         printf '%s' "${entry#*=}"
         return 0
     done
+    # The selected identity, for the handful of keys an identity owns: the
+    # credentials and the ssh key a PERSON brings, which is the half a shared
+    # project file cannot carry. Below a flag, because a flag is this launch
+    # and an identity is this project; above the file, because the file is the
+    # machine's default and naming an identity is how you say "not that one".
+    #
+    # Every consumer goes through config_get, including forge_env_exports in
+    # the library, so this one wrapper is the whole insertion point.
+    if value="$(identity_get "$1" "$2")"; then
+        printf '%s' "$value"
+        return 0
+    fi
     _config_get_from_file "$1" "$2"
 }
 
@@ -419,6 +432,18 @@ fi
 # testable without booting Docker.
 if [ "$PRINT_CONFIG" = 1 ]; then
     config_validate || exit 1
+    # Before printing, not only before launching. Every value below resolves
+    # THROUGH the identity, so printing them under a name that resolves to
+    # nothing would show this machine's own credentials as though they were
+    # the identity's - the exact confusion the refusal exists to prevent, in
+    # the one command an operator runs to check what they configured.
+    _identity=""
+    config_exists && { _identity="$(config_get core identity)" || _identity=""; }
+    if [ -n "$_identity" ] && ! identity_exists "$_identity"; then
+        echo "[core] identity is '$_identity', and no [identity.$_identity] section sets" >&2
+        echo "anything in $(config_path)." >&2
+        exit 1
+    fi
     while IFS= read -r _key; do
         _section="${_key%.*}"
         _leaf="${_key##*.}"
@@ -1131,6 +1156,23 @@ if [ -f "$HOME/.gitconfig" ]; then
 else
     touch "$SANDBOX_GITCONFIG_DIR/.gitconfig"
 fi
+# The selected identity's git name, appended to the COPY. Appended rather than
+# rewritten because git takes the last value for a key, so this needs no
+# knowledge of what the operator's own file already says - and because the
+# copy is the only thing being edited, the real ~/.gitconfig is untouched
+# whatever happens here.
+#
+# `git config -f` rather than a printf of "[user]\n\tname = ...": the value is
+# the operator's own text, and git quotes and escapes its own file format
+# correctly where a printf would produce something git reads differently the
+# moment a name contains a quote or a backslash.
+for _git_field in name email; do
+    _git_value="$(identity_git_field "user_$_git_field")" || _git_value=""
+    [ -n "$_git_value" ] || continue
+    git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" "user.$_git_field" "$_git_value" \
+        || { echo "could not set user.$_git_field from [identity] - is git installed?" >&2; exit 1; }
+done
+unset _git_field _git_value
 
 export WORKSPACE_DIR
 # The image's user is built to match this uid/gid/username exactly (see
