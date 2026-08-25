@@ -42,9 +42,35 @@ services:
     # ten per run - becomes a permanent zombie, and a long session eventually
     # exhausts the cgroup pids limit and can no longer fork at all.
     init: true
+    # An explicit floor rather than Docker's default set plus two. The default
+    # carries about fourteen capabilities for the entrypoint's root phase, and
+    # the entrypoint uses six of them: it writes and chowns files, runs the
+    # firewall, and drops privilege twice (gosu for the session, `ulogd -u` for
+    # the log daemon). MKNOD, SETFCAP, SETPCAP, SYS_CHROOT, AUDIT_WRITE and
+    # NET_BIND_SERVICE are not used by anything here - the last one because the
+    # sysctl below is what lets the TLS terminator bind :443 unprivileged.
+    #
+    # This narrows the ROOT phase. The session user's capabilities were already
+    # empty: they are cleared on the gosu drop, which runtime.bats asserts by
+    # reading CapEff of the running process. What this adds is that the set was
+    # never there to be regained.
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    # No path back up. gosu drops privilege rather than gaining it, so this
+    # does not interfere with it - what it forbids is a setuid binary or a file
+    # capability raising privileges on exec, which is the shape any escalation
+    # from the session user would have to take. The gosu claim becomes
+    # structural instead of only observed.
+    security_opt:
+      - no-new-privileges:true
     # The credential-proxy TLS terminator binds :443 as the unprivileged
     # sandbox user (see entrypoint.sh). Docker already defaults this to 0, but
     # pinning it makes the dependency explicit: a future default change then

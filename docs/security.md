@@ -710,6 +710,14 @@ session, where the credential deliberately never goes.
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
+- The container runs with `no-new-privileges` and an explicit capability
+  floor - `cap_drop: ALL` plus the six the entrypoint's root phase actually
+  uses. The first means a setuid binary or a file capability cannot raise
+  privileges on exec, which is the shape any escalation from the session user
+  would have to take; the second means the capabilities nothing here uses were
+  never in the bounding set to be regained. Both are asserted against a running
+  container rather than against the compose file, and the capability list the
+  test uses is read out of that file so the two cannot drift.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see
   [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)
