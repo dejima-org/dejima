@@ -96,6 +96,9 @@ touches '^(forges/|bin/dejima-provider-lib|docker/forge-guard)' &&
        body that arrived. forge = github has never been run end to end."
 touches '^(docker/git-guard|hooks/git-push-guard|hooks/merge-guard|docker/forge-guard)' &&
     manual "Try the thing the guard refuses, by the route an agent would take."
+touches '^(bin/dejima-tty-suspend|bin/dejima$)' &&
+    manual "Ctrl-Z a real session and fg it back: the terminal handling is
+       tested against a stand-in, not against a real container run."
 touches '^web/' &&
     manual "Load the page on a real phone. Nothing here can see a soft keyboard."
 touches '^(harnesses/|bin/harness/|docker/harness-wrapper)' &&

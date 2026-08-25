@@ -876,6 +876,9 @@ SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 SANDBOX_CONVERSATION_SHIP_PID=""
+SANDBOX_TTY_SUSPEND_PID=""
+SANDBOX_TTY_MODES=""
+SANDBOX_CLIENT_PID=""
 
 # Names each host-side task in cleanup() as it starts. Between the container
 # exiting and the operator's shell prompt returning, dejima audits every
@@ -922,6 +925,20 @@ cleanup() {
     # rather than dying with the batch. Reaped for the same reason the proxy
     # is: an unreaped child reparents to PID 1 and stays a zombie wherever
     # PID 1 does not reap.
+    # The terminal first, and its settings before their watcher: the
+    # container run restores what it saved when it attached, but a run that
+    # was killed rather than exited restores nothing, and what that leaves
+    # behind is a terminal with no interrupt character.
+    if [ -n "${SANDBOX_TTY_MODES:-}" ]; then
+        stty "$SANDBOX_TTY_MODES" < /dev/tty 2>/dev/null || true
+        # And the cursor, for the same reason the modes are restored here: a
+        # run that was killed rather than exited put neither back.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
+    fi
+    if [ -n "${SANDBOX_TTY_SUSPEND_PID:-}" ]; then
+        kill "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
+        wait "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
+    fi
     if [ -n "${SANDBOX_CONVERSATION_SHIP_PID:-}" ]; then
         kill "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
         wait "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
@@ -1843,7 +1860,98 @@ compose_status=0
 "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
 SANDBOX_CONVERSATION_SHIP_PID=$!
 
-docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
+# Ctrl-Z (#179). Two things have to be true at once, and the second is the
+# one that took four rounds of measurement to find.
+#
+# The keystroke has to become a signal at all. Under a container run the
+# terminal is raw, ISIG is off, and Ctrl-Z is the byte 0x1a delivered into the
+# container - where a harness that implements suspend stops itself, with no
+# job-control shell in there to continue it. dejima-tty-suspend takes that one
+# character back for the host.
+#
+# And the container client must never receive SIGTSTP. Measured, holding
+# everything else equal: the client survives SIGSTOP and does not survive
+# SIGTSTP. A catchable stop signal interrupts the read it is blocked in, its
+# input forwarding never recovers, and the session comes back alive but deaf -
+# resumed, with nothing typed reaching the harness. That is what shipped once
+# and had to be taken out again.
+#
+# So the client is started with SIGTSTP ignored, which it inherits and keeps
+# across exec, and the launcher converts the keystroke into an explicit
+# SIGSTOP for it before stopping itself. The job still stops completely, so
+# the prompt comes back; the client is stopped by a signal that interrupts
+# nothing.
+#
+# < /dev/tty because a background command is given /dev/null for stdin, and a
+# container client with no terminal reads EOF and exits at once.
+SANDBOX_TTY_MODES="$(stty -g < /dev/tty 2>/dev/null)" || SANDBOX_TTY_MODES=""
+if [ -n "$SANDBOX_TTY_MODES" ]; then
+    "$SCRIPT_DIR/dejima-tty-suspend" &
+    SANDBOX_TTY_SUSPEND_PID=$!
+
+    trap '' TSTP
+    docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" < /dev/tty &
+    SANDBOX_CLIENT_PID=$!
+    trap - TSTP
+
+    # The pid $! names is the docker CLI; `docker compose run` then runs the
+    # compose plugin as a child of it, and the child is what holds the
+    # terminal. Stopping only the pid leaves that child in raw mode with the
+    # shell also on the terminal - a cursorless prompt that resumes to
+    # nothing, which is what the first version of this fix produced.
+    #
+    # Deepest first, so nothing is left running long enough to fork again;
+    # shallowest first on the way back, so a parent is ready before its child
+    # resumes.
+    _stop_tree() {
+        local p="$1" kid
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _stop_tree "$kid"; done
+        kill -STOP "$p" 2>/dev/null || true
+    }
+    _cont_tree() {
+        local p="$1" kid
+        kill -CONT "$p" 2>/dev/null || true
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _cont_tree "$kid"; done
+    }
+
+    _on_tstp() {
+        _stop_tree "$SANDBOX_CLIENT_PID"
+        # Show the cursor again. A full-screen harness hides it (DECTCEM,
+        # \033[?25l) and puts it back when it exits - but a suspend is not an
+        # exit, so the shell prompt inherits an invisible cursor and the
+        # terminal looks like a connection that died. The harness hides it
+        # again on resume, when the SIGWINCH below makes it repaint.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
+        # Default disposition to actually stop, then put the handler back for
+        # the next time. Everything after the re-raise runs on resume.
+        trap - TSTP
+        kill -TSTP $$
+        trap _on_tstp TSTP
+        _cont_tree "$SANDBOX_CLIENT_PID"
+    }
+    trap _on_tstp TSTP
+
+    # Looped because `wait` returns early when a trap runs, which is exactly
+    # what happens on every suspend.
+    while kill -0 "$SANDBOX_CLIENT_PID" 2>/dev/null; do
+        if wait "$SANDBOX_CLIENT_PID"; then
+            compose_status=0
+        else
+            compose_status=$?
+        fi
+        # 128+n means a signal interrupted the wait rather than the client
+        # exiting; anything else is the client's own status.
+        case "$compose_status" in
+            146|148) continue ;;
+        esac
+        break
+    done
+    trap - TSTP
+else
+    # No terminal - a CI job, or output redirected. Nothing to suspend, and
+    # /dev/tty would not open.
+    docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
+fi
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2
