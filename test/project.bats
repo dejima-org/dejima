@@ -112,6 +112,35 @@ dockerfile_for() {
         "$LAUNCH_DIR/dockerfile-log" 2>/dev/null
 }
 
+@test "valid_domain refuses the hostname shapes a resolver would read differently" {
+    # The matcher is a trust boundary: what it accepts becomes a dnsmasq
+    # `server=` line and an ipset entry. The published bypass in this space
+    # came from an egress control accepting a string its resolver then read as
+    # a different host, so the shapes below are the ones worth asserting on
+    # rather than only "does it reject evil.com".
+    #
+    # Run against this matcher during the 2026-08 prior-art sweep: every case
+    # here was already refused except the empty label, which was not.
+    local bad
+    for bad in 'a..b.com' 'github.com.' '.github.com' '-bad.com' 'bad-.com' \
+               'a.-b.com' 'evil.com%00.github.com' 'a_b.com' '' \
+               'evil.com
+github.com'; do
+        run bash -c 'source "$1"; valid_domain "$2"' _ "$LIB" "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted: $(printf %q "$bad")"; return 1; }
+    done
+
+    # And the shapes that must keep working, including the ones the tightening
+    # could plausibly have broken: an IDNA label starts with a letter and
+    # contains hyphens, and a single label with no dot is a real internal name.
+    local good
+    for good in 'crates.io' 'static.crates.io' 'xn--e1afmkfd.com' 'GitHub.com' \
+                'localhost' 'a' 'llm-backend.example.com'; do
+        run bash -c 'source "$1"; valid_domain "$2"' _ "$LIB" "$good"
+        [ "$status" -eq 0 ] || { echo "refused: $good"; return 1; }
+    done
+}
+
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
     [ "$status" -eq 0 ]

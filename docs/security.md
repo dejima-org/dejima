@@ -16,6 +16,61 @@ person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
 
+## What dejima does not sandbox
+
+Every item here is documented somewhere below, and a document organised by
+control makes a reader assemble the negative space themselves. Most will not.
+So it is collected here, at the top, where it is the first thing read rather
+than the thing inferred from silence.
+
+- **Exfiltration through a domain that is allowed.** The egress allowlist
+  decides *where* a session may connect, not what it may put in the request. A
+  session that can reach a host can encode data into a path or a query it
+  sends there. Allowing a domain at all creates that channel.
+- **Data encoded into DNS query names.** The DNS proxy answers for allowlisted
+  domains; the names asked for are a channel of their own.
+- **Anything below the container, where nothing is arranged there.** dejima's
+  blast-radius table has rows beneath the container, and their controls belong
+  to [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener).
+  Run on a laptop with no VM layer, the row below the container is the
+  operator's own machine, and dejima has nothing to say about it. See
+  [Which deployment this describes](threat-model.md#which-deployment-this-describes).
+- **Anything finer than a session.** The unit of isolation is one container for
+  one session. An MCP server, a hook, or a tool the session runs inherits the
+  session's whole reach - dejima reports that a session *added* an MCP server
+  (see the audit surfaces below) and does not constrain what that server then
+  does. Per-tool granularity would need a second sandbox inside this one.
+- **Resource exhaustion.** No time limit, no memory limit, no CPU limit. A
+  session that loops until someone notices is not prevented, and this is a
+  deliberate omission rather than an oversight - see
+  [Why there are no timeouts](#why-there-are-no-timeouts).
+- **The first layer's controls against an agent that has stopped
+  cooperating.** The briefing and `.dejima.md` are advice. They shape what a
+  cooperating agent does and stop nothing that has decided otherwise. Only the
+  layers below them are enforcement.
+
+## Why there are no timeouts
+
+Every published checklist for sandboxing an agent lists timeouts alongside
+non-root, egress filtering and read-only mounts. dejima has none, and the
+reason is a judgement about what dejima is for rather than an item not yet
+reached.
+
+**A runaway session costs money and does not cross the boundary.** It burns
+tokens and holds a CPU until someone looks. Nothing about it reaches the host,
+widens the allowlist, or writes where a session may not write - the guarantees
+dejima makes are all still held while it happens. A timeout would protect a
+budget, which dejima has never claimed to protect.
+
+**And "unattended" here does not mean "unobserved".** The sessions this is
+built for run for days, and are checked at every issue and every pull request.
+They need less babysitting, not none. A wall clock tuned for that is either so
+long it prevents nothing or short enough to kill work in progress, and killing
+a session mid-commit is a failure mode of its own.
+
+If this changes it will be because a resource limit starts protecting the
+boundary rather than the bill.
+
 ## Blast radius by layer
 
 Where each layer's compromise stops, with and without the thing arranged

@@ -724,6 +724,7 @@ covers, and how to run them.
 | [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
 | [security.md](docs/security.md) | Provider trust, the egress firewall, identity, and logging |
 | [threat-model.md](docs/threat-model.md) | What is assumed hostile, and where each layer's compromise stops |
+| [research-review.md](docs/research-review.md) | Checking the threat model against the field's, and the standing questions that are the agenda |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
