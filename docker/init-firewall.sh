@@ -49,14 +49,59 @@ ipset destroy github-domains 2>/dev/null || true
 # level, e.g. no ip6_tables module) - once it's confirmed to work at all, a
 # failure partway through must fail the whole script (set -e, no more
 # blanket `|| true`) rather than silently leaving IPv6 wide open.
+#
+# The `else` below used to log that the family was presumably off at the
+# kernel level, and continue. That inferred a fact about the WORLD from a fact
+# about a TOOL, and the two are not the same condition: a container whose kernel
+# lacks ip6_tables, on a host with IPv6 enabled, took that branch, logged a
+# reassuring line, and ran with IPv6 live and unfiltered. Nothing failed,
+# because the only thing that had happened was a check that could not tell.
+#
+# So the branch asks the kernel instead. /proc/net/if_inet6 lists every IPv6
+# address on every interface, and it is the netns's own view - present with
+# `::1` alone when the stack is up and nothing is reachable, absent entirely
+# when IPv6 is compiled out.
+#
+# Loopback does not count. Refusing to start over `::1` would refuse every
+# container that has no IPv6 connectivity at all, which is a false refusal
+# for the common case. What matters is an address on an interface that leaves
+# the box.
+_ipv6_off_box() {
+    [ -e /proc/net/if_inet6 ] || return 1
+    # address ifindex prefixlen scope flags devname
+    awk '$6 != "lo" { found = 1 } END { exit !found }' /proc/net/if_inet6
+}
+
 if ip6tables -L >/dev/null 2>&1; then
     ip6tables -F
     ip6tables -X
     ip6tables -P INPUT DROP
     ip6tables -P OUTPUT DROP
     ip6tables -P FORWARD DROP
+elif _ipv6_off_box; then
+    echo "ip6tables is unusable here, and IPv6 is live on an interface that" >&2
+    echo "leaves this container. Turning the family off in this network" >&2
+    echo "namespace, since it cannot be filtered." >&2
+    # Written to /proc directly rather than through sysctl(8), which is one
+    # more thing that has to be in the image for the firewall to hold. Per
+    # interface as well as `all`, because which of those flushes existing
+    # addresses has varied across kernels.
+    for _conf in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+        [ -w "$_conf" ] || continue
+        echo 1 > "$_conf" 2>/dev/null || true
+    done
+    if _ipv6_off_box; then
+        echo "" >&2
+        echo "IPv6 is still up and there is no way to filter it from here, so" >&2
+        echo "every rule below would be bypassable by an AAAA-resolved address." >&2
+        echo "Refusing to start rather than reporting a boundary that is not" >&2
+        echo "there. Either give the container a usable ip6tables (the" >&2
+        echo "ip6_tables module on the host), or disable IPv6 for its network." >&2
+        exit 1
+    fi
+    echo "IPv6 is off in this namespace."
 else
-    echo "ip6tables unusable - assuming IPv6 is unavailable at the kernel level"
+    echo "ip6tables unusable, and no IPv6 address outside loopback - nothing to filter"
 fi
 
 # Reinsert just the rules captured above - nothing else Docker had set up in

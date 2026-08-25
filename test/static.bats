@@ -3169,6 +3169,37 @@ registered_commands() {
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
 }
 
+@test "an unusable ip6tables is not read as IPv6 being absent" {
+    # The branch used to print "assuming IPv6 is unavailable at the kernel
+    # level" and continue, which inferred a fact about the world from a fact
+    # about a tool. A container whose kernel lacks ip6_tables, on a host with
+    # IPv6 enabled, took it and ran with IPv6 live and unfiltered - and nothing
+    # failed, because all that had happened was a check that could not tell.
+    #
+    # Raised by the dejima-devbox-hardener review, where the same shape had
+    # just been found twice: an audit reporting PASS from a probe that only
+    # looked at IPv4.
+    local f="$SANDBOX_DIR/init-firewall.sh"
+    run grep -n 'assuming IPv6 is unavailable' "$f"
+    [ "$status" -ne 0 ] || { echo "the inference is back:"; echo "$output"; return 1; }
+
+    # It asks the kernel instead, and loopback does not count - refusing over
+    # ::1 would refuse every container with no IPv6 connectivity at all.
+    grep -q '/proc/net/if_inet6' "$f" \
+        || { echo "nothing checks whether IPv6 is actually up"; return 1; }
+    grep -q 'lo' "$f" || { echo "the check no longer excludes loopback"; return 1; }
+
+    # And it can refuse. A branch that only logs is the thing being replaced,
+    # so the exit has to be reachable from it.
+    local branch
+    branch="$(sed -n '/^elif _ipv6_off_box/,/^else$/p' "$f")"
+    [ -n "$branch" ] || { echo "the live-IPv6 branch is gone"; return 1; }
+    grep -q 'exit 1' <<< "$branch" \
+        || { echo "the branch cannot refuse to start"; return 1; }
+    grep -q 'disable_ipv6' <<< "$branch" \
+        || { echo "it refuses without first trying to turn the family off"; return 1; }
+}
+
 @test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
     # Same persistence-path rationale as the hooks mount: these carry
     # executable skill scripts / injectable command, agent, and output-style
