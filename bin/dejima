@@ -34,12 +34,15 @@ Options (each overrides the config file for one launch only):
   --forge <name>          which forge integration to use
   --workflow <name>       what the agent is told to do with its work
   --cmd <command>         run this instead of the harness's own command
+  --identity <name>       which [identity.<name>] supplies the credentials
+  -i, --include <tool>    add an optional tool to this launch (repeatable);
+                          see docs/tools.md for what dejima ships
   --model <id>            the selected harness's model, where it has one;
   --base-url <url>          its endpoint, and how much context it may use.
   --context-window <n>      Refused for a harness with no such setting
-  --ro <path>             also mount a host path read-only; --rw read-write.
-                          Repeatable; both refuse a path overlapping dejima's
-                          own approval, audit or epitaph stores
+  --ro <path>             mount read-only; --rw read-write. Repeatable. Long
+                          forms --extra-readonly and --extra-read-write. Both
+                          refuse a path overlapping dejima's own stores
   --allow-github-push     open GitHub's push path (port 22)
   --strict-audit          refuse to start over unacknowledged CRITICAL findings
   --no-log                ship nothing to the log endpoint this launch
@@ -53,9 +56,8 @@ Options (each overrides the config file for one launch only):
 Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
 config that says off is a decision, not a default to override in passing.
 
-Config lives in ~/.config/dejima/config and [core] harness must be set before a
-launch will start. --print-config prints every key as it resolves for this
-launch, flags included. docs/configuration.md describes them.
+Config lives in ~/.config/dejima/config and [core] harness must be set before
+a launch starts. --print-config prints every key as it resolves.
 DEJIMA_HELP
         exit 0 ;;
 esac
@@ -215,6 +217,10 @@ _defer_harness_key() {
 PRINT_CONFIG=0
 PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
+# Additive, like --ro and --rw and unlike every other flag here: an optional
+# tool asked for on the command line is one MORE than the config and the
+# project already agreed on, not a replacement for them. Repeatable.
+TOOL_FLAGS=()
 NO_LOG=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -241,6 +247,9 @@ while [ $# -gt 0 ]; do
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
         --identity) _need_value --identity "${2:-}"; _set_override core.identity "$2"; shift 2 ;;
+        --include|-i)
+            _need_value --include "${2:-}"
+            TOOL_FLAGS+=("$2"); shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
         --extra-readonly|--ro)
@@ -544,6 +553,44 @@ case " $_corpus_approved " in
     *" commit-per-step "*) DEJIMA_CORPUS=on ;;
 esac
 unset _corpus_approved
+
+# The optional tools this launch has: [core] tools, plus whatever the project
+# declared AND the operator approved, plus --include. A union rather than a
+# precedence chain, because each of the three answers a different question -
+# what this machine always wants, what this project needs, what this run is
+# for - and none of them is a correction of another.
+#
+# The project's half comes from the APPROVAL STORE and never from the
+# declaration in the workspace, for the reason the corpus block above gives:
+# that file is session-writable, and a session that could add a tool would be
+# choosing what the next session's image contains. This file may not name that
+# directory at all, and a static test holds it to that - which is why the path
+# is not spelled out here.
+#
+# Every name is checked against a manifest that exists before it reaches the
+# image build. approved_entries already refuses an entry its validator does
+# not accept, so the only unchecked source is the flag - which is the
+# operator's own typing, and gets the same answer.
+DEJIMA_TOOLS=""
+_tools_wanted="$(config_get core tools | tr ':' ' ')"
+_tools_wanted="$_tools_wanted $(approved_entries "$(config_root)" tools | tr '\n' ' ')"
+if [ -n "$PROJECT_STORE" ]; then
+    _tools_wanted="$_tools_wanted $(approved_entries "$PROJECT_STORE" tools | tr '\n' ' ')"
+fi
+_tools_wanted="$_tools_wanted ${TOOL_FLAGS[*]-}"
+for _tool in $_tools_wanted; do
+    [ -n "$_tool" ] || continue
+    case " $DEJIMA_TOOLS " in *" $_tool "*) continue ;; esac
+    if ! valid_tool_name "$_tool"; then
+        echo "no optional tool named '$_tool'." >&2
+        echo "Available: $(provider_list tool | tr '\n' ' ')" >&2
+        echo "See docs/tools.md." >&2
+        exit 1
+    fi
+    manifest_validate tool "$_tool" || exit 1
+    DEJIMA_TOOLS="${DEJIMA_TOOLS:+$DEJIMA_TOOLS }$_tool"
+done
+unset _tools_wanted _tool
 
 
 AUDIT_DIR="$(config_get audit dir)"
@@ -1886,6 +1933,7 @@ SANDBOX_HARNESS_IMAGE_FILES="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image
 
 if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
     || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ] \
+    || [ -n "$DEJIMA_TOOLS" ] \
     || [ -s "$(config_root)/dependencies" ] \
     || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
     SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
@@ -1913,6 +1961,34 @@ if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
     fi
     SANDBOX_IMAGE="$tag"
 fi
+
+# One layer per tool, above the harness and below the dependencies. Above the
+# harness because a tool is meant to be on PATH for it; below the operator's
+# own dependencies because those are the last word on what the image holds.
+#
+# Tagged by name and version-of-spec so two projects wanting the same tool
+# share a layer, and a manifest that changes what it installs gets a new one
+# rather than a stale cached hit.
+for _tool in $DEJIMA_TOOLS; do
+    _tool_install="$(manifest_get tool "$_tool" install)"
+    _tool_env="$(manifest_get tool "$_tool" image_env)"
+    _tool_layout="$(manifest_get tool "$_tool" install_layout)"
+    tag="dejima:${SANDBOX_USER}-tool-${_tool}-$(printf '%s' "$_tool_install" | sha256sum | cut -c1-12)"
+    DEJIMA_TARBALL_STRIP="$_tool_layout" \
+        generate_spec_dockerfile "$SANDBOX_IMAGE" "$_tool_install" "" "$_tool_env" "" \
+        > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building $tag ($_tool: $(manifest_get tool "$_tool" description))..."
+    if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback, for the reason the harness layer gives: a session told
+        # it has a tool and given an image without one fails inside the
+        # container, where it reads as dejima being broken.
+        echo "Failed to build $tag." >&2
+        echo "$_tool installs from: $_tool_install" >&2
+        exit 1
+    fi
+    SANDBOX_IMAGE="$tag"
+done
+unset _tool _tool_install _tool_env _tool_layout
 
 if [ -s "$(config_root)/dependencies" ]; then
     build_dep_layer "dejima:${SANDBOX_USER}-global" "$(config_root)"

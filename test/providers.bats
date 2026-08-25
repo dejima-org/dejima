@@ -5,6 +5,7 @@
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    LIB_PROJECT="$REPO_ROOT/bin/dejima-project-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
 }
@@ -827,6 +828,97 @@ assert_remedy_forges_exist() {
     run lib provider_validate_selection none local-only claude-code
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ -z "$output" ]
+}
+
+# --- optional tools ----------------------------------------------------------
+
+@test "every shipped tool is pinned by digest, not fetched from a moving ref" {
+    # The bar docs/tools.md sets, asserted rather than described. A tool that
+    # installs from whatever a branch points at today is one nothing has
+    # reviewed, and it would build differently on different days with no
+    # change to this repository.
+    local tool spec
+    for tool in $(lib provider_list tool); do
+        run lib manifest_validate tool "$tool"
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        spec="$(lib manifest_get tool "$tool" install)"
+        [[ "$spec" == tarball:* ]] \
+            || { echo "$tool does not install from a pinned artifact: $spec"; return 1; }
+        # valid_tarball_spec already requires a 64-hex digest and an https
+        # URL; this is the part it cannot check - that the URL names a
+        # version rather than a branch.
+        [[ "$spec" != *"/refs/heads/"* && "$spec" != *"/master/"* && "$spec" != *"/main/"* ]] \
+            || { echo "$tool installs from a moving ref: $spec"; return 1; }
+    done
+}
+
+@test "a tool cannot declare anything that changes what dejima permits" {
+    # The manifest has no key for a hook, a mount, a domain or a guard. A tool
+    # that needed one would be a change to the boundary rather than a program
+    # on PATH, and adding the key is the moment to argue about it - not the
+    # moment a manifest quietly starts carrying one.
+    local key
+    for key in guards hooks mounts api_domains fixed_hosts install_hook \
+               briefing no_confirm_args settings_args; do
+        run lib manifest_get tool rtk "$key"
+        [ "$status" -ne 0 ] \
+            || { echo "the tool schema accepts '$key', which it must not"; return 1; }
+    done
+}
+
+@test "rtk declares the archive shape its release actually has" {
+    # Inspected: `tar tzf rtk-x86_64-unknown-linux-musl.tar.gz` lists one
+    # entry, `rtk`, with no enclosing directory. Declared `prefix`, the layer
+    # would strip that single component, extract nothing, and build cleanly -
+    # a tool the session is told it has and does not.
+    #
+    # Pinned here because the emitter test below exercises both shapes with an
+    # explicit setting and so cannot notice this manifest changing.
+    [ "$(lib manifest_get tool rtk install_layout)" = "binary" ] \
+        || { echo "rtk's release is a bare binary and the manifest no longer says so"; return 1; }
+}
+
+@test "rtk is declared with its telemetry switched off in the image" {
+    # Two independent offs, because either one can be wrong: the tool's own
+    # switch here, and the firewall, which does not allowlist the endpoint.
+    [[ "$(lib manifest_get tool rtk image_env)" == *"RTK_TELEMETRY_DISABLED=1"* ]] \
+        || { echo "rtk's telemetry switch is no longer set"; return 1; }
+    # And the endpoint stays out of what core allowlists.
+    run grep -rn 'telemetry.rtk-ai' "$REPO_ROOT/docker" "$REPO_ROOT/bin"
+    [ "$status" -ne 0 ] || { echo "the telemetry endpoint reached the allowlist:"; echo "$output"; return 1; }
+}
+
+@test "a tool's archive shape decides how it is unpacked" {
+    # A bare-binary archive stripped of a component extracts NOTHING, and does
+    # it silently: the layer builds, and the tool is not in it.
+    local spec
+    spec="tarball:x@$(printf 'a%.0s' {1..64}):https://e.example/x.tgz"
+    run env DEJIMA_TARBALL_STRIP=binary bash -c \
+        'source "$1"; generate_spec_dockerfile base "$2"' _ "$LIB_PROJECT" "$spec"
+    [[ "$output" == *"tar -C /opt/dejima/x/bin -xaf"* ]] \
+        || { echo "binary layout still strips a component: $output"; return 1; }
+    run env DEJIMA_TARBALL_STRIP=prefix bash -c \
+        'source "$1"; generate_spec_dockerfile base "$2"' _ "$LIB_PROJECT" "$spec"
+    [[ "$output" == *"--strip-components=1"* ]] \
+        || { echo "prefix layout stopped stripping: $output"; return 1; }
+    # Both verify before they unpack. A tar extracted first and checked after
+    # has already written whatever it contained.
+    [[ "$output" == *"sha256sum -c -"*"tar -C"* ]] \
+        || { echo "the digest is no longer checked before unpacking"; return 1; }
+}
+
+@test "the briefing names the tools a launch enabled, and says nothing when there are none" {
+    run env DEJIMA_TOOLS=rtk bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Extra tools this session has"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"rtk git status"* ]] \
+        || { echo "the tool's own instructions did not reach the briefing"; return 1; }
+
+    run env DEJIMA_TOOLS= bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ "$LIB"
+    [[ "$output" != *"Extra tools this session has"* ]] \
+        || { echo "a heading with nothing under it"; return 1; }
 }
 
 @test "the github forge pushes with its own token, not the read-only one" {

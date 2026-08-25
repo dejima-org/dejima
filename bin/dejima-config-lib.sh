@@ -43,6 +43,7 @@ core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
 core.command	?identifier
 core.identity	?identifier
+core.tools	?list:identifier
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
@@ -354,10 +355,11 @@ _config_valid_value() {
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
             ;;
         text)
-            # A person's name or email address: an identifier has no room for
-            # a space and a path refuses a colon, and both are legal here.
-            # Refuses only what cannot survive the trip - a newline splits the
-            # value where every consumer expects one line, and a control
+            # A sentence rather than a token - a person's name, an email
+            # address, a one-line description. An identifier has no room for a
+            # space and a path refuses a colon, and all of those are legal
+            # here. Refuses only what cannot survive the trip: a newline splits
+            # the value where every consumer expects one line, and a control
             # character reaching a terminal is the escape-sequence hazard
             # docs/security.md names. Everything else is the operator's
             # business, the same reading `path` takes of a space.

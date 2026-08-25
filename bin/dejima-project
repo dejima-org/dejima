@@ -29,6 +29,7 @@ A project declares its requirements in files inside its own checkout:
   .dejima/dependencies      packages its image should carry
   .dejima/allowed-domains   hosts its sessions may reach
   .dejima/corpus            rules about how its history is recorded
+  .dejima/tools             optional tools its sessions should have
 
 Those are declarations, not grants. They live in the workspace, which a session
 can write, so nothing they contain takes effect until it is approved here and
@@ -164,12 +165,15 @@ case "$action" in
         report allowed-domains valid_domain
         echo "corpus:"
         report corpus valid_corpus_rule
+        echo "tools:"
+        report tools valid_tool_name
         ;;
     approve)
         pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
         pending_doms=$(classify allowed-domains valid_domain | sed -n 's/^pending //p')
         pending_corpus=$(classify corpus valid_corpus_rule | sed -n 's/^pending //p')
-        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; classify corpus valid_corpus_rule; } | sed -n 's/^rejected //p')
+        pending_tools=$(classify tools valid_tool_name | sed -n 's/^pending //p')
+        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; classify corpus valid_corpus_rule; classify tools valid_tool_name; } | sed -n 's/^rejected //p')
         trunc_deps=$(classify dependencies valid_dep_spec | sed -n 's/^truncated //p')
         trunc_doms=$(classify allowed-domains valid_domain | sed -n 's/^truncated //p')
         if [ -n "$trunc_deps" ]; then
@@ -183,7 +187,8 @@ case "$action" in
             sed 's/^/  /' <<< "$rejected" >&2
             echo >&2
         fi
-        if [ -z "$pending_deps" ] && [ -z "$pending_doms" ] && [ -z "$pending_corpus" ]; then
+        if [ -z "$pending_deps" ] && [ -z "$pending_doms" ] && [ -z "$pending_corpus" ] \
+            && [ -z "$pending_tools" ]; then
             echo "Nothing pending approval for $project."
             exit 0
         fi
@@ -191,6 +196,12 @@ case "$action" in
         [ -n "$pending_deps" ] && printf '  dependency: %s\n' $pending_deps
         [ -n "$pending_doms" ] && printf '  domain:     %s\n' $pending_doms
         [ -n "$pending_corpus" ] && printf '  corpus:     %s\n' $pending_corpus
+        # Named as what it is rather than as a package: approving one adds a
+        # program to the image every session on this project then has on
+        # PATH. dejima hardens what it ships (docs/tools.md), which is what
+        # makes this a shorter conversation than a dependency - but it is
+        # still a change to what the sandbox contains.
+        [ -n "$pending_tools" ] && printf '  tool:       %s (installed into the image)\n' $pending_tools
         echo
         printf 'Approve all of the above? [y/N] '
         read -r reply || reply=n
@@ -233,6 +244,15 @@ case "$action" in
         # RUNNING container's firewall or image; a corpus rule changes what the
         # next session is told and nothing about a live one, so there is
         # nothing to patch and no CLI to route through.
+        tool_failed=""
+        tool_approved=0
+        for tool in $pending_tools; do
+            if approve_entry "$(ensure_project_store "$project")" tools "$tool"; then
+                tool_approved=1
+            else
+                tool_failed="$tool_failed $tool"
+            fi
+        done
         corpus_failed=""
         corpus_approved=0
         for rule in $pending_corpus; do
@@ -248,6 +268,12 @@ case "$action" in
         fi
         if [ "$corpus_approved" = 1 ]; then
             echo "Approved corpus rules for $project. They take effect at the next launch."
+        fi
+        if [ -n "$tool_failed" ]; then
+            echo "NOT approved for $project (could not record):$tool_failed" >&2
+        fi
+        if [ "$tool_approved" = 1 ]; then
+            echo "Approved tools for $project. The image rebuilds on the next launch."
         fi
         if [ -n "$dep_failed" ]; then
             echo "NOT approved for $project (dejima-dep failed):$dep_failed" >&2

@@ -1231,6 +1231,29 @@ _cli_tools() {
     done < <(_cli_tools)
 }
 
+@test "every option a tool accepts appears in its own --help" {
+    # Twice now a flag has been implemented, documented in
+    # docs/configuration.md and covered by tests, and left out of the usage
+    # block: --harness, then --identity. The help page is the discovery
+    # surface, so a flag only the config reference mentions is one most people
+    # never find - and neither omission failed anything.
+    #
+    # Derived from the case arms rather than from a list here, which is what
+    # makes it catch the next one without being updated.
+    local name flag missing=""
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        local help
+        help="$("$REPO_ROOT/bin/$name" --help 2>/dev/null)"
+        while IFS= read -r flag; do
+            [ -n "$flag" ] || continue
+            grep -qF -- "$flag" <<< "$help" || missing="$missing $name:$flag"
+        done < <(grep -oE '^\s+(--[a-z][a-z-]*\|)*--[a-z][a-z-]*\)' "$REPO_ROOT/bin/$name" \
+            | grep -oE -- '--[a-z][a-z-]*' | sort -u)
+    done < <(_cli_tools)
+    [ -z "$missing" ] || { echo "accepted but not in --help:$missing"; return 1; }
+}
+
 @test "no help page scrolls off a reasonable pane" {
     # The budget is the constraint that forces a help page to choose what
     # matters. Asserted rather than aspired to, so a later addition that pushes
@@ -1281,6 +1304,58 @@ _cli_tools() {
         done
     done
     [ -z "$missing" ] || { echo "not in the reference table:$missing"; return 1; }
+}
+
+@test "an optional tool does not stand between a command and its guard" {
+    # The one thing that would make tools a security change rather than a
+    # convenience. rtk's own Claude Code integration installs a PreToolUse
+    # hook that REWRITES a Bash command - `git push x` becomes `rtk git push
+    # x` - in the same slot deny-dangerous-bash.sh, git-push-guard.sh and
+    # merge-guard.sh occupy. dejima does not install that hook, and this
+    # holds it to that: the tool's manifest may not name one, and nothing
+    # here runs the tool's own init.
+    local conf="$REPO_ROOT/tools/rtk/tool.conf"
+    [ -f "$conf" ] || { echo "the rtk manifest is gone"; return 1; }
+    run grep -nE '^(hook|hooks|install_hook|init)' "$conf"
+    [ "$status" -ne 0 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
+    run grep -rn 'rtk init\|rtk hook' "$REPO_ROOT/bin" "$REPO_ROOT/docker" "$REPO_ROOT/hooks"
+    [ "$status" -ne 0 ] \
+        || { echo "something runs rtk's own installer:"; echo "$output"; return 1; }
+
+    # And the guards are still registered the way they were - a tool layer
+    # sits above the harness in the image and changes nothing about them.
+    grep -q 'deny-dangerous-bash.sh' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        || { echo "the bash guard registration is gone"; return 1; }
+    grep -q 'git-push-guard.sh' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        || { echo "the push guard registration is gone"; return 1; }
+}
+
+@test "the tools doc states the bar rather than describing one tool" {
+    # The bar is what makes a second tool safe to add. Written as a rule for
+    # every tool, because a document that only describes rtk leaves the next
+    # one to be argued from scratch - or not argued at all.
+    local doc="$REPO_ROOT/docs/tools.md" claim
+    [ -f "$doc" ] || { echo "docs/tools.md is gone"; return 1; }
+    grep -qi 'does not mean a bare install' "$doc" \
+        || { echo "the doc no longer says what an optional tool is not"; return 1; }
+    for claim in 'Pinned and checksummed' 'network behaviour' 'Telemetry off' \
+                 'Wired up by dejima' 'guards still hold'; do
+        grep -qF "$claim" "$doc" || { echo "the bar drops: $claim"; return 1; }
+    done
+    # Named as applying to every tool, not to the first one.
+    grep -qF 'not only the first' "$doc" \
+        || { echo "the bar reads as being about rtk rather than about tools"; return 1; }
+}
+
+@test "a tool is never read from the workspace, only from the approval store" {
+    # Same rule as every other .dejima/ declaration: the workspace is
+    # session-writable, so a session that could add a tool would be choosing
+    # what the next session's image contains. The launcher reads approvals.
+    grep -q 'approved_entries "$(config_root)" tools' "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer reads approved tools"; return 1; }
+    run grep -n 'dejima/tools' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] \
+        || { echo "the launcher reads the declaration directly:"; echo "$output"; return 1; }
 }
 
 @test "a flag that turns something off is enforced where the launcher decides" {

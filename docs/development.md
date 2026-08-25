@@ -32,6 +32,7 @@ run them.
 | `bin/dejima-config-lib.sh` | The config file's schema, parser and value validators, plus the dependency-spec grammar. The base layer: it sources nothing, so everything else can source it. Not on PATH |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH: see [docs/providers.md](providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
+| `tools/` | Optional tools a launch can add to its image - not an axis, since a launch enables zero or more. Same manifest rules, and a bar for what may be added: see [docs/tools.md](tools.md) |
 | `docs/release.md` | The pass a `development` -> `main` release goes through, and why each part of it is not a test |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
 | `forges/github/bin/` | The github forge's one CLI: `github-pr comments`, which shows unresolved review threads. `gh` covers everything else, but thread resolution lives only in GitHub's GraphQL API, so `gh pr view --comments` cannot tell a closed thread from an open one |

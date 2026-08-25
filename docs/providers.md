@@ -260,6 +260,26 @@ resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.
 
+## Tool
+
+Not an axis: a launch selects one forge, one workflow and one harness, and
+enables zero or more tools. Everything else about it is the same - a manifest
+that is data, validated by the same schema machinery, never sourced.
+
+The keys are deliberately few. A tool declares what it is, what installs it,
+what its environment needs and what the session should be told about it. There
+is no key for a hook, a mount, a domain or a guard, because a tool that needed
+one of those would be a change to the boundary rather than a program on PATH.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `description` | `text` | *(required)* | One line, shown when the layer builds and in the session briefing. |
+| `install` | `depspec` | *(required)* | The same grammar a dependency uses. In practice a `tarball:` spec, because a tool has to be pinned by digest - see [docs/tools.md](tools.md) for why that is a rule rather than a preference. |
+| `install_layout` | `enum:prefix\|binary` | `prefix` | The archive's shape. `prefix` is one enclosing directory, stripped so `bin/` lands in the same place whatever the release called its top level. `binary` is an archive that IS the executable: stripping a component there would strip the binary and extract nothing, silently. |
+| `image_env` | `?list:envpair` | (empty) | `NAME=VALUE` pairs the layer sets. Where a tool's own telemetry switch goes. |
+| `command` | `identifier` | *(required)* | What it puts on PATH. |
+| `instructions` | `?relpath` | (empty) | A markdown fragment appended to the session briefing under a core-owned heading, so a tool describes itself once and every harness gets the same words. This is the whole of the per-harness wiring: dejima renders it rather than letting the tool's installer patch a harness config. |
+
 ## Session briefing composition
 
 The text a `SessionStart` hook injects into the agent is assembled

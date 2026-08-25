@@ -236,6 +236,7 @@ _approved_validator() {
         allowed-domains) printf 'valid_domain' ;;
         dependencies)    printf 'valid_dep_spec' ;;
         corpus)          printf 'valid_corpus_rule' ;;
+        tools)           printf 'valid_tool_name' ;;
         *) return 1 ;;
     esac
 }
@@ -248,6 +249,18 @@ _approved_validator() {
 # store, and do nothing - which reads as the rule being in force when it is
 # not. There is one today.
 DEJIMA_CORPUS_RULES="commit-per-step"
+
+# An optional tool a project asks for. A name dejima ships a manifest for and
+# nothing else: an entry naming a tool that does not exist would approve
+# cleanly, sit in the store and install nothing, which reads as the tool being
+# in force when it is not - the same reasoning as the corpus rules above.
+#
+# Refusing at declaration time also means the approval prompt cannot offer an
+# operator a name that would silently do nothing.
+valid_tool_name() {
+    valid_provider_name "$1" || return 1
+    provider_dir tool "$1" >/dev/null 2>&1
+}
 
 valid_corpus_rule() {
     case " $DEJIMA_CORPUS_RULES " in
@@ -423,8 +436,22 @@ unapprove_entry() {
 #
 # -xaf rather than -xzf: compression is detected from the archive, so xz and
 # zstd releases work without the spec having to say which it is.
+# DEJIMA_TARBALL_STRIP picks between the two archive shapes. "prefix" is the
+# default and the one every dependency uses: everything under a single
+# directory, stripped so bin/ lands in the same place whatever the release
+# called its top level. "binary" is an archive that IS the executable, with no
+# enclosing directory at all - stripping a component there strips the binary
+# and extracts nothing, silently, leaving a layer that built fine and contains
+# no tool.
+#
+# A parameter rather than a second emitter, because the digest-before-unpack
+# below is the part that must not exist twice.
 _emit_tarball_layers() {
-    local spec rest name sha url
+    local spec rest name sha url dest strip
+    case "${DEJIMA_TARBALL_STRIP:-prefix}" in
+        binary) strip="" ;;
+        *)      strip="--strip-components=1 " ;;
+    esac
     for spec in "$@"; do
         [ -n "$spec" ] || continue
         rest="${spec#tarball:}"
@@ -436,7 +463,12 @@ _emit_tarball_layers() {
         printf '  wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \\\n'
         printf '    -O /tmp/%s.tar "%s" && \\\n' "$name" "$url"
         printf '  echo "%s  /tmp/%s.tar" | sha256sum -c - && \\\n' "$sha" "$name"
-        printf '  tar -C /opt/dejima/%s --strip-components=1 -xaf /tmp/%s.tar && \\\n' "$name" "$name"
+        # A bare binary goes straight into the bin/ a prefix archive would
+        # have brought with it, so the PATH line below is the same either way.
+        dest="/opt/dejima/$name"
+        [ -n "$strip" ] || dest="$dest/bin"
+        printf '  mkdir -p %s && \\\n' "$dest"
+        printf '  tar -C %s %s-xaf /tmp/%s.tar && \\\n' "$dest" "$strip" "$name"
         printf '  rm /tmp/%s.tar\n' "$name"
         printf 'ENV PATH=$PATH:/opt/dejima/%s/bin\n' "$name"
     done
