@@ -143,6 +143,8 @@ capabilities	?list:identifier
 pr_command	?command
 issue_command	?command
 merge_block	?command
+repo_flags	?list:flag
+repo_env	?identifier
 disclose	?disclosures
 keys	?list:keyspec
 requires	?list:identifier
@@ -270,6 +272,13 @@ _provider_valid_value() {
             # a bare command name and a multi-word one like "gh pr" both fit
             # and nothing shell-active does.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*( [A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]
+            ;;
+        flag)
+            # A command-line option name, compared against argv by
+            # docker/forge-guard.sh. The leading dash is required: without it
+            # the guard would be comparing a word that could just as well be a
+            # subcommand or a value.
+            [[ "$value" =~ ^--?[A-Za-z0-9][A-Za-z0-9-]*$ ]]
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no

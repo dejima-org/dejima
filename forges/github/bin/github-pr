@@ -1,0 +1,215 @@
+#!/bin/bash
+# The one thing `gh` cannot do (#186).
+#
+# `gh pr view --comments` prints reviews and comments with no resolution state
+# anywhere in the output, because the REST API it uses does not carry any.
+# `isResolved` exists only on `reviewThreads` in the GraphQL API. So an agent
+# or an operator working through PR feedback re-reads and re-answers threads
+# that were closed a week ago, with nothing saying so - quiet in the direction
+# that wastes the most work.
+#
+# Everything else `gitea-pr` does has a `gh` subcommand already, which is why
+# this ships one command rather than a second CLI. It reads and never writes,
+# so there is no authorship disclosure to apply: docker/forge-guard.sh shadows
+# `gh`, not this.
+set -euo pipefail
+
+function usage() {
+    echo "Usage: github-pr comments PR_NUMBER [--all]"
+    echo ""
+    echo "Shows a pull request's comments, reviews and inline review threads."
+    echo "Unresolved threads only by default; --all includes the ones already"
+    echo "resolved, marked as such."
+    echo ""
+    echo "The repository is the 'origin' remote of the checkout you are in, and"
+    echo "must be on github.com. Authentication is gh's own - GH_TOKEN, or"
+    echo "whatever 'gh auth status' reports."
+}
+
+# Same shape as gitea-pr's: resolve from origin and refuse another host, so
+# this tool cannot be pointed at a repository the checkout is not for. Covers
+# ssh, scp-style and https remotes by taking the last two path components
+# rather than parsing any of them as a URL.
+function github_owner_repo() {
+    local remote_url stripped name rest owner
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo "No 'origin' remote found in this repository" >&2
+        exit 1
+    }
+    case "$remote_url" in
+        *github.com[:/]*) ;;
+        *) echo "origin remote ($remote_url) is not on github.com; github-pr only supports this host" >&2
+           exit 1 ;;
+    esac
+    stripped="${remote_url%/}"
+    stripped="${stripped%.git}"
+    name="${stripped##*/}"
+    rest="${stripped%/*}"
+    owner="${rest##*[:/]}"
+    if [ -z "$owner" ] || [ -z "$name" ] || [ "$owner" = "$stripped" ]; then
+        echo "Could not read an owner/name out of the origin remote ($remote_url)" >&2
+        exit 1
+    fi
+    printf '%s/%s' "$owner" "$name"
+}
+
+# The number reaches gh as a typed GraphQL variable rather than being spliced
+# into a path, so this is not the URL-traversal check gitea-pr's is. It is
+# here so a mistyped argument fails with something a person can act on instead
+# of a GraphQL type error.
+function require_number() {
+    if ! [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+        echo "Expected a PR number, got '${1:-}'" >&2
+        exit 1
+    fi
+}
+
+if [ "$#" -lt 1 ]; then
+    usage
+    exit 1
+fi
+
+subcommand="$1"
+shift
+
+case "$subcommand" in
+    -h|--help|help) usage; exit 0 ;;
+    comments) ;;
+    *) echo "Unknown subcommand: $subcommand" >&2; usage >&2; exit 1 ;;
+esac
+
+require_number "${1:-}"
+pr_number="$1"
+shift || true
+show_all=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --all) show_all=1 ;;
+        *) echo "Unknown argument: $1" >&2
+           echo "Usage: github-pr comments PR_NUMBER [--all]" >&2
+           exit 1 ;;
+    esac
+    shift
+done
+
+owner_repo="$(github_owner_repo)"
+owner="${owner_repo%%/*}"
+repo="${owner_repo##*/}"
+
+# gh's own message, then one line saying what was being asked for. Captured
+# rather than piped straight into jq: on a 404 gh prints "Not Found" and exits,
+# and jq then fails on the message text, so the last thing on the terminal is
+# "Cannot index string with string" rather than the fact that the PR does not
+# exist.
+api_or_die() {
+    local what="$1"; shift
+    local out
+    if ! out="$("$@" 2>&1)"; then
+        printf '%s\n' "$out" >&2
+        echo "github-pr: could not $what for ${owner_repo}#${pr_number}" >&2
+        exit 1
+    fi
+    printf '%s' "$out"
+}
+
+echo "=== Issue comments ==="
+api_or_die "fetch issue comments" \
+    gh api --paginate "repos/${owner}/${repo}/issues/${pr_number}/comments" \
+    | jq -r '.[] | "[\(.user.login) @ \(.created_at)]\n\(.body)\n"'
+
+echo "=== Reviews ==="
+api_or_die "fetch reviews" \
+    gh api --paginate "repos/${owner}/${repo}/pulls/${pr_number}/reviews" \
+    | jq -r '.[] | select(.body != "") | "[\(.user.login) @ \(.submitted_at) — \(.state)]\n\(.body)\n"'
+
+echo "=== Inline review comments ==="
+
+# reviewThreads, not the REST review comments, for the whole reason this tool
+# exists: `isResolved` is only here. `isOutdated` comes with it and is worth
+# printing - a thread against a hunk that no longer exists is usually already
+# handled, and reads as outstanding otherwise.
+#
+# Paginated by hand rather than with `gh api --paginate`: that flag emits one
+# JSON document per page for GraphQL, which would have to be reassembled here
+# anyway, and the bound below is the point. A server that ignored `after`
+# would otherwise loop forever, and this runs unattended.
+PAGE_SIZE=50
+PAGE_MAX=20
+read -r -d '' QUERY <<'GRAPHQL' || true
+query($owner: String!, $name: String!, $number: Int!, $size: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: $size, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 100) {
+            pageInfo { hasNextPage }
+            nodes { author { login } body diffHunk createdAt }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+
+threads='[]'
+cursor=""
+page=1
+while [ "$page" -le "$PAGE_MAX" ]; do
+    if [ -z "$cursor" ]; then
+        json="$(api_or_die "fetch review threads" gh api graphql -f query="$QUERY" \
+            -f owner="$owner" -f name="$repo" -F number="$pr_number" -F size="$PAGE_SIZE")"
+    else
+        json="$(api_or_die "fetch review threads" gh api graphql -f query="$QUERY" \
+            -f owner="$owner" -f name="$repo" -F number="$pr_number" -F size="$PAGE_SIZE" \
+            -f cursor="$cursor")"
+    fi
+    # GraphQL answers a PR number that does not exist with a null pullRequest
+    # and no error at all, so this is the check that catches it rather than
+    # adding null to an array and failing with jq's wording.
+    if [ "$(jq -r '.data.repository.pullRequest // "null"' <<< "$json")" = "null" ]; then
+        echo "github-pr: no pull request ${owner_repo}#${pr_number}" >&2
+        exit 1
+    fi
+    threads="$(jq -n --argjson a "$threads" --argjson b "$json" \
+        '$a + $b.data.repository.pullRequest.reviewThreads.nodes')"
+    if [ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<< "$json")" != "true" ]; then
+        break
+    fi
+    cursor="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<< "$json")"
+    page=$((page + 1))
+done
+if [ "$page" -gt "$PAGE_MAX" ]; then
+    echo "warning: stopped reading review threads after $PAGE_MAX pages - some may be missing" >&2
+fi
+
+# A thread whose replies did not all fit is reported rather than silently
+# truncated, for the same reason the page bound is: a feedback tool that drops
+# the comment someone is waiting on is worse than one that says it might have.
+truncated="$(jq '[.[] | select(.comments.pageInfo.hasNextPage)] | length' <<< "$threads")"
+[ "$truncated" -eq 0 ] || \
+    echo "warning: $truncated thread(s) have more replies than were fetched" >&2
+
+resolved_count="$(jq '[.[] | select(.isResolved)] | length' <<< "$threads")"
+if [ "$show_all" -eq 1 ]; then
+    visible="$threads"
+else
+    visible="$(jq '[.[] | select(.isResolved | not)]' <<< "$threads")"
+fi
+
+# The hunk, not just the path, and the same layout gitea-pr prints: whoever
+# reads one of these tools should not have to learn the other's output.
+jq -r '.[]
+    | . as $t
+    | .comments.nodes[]
+    | "[\(.author.login // "?") @ \($t.path):\($t.line // "?")\(if $t.isResolved then "  (resolved)" else "" end)\(if $t.isOutdated then "  (outdated)" else "" end)]\n\($t.comments.nodes[0].diffHunk // "(no hunk recorded)")\n--- comment ---\n\(.body)\n"' \
+    <<< "$visible"
+
+if [ "$show_all" -ne 1 ] && [ "$resolved_count" -gt 0 ]; then
+    echo "($resolved_count resolved thread(s) hidden. Re-run with --all to include them.)"
+fi

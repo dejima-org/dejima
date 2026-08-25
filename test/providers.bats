@@ -803,7 +803,42 @@ assert_remedy_forges_exist() {
     # declared: the entrypoint links the merge shadow only over a command that
     # is behind /usr/local/lib/dejima/forge, and refuses to start otherwise.
     # This forge shipping nothing of its own is what "system:" says.
-    [ "$(lib manifest_get forge github install)" = "system:gh" ]
+    # system:gh AND the one CLI this forge ships. install-forge-bins.sh fails
+    # the build in both directions - a declared file that is missing, and a
+    # file under bin/ that no manifest declares - so this is the declaration
+    # an operator reads to know what lands in the image.
+    [ "$(lib manifest_get forge github install)" = "system:gh bin/github-pr" ]
+}
+
+@test "the github forge declares how its CLI can be aimed at another repo" {
+    # gh takes --repo on nearly every subcommand and reads GH_REPO, so the
+    # ordinary path can act on a repository the session has nothing to do
+    # with (#187). The guard is generic; the manifest is what makes it fire.
+    [ "$(lib manifest_get forge github repo_flags)" = "--repo -R" ]
+    [ "$(lib manifest_get forge github repo_env)" = "GH_REPO" ]
+    # The gitea CLIs resolve the repo from origin and refuse another host, so
+    # there is nothing to declare and nothing for the guard to compare. A
+    # forge is not required to be aimable.
+    [ -z "$(lib manifest_get forge gitea repo_flags)" ]
+    [ -z "$(lib manifest_get forge gitea repo_env)" ]
+}
+
+@test "a repo flag has to look like a flag" {
+    # It is compared against argv. A bare word would be indistinguishable from
+    # a subcommand or a value, and would refuse commands at random.
+    local d bad; d="$(mktemp -d "$BATS_TEST_TMPDIR/flagtype.XXXXXX")"
+    mkdir -p "$d/forges/probe"
+    for bad in "repo" "--" "-" "--repo=x"; do
+        printf 'repo_flags = %s\n' "$bad" > "$d/forges/probe/forge.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted repo_flags = $bad"; return 1; }
+    done
+    # Space-separated, like every other manifest list.
+    printf 'repo_flags = --repo -R\n' > "$d/forges/probe/forge.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "the briefing does not call GitHub read-only when the forge can push to it" {

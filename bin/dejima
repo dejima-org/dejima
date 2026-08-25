@@ -671,6 +671,39 @@ if [ -n "$_disclose_spec" ]; then
     IFS="$_old_ifs"
 fi
 
+# How this forge's CLI can be aimed somewhere other than the repository the
+# session was launched against, and what that repository is (#187).
+#
+# A CLI that resolves the repo from origin and refuses another host cannot be
+# aimed anywhere and declares nothing here. One that takes the repository as
+# an option makes acting on an unrelated repository the same length of command
+# as acting on this one. Which is which is the forge's to declare; core only
+# resolves the repository the declaration is compared against, and
+# docker/forge-guard.sh does the comparing.
+#
+# The last two path components of origin's URL, which is the same
+# "<owner>/<name>" both forges use and covers ssh, scp-style and https
+# remotes without parsing any of them as a URL. No origin, or a workspace
+# that is not a checkout, leaves this empty and the guard does nothing: the
+# comparison would have nothing to be right about.
+DEJIMA_FORGE_REPO_FLAGS="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_flags)"
+DEJIMA_FORGE_REPO_ENV="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_env)"
+DEJIMA_FORGE_REPO=""
+if [ -n "$DEJIMA_FORGE_REPO_FLAGS" ] || [ -n "$DEJIMA_FORGE_REPO_ENV" ]; then
+    _origin_url="$(git -C "$WORKSPACE_DIR" remote get-url origin 2>/dev/null)" || _origin_url=""
+    if [ -n "$_origin_url" ]; then
+        _origin_url="${_origin_url%/}"
+        _origin_url="${_origin_url%.git}"
+        _origin_name="${_origin_url##*/}"
+        _origin_rest="${_origin_url%/*}"
+        _origin_owner="${_origin_rest##*[:/]}"
+        if [ -n "$_origin_owner" ] && [ -n "$_origin_name" ] &&
+           [ "$_origin_owner" != "$_origin_url" ]; then
+            DEJIMA_FORGE_REPO="$_origin_owner/$_origin_name"
+        fi
+    fi
+fi
+
 # WORKSPACE_DIR is resolved above, ahead of --print-briefing, since
 # briefing_compose needs DEJIMA_RW_MOUNTS (which needs WORKSPACE_DIR for its
 # own overlap guard) before that point.
@@ -1198,6 +1231,9 @@ extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
 extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
 extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
 extra_mounts+=(-e "DEJIMA_DISCLOSE=$DEJIMA_DISCLOSE")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO=$DEJIMA_FORGE_REPO")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO_FLAGS=$DEJIMA_FORGE_REPO_FLAGS")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO_ENV=$DEJIMA_FORGE_REPO_ENV")
 
 # The harness's own configuration, mounted at the mode it declared, and -
 # for the directories it marked scannable - the symlink targets that have to
