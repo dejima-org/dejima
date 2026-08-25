@@ -276,7 +276,7 @@ one of those would be a change to the boundary rather than a program on PATH.
 | `description` | `text` | *(required)* | One line, shown when the layer builds and in the session briefing. |
 | `install` | `depspec` | *(required)* | The same grammar a dependency uses. In practice a `tarball:` spec, because a tool has to be pinned by digest - see [docs/tools.md](tools.md) for why that is a rule rather than a preference. |
 | `install_layout` | `enum:prefix\|binary` | `prefix` | The archive's shape. `prefix` is one enclosing directory, stripped so `bin/` lands in the same place whatever the release called its top level. `binary` is an archive that IS the executable: stripping a component there would strip the binary and extract nothing, silently. |
-| `image_env` | `?list:envpair` | (empty) | `NAME=VALUE` pairs the layer sets. Where a tool's own telemetry switch goes. |
+| `image_env` | `?list:envpair` | (empty) | `NAME=VALUE` pairs the layer sets. **Every name must be namespaced to the tool** - `RTK_*` for `rtk` - and a launch refuses one that is not. This becomes a Dockerfile `ENV`, which every process in the container inherits, so a bare `NO_COLOR` or `DO_NOT_TRACK` changes the harness and everything else too. A harness manifest may use bare names there because a harness is the container's main process; a tool is one program among many. |
 | `command` | `identifier` | *(required)* | What it puts on PATH. |
 | `instructions` | `?relpath` | (empty) | A markdown fragment appended to the session briefing under a core-owned heading, so a tool describes itself once and every harness gets the same words. This is the whole of the per-harness wiring: dejima renders it rather than letting the tool's installer patch a harness config. |
 

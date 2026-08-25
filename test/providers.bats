@@ -878,7 +878,54 @@ assert_remedy_forges_exist() {
         || { echo "rtk's release is a bare binary and the manifest no longer says so"; return 1; }
 }
 
-@test "rtk is declared with its telemetry switched off in the image" {
+@test "a tool may only set environment variables that are its own" {
+    # image_env becomes a Dockerfile ENV, which every process in the container
+    # inherits - not just the tool that declared it. rtk shipped with
+    # NO_COLOR=1, reasoning that its output lands in a model's context where an
+    # escape sequence is noise. The reasoning was fine and the scope was wrong:
+    # a launch with the tool enabled lost colour in the harness, in git, in ls,
+    # in everything.
+    #
+    # A harness may set a bare name there, because a harness IS the container's
+    # main process. A tool is one program among many.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/toolenv.XXXXXX")"
+    mkdir -p "$d/tools/probe"
+    local sha; sha="$(printf 'a%.0s' {1..64})"
+    local bad
+    for bad in 'NO_COLOR=1' 'DO_NOT_TRACK=1' 'PATH=/x' 'PROBEISH_X=1'; do
+        printf 'description = x\ninstall = tarball:p@%s:https://e.example/p.tgz\ncommand = p\nimage_env = %s\n' \
+            "$sha" "$bad" > "$d/tools/probe/tool.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; tool_validate probe' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted image_env $bad"; return 1; }
+        [[ "$output" == *"not its own"* ]] || { echo "$output"; return 1; }
+    done
+
+    # Namespaced to the tool, which is what a tool's own switch looks like.
+    printf 'description = x\ninstall = tarball:p@%s:https://e.example/p.tgz\ncommand = p\nimage_env = PROBE_TELEMETRY=0 PROBE_QUIET=1\n' \
+        "$sha" > "$d/tools/probe/tool.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" bash -c 'source "$1"; tool_validate probe' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "no shipped tool takes the colour out of the rest of the container" {
+    # The specific regression, pinned by name as well as by the rule above:
+    # these are the bare names most likely to look like a tool's own business
+    # and reach everything.
+    local tool pair
+    for tool in $(lib provider_list tool); do
+        run lib tool_validate "$tool"
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        for pair in $(lib manifest_get tool "$tool" image_env); do
+            case "${pair%%=*}" in
+                NO_COLOR|TERM|CLICOLOR|CLICOLOR_FORCE|FORCE_COLOR)
+                    echo "$tool sets ${pair%%=*} for the whole container"; return 1 ;;
+            esac
+        done
+    done
+}
+
+@test "rtk is declared with its telemetry switched off in the image" {@test "rtk is declared with its telemetry switched off in the image" {
     # Two independent offs, because either one can be wrong: the tool's own
     # switch here, and the firewall, which does not allowlist the endpoint.
     [[ "$(lib manifest_get tool rtk image_env)" == *"RTK_TELEMETRY_DISABLED=1"* ]] \

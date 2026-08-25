@@ -1509,6 +1509,38 @@ _briefing_substitute() {
 # the resume command) - in that reading order. Every {{key}} is substituted
 # except {{session_id}}/{{container_id}}, deferred as @@SESSION_ID@@ and
 # @@CONTAINER_ID@@ for the hook that mounts this at session start.
+# A tool's manifest, plus the one rule its schema cannot express.
+#
+# image_env becomes a Dockerfile ENV, which every process in the container
+# inherits - not just the tool that declared it. A harness may set a bare name
+# there because a harness IS the container's main process; a tool is one
+# program among many and may not.
+#
+# This is not hypothetical. rtk shipped with NO_COLOR=1, reasoning that its
+# output lands in a model's context where an escape sequence is noise. The
+# reasoning was fine, the scope was wrong, and a launch with that tool enabled
+# lost colour in the harness, git, ls and everything else. The rule that would
+# have caught it is that a tool's variables must be namespaced to the tool.
+#
+# Uppercased, with anything that is not alphanumeric folded to an underscore,
+# so a tool named `my-tool` claims `MY_TOOL_*`.
+tool_validate() {
+    local name="$1" prefix pair varname
+    manifest_validate tool "$name" || return 1
+    prefix="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]' | tr -c '[:alnum:]' '_')_"
+    for pair in $(manifest_get tool "$name" image_env); do
+        varname="${pair%%=*}"
+        case "$varname" in
+            "$prefix"*) continue ;;
+        esac
+        echo "tool '$name' declares image_env $varname, which is not its own." >&2
+        echo "A tool's image_env reaches every process in the container, so a bare" >&2
+        echo "name like NO_COLOR or DO_NOT_TRACK changes the harness and everything" >&2
+        echo "else too. Name it ${prefix}something, or do not set it." >&2
+        return 1
+    done
+}
+
 # What the session is told about the optional tools this launch enabled.
 #
 # The heading is core's and the body is each tool's own instructions.md, so a
