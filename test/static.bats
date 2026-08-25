@@ -1235,14 +1235,80 @@ _cli_tools() {
     # The budget is the constraint that forces a help page to choose what
     # matters. Asserted rather than aspired to, so a later addition that pushes
     # one past it fails here instead of quietly growing.
-    local name n
+    #
+    # bin/dejima gets a larger one, and only bin/dejima. It is the entry point
+    # and carries eighteen options where the next tool carries five, so one
+    # constant across all of them stops measuring "has this page been allowed
+    # to sprawl" and starts measuring "does this tool have the most flags".
+    # The exception is a named tool, not a licence: every other page is held
+    # to 30, and the way to fit a nineteenth option here is still to earn the
+    # line rather than to raise this again.
+    local name n budget
     while IFS= read -r name; do
         [ -n "$name" ] || continue
+        budget=30
+        [ "$name" = dejima ] && budget=36
         n="$("$REPO_ROOT/bin/$name" --help 2>/dev/null | wc -l)"
-        [ "$n" -le 30 ] || { echo "$name --help is $n lines, budget is 30"; return 1; }
+        [ "$n" -le "$budget" ] || { echo "$name --help is $n lines, budget is $budget"; return 1; }
         # A help page that fits because it says nothing is not the goal either.
         [ "$n" -ge 8 ] || { echo "$name --help is only $n lines"; return 1; }
     done < <(_cli_tools)
+}
+
+@test "every config key the schema knows is in the reference table" {
+    # docs/configuration.md's table is the operator-facing list of what can be
+    # set. A key in the schema and not in the table is settable and
+    # undiscoverable, which is how four of them ended up documented only in
+    # docs/security.md, only in docs/remote-access.md, or nowhere.
+    local doc="$REPO_ROOT/docs/configuration.md" key section leaf missing=""
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        section="${key%.*}"
+        leaf="${key##*.}"
+        grep -qF "\`[$section] $leaf\`" "$doc" || missing="$missing $section.$leaf"
+    done < <(sed -n '/^_config_table()/,/^EOF$/p' "$REPO_ROOT/bin/dejima-config-lib.sh" \
+        | grep -oE '^[a-z-]+\.[a-z_]+')
+    # And the per-provider keys, which live in the manifests rather than the
+    # table above.
+    local conf axis name spec
+    for conf in "$REPO_ROOT"/forges/*/forge.conf "$REPO_ROOT"/harnesses/*/harness.conf; do
+        [ -f "$conf" ] || continue
+        case "$conf" in */forges/*) axis=forge ;; *) axis=harness ;; esac
+        name="$(basename "$(dirname "$conf")")"
+        for spec in $(sed -n 's/^keys[[:space:]]*=[[:space:]]*//p' "$conf"); do
+            leaf="${spec%%:*}"
+            grep -qF "\`[$axis.$name] $leaf\`" "$doc" || missing="$missing $axis.$name.$leaf"
+        done
+    done
+    [ -z "$missing" ] || { echo "not in the reference table:$missing"; return 1; }
+}
+
+@test "a flag that turns something off is enforced where the launcher decides" {
+    # The override lives in bin/dejima's own memory, and both of these tools
+    # re-read the config for themselves - they are run by hand too, where an
+    # environment this launcher happened to have would be the wrong authority.
+    # So --no-epitaph and --no-conversation are enforced by not starting them,
+    # and a resolved config the child never sees is not enforcement.
+    local d="$REPO_ROOT/bin/dejima"
+    grep -q 'config_get_bool epitaph enabled' "$d" \
+        || { echo "the epitaph call is no longer gated on the resolved value"; return 1; }
+    grep -q 'config_get_bool logging conversation' "$d" \
+        || { echo "the shipper start is no longer gated on the resolved value"; return 1; }
+
+    # The one part --no-log cannot decide for the tool is whether to push what
+    # it kept. Honoured from the environment, which is safe only because it
+    # can suppress and never enable: a stale export keeps an epitaph off the
+    # wire and cannot put one on it.
+    grep -q 'DEJIMA_EPITAPH_NO_SHIP' "$d" \
+        || { echo "--no-log no longer reaches the epitaph tool"; return 1; }
+    grep -q 'DEJIMA_EPITAPH_NO_SHIP' "$REPO_ROOT/bin/dejima-epitaph" \
+        || { echo "the epitaph tool no longer honours it"; return 1; }
+    # And it gates the push only - the epitaph is still written, because the
+    # store is the durable copy and shipping is the bonus on top of it.
+    local line
+    line="$(grep -n 'DEJIMA_EPITAPH_NO_SHIP' "$REPO_ROOT/bin/dejima-epitaph" | tail -1 | cut -d: -f1)"
+    [ "$line" -gt "$(grep -n 'wrote .*epitaph(s) to' "$REPO_ROOT/bin/dejima-epitaph" | cut -d: -f1)" ] \
+        || { echo "the no-ship check now runs before the epitaph is written"; return 1; }
 }
 
 @test "--help works when there is no config at all" {

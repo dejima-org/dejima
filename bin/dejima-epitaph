@@ -161,6 +161,13 @@ echo "dejima: wrote $saved epitaph(s) to $STORE" >&2
 # operators who already centralise session logs. Host-side rather than
 # through the container's log-shipper, so the same "never in the session's
 # reach" property holds for the shipping path too.
+#
+# DEJIMA_EPITAPH_NO_SHIP is bin/dejima's --no-log reaching the one decision it
+# cannot make on this tool's behalf. Honoured from the environment, which
+# nothing else here is, because it can only ever suppress: a stale export
+# keeps an epitaph off the wire and never puts one on it. The epitaph is still
+# written either way - the store is the durable copy, and this is the bonus.
+[ "${DEJIMA_EPITAPH_NO_SHIP:-0}" != 1 ] || exit 0
 [ "$(config_get epitaph loki)" = "on" ] || exit 0
 loki="$(config_get logging loki_url)"
 [ -n "$loki" ] || exit 0

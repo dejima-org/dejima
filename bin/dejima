@@ -30,26 +30,32 @@ Usage: dejima [options] [workspace] [-- args...]
   -- args...   everything after is passed to the harness command untouched
 
 Options (each overrides the config file for one launch only):
-  --forge <name>          which forge integration to use for this launch
+  --harness <name>        which harness to run
+  --forge <name>          which forge integration to use
   --workflow <name>       what the agent is told to do with its work
   --cmd <command>         run this instead of the harness's own command
-  --ro,  --extra-readonly <path>    also mount this host path read-only
-  --rw,  --extra-read-write <path>  also mount this host path read-write
-  --allow-github-push     open GitHub's push path (port 22) for this launch
+  --model <id>            the selected harness's model, where it has one;
+  --base-url <url>          its endpoint, and how much context it may use.
+  --context-window <n>      Refused for a harness with no such setting
+  --ro <path>             also mount a host path read-only; --rw read-write.
+                          Repeatable; both refuse a path overlapping dejima's
+                          own approval, audit or epitaph stores
+  --allow-github-push     open GitHub's push path (port 22)
+  --strict-audit          refuse to start over unacknowledged CRITICAL findings
+  --no-log                ship nothing to the log endpoint this launch
+  --no-conversation       keep this session's transcript out of the log
+  --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
   --print-config          print the resolved configuration and exit
-  --print-briefing        print the session briefing the agent will get, and exit
+  --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
 
---ro and --rw may be given more than once. Both refuse a path that overlaps
-dejima's own approval, audit or epitaph stores.
+Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
+config that says off is a decision, not a default to override in passing.
 
-Configuration lives in ~/.config/dejima/config and [core] harness must be set
-before a launch will start. --print-config shows what is actually in effect,
-including which flag overrode which key.
-
-See docs/configuration.md for every key, docs/security.md for what the
-container can and cannot reach.
+Config lives in ~/.config/dejima/config and [core] harness must be set before a
+launch will start. --print-config prints every key as it resolves for this
+launch, flags included. docs/configuration.md describes them.
 DEJIMA_HELP
         exit 0 ;;
 esac
@@ -111,10 +117,14 @@ fi
 FLAG_OVERRIDES=()
 _set_override() {
     local key="$1" value="$2" type entry
+    # $3 is the flag to blame, for the flags whose spelling is not their key's:
+    # --context-window sets context_window, and reporting the key back would
+    # name an option the operator cannot type.
+    local flag="${3:---${1##*.}}"
     local -a kept=()
     type="$(config_type "$key")" || { echo "unknown config key: $key" >&2; exit 1; }
     if ! _config_valid_value "$type" "$value"; then
-        echo "invalid value for --${key##*.}: $value" >&2
+        echo "invalid value for $flag: $value" >&2
         exit 1
     fi
     # A repeated flag takes the last value, same as a repeated key in the
@@ -190,9 +200,22 @@ _mount_label() {
     esac
 }
 
+# A flag naming one of the SELECTED harness's keys, deferred because which
+# harness is selected is not known until every flag has been read - --harness
+# may come after --model. Recorded here, resolved below the loop.
+#
+# Deferred rather than resolved eagerly so the error can name the harness:
+# "claude-code has no model setting" is actionable where "unknown config key"
+# is not.
+HARNESS_KEY_FLAGS=()
+_defer_harness_key() {
+    HARNESS_KEY_FLAGS+=("$1=$2=$3")
+}
+
 PRINT_CONFIG=0
 PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
+NO_LOG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
@@ -200,6 +223,21 @@ while [ $# -gt 0 ]; do
         --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
+        # Narrowing flags. Each has no counterpart that turns the setting back
+        # on: a config saying off is a decision, and a flag that could undo it
+        # in passing would make the file's answer the weaker one.
+        --strict-audit)      _set_override audit.strict on; shift ;;
+        --no-epitaph)        _set_override epitaph.enabled off; shift ;;
+        --no-conversation)   _set_override logging.conversation off; shift ;;
+        --no-log)            _set_override logging.loki_url ""
+                             _set_override logging.conversation off
+                             NO_LOG=1; shift ;;
+        --model)          _need_value --model "${2:-}"
+                          _defer_harness_key --model model "$2"; shift 2 ;;
+        --base-url)       _need_value --base-url "${2:-}"
+                          _defer_harness_key --base-url base_url "$2"; shift 2 ;;
+        --context-window) _need_value --context-window "${2:-}"
+                          _defer_harness_key --context-window context_window "$2"; shift 2 ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
@@ -227,6 +265,31 @@ config_get() {
     done
     _config_get_from_file "$1" "$2"
 }
+
+# The deferred harness-key flags, now that --harness has been read and
+# config_get honours it. A key the selected harness does not declare is
+# refused by name rather than ignored: a --model that silently did nothing
+# because the harness has no such setting is the failure worth avoiding, and
+# it is the whole reason these are not resolved inside the loop above.
+if [ "${#HARNESS_KEY_FLAGS[@]}" -gt 0 ]; then
+    _flag_harness="$(config_get core harness)"
+    for _entry in "${HARNESS_KEY_FLAGS[@]}"; do
+        _flag="${_entry%%=*}"
+        _rest="${_entry#*=}"
+        _key="${_rest%%=*}"
+        _value="${_rest#*=}"
+        if [ -z "$_flag_harness" ]; then
+            echo "$_flag needs a harness: set [core] harness or pass --harness." >&2
+            exit 1
+        fi
+        if ! config_type "harness.$_flag_harness.$_key" >/dev/null 2>&1; then
+            echo "the $_flag_harness harness has no '$_key' setting, so $_flag does not apply to it." >&2
+            exit 1
+        fi
+        _set_override "harness.$_flag_harness.$_key" "$_value" "$_flag"
+    done
+    unset _flag_harness _entry _flag _rest _key _value
+fi
 
 # Retired environment variables. Named, never honoured: silently ignoring an
 # exported LOKI_URL means logs stop shipping with nothing saying why, and
@@ -987,7 +1050,20 @@ cleanup() {
     # Ahead of the audit rather than after it, so the audit keeps the last
     # word (see below): this prints a line of its own whenever it keeps
     # something, and that line was landing under the verdict.
-    "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
+    # Gated here as well as inside the tool, because a flag override lives in
+    # this process and the tool re-reads the config for itself - it is also
+    # run by hand, where an environment this launcher happened to have would
+    # be the wrong authority. Same reason the shipper is gated at its start.
+    #
+    # DEJIMA_EPITAPH_NO_SHIP carries the one part of --no-log that this
+    # process cannot decide for the tool: whether to push what it kept. It
+    # only ever suppresses, so a stale export makes epitaph quieter and never
+    # louder, which is what makes it safe to honour from the environment at
+    # all.
+    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+        DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
+            "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
+    fi
     # Last writer, structurally: the operator reads bottom-up from their
     # shell prompt, so anything printed after the verdict pushes it out of
     # view. The marker-directory warning above is the one line a session can
@@ -1857,8 +1933,15 @@ compose_status=0
 #
 # `|| true` and a backgrounded start: shipping is a bonus on top of the
 # session, so a shipper that cannot start must not stop the session running.
-"$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
-SANDBOX_CONVERSATION_SHIP_PID=$!
+#
+# Gated here as well as inside the shipper, which checks the same two keys for
+# itself: --no-conversation and --no-log are overrides held in this process,
+# and the shipper re-reads the config rather than inheriting them.
+if [ "$(config_get_bool logging conversation)" = "1" ] &&
+   [ -n "$(config_get logging loki_url)" ]; then
+    "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
+    SANDBOX_CONVERSATION_SHIP_PID=$!
+fi
 
 # Ctrl-Z (#179). Two things have to be true at once, and the second is the
 # one that took four rounds of measurement to find.
