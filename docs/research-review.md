@@ -78,6 +78,15 @@ doing any work.
 7. **What does the field consider baseline that dejima does not do?** The
    cheapest question to ask. It found the absence of timeouts, which is now a
    [stated non-goal](security.md#why-there-are-no-timeouts) rather than a gap.
+8. **Is a control argued in one layer honoured in the others?** The three
+   projects are three repositories with three vocabularies, and nothing checks
+   that a claim made in one reaches the next. The first sweep produced the
+   worked example: dejima blocks IPv6 outright and says why, `dejima-ci-hardener`
+   makes the same argument for its job network - and both sibling projects'
+   node-side firewalls were IPv4-only, written later, by people who had already
+   made that argument twice. Each project's tests pass, because each tests its
+   own layer against its own template. This question is the only thing looking
+   at the seams.
 
 ## How to run one
 
