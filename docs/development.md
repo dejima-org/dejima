@@ -34,6 +34,7 @@ run them.
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
 | `docs/release.md` | The pass a `development` -> `main` release goes through, and why each part of it is not a test |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
+| `forges/github/bin/` | The github forge's one CLI: `github-pr comments`, which shows unresolved review threads. `gh` covers everything else, but thread resolution lives only in GitHub's GraphQL API, so `gh pr view --comments` cannot tell a closed thread from an open one |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |

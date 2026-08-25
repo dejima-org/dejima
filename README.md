@@ -82,7 +82,9 @@ behind that you can walk away from a session and still pick up what it did.
 - **A PR and issue workflow the agent drives itself.** `gitea-pr` and
   `gitea-issue` let a session open pull requests and issues against Gitea or
   Forgejo and pull review feedback back in, on a token scoped for exactly
-  that. Merging stays a human decision, made outside the sandbox.
+  that; on GitHub the same work goes through `gh`, plus a `github-pr` for the
+  one thing `gh` cannot do. Merging stays a human decision, made outside the
+  sandbox.
 - **Project context written for the agent.** A project ships a `.dejima.md`
   saying how work is done in it - `CLAUDE.md`'s job under a harness-agnostic
   name - and dejima loads it alongside a briefing on where the session is,

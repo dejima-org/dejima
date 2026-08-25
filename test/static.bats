@@ -2460,6 +2460,113 @@ _guard_repo() {
     [[ "$output" == real:* ]] || { echo "$output"; return 1; }
 }
 
+# --- the repository the session was launched against ------------------------
+#
+# #187. The gitea CLIs resolve the repo from origin and refuse another host,
+# so they cannot be aimed elsewhere. `gh` takes --repo on nearly every
+# subcommand and reads GH_REPO, which makes filing an issue on an unrelated
+# repository the same length of command as filing one here. A forge declares
+# the spellings; the guard compares them.
+
+_repo_guard_shim() {
+    local d="$1"; shift
+    mkdir -p "$d/real"
+    printf '#!/bin/bash\necho "real: $*"\n' > "$d/real/gh"
+    chmod +x "$d/real/gh"
+    cp "$SANDBOX_DIR/forge-guard.sh" "$d/gh"
+    chmod +x "$d/gh"
+}
+
+@test "the forge guard refuses a command aimed at another repository" {
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repoguard.XXXXXX")"
+    _repo_guard_shim "$d"
+    local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
+                      DEJIMA_FORGE_REPO=own/thing
+                      DEJIMA_FORGE_REPO_FLAGS="--repo -R" DEJIMA_FORGE_REPO_ENV=GH_REPO)
+
+    # Every spelling gh accepts, including the short flag with its value
+    # attached, which two-dash flags do not do.
+    local form
+    for form in "--repo other/thing" "--repo=other/thing" "-R other/thing" "-Rother/thing"; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" $form issue create --title x
+        [[ "$output" == *"Blocked by dejima"* ]] \
+            || { echo "gh $form reached the real CLI: $output"; return 1; }
+    done
+
+    # And the environment variable, which takes no argument at all and would
+    # otherwise be the way around every check above.
+    run env "${env_common[@]}" GH_REPO=other/thing "$d/gh" issue create --title x
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "GH_REPO was ignored: $output"; return 1; }
+
+    # The repository the session IS for goes through, in any capitalisation:
+    # forges preserve case without distinguishing it, and a refusal over that
+    # would be a false one.
+    for form in "--repo own/thing" "--repo Own/Thing" ""; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" $form issue list
+        [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }
+    done
+
+    # A launch that resolved no repository refuses rather than waving it
+    # through: a workspace with no origin has nothing --repo can legitimately
+    # name, and "cannot confirm" is not a reason to allow.
+    run env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" DEJIMA_FORGE_REPO="" \
+        DEJIMA_FORGE_REPO_FLAGS="--repo -R" "$d/gh" --repo any/thing issue create
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+
+    # The merge block still answers first for a merge, whatever repo it names:
+    # the more specific refusal is the more useful one to read.
+    run env "${env_common[@]}" DEJIMA_MERGE_BLOCK="gh pr merge" \
+        "$d/gh" --repo other/thing pr merge 3
+    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a forge that declares no repo flags is left alone by that check" {
+    # The gitea CLIs' own refusal is stricter than this guard's and lives in
+    # the tool. A forge declaring nothing here must not acquire a check it did
+    # not ask for - and must still be a pass-through with nothing else set.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repoguard-off.XXXXXX")"
+    _repo_guard_shim "$d"
+    run env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" DEJIMA_FORGE_REPO=own/thing \
+        "$d/gh" --repo other/thing issue create
+    [[ "$output" == real:* ]] || { echo "$output"; return 1; }
+}
+
+@test "the github forge declares how its CLI can be aimed elsewhere" {
+    # The guard is generic; what makes it fire is the manifest. A forge whose
+    # CLI takes a --repo and declares nothing here is one the check silently
+    # does not cover, which is the failure this pins.
+    local conf="$REPO_ROOT/forges/github/forge.conf"
+    grep -qE '^repo_flags[[:space:]]*=.*--repo' "$conf" \
+        || { echo "the github manifest no longer declares --repo"; return 1; }
+    grep -qE '^repo_env[[:space:]]*=[[:space:]]*GH_REPO' "$conf" \
+        || { echo "the github manifest no longer declares GH_REPO"; return 1; }
+    # And core passes both through, or the manifest is a declaration nothing
+    # reads.
+    local v
+    for v in DEJIMA_FORGE_REPO DEJIMA_FORGE_REPO_FLAGS DEJIMA_FORGE_REPO_ENV; do
+        grep -q "\-e \"$v=" "$REPO_ROOT/bin/dejima" \
+            || { echo "$v never reaches the container"; return 1; }
+    done
+}
+
+@test "github-pr ships and is declared, and only reads" {
+    # The one thing gh cannot do (#186): thread resolution is GraphQL-only, so
+    # `gh pr view --comments` shows resolved and unresolved alike. A tool that
+    # ships without being declared in `install` is one install-forge-bins.sh
+    # refuses to build, and the declaration is what an operator reads to know
+    # what a forge puts in the image.
+    local tool="$REPO_ROOT/forges/github/bin/github-pr"
+    [ -x "$tool" ] || { echo "github-pr is missing or not executable"; return 1; }
+    grep -qE '^install[[:space:]]*=.*bin/github-pr' "$REPO_ROOT/forges/github/forge.conf" \
+        || { echo "github-pr is not declared in the github manifest's install"; return 1; }
+    # It reads. A write would need the authorship disclosure, and the
+    # disclosure is keyed on gh - so a write here would be undisclosed.
+    run grep -nE '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method' "$tool"
+    [ "$status" -ne 0 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
+}
+
 # --- the authorship disclosure ----------------------------------------------
 #
 # The marker used to live in the two CLIs this repo wrote, which made "does
