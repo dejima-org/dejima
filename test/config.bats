@@ -1780,7 +1780,7 @@ _epitaph_three() {
     _epitaph_transcript s1 "the firewall drops IPv6"      aaaa1111 2026-01-02T03:04:05.000Z
     _epitaph_transcript s2 "the DNS proxy rewrote resolv" bbbb2222 2026-02-03T04:05:06.000Z
     _epitaph_transcript s3 "worked out the audit baseline" cccc3333 2026-03-04T05:06:07.000Z
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
 }
 
 @test "an epitaph is written out of the container's reach" {
@@ -1892,8 +1892,23 @@ _epitaph_three() {
     [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
     # Writing still is.
     _epitaph_transcript s4 "should not be kept" dddd4444 2026-04-05T06:07:08.000Z
-    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" "$EPI_TR" >/dev/null 2>&1
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
     [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 3 ]
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list says the resumable state is unknown rather than guessing it" {
+    # Which sessions still have a transcript is the harness's answer. With no
+    # harness there is nobody to ask, and "aged out" would be a claim this
+    # cannot support - the transcripts may be sitting right there. The config
+    # is written directly because write_config seeds a harness otherwise.
+    _epitaph_three
+    printf '[epitaph]\ndir = %s\n' "$EPI_STORE" > "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c 'aged out' <<< "$output")" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
 

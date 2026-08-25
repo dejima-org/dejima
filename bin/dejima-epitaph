@@ -51,32 +51,22 @@ Usage: dejima-epitaph save   <workspace>
        dejima-epitaph show   [n | name] [workspace]
 
   save     extract any compaction summaries from that workspace's transcripts
-           and keep them. Run by bin/dejima when a session exits, not usually
-           by hand.
-  list     what is kept, oldest first, and whether each session is still
-           resumable
+           and keep them. Run by bin/dejima when a session exits, not by hand
+  list     what is kept, oldest first, and whether the session behind each is
+           still resumable - where it is, resuming beats reading a summary
   search   case-insensitive regex over the bodies, reporting each hit's
-           position in the same listing `list` prints
+           position in the listing list prints
   show     open one in $VISUAL or $EDITOR, or print it where there is no
            terminal to open an editor on
-
-`--all` widens list and search to every project rather than this one.
-
-The reading commands work with [epitaph] enabled off. Turning the feature off
-is when reviewing and clearing the store is most likely, and stranding what it
-already kept behind the switch that turns it off is the wrong shape.
+  --all    widen list and search to every project rather than this one
 
 A harness that compacts a long session writes a summary of what it is about to
-forget. For some harnesses that summary is the only durable account of a long
-session's reasoning, and it goes away with the container. This keeps it.
+forget, and it goes away with the container. This keeps it, host-side, in a
+store nothing mounts - so one session cannot read what an earlier one concluded
+or edit what this one is about to record.
 
-What a compaction looks like in a transcript is the harness's business, so the
-selected harness's plugin does the extracting; everything else here is dejima's:
-where the store is, that nothing mounts it, and that a directory appears only
-once something has been written into it.
-
-The store is host-side and never mounted, so one session cannot read what an
-earlier one concluded or edit what this one is about to record.
+Reading works with [epitaph] enabled off: turning the feature off is when
+reviewing and clearing the store is most likely.
 
 Nothing is kept when the selected harness does not lose anything to compaction,
 which is not a failure - it means the transcript already holds it all.
@@ -125,11 +115,6 @@ done
 set -- ${args[@]+"${args[@]}"}
 
 STORE="$(config_get epitaph dir)"
-# Only for `list`'s resumable column, and only the selected harness's - the
-# same key dejima-audit reads, rather than any one harness's by name. Empty
-# for a harness that keeps its transcripts somewhere this cannot name, and
-# that column then says so instead of guessing.
-TRANSCRIPTS="$(harness_config_get projects_dir)"
 
 # `enabled` gates writing, not reading. Turning epitaph off must not strand
 # what it already kept behind a config key: an operator who switches it off
@@ -218,11 +203,29 @@ list)
     # same sentence down eight rows reads as a broken tool while leaving
     # discoverability exactly where it was. `search` is the answer to "which
     # one was it"; this is the answer to "what is here".
+    #
+    # Which sessions still have a transcript is the harness's answer, not
+    # something to work out from a filename: the id is in the name for one
+    # harness and is the directory for the next. Under --all the workspace is
+    # not passed, because a store key is a slug and a slug does not resolve
+    # back to a path - the plugin answers for every key it holds instead. A
+    # harness that does not implement the hook returns nothing, and every row
+    # then says so rather than claiming the transcript is gone.
+    harness_plugin_load "$(config_get core harness)"
+    live=""
+    if [ "$ALL" = 1 ]; then live="$(harness_hook harness_live_sessions)"
+    else live="$(harness_hook harness_live_sessions "$ws")"; fi
     C_KEY="$C_KEY" C_DIM="$C_DIM" C_OK="$C_OK" C_RESET="$C_RESET" \
-    python3 - "$TRANSCRIPTS" "$ALL" ${FILES[@]+"${FILES[@]}"} <<'PY'
+    DEJIMA_LIVE_SESSIONS="$live" DEJIMA_HAS_LIVE="$(declare -F harness_live_sessions >/dev/null && echo 1)" \
+    python3 - "$ALL" ${FILES[@]+"${FILES[@]}"} <<'PY'
 import os, re, sys
 
-transcripts, show_slug = sys.argv[1], sys.argv[2] == "1"
+show_slug = sys.argv[1] == "1"
+# "<key>\t<session-id>" per live transcript. The distinction that matters is
+# an empty set from a harness that answered versus no answer at all: the
+# first means aged out, the second means unknown.
+known = os.environ.get("DEJIMA_HAS_LIVE") == "1"
+live = set(os.environ.get("DEJIMA_LIVE_SESSIONS", "").splitlines())
 KEY, DIM, OK, RESET = (os.environ.get(k, "") for k in ("C_KEY", "C_DIM", "C_OK", "C_RESET"))
 
 # The index is padded before it is coloured: a width in the format string
@@ -231,7 +234,7 @@ KEY, DIM, OK, RESET = (os.environ.get(k, "") for k in ("C_KEY", "C_DIM", "C_OK",
 ROW = "%s  %-16s  %-6s %6s %5s  %s"
 print(DIM + ROW % ("%4s" % "#", "when", "how", "ctx", "size", "transcript") + RESET)
 
-for i, path in enumerate(sys.argv[3:], 1):
+for i, path in enumerate(sys.argv[2:], 1):
     try:
         with open(path, errors="replace") as fh:
             head = [next(fh, "") for _ in range(12)]
@@ -248,14 +251,12 @@ for i, path in enumerate(sys.argv[3:], 1):
     # it is recorded rather than guessed at.
     m = re.match(r"(\d+) before", h.get("tokens", ""))
     ctx = "%dk" % (int(m.group(1)) / 1000) if m else "?"
-    # <dir>/<slug>/<session>.jsonl is Claude Code's layout, which is why the
-    # directory it is under is the selected harness's own key rather than a
-    # fixed one. A harness that does not publish that key gets "?" here: not
-    # knowing where a transcript would be is not the same as it being gone.
-    if not transcripts:
+    # The store key is the directory this epitaph sits in, which is dejima's
+    # own arrangement; pairing it with the session id is what makes the answer
+    # unambiguous under --all, where two projects can hold the same id.
+    if not known:
         state = DIM + "?" + RESET
-    elif os.path.exists(os.path.join(
-            transcripts, os.path.basename(os.path.dirname(path)), sid + ".jsonl")):
+    elif "%s\t%s" % (os.path.basename(os.path.dirname(path)), sid) in live:
         state = OK + "resumable" + RESET
     else:
         state = DIM + "aged out" + RESET
@@ -345,9 +346,10 @@ show)
     ;;
 esac
 
-# Everything below is `save`, which is the only command that needs a harness:
-# reading the store is dejima's own business, extracting an epitaph is the
-# plugin's.
+# Everything below is `save`. Reading the store is dejima's own business and
+# needs the plugin only to label a row (see `list` above, which tolerates its
+# absence); extracting an epitaph is entirely the plugin's, so from here a
+# missing one is fatal rather than a blank column.
 harness_plugin_load "$(config_get core harness)"
 
 # With no harness selected nothing knows what a compaction looks like, so
