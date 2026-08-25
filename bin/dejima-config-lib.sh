@@ -42,6 +42,7 @@ core.harness	provider:harness
 core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
 core.command	?identifier
+core.identity	?identifier
 core.firewall	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
@@ -351,6 +352,19 @@ _config_valid_value() {
             ;;
         identifier)
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+            ;;
+        text)
+            # A person's name or email address: an identifier has no room for
+            # a space and a path refuses a colon, and both are legal here.
+            # Refuses only what cannot survive the trip - a newline splits the
+            # value where every consumer expects one line, and a control
+            # character reaching a terminal is the escape-sequence hazard
+            # docs/security.md names. Everything else is the operator's
+            # business, the same reading `path` takes of a space.
+            case "$value" in
+                *[$'\n\r\t']*) return 1 ;;
+            esac
+            [[ ! "$value" =~ [[:cntrl:]] ]]
             ;;
         chord)
             # A tmux control chord, as the remote terminal page's PREFIX,

@@ -145,6 +145,7 @@ issue_command	?command
 merge_block	?command
 repo_flags	?list:flag
 repo_env	?identifier
+identity_keys	?list:identifier
 disclose	?disclosures
 keys	?list:keyspec
 requires	?list:identifier
@@ -609,9 +610,52 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
+        # An identity is the operator's own name for a set of credentials, so
+        # there is no directory to check it against - only that it is a name
+        # at all. Unlike a provider, an unused one is not a misconfiguration:
+        # having [identity.oss] on a machine that never selects it is the
+        # normal state of a second account.
+        identity.*)
+            name="${section#identity.}"
+            valid_provider_name "$name"
+            return
+            ;;
         *) return 1 ;;
     esac
     provider_dir "$axis" "$name" >/dev/null 2>&1
+}
+
+# The keys an [identity.<name>] section may carry, as "<key>\t<type>" lines.
+#
+# ssh_key and the git identity are core's, because every forge needs the same
+# two answers to "who is pushing". Everything else is declared by a forge's
+# identity_keys and typed by that forge's own keys entry, so the identity
+# inherits the validation the forge already wrote rather than a second copy of
+# it that could disagree.
+#
+# A key name declared by two forges resolves to one type here, which is why a
+# static test refuses that collision rather than this function guessing.
+_identity_key_specs() {
+    printf 'ssh_key	?path
+'
+    printf 'user_name	?text
+'
+    printf 'user_email	?text
+'
+    local forge key spec
+    for forge in $(provider_list forge); do
+        for key in $(manifest_get forge "$forge" identity_keys); do
+            for spec in $(_provider_keys_field forge "$forge"); do
+                [ "${spec%%:*}" = "$key" ] || continue
+                # The forge's own type, with its default deliberately dropped:
+                # a default belongs to the forge's section, and repeating it
+                # here would make an identity that names no token look like one
+                # that named the default path.
+                printf '%s\t?%s\n' "$key" \
+                    "$(cut -f2 <<< "$(_provider_keyspec_parse "$spec")" | sed 's/^?//')"
+            done
+        done
+    done
 }
 
 # Looks up one [forge.<name>]/[harness.<name>] key's TYPE<TAB>DEFAULT in that
@@ -621,6 +665,17 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
+        identity.*)
+            rest="${want#identity.}"
+            key="${rest#*.}"
+            [ "$key" != "$rest" ] || return 1
+            while IFS=$'\t' read -r pname ptype; do
+                [ "$pname" = "$key" ] || continue
+                printf '%s\t' "$ptype"
+                return 0
+            done < <(_identity_key_specs)
+            return 1
+            ;;
         *) return 1 ;;
     esac
     rest="${want#*.}"
@@ -639,6 +694,75 @@ _config_extra_spec() {
         return 0
     done
     return 1
+}
+
+# What the selected identity says about one key, if anything.
+#
+# An identity answers for the credentials and the git name a PERSON brings to
+# a project, which is the half a project cannot declare: .dejima/ is committed
+# and shared, and a key path is per-user and per-machine. The project (or the
+# operator) names an identity; the identity supplies the paths.
+#
+# Returns 1 for a key no identity owns, which is most of them - the caller
+# then reads the config file as before. Deliberately narrow: an identity that
+# could set any key would be a second config file with different rules about
+# what may be in it.
+#
+# core.identity itself is excluded, and not merely by convention: the caller
+# that consults this is bin/dejima's config_get wrapper, so answering for the
+# key that names the identity would recurse into itself.
+# Whether the named identity exists in the config at all - any of its keys
+# being present is enough, because a section with no keys is not a section
+# the parser records.
+#
+# The check that matters: [core] identity naming a section nobody wrote is a
+# silent fall-through to the machine's defaults, which is the wrong direction
+# to be wrong in. Pushing under the wrong key fails loudly; pushing under the
+# default key when you asked for another one does not fail at all.
+identity_exists() {
+    local name="$1" key
+    [ -n "$name" ] || return 1
+    valid_provider_name "$name" || return 1
+    while IFS=$'\t' read -r key _; do
+        config_is_set "identity.$name" "$key" && return 0
+    done < <(_identity_key_specs)
+    return 1
+}
+
+identity_get() {
+    local section="$1" key="$2" name value pname
+    [ "$section.$key" != "core.identity" ] || return 1
+    name="$(config_get core identity)" || return 1
+    [ -n "$name" ] || return 1
+    case "$section" in
+        core)      [ "$key" = ssh_key ] || return 1 ;;
+        forge.*)   _forge_owns_identity_key "${section#forge.}" "$key" || return 1 ;;
+        identity.*) return 1 ;;
+        *) return 1 ;;
+    esac
+    value="$(config_get "identity.$name" "$key")" || return 1
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+# Whether one forge declared this key as a person's rather than a project's.
+_forge_owns_identity_key() {
+    local forge="$1" key="$2" k
+    for k in $(manifest_get forge "$forge" identity_keys); do
+        [ "$k" = "$key" ] && return 0
+    done
+    return 1
+}
+
+# The git name and address the identity carries, for the gitconfig copy the
+# container gets. Not core config keys: the host's own ~/.gitconfig is where
+# they come from without an identity, and adding a second place to set them
+# globally would be a new way to get the same answer.
+identity_git_field() {
+    local field="$1" name
+    name="$(config_get core identity)" || return 1
+    [ -n "$name" ] || return 1
+    config_get "identity.$name" "$field"
 }
 
 # One key of the SELECTED harness, rather than of a harness named literally
@@ -716,6 +840,23 @@ provider_validate_selection() {
     # quietly absent, because an operator who has them everywhere else would
     # otherwise have to read a manifest to find out they are gone here.
     #
+    # An identity that names nothing is refused rather than ignored. Falling
+    # through to the machine's own credentials would mean pushing under the
+    # wrong account with nothing saying so, which is the failure this feature
+    # exists to remove rather than one it may introduce.
+    # Guarded on the config existing rather than swallowing config_get's
+    # stderr: with no file at all it says so, and a selection validated
+    # without one is a legitimate case this must stay silent for.
+    local _identity=""
+    config_exists && { _identity="$(config_get core identity)" || _identity=""; }
+    if [ -n "$_identity" ] && ! identity_exists "$_identity"; then
+        echo "[core] identity is '$_identity', and no [identity.$_identity] section sets" >&2
+        echo "anything in $(config_path). An identity that resolves to nothing would" >&2
+        echo "quietly use this machine's own credentials instead - refusing rather than" >&2
+        echo "doing that. See docs/configuration.md, \"Identities\"." >&2
+        return 1
+    fi
+
     # A name outside this set is a hard error rather than an unknown guard
     # treated as absent: a typo would otherwise silently turn a guard off,
     # which is the failure this whole declaration exists to prevent.

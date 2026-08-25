@@ -850,6 +850,56 @@ assert_remedy_forges_exist() {
     [ "$(lib manifest_get forge github install)" = "system:gh bin/github-pr" ]
 }
 
+@test "each forge declares which of its keys belong to a person" {
+    # The credential paths, which a project may not declare and an identity
+    # may set. One declaration drives both rules, so they cannot disagree
+    # about which key is which.
+    [ "$(lib manifest_get forge gitea identity_keys)" = "token_file" ]
+    [ "$(lib manifest_get forge github identity_keys)" = "push_token_file" ]
+    [ -z "$(lib manifest_get forge none identity_keys)" ]
+    # And every one of them is a key that forge actually has, or the identity
+    # would offer a setting nothing reads.
+    local forge key spec found
+    for forge in $(lib provider_list forge); do
+        for key in $(lib manifest_get forge "$forge" identity_keys); do
+            found=0
+            for spec in $(lib manifest_get forge "$forge" keys); do
+                [ "${spec%%:*}" = "$key" ] && found=1
+            done
+            [ "$found" -eq 1 ] \
+                || { echo "$forge names identity key '$key' and has no such key"; return 1; }
+        done
+    done
+}
+
+@test "no two forges claim the same identity key name" {
+    # An identity's keys are unqualified, so one name resolving to two forges'
+    # types would make the validation depend on which forge was read first.
+    # Refused here rather than guessed at in _identity_key_specs.
+    local forge key seen=""
+    for forge in $(lib provider_list forge); do
+        for key in $(lib manifest_get forge "$forge" identity_keys); do
+            case " $seen " in
+                *" $key "*) echo "two forges declare identity key '$key'"; return 1 ;;
+            esac
+            seen="$seen $key"
+        done
+    done
+}
+
+@test "the identity key set is core's two plus whatever the forges declare" {
+    # ssh_key and the git name are core's, because every forge needs the same
+    # answer to "who is pushing". The credentials are not, and are typed by
+    # the forge that owns them rather than by a second copy here.
+    local specs
+    specs="$(lib _identity_key_specs)"
+    grep -qP '^ssh_key\t\?path$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^user_name\t\?text$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^user_email\t\?text$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^token_file\t\?path$' <<< "$specs" \
+        || { echo "token_file did not inherit gitea's type: $specs"; return 1; }
+}
+
 @test "the github forge declares how its CLI can be aimed at another repo" {
     # gh takes --repo on nearly every subcommand and reads GH_REPO, so the
     # ordinary path can act on a repository the session has nothing to do
