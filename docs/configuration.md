@@ -27,6 +27,7 @@ config file behind them.
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
 | `[core] identity` | unset | which `[identity.<name>]` section supplies this project's credentials and git name; also settable per launch with `--identity`. A name with no section is refused rather than falling back |
+| `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |

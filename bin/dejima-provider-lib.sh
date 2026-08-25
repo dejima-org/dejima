@@ -44,6 +44,11 @@ _provider_axis_dir() {
         forge)    printf 'forges' ;;
         workflow) printf 'workflows' ;;
         harness)  printf 'harnesses' ;;
+        # Not an axis in the select-one sense the other three are: a launch
+        # enables zero or more tools, and none is the default. It is here
+        # because everything else about it is the same - a manifest that is
+        # data, validated by the same schema machinery, never sourced.
+        tool)     printf 'tools' ;;
         *) echo "unknown provider axis: $1" >&2; return 1 ;;
     esac
 }
@@ -53,6 +58,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
+        tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
 }
@@ -155,6 +161,22 @@ fixed_hosts	?list:hostname
 hosts_allowlisted_by_core	bool	off
 install	?list:installspec
 env_export	?list:export
+EOF
+            ;;
+        # An optional tool. Deliberately small: a tool declares what it is,
+        # what installs it, what its environment needs and what the session
+        # should be told about it - and nothing that could change what dejima
+        # permits. There is no key here for a hook, a mount, a domain or a
+        # guard, because a tool that needed one of those would be a change to
+        # the boundary rather than a program on PATH, and would have to be
+        # argued for rather than declared.
+        tool) cat <<'EOF'
+description	text
+install	depspec
+install_layout	enum:prefix|binary	prefix
+image_env	?list:envpair
+command	identifier
+instructions	?relpath
 EOF
             ;;
         workflow) cat <<'EOF'
@@ -1487,6 +1509,29 @@ _briefing_substitute() {
 # the resume command) - in that reading order. Every {{key}} is substituted
 # except {{session_id}}/{{container_id}}, deferred as @@SESSION_ID@@ and
 # @@CONTAINER_ID@@ for the hook that mounts this at session start.
+# What the session is told about the optional tools this launch enabled.
+#
+# The heading is core's and the body is each tool's own instructions.md, so a
+# tool describes itself once and every harness gets the same words. Nothing
+# here can change what the session may do - a tool's manifest has no key for
+# that - which is what makes rendering a project-selectable fragment into the
+# briefing safe at all.
+_briefing_core_tools() {
+    local tools="$1" tool frag dir out=""
+    out="Extra tools this session has, beyond the usual shell:"
+    for tool in $tools; do
+        dir="$(provider_dir tool "$tool")" || continue
+        frag="$(manifest_get tool "$tool" instructions)" || frag=""
+        out+=$'\n\n'
+        out+="- **$tool** - $(manifest_get tool "$tool" description)"
+        if [ -n "$frag" ] && [ -f "$dir/$frag" ]; then
+            out+=$'\n\n'
+            out+="$(sed 's/^/  /' "$dir/$frag")"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 briefing_compose() {
     local forge="$1" workflow="$2" harness="$3"
     local caps autonomy workflow_frag harness_frag text
@@ -1514,6 +1559,15 @@ briefing_compose() {
     fi
     if [ "${DEJIMA_CORPUS:-off}" = "on" ]; then
         text+="$(_briefing_core_corpus)"
+        text+=$'\n\n'
+    fi
+    # Optional tools, from DEJIMA_TOOLS. A tool the session is not told about
+    # is one it will not use, so the manifest's instructions fragment is the
+    # whole of the wiring for a harness: dejima renders it rather than letting
+    # the tool's own installer patch a config, which is the difference
+    # docs/tools.md draws between a hardened tool and a bare install.
+    if [ -n "${DEJIMA_TOOLS:-}" ]; then
+        text+="$(_briefing_core_tools "${DEJIMA_TOOLS}")"
         text+=$'\n\n'
     fi
     # The harness fragment closes the briefing: it supplies both the resume

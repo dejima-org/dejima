@@ -23,6 +23,7 @@ Usage: dejima-audit <snapshot|compare|show|ack> [workspace] [state-file]
   show [--full]    index of reports waiting to be read; --full prints one
   ack              walk a report finding by finding and record a decision
                    ([o] at the prompt opens the file in $VISUAL/$EDITOR)
+  --print-paths    the resolved store paths, one per line, for scripts
 
   workspace defaults to the enclosing git repository, else $PWD.
 
