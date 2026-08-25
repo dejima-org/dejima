@@ -587,7 +587,7 @@ for _tool in $_tools_wanted; do
         echo "See docs/tools.md." >&2
         exit 1
     fi
-    manifest_validate tool "$_tool" || exit 1
+    tool_validate "$_tool" || exit 1
     DEJIMA_TOOLS="${DEJIMA_TOOLS:+$DEJIMA_TOOLS }$_tool"
 done
 unset _tools_wanted _tool

@@ -56,6 +56,13 @@ tool added this way, not only the first:
   itself so the ordering, and what the file ends up containing, stay dejima's.
 - **The guards still hold with it enabled**, and a test says so.
 
+- **It sets only its own environment.** A tool's `image_env` becomes a
+  Dockerfile `ENV` that every process in the container inherits, so a bare
+  name reaches the harness too. Names must be namespaced to the tool and a
+  launch refuses one that is not. This is the bar's newest line, and it is
+  here because rtk broke it: it shipped with `NO_COLOR=1`, and a session with
+  the tool enabled lost colour in the harness, git and everything else.
+
 If a tool cannot clear that, it is not an optional tool. It might still be a
 dependency a project declares and an operator approves, where the claim being
 made is much smaller.
