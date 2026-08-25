@@ -251,8 +251,23 @@ valid_tarball_spec() {
 # A declared domain has to survive being written into a dnsmasq
 # server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
 # there is one definition and no pair of them to drift apart.
+# A hostname, label by label. The matcher is a trust boundary: what it accepts
+# becomes a dnsmasq `server=` line and an ipset entry, so it should accept only
+# what it means to rather than only what it can see a use for.
+#
+# The previous form allowed an EMPTY label - `a..b.com` matched - because its
+# repeated group could consume a dot having matched no characters before it.
+# Harmless in practice, since nothing that shape resolves, and fixed on the
+# principle rather than on a known abuse: the published bypass in this space
+# came from a matcher accepting a string the resolver read differently.
+#
+# Per label: 1-63 characters, starting and ending alphanumeric, hyphens in
+# between. That also newly refuses a label with a leading or trailing hyphen,
+# which is not a hostname either. A single label with no dot stays legal - an
+# internal name resolved by the host's own resolver is a real case.
 valid_domain() {
-    [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
+    local label='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+    [[ "$1" =~ ^$label(\.$label)*$ ]]
 }
 
 # Extension point for types this layer cannot judge on its own. A stub here,

@@ -4247,6 +4247,89 @@ EOF
         || { echo "the threat model reads as a Claude Code quirk"; return 1; }
 }
 
+@test "the negative space is collected where a reader will find it" {
+    # A document organised by control makes a reader assemble what is NOT
+    # covered themselves, and most will not. Every item here is documented
+    # somewhere else too; this holds the collected list, at the top, because
+    # the collection is the part that is easy to lose.
+    local sec="$REPO_ROOT/docs/security.md" claim
+    grep -q '^## What dejima does not sandbox' "$sec" \
+        || { echo "the not-sandboxed list is gone"; return 1; }
+    for claim in 'through a domain that is allowed' 'DNS query names' \
+                 'below the container' 'finer than a session' \
+                 'Resource exhaustion'; do
+        grep -qi "$claim" "$sec" || { echo "the list drops: $claim"; return 1; }
+    done
+    # First, not buried: a list of what is not covered is only useful before
+    # the reader has formed an impression from the list of what is.
+    local not_line blast_line
+    not_line="$(grep -n '^## What dejima does not sandbox' "$sec" | cut -d: -f1)"
+    blast_line="$(grep -n '^## Blast radius by layer' "$sec" | cut -d: -f1)"
+    [ "$not_line" -lt "$blast_line" ] \
+        || { echo "the not-sandboxed list sits below the controls"; return 1; }
+}
+
+@test "the absence of timeouts is a stated decision, not a gap" {
+    # Every published checklist for this lists them. dejima does not have them
+    # and the reason is a judgement about what dejima protects - so it is
+    # written where the absence is, or it reads as something not yet reached.
+    local sec="$REPO_ROOT/docs/security.md"
+    grep -q '^## Why there are no timeouts' "$sec" \
+        || { echo "the reasoning is gone but the absence is not"; return 1; }
+    grep -qi 'does not cross the boundary' "$sec" \
+        || { echo "the reason no longer says what a runaway session does not do"; return 1; }
+    # And the claim stays true: adding a limit without revisiting this would
+    # leave the document arguing against something the code now does.
+    run grep -nE '^\s*(mem_limit|cpus|pids_limit|stop_grace_period):' \
+        "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] \
+        || { echo "a resource limit exists while the doc says none does:"; echo "$output"; return 1; }
+}
+
+@test "the threat model says which deployment it describes" {
+    # The table has rows below the container whose controls belong to another
+    # repository. Run without it - on a laptop, which the README invites - the
+    # row below the container is the operator's own machine. The table cannot
+    # show that, so the prose has to say it.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q '^## Which deployment this describes' "$tm" \
+        || { echo "the deployment the table describes is unstated again"; return 1; }
+    grep -qi 'load-bearing' "$tm" \
+        || { echo "the sister project reads as optional"; return 1; }
+    grep -q 'devbox-hardener' "$tm" || { echo "$tm names no VM layer"; return 1; }
+    # Linked from the not-sandboxed list, which is where a reader hits the
+    # question first.
+    grep -q 'which-deployment-this-describes' "$REPO_ROOT/docs/security.md" \
+        || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
+}
+
+@test "docs/research-review.md exists and carries its standing questions" {
+    # The process is only worth having if the agenda is in it: a review with no
+    # standing questions becomes a reading list, which is the failure mode it
+    # exists to avoid.
+    local doc="$REPO_ROOT/docs/research-review.md"
+    [ -f "$doc" ] || { echo "the review process is gone"; return 1; }
+    grep -q '^## The standing questions' "$doc" \
+        || { echo "the agenda is gone; what is left is a reading list"; return 1; }
+    grep -q '^## The standing test queue' "$doc" \
+        || { echo "the test queue is gone, so findings stay hypotheses"; return 1; }
+    # And it says where a sweep does NOT go. Reviews, specs and plans are
+    # ephemeral and live on the operator's machine; what belongs in the
+    # repository is the action a review produced, not the reasoning behind it.
+    grep -qi 'not committed here' "$doc" \
+        || { echo "the doc no longer says a sweep stays out of the repository"; return 1; }
+    # Held structurally too, so the practice cannot drift into a directory of
+    # reading notes that nobody acts on.
+    local d
+    for d in findings sweeps research reviews docs/findings docs/research; do
+        [ ! -d "$REPO_ROOT/$d" ] \
+            || { echo "$d/ exists; sweeps are being committed after all"; return 1; }
+    done
+    # Quarterly, because the argument for a schedule is capability drift rather
+    # than anything on the current list.
+    grep -qi 'quarterly' "$doc" || { echo "the standing sweep lost its schedule"; return 1; }
+}
+
 @test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/threat-model.md" ]
     grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"

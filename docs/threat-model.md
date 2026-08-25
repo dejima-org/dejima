@@ -127,6 +127,45 @@ has the two tiers and where each one's boundary sits.
 Neither is required to run dejima, and the container row holds without them.
 What they change is what the row below it costs.
 
+**A survey of comparable projects found none with rows below the container at
+all** - their boundary is between the agent and the host, and what is under
+the host is outside their threat models. The same survey found nothing
+treating a forge or a CI runner as part of an agent's blast radius, which is
+what the second sister project exists for: a session that can open a pull
+request can execute code on a machine dejima never touches.
+
+Recorded as an observation from one day of secondary sources rather than as a
+claim to have surveyed the field exhaustively. The reason it is here at all is
+that it changes what to defend: if the layers below and beside the container
+are ones nobody else is examining, they are also ones where nobody else's
+mistakes are available to learn from.
+
+## Which deployment this describes
+
+The table above describes dejima **as deployed on a devbox VM with the two
+sister projects arranged around it**. Say that plainly, because the README
+also invites running dejima on a laptop, and there the table is shorter than
+it looks: the container row holds exactly as described, and the row below it
+is the operator's own machine with nothing arranged against it.
+
+That matters more than it used to. The field's own ordering for isolating an
+agent whose contents are assumed hostile puts a hardened container below
+gVisor and below a per-workload VM kernel, on the grounds that a container
+shares the host kernel and that container *runtime* vulnerabilities bypass
+syscall filtering rather than being caught by it. dejima's answer to that
+ordering is not to dispute it. It is that escape moves a layer instead of
+ending the argument - which is a better answer where the next layer exists,
+and no answer at all where it does not.
+
+So `dejima-devbox-hardener` is load-bearing rather than optional-and-nice.
+It is the layer that other approaches reach for as the primary boundary, and
+in this architecture it is the second one. On a laptop, dejima is a hardened
+container and the honest description of what is under it is "your home
+directory, and dejima has nothing to say about it".
+
+**What this repository can do about that is say so**, which is the whole of
+this section. Nothing in dejima can bound its own host.
+
 ## What this repository does not claim
 
 - **That the egress allowlist bounds what reaches the model.** It bounds what
