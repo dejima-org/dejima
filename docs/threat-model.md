@@ -158,10 +158,23 @@ ending the argument - which is a better answer where the next layer exists,
 and no answer at all where it does not.
 
 So `dejima-devbox-hardener` is load-bearing rather than optional-and-nice.
-It is the layer that other approaches reach for as the primary boundary, and
-in this architecture it is the second one. On a laptop, dejima is a hardened
-container and the honest description of what is under it is "your home
-directory, and dejima has nothing to say about it".
+On a laptop, dejima is a hardened container and the honest description of what
+is under it is "your home directory, and dejima has nothing to say about it".
+
+**Load-bearing for what, exactly**, because the field's tiering invites a
+reading that project does not accept and has never claimed. A per-workload VM
+kernel is reached for elsewhere as a *containment* boundary. That is not what
+the row below the container buys here. `dejima-devbox-hardener`'s own threat
+model states in three places that its firewall bounds where a compromise can
+**spread**, not whether it can phone home: an escape reopens internet egress,
+deliberately, because deny-by-default earns its keep where the protected set
+is enumerable and the internet is not.
+
+Read the row as written, then: it cuts LAN reach to what is declared, and it
+is enforced from outside the guest so root in the VM cannot flush it. It does
+not restore the egress control the container layer provides. Anyone writing
+this sentence more confidently than that is making a promise on another
+repository's behalf.
 
 **What this repository can do about that is say so**, which is the whole of
 this section. Nothing in dejima can bound its own host.
