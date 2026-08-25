@@ -547,6 +547,25 @@ dexec_node() {
     [[ "$output" == *"policy DROP"* ]]
 }
 
+@test "the IPv6 block is a filtered family, not an absent one" {
+    # The DROP policy above is the good path. This asserts the container is
+    # actually ON that path rather than on the fallback, because the two are
+    # indistinguishable from the outside: a container with no IPv6 at all also
+    # reaches nothing over IPv6.
+    #
+    # If ip6tables ever stops working as root here, the test above fails and
+    # this one says why - and on a host that takes the fallback branch,
+    # init-firewall.sh now either turns the family off or refuses to start,
+    # rather than logging a conclusion it had not checked.
+    run dexec sh -c 'ip6tables -L >/dev/null 2>&1 && echo usable'
+    [[ "$output" == *usable* ]] \
+        || { echo "ip6tables is not usable as root; the fallback branch is live"; return 1; }
+    # And the fallback's own condition is readable, so a failure here can be
+    # diagnosed without a second run: what does the kernel say is up?
+    run dexec sh -c 'cat /proc/net/if_inet6 2>/dev/null || echo "(no /proc/net/if_inet6)"'
+    [ "$status" -eq 0 ]
+}
+
 @test "a non-allowlisted domain is refused by the DNS proxy, not just left to fail later" {
     run dexec dig definitely-not-on-the-allowlist.example.org
     [[ "$output" == *"status: REFUSED"* ]]

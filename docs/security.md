@@ -920,6 +920,14 @@ strips AAAA answers): there's no IPv6 equivalent of the allowlist above, so
 leaving it open would bypass the whole firewall on any host with IPv6
 egress.
 
+Where `ip6tables` cannot be used at all, the firewall does not conclude that
+IPv6 is therefore absent - it asks the kernel, and treats an address on any
+interface other than loopback as the family being live. It then turns IPv6
+off in the container's own network namespace, and **refuses to start** if it
+cannot. A tool that will not run and a family that is not there are different
+conditions, and reporting the second on evidence of the first is how a
+boundary comes to be described rather than held.
+
 If your Gitea host only resolves via a LAN-local DNS server, make sure the
 Docker host itself can resolve it: containers inherit the host's resolver.
 
