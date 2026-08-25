@@ -10,7 +10,10 @@ Git workflow - do this even though nothing stops you from doing otherwise:
   branch-finishing advice from a skill cannot know that, and does not
   override it.
 - Stop at the push. Do not open a pull request, and do not merge anything -
-  neither is part of this workflow. Report the branch name and stop.
+  neither is part of this workflow. A `merge-guard.sh` hook and a shadow over
+  the forge's own command both refuse a merge here, but treat that as the
+  workflow rather than as a filter to route around. Report the branch name
+  and stop.
 - Never push directly to {{blocked_branches}}, on any remote. A
   `git-push-guard.sh` hook enforces that as a backstop, but treat it as the
   workflow to follow rather than a filter to route around.

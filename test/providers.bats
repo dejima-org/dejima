@@ -622,7 +622,7 @@ assert_remedy_forges_exist() {
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$(lib manifest_get workflow branch-push push)" = "on" ]
     [ "$(lib manifest_get workflow branch-push blocked_branches)" = "main master" ]
-    [ "$(lib manifest_get workflow branch-push block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow branch-push block_merge)" = "on" ]
     [ "$(lib manifest_get workflow branch-push requires_worktree)" = "on" ]
     [ "$(lib manifest_get workflow branch-push autonomy)" = "push-branch" ]
     # Requires no capability, so it is usable against a forge that offers
@@ -770,11 +770,51 @@ assert_remedy_forges_exist() {
     grep -q 'export DEJIMA_GITHUB_PUSH' "$REPO_ROOT/bin/dejima"
 }
 
+@test "no shipped workflow tells the agent not to merge without blocking it" {
+    # Every shipped briefing says some version of "do not merge". Two of them
+    # said it with block_merge off, which made the sentence an assertion
+    # nothing held: the forge's CLI is installed by the FORGE, so `<pr> merge`
+    # is on PATH whenever a forge is selected, whatever the workflow tells the
+    # agent to do. The manifest that was off carried a reason - "nothing here
+    # ever reaches a forge's PR interface" - and the reason was false.
+    #
+    # Asserted as an invariant over every workflow rather than as three pinned
+    # values, because a fourth workflow gets this wrong the same way. A
+    # workflow that genuinely means to permit merging has to say so in its
+    # briefing and change this test on purpose.
+    local wf name
+    for wf in "$REPO_ROOT"/workflows/*/; do
+        [ -d "$wf" ] || continue
+        name="$(basename "$wf")"
+        [ "$(lib manifest_get workflow "$name" block_merge)" = "on" ] \
+            || { echo "$name leaves merging unguarded"; return 1; }
+        grep -qi 'merg' "$wf/briefing.md" \
+            || { echo "$name's briefing says nothing about merging"; return 1; }
+    done
+}
+
+@test "a workflow blocking merges reaches the guard with the forge's command" {
+    # block_merge is only half of it: what actually refuses the command is
+    # DEJIMA_MERGE_BLOCK, resolved from the FORGE's merge_block and passed to
+    # docker/forge-guard.sh. A workflow with the flag on and a forge that
+    # names no command blocks nothing, which is correct - there is nothing to
+    # block - but the pairing is what has to hold.
+    local wf
+    for wf in branch-push local-only worktree-pr; do
+        [ "$(lib manifest_get workflow "$wf" block_merge)" = "on" ] || continue
+        [ -n "$(lib manifest_get forge gitea merge_block)" ] \
+            || { echo "gitea names no merge command for $wf to block"; return 1; }
+    done
+    grep -q 'DEJIMA_MERGE_BLOCK="$(manifest_get forge "$DEJIMA_FORGE_NAME" merge_block)"' \
+        "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer resolves the forge's merge command"; return 1; }
+}
+
 @test "local-only pushes nothing and blocks no branches" {
     run lib manifest_validate workflow local-only
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$(lib manifest_get workflow local-only push)" = "off" ]
-    [ "$(lib manifest_get workflow local-only block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow local-only block_merge)" = "on" ]
     [ "$(lib manifest_get workflow local-only requires_worktree)" = "off" ]
     [ "$(lib manifest_get workflow local-only autonomy)" = "commit" ]
     # blocked_branches is empty BECAUSE push is off - there is no push to
