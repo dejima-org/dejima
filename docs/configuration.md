@@ -33,9 +33,9 @@ config file behind them.
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release |
-| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted |
-| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one |
+| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release. Also settable per launch with `--model` |
+| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted. Also settable per launch with `--base-url` |
+| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one. Also settable per launch with `--context-window` |
 | `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
@@ -47,20 +47,24 @@ config file behind them.
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
-| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `[epitaph] enabled` | `on` | keep the summary Claude Code writes when a session compacts |
+| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |
+| `[epitaph] enabled` | `on` | keep the summary a harness writes when a session compacts; `--no-epitaph` skips it for one launch |
 | `[epitaph] dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
 | `[epitaph] loki` | `off` | also push each epitaph to `[logging] loki_url`, host-side |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md. `--no-conversation` turns it off for one launch, and `--no-log` implies it |
 | `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
 | `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
 | `[audit] keep` | `10` | how many past findings/baselines to retain |
-| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
+| `[audit] diffs` | `on` | keep the diff of what changed alongside each finding; `off` records that something changed without retaining the content |
+| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings; also settable per launch with `--strict-audit` |
 | `[remote-access] enabled` | `off` | the switch: nothing in "Remote access" below runs until this is `on` |
 | `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
 | `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
 | `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
+| `[remote-access] ttyd_tmux_prefix` | unset | the tmux prefix the page's buttons send; the page assumes stock `C-b` without it |
+| `[remote-access] ttyd_focus_on_tap` | unset | `on` lets a tap on the terminal raise the phone keyboard; unset means only the KBD button does |
+| `[remote-access] ttyd_button_colors` | unset | `off` returns the toolbar to monochrome |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
 **No forge is the default**: `[core] forge = none` with

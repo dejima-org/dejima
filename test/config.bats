@@ -639,6 +639,88 @@ write_config() {
     [[ "$output" == *"core.command=nvim"* ]]
 }
 
+@test "the narrowing flags only ever narrow" {
+    # Each of these turns something off for one launch and has no counterpart
+    # that turns it on. A config saying off is a decision; a flag that could
+    # undo it in passing would make the file's answer the weaker one.
+    write_config '[logging]' 'loki_url = https://loki.example.com' 'conversation = on' \
+        '[epitaph]' 'enabled = on' \
+        '[audit]' 'strict = off'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"logging.conversation=on"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-conversation --print-config
+    [[ "$output" == *"logging.conversation=off"* ]] || { echo "$output"; return 1; }
+    # and only that: the DNS and firewall log still ships.
+    [[ "$output" == *"logging.loki_url=https://loki.example.com"* ]] \
+        || { echo "--no-conversation took the whole log with it"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-log --print-config
+    grep -qx 'logging.loki_url=' <<< "$output" || { echo "$output"; return 1; }
+    # --no-log implies --no-conversation: shipping the transcript needs an
+    # endpoint, and leaving the key on while clearing the endpoint would read
+    # as conversation logging still being in force.
+    [[ "$output" == *"logging.conversation=off"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-epitaph --print-config
+    [[ "$output" == *"epitaph.enabled=off"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --strict-audit --print-config
+    [[ "$output" == *"audit.strict=on"* ]] || { echo "$output"; return 1; }
+
+    # None of them takes a value, so none can be turned back on by passing one.
+    local f
+    for f in --no-log --no-conversation --no-epitaph --strict-audit; do
+        run "$REPO_ROOT/bin/dejima" "$f" on --print-config
+        [ "$status" -ne 0 ] || { echo "$f accepted a value: $output"; return 1; }
+    done
+}
+
+@test "a harness-key flag sets the selected harness's key" {
+    # --model is one flag over harnesses that spell the setting differently or
+    # do not have it at all, so what it resolves to depends on the selection.
+    write_config '[core]' 'harness = cline' \
+        '[harness.cline]' 'model = from-the-file'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"harness.cline.model=from-the-file"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --model from-the-flag --base-url http://127.0.0.1:8080 \
+        --context-window 60000 --print-config
+    [[ "$output" == *"harness.cline.model=from-the-flag"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.base_url=http://127.0.0.1:8080"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.context_window=60000"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a harness-key flag is resolved after every flag, not where it appears" {
+    # --harness may come after --model, so which harness the key belongs to is
+    # not known until the whole line has been read. Resolving eagerly would
+    # bind the flag to whatever the config happened to say.
+    write_config '[core]' 'harness = claude-code'
+    run "$REPO_ROOT/bin/dejima" --model chosen --harness cline --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.model=chosen"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a harness-key flag is refused for a harness without that key" {
+    # Silently doing nothing is the failure worth avoiding: --model against a
+    # harness with no model setting reads as having chosen one.
+    write_config '[core]' 'harness = claude-code'
+    run "$REPO_ROOT/bin/dejima" --model x --print-config
+    [ "$status" -ne 0 ] || { echo "--model was accepted for claude-code"; return 1; }
+    [[ "$output" == *"claude-code"* ]] || { echo "the refusal does not name the harness: $output"; return 1; }
+    [[ "$output" == *"model"* ]] || { echo "the refusal does not name the key: $output"; return 1; }
+}
+
+@test "a harness-key flag names itself in a validation failure" {
+    # _set_override reports the key by default, and --context-window's key is
+    # context_window - an option nobody can type.
+    write_config '[core]' 'harness = cline'
+    run "$REPO_ROOT/bin/dejima" --context-window 5 --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--context-window"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"--context_window"* ]] || { echo "reported the key, not the flag: $output"; return 1; }
+}
+
 @test "a flag value is validated against the same schema type" {
     write_config '[core]' 'firewall = on'
     run "$REPO_ROOT/bin/dejima" --cmd 'rm -rf /' --print-config
