@@ -32,6 +32,8 @@ Scope, which decides who the grant is for and how long it lasts:
                      if exactly one is running; refuses if none or several.
   --container <id>   the same, for a named container. Use this when a session
                      told you its own id rather than letting anything guess.
+                     With several running, they are listed by project and by
+                     the number the dejima-attach picker gives each one.
   --project [path]   every future session in one project. Also writes the domain
                      to that project's .dejima/allowed-domains, so it is shared
                      with everyone working on it. Path defaults to $PWD.
@@ -129,25 +131,61 @@ fi
 # This is the only thing that decides. Deliberately not an environment
 # variable as well: a firewall CLI with an environment-triggered no-op path
 # is one an env var can silently disarm.
+# A container list an operator can act on without asking the agent anything.
+#
+# The name alone is a run id, which is exactly what someone with three
+# sessions open does not know. What they do know is which project each one is
+# working on, and - where remote access is on - the number the dejima-attach
+# picker gives it, because that is the list they are already reading.
+#
+# The project comes from the container's own working directory rather than
+# from the session registry, so it is there for every session and not only a
+# remote-enabled one. The picker number comes from `dejima-attach --list`,
+# whose rows the picker numbers 1..N in the order they are printed; absent
+# where remote access is off, which is a column missing rather than a failure.
+#
+# Reads only. Nothing here decides which container is acted on - that is the
+# caller's --container, or the single running one.
+describe_containers() {
+    local listing="$1" name id project row n=0 idx
+    local -A attach_index=()
+    while IFS=$'\t' read -r _ _ _ _ _ row; do
+        [ -n "$row" ] || continue
+        n=$((n + 1))
+        attach_index["$row"]="$n"
+    done < <(dejima-attach --list 2>/dev/null || true)
+    while IFS=$'\t' read -r name id; do
+        [ -n "$name" ] || continue
+        project="$(docker inspect -f '{{.Config.WorkingDir}}' "$id" 2>/dev/null)" || project=""
+        [ -n "$project" ] && project="$(basename "$project")"
+        idx="${attach_index[${id:0:12}]:-}"
+        printf '  %-28s %-24s %s\n' "$name" "${project:-?}" \
+            "${idx:+(dejima-attach $idx)}"
+    done <<< "$listing"
+}
+
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0
 fi
 if [ "$session_wanted" -eq 1 ]; then
     if [ -z "$container" ]; then
-        containers=$(docker ps --filter "label=com.docker.compose.project=dejima" --filter "status=running" --format '{{.Names}}')
+        containers=$(docker ps --filter "label=com.docker.compose.project=dejima" \
+            --filter "status=running" --format '{{.Names}}	{{.ID}}')
         count=$(echo "$containers" | grep -c . || true)
         if [ "$count" -eq 0 ]; then
             echo "No running dejima container found." >&2
             exit 1
         elif [ "$count" -gt 1 ]; then
             echo "Multiple running dejima containers found; specify one with --container:" >&2
-            echo "$containers" >&2
+            echo "" >&2
+            describe_containers "$containers" >&2
+            echo "" >&2
             echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
             echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
             exit 1
         fi
-        container="$containers"
+        container="${containers%%$'\t'*}"
     fi
 
     # The DNS proxy (dns-proxy.sh) NXDOMAINs anything not in its allowlist, so
