@@ -711,8 +711,10 @@ session, where the credential deliberately never goes.
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
 - The container runs with `no-new-privileges` and an explicit capability
-  floor - `cap_drop: ALL` plus the six the entrypoint's root phase actually
-  uses. The first means a setuid binary or a file capability cannot raise
+  floor - `cap_drop: ALL` plus the seven it actually uses. Six are the
+  entrypoint's own; the seventh is `KILL`, which nothing in the entrypoint
+  needs and `dejima-allow --container` does, because adding a domain to a
+  running session signals dnsmasq and dnsmasq runs as its own user. The first means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
   would have to take; the second means the capabilities nothing here uses were
   never in the bounding set to be regained. Both are asserted against a running

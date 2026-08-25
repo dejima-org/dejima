@@ -1095,10 +1095,28 @@ dexec_node() {
         [[ "$have" == *"cap_$(echo "$cap" | tr '[:upper:]' '[:lower:]')"* ]] \
             || { echo "declared $cap is missing from the bounding set: $have"; return 1; }
     done
-    for cap in mknod setfcap setpcap sys_chroot audit_write net_bind_service sys_admin; do
+    # Not KILL: `dejima-allow --container` signals dnsmasq, which runs as its
+    # own user, so root here needs it. That absence is what failed the first
+    # privileged run of this change.
+    for cap in mknod setfcap setpcap sys_chroot audit_write net_bind_service sys_admin fsetid; do
         [[ "$have" != *"cap_$cap"* ]] \
             || { echo "cap_$cap is in the bounding set and nothing declares it: $have"; return 1; }
     done
+}
+
+@test "root can still signal dnsmasq, which is what adding a domain mid-session needs" {
+    # Named for the thing rather than left to be caught by the ipset tests,
+    # which is how it WAS caught: the first version of the capability floor
+    # dropped KILL, and `dejima-allow --container` failed with "Operation not
+    # permitted" because dnsmasq runs as its own user (`user=dnsmasq`) and root
+    # cannot signal another user's process without CAP_KILL.
+    #
+    # Adding a domain to a running session is a documented feature that every
+    # session briefing tells the agent to ask for, so this asserts the
+    # capability by exercising what needs it.
+    run dexec sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    [ "$status" -eq 0 ] \
+        || { echo "root cannot signal dnsmasq - is KILL in the floor? $output"; return 1; }
 }
 
 @test "the real running node process has NET_ADMIN/NET_RAW stripped, not just the bounding set" {
