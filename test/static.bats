@@ -4313,6 +4313,18 @@ EOF
         || { echo "the agenda is gone; what is left is a reading list"; return 1; }
     grep -q '^## The standing test queue' "$doc" \
         || { echo "the test queue is gone, so findings stay hypotheses"; return 1; }
+    # And it says where a sweep does NOT go. Reviews, specs and plans are
+    # ephemeral and live on the operator's machine; what belongs in the
+    # repository is the action a review produced, not the reasoning behind it.
+    grep -qi 'not committed here' "$doc" \
+        || { echo "the doc no longer says a sweep stays out of the repository"; return 1; }
+    # Held structurally too, so the practice cannot drift into a directory of
+    # reading notes that nobody acts on.
+    local d
+    for d in findings sweeps research reviews docs/findings docs/research; do
+        [ ! -d "$REPO_ROOT/$d" ] \
+            || { echo "$d/ exists; sweeps are being committed after all"; return 1; }
+    done
     # Quarterly, because the argument for a schedule is capability drift rather
     # than anything on the current list.
     grep -qi 'quarterly' "$doc" || { echo "the standing sweep lost its schedule"; return 1; }

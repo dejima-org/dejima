@@ -2,15 +2,30 @@
 
 [← dejima README](../README.md)
 
-dejima reasoned from its own threat model for its whole life and did not check
-it against anyone else's until August 2026. The first sweep found that a bypass
-class is documented for exactly the control dejima leans on hardest, and that
-the most credible comparable project makes the opposite default choice on it.
-Neither changed a control. Both would have been expensive to keep not knowing.
+dejima's first month, from late July 2026, was spent reasoning from its own
+threat model without checking it against anyone else's. The first sweep, in
+August, turned up two things worth having found sooner than that:
 
-This is the process for not letting that gap open again. It is deliberately
-small: the failure mode of a research review is producing a reading list nobody
-acts on.
+- **A parser-differential bypass class against egress allowlists**, disclosed
+  against another vendor's agent network sandbox: a null byte in a SOCKS5
+  hostname, so the policy check read `attacker-host\x00.google.com` and matched
+  a `.google.com` suffix while the resolver read `attacker-host`. dejima's
+  matcher refused that shape and every neighbouring one, for structural reasons
+  now recorded beside it - it matches whole domains rather than suffixes, and
+  the decision and the dial are bound by the ipset being filled from the
+  answer the resolver returned. One laxity turned up and was fixed.
+- **The closest comparable project ships the opposite default.** Trail of Bits'
+  Claude Code devcontainer lists network under "not sandboxed" and has full
+  outbound access unless an operator opts in. Working out why was worth more
+  than the comparison: their scope is the host filesystem for an auditor
+  watching a session, and network was never the thing they were containing.
+
+Neither changed a control, which is the point. A month is not long to have gone
+unchecked, and finding out was cheap - which is the argument for doing it on a
+schedule rather than when something goes wrong.
+
+This is the process. It is deliberately small: the failure mode of a research
+review is producing a reading list nobody acts on.
 
 ## When to run one
 
@@ -90,19 +105,32 @@ another" is a test to write.
 | **Open ground** | Nobody does this | Say so, and say *why*. Usually a constraint others do not have; occasionally it means everyone else knows something. |
 
 **5. Write down the contradiction even when it resolves in dejima's favour.**
-The first sweep found a security firm's comparable project shipping full
-outbound network by default. That reads as dejima being ahead, and working out
-why they chose it was worth more than the scoreboard: their scope was the host
-filesystem, and network was never what they were containing. Recording that
-stops a different scope being mistaken for a weaker one.
+The default-network difference above is the worked example: it reads as dejima
+being ahead, and the reason turned out to be scope rather than rigour.
+Recording the reason is what stops a different scope being mistaken for a
+weaker one - by us, in six months, reading our own note.
 
 **6. Turn every finding that changes a control into an issue.** A review that
 ends in a document has not finished.
 
-## What to record
+## What to record, and where it does not go
 
-One page per sweep, dated and sourced, in the house style. Two rules specific to
-reviews, because both distinctions vanish within a week of writing:
+**A sweep is not committed here.** It is written to the shared mount on the
+operator's machine, alongside the specs, plans and design notes that live
+there for the same reason: a review is ephemeral, and what belongs in this
+repository is the *action* it produced, not the reasoning that produced it.
+
+What lands here is the outcome - an issue, a pull request, a paragraph in the
+documentation section the finding actually bears on. This page is itself an
+example: the August 2026 sweep produced a matcher fix, a
+[not-sandboxed list](security.md#what-dejima-does-not-sandbox), a
+[statement of which deployment the threat model describes](threat-model.md#which-deployment-this-describes),
+and a stated non-goal on timeouts. The sweep that produced them stayed on the
+operator's machine.
+
+The sweep itself is one page, dated and sourced, in the house style, written
+where the other ephemeral documents go. Two rules specific to reviews, because
+both distinctions vanish within a week of writing:
 
 - **Mark what was read in full and what came from a search summary.** A summary
   of a bypass is enough to write a test case from and not enough to claim
