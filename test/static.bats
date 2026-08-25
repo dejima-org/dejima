@@ -3939,7 +3939,56 @@ STUB
     [[ "$output" == 'if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then' ]]
 }
 
-@test "the approval store is never mounted into the container" {
+@test "the container declares a capability floor rather than the default set" {
+    # Docker's default carries about fourteen capabilities for the root phase
+    # and the entrypoint uses six. Asserted here as a declaration, and in
+    # runtime.bats as a property of a container that actually came up - this
+    # half is what fails fast in a sandbox where nothing can be booted.
+    local c="$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*cap_drop:' "$c" || { echo "no cap_drop; the default set is back"; return 1; }
+    grep -qE '^\s*- ALL\s*$' "$c" || { echo "cap_drop does not drop ALL"; return 1; }
+    grep -qE '^\s*- no-new-privileges:true\s*$' "$c" \
+        || { echo "no-new-privileges is gone"; return 1; }
+    # The two the firewall needs are still declared, or the container cannot
+    # bring its own egress control up at all.
+    local cap
+    for cap in NET_ADMIN NET_RAW; do
+        grep -qE "^\s*- $cap\s*$" "$c" || { echo "$cap is no longer added"; return 1; }
+    done
+    # And nothing the entrypoint does not use has been added back.
+    for cap in SYS_ADMIN MKNOD SETPCAP SETFCAP SYS_CHROOT SYS_PTRACE; do
+        run grep -nE "^\s*- $cap\s*$" "$c"
+        [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
+    done
+}
+
+@test "the runtime suite's session container reads the capability floor rather than copying it" {
+    # Only the container that stands in for a real session. The suite also
+    # starts ad-hoc containers to exercise the firewall in isolation, and those
+    # legitimately pass NET_ADMIN/NET_RAW by hand - they are testing a
+    # component, not the posture a session runs under.
+    #
+    # The one in setup_file is different: a hand-written list there would drift
+    # from the compose file, and the container under test would stop being the
+    # container a session gets.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    grep -q '^compose_cap_add()' "$rt" \
+        || { echo "runtime.bats no longer derives the capability list"; return 1; }
+    local setup_block
+    setup_block="$(sed -n '/^setup_file()/,/^}/p' "$rt")"
+    [ -n "$setup_block" ] || { echo "no setup_file in runtime.bats"; return 1; }
+    grep -q 'compose_cap_add' <<< "$setup_block" \
+        || { echo "the session container no longer derives its capabilities"; return 1; }
+    grep -q -- '--cap-drop=ALL' <<< "$setup_block" \
+        || { echo "the session container does not start from an empty set"; return 1; }
+    grep -q -- '--security-opt=no-new-privileges:true' <<< "$setup_block" \
+        || { echo "the session container does not run with no-new-privileges"; return 1; }
+    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$setup_block"
+    [ "$status" -ne 0 ] \
+        || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
+}
+
+@test "the approval store is never mounted into the container" {@test "the approval store is never mounted into the container" {
     # The store is the only thing that actually grants anything, and the
     # container runs an agent with no tool-use confirmations - mounting it
     # anywhere, at any mode, would let a session widen its own next launch
