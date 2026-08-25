@@ -444,6 +444,36 @@ harness_transcript_files() {
     done < <(workspace_slugs_sorted "$ws")
 }
 
+# Which sessions still have a transcript on disk, as "<key>\t<session-id>"
+# lines. `dejima-epitaph list` matches an epitaph's own session id against
+# this to say whether resuming the real session is still on offer, and it has
+# no way to work that out for itself: the id is in the filename here and is
+# the directory name for the next harness.
+#
+# $1 is a workspace, or absent for every key this harness holds transcripts
+# under - which is what `list --all` needs, since a store key is a slug and a
+# slug does not resolve back to a path.
+harness_live_sessions() {
+    local ws="${1:-}" projects key f d
+    projects="$(harness_config_get projects_dir)"
+    [ -n "$projects" ] || return 0
+    if [ -n "$ws" ]; then
+        while IFS=$'\t' read -r key f; do
+            [ -n "$f" ] || continue
+            printf '%s\t%s\n' "$key" "$(basename "$f" .jsonl)"
+        done < <(harness_transcript_files "$ws")
+        return 0
+    fi
+    for d in "$projects"/*/; do
+        [ -d "$d" ] || continue
+        key="$(basename "$d")"
+        for f in "$d"/*.jsonl; do
+            [ -f "$f" ] || continue
+            printf '%s\t%s\n' "$key" "$(basename "$f" .jsonl)"
+        done
+    done
+}
+
 # Compaction summaries out of this harness's transcripts.
 #
 # Claude Code writes line-delimited JSON, one record per line, with the

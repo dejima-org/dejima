@@ -4048,6 +4048,25 @@ EOF
         || { echo "the refusal names no requirement it failed"; return 1; }
 }
 
+@test "nothing that builds a session runs an epitaph command that reads" {
+    # `save` writes the store; `list`, `search` and `show` read it. A session
+    # can write its own transcript, so it can author what its own epitaph
+    # says - routing one back into a later session's startup would plant
+    # text in its premises as established background, which is the channel
+    # the never-mounted store closes (#104). The launcher may therefore call
+    # `save` and nothing else, and the context hook must not call it at all.
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        grep -q 'dejima-epitaph" save' <<< "$line" \
+            || { echo "bin/dejima runs an epitaph command other than save: $line"; return 1; }
+    done < <(grep -n 'dejima-epitaph' "$REPO_ROOT/bin/dejima" | grep -v '^\s*#')
+    for f in "$REPO_ROOT/hooks/sandbox-context.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"; do
+        run grep -n 'dejima-epitaph' "$f"
+        [ "$status" -ne 0 ] || { echo "$f reaches for epitaph: $output"; return 1; }
+    done
+}
+
 @test "docs/ci.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/ci.md" ]
     grep -q 'docs/ci\.md' "$REPO_ROOT/README.md"
