@@ -967,9 +967,9 @@ What this means:
   it appears to. If a task needs one more domain and nothing else, that's
   a quick fix, not a reason to stop. Tell the user to run, from a terminal
   outside the sandbox, whichever of these matches why the domain is needed:
-    bin/dejima-allow --container {{container_id}} <domain>  # just this session
-    bin/dejima-allow --project <path> <domain>              # this project, always
-    bin/dejima-allow --global <domain>                      # every project
+    dejima-allow --container {{container_id}} <domain>  # just this session
+    dejima-allow --project <path> <domain>              # this project, always
+    dejima-allow --global <domain>                      # every project
   Pick deliberately rather than asking for all three: a domain this project
   needs is --project, not --global - a global grant widens every other
   project's firewall too, which is rarely what one project's dependency

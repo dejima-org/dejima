@@ -506,6 +506,85 @@ EOF
     [ ! -f "$CONFIG_DIR/dependencies" ]
 }
 
+# Two running sandboxes, each with a working directory, plus a dejima-attach
+# that lists them in the order its picker numbers them.
+stub_two_containers() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+if [ "$1" = ps ]; then
+    printf 'dejima-run-aaaa\taaaaaaaaaaaa\n'
+    printf 'dejima-run-bbbb\tbbbbbbbbbbbb\n'
+    exit 0
+fi
+if [ "$1" = inspect ]; then
+    case "$*" in
+        *aaaaaaaaaaaa*) echo /home/someone/workspace/alpha ;;
+        *bbbbbbbbbbbb*) echo /home/someone/workspace/beta ;;
+    esac
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    cat > "$STUB_DIR/dejima-attach" <<'EOF'
+#!/bin/bash
+[ "$1" = --list ] || exit 1
+printf 'run1\tlabel-b\tbeta\t3m\tattachable\tbbbbbbbbbbbb\n'
+printf 'run2\tlabel-a\talpha\t9m\tattachable\taaaaaaaaaaaa\n'
+EOF
+    chmod +x "$STUB_DIR/dejima-attach"
+    PATH="$STUB_DIR:$PATH"
+}
+
+@test "several running sandboxes are listed by project, not by run id alone" {
+    # The name is a run id, which is exactly what someone with three sessions
+    # open does not know. What they do know is which project each is working
+    # on. Taken from the container's own working directory, so it is there
+    # whether or not remote access is on.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Multiple running dejima containers"* ]] || { echo "$output"; return 1; }
+    grep -qE 'dejima-run-aaaa +alpha' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'dejima-run-bbbb +beta' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the listing carries the number the dejima-attach picker gives each one" {
+    # The picker numbers its rows 1..N in the order --list prints them, so a
+    # position there is the number an operator would type. Deliberately not
+    # this tool's own ordering: two lists that number the same sessions
+    # differently is worse than one list without numbers.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    # beta is first in the attach listing, so beta is 1 - not alpha, which
+    # docker happens to report first.
+    grep -qE 'beta .*\(dejima-attach 1\)' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'alpha .*\(dejima-attach 2\)' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the listing drops the picker number rather than failing without one" {
+    # dejima-attach refuses outright when remote access is off. That is a
+    # column missing, not an error: the project name is the part that makes
+    # this usable and it does not depend on the feature.
+    stub_two_containers
+    cat > "$STUB_DIR/dejima-attach" <<'EOF'
+#!/bin/bash
+echo "Remote access is not configured." >&2
+exit 1
+EOF
+    chmod +x "$STUB_DIR/dejima-attach"
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ]
+    grep -qE 'dejima-run-aaaa +alpha' <<< "$output" || { echo "$output"; return 1; }
+    [[ "$output" != *"dejima-attach 1"* ]] || { echo "invented a number: $output"; return 1; }
+    [[ "$output" != *"Remote access is not configured"* ]] \
+        || { echo "leaked the attach refusal: $output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
 @test "dejima-allow --project persists without needing a container" {
     run "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" crates.io
     [ "$status" -eq 0 ]

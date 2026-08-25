@@ -1455,6 +1455,32 @@ _cli_tools() {
     ! grep -qE '^\s*USER\s+node\s*$' <(tail -n 8 "$SANDBOX_DIR/Dockerfile")
 }
 
+@test "a command an operator is told to run does not carry a bin/ prefix" {
+    # install.sh links these into ~/.local/bin, so they are on PATH by name.
+    # An operator reading "bin/dejima-allow ..." is generally not standing in
+    # the dejima checkout, so the prefix does not merely look odd - the
+    # command fails outright, and it fails looking like the tool is broken.
+    #
+    # Checked on the strings that get shown rather than on source comments,
+    # which legitimately name the file.
+    local tools name f hits="" line
+    tools="$(sed -n 's/^link_bin \([a-z-]*\).*/\1/p' "$REPO_ROOT/install.sh")"
+    [ -n "$tools" ] || { echo "install.sh links nothing - has link_bin gone?"; return 1; }
+    for f in "$REPO_ROOT"/bin/dejima-provider-lib.sh "$REPO_ROOT"/bin/harness/*.sh \
+             "$REPO_ROOT"/hooks/*.sh; do
+        [ -f "$f" ] || continue
+        for name in $tools; do
+            # An invocation, not a mention: the name followed by an argument.
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                hits="$hits
+  $(basename "$f"): $line"
+            done < <(grep -nE "bin/$name [-<\$]" "$f" | grep -v '^[0-9]*:#')
+        done
+    done
+    [ -z "$hits" ] || { echo "these tell someone to run a path, not a command:$hits"; return 1; }
+}
+
 @test "bin/dejima and bin/dejima-allow resolve their own location through symlinks" {
     # install.sh symlinks both into ~/.local/bin so they can be run by name
     # via PATH. A bare `dirname "${BASH_SOURCE[0]}"` (no readlink -f first)
