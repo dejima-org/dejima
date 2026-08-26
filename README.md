@@ -620,6 +620,15 @@ default it can never push there: GitHub's IP ranges are only allowlisted on
 port 443, so port 22 is physically unreachable, not merely discouraged by a
 hook.
 
+That rests on **two** properties, and it is worth naming both because the
+sentence above stays readable if either one quietly stops being true. The
+allowlist decides what is reachable over IPv4. What makes port 22 unreachable
+*at all* is that the container also blocks IPv6 outright - an allowlist naming
+one address family says nothing about the other, and a session with IPv6 could
+reach GitHub's v6 ranges on any port it liked. `init-firewall.sh` refuses to
+start rather than run with IPv6 live and unfilterable, which is what holds the
+second half up.
+
 Pass `--allow-github-push` to open port 22 for that one launch, paired with
 a repo-scoped deploy key in `[core] ssh_key` rather than a forwarded
 personal agent. The one exception is `[github] token_file`: pointed at a
