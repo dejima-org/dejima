@@ -27,23 +27,23 @@
 **Agents work best without you babysitting them. Bound the blast radius, let them
 work, and assume they are hostile.**
 
-An agent with permission prompts turned off gets a lot done. It can also be
-turned against you mid-session, by a prompt injection or a poisoned
-dependency, and it will not announce that it has been. dejima is built for
-that case: the agent works without asking, and what it can reach, take and
-break was decided before it started.
+Most sandboxes stop at the container. The blast radius does not. A contained
+session still opens pull requests, and your CI runs that commit before anyone
+reads it; an escape from the container lands on a machine with its own reach
+across your network. **dejima puts a control on every layer it passes
+through.**
 
 dejima is a **sandboxed development environment for unsupervised agentic
-work.** It runs a coding agent (Claude Code, or whatever command you point it
-at) inside a firewalled Docker container with `--dangerously-skip-permissions`
-(no permission prompts, all tool use auto-accepted), against a project
-bind-mounted from the host. The agent gets to work without stopping to ask;
-the container is what makes that trade a reasonable one.
+work**: a coding agent (Claude Code, or whatever command you point it at)
+running with `--dangerously-skip-permissions` inside a firewalled Docker
+container, against a project bind-mounted from your host. A prompt injection or
+a poisoned dependency can turn it mid-session and it will not announce that, so
+what it can reach, take and break is decided before it starts.
 
-A container on its own is only confinement. What makes this a development
-environment is the rest: a forge workflow the agent drives itself, project
-context written for the agent rather than for you, and enough of a trail left
-behind that you can walk away from a session and still pick up what it did.
+A container alone is only confinement. The rest is what makes it somewhere to
+work: a forge workflow the agent drives itself, project context written for the
+agent rather than for you, and enough of a trail that you can walk away from a
+session and still pick up what it did.
 
 **What bounds it:**
 

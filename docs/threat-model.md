@@ -62,11 +62,25 @@ to instructions, because it arrives as instructions.
 4. **Cross-project context poisoning.** A session writes another project's
    agent memory or transcripts, and a later session there reads planted text
    as established background.
-5. **Container escape.** Real, and it recurs, but it needs an unpatched host
+5. **The operator running something the session asked them to run.** dejima
+   tells agents to hand host-side work over rather than attempt it - a domain
+   to allow, a dependency to approve, a command only the host can run. That is
+   a designed, legitimate, frequent workflow, which is exactly what makes it a
+   delivery mechanism: a script that does what it says and one thing more is
+   indistinguishable at the moment of running it. Nothing here inspects what
+   crosses that boundary, and nothing can - the whole point of the handoff is
+   that a person decides.
+6. **Container escape.** Real, and it recurs, but it needs an unpatched host
    or a working zero-day, and the two rows it moves between are both already
    in the table below.
 
 The ordering is the point. Nothing above the last item requires an exploit.
+
+Item 5 is not an argument for making the handoff harder; a session that cannot
+ask is a session that works around you instead. It is an argument for being
+able to answer, afterwards, what that actually did to the machine - which is
+the layer below this repository's, and the reason the sister project is
+looking at detection rather than at more enforcement.
 
 ## Blast radius by layer
 
