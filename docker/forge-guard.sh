@@ -235,12 +235,39 @@ read_body_or_die() {
     body="$(cat -- "$1")" || exit 1
 }
 
-# The path to a temp file holding the marker and the body. Set outside the
-# command substitution as well, so the caller can delete it afterwards.
+# The body with the marker on it, whichever way the body arrived.
+#
+# One function for all four spellings, because there were two: --body-file
+# went through here and --body prepended the marker inline at its own call
+# site, so a rule added in one place was not in force in the other. That is
+# the whole reason this exists as a function rather than as a printf repeated
+# four times.
+#
+# Idempotent, which is the rule that was missing. An agent that has read the
+# project's existing issues has seen every one of them open with this line,
+# and writes it into the body itself - at which point a second was added and
+# the artifact said it twice. Each doubled issue then taught the next agent to
+# do the same, so it spread rather than settling.
+#
+# Skipping is safe because the marker is a statement, not a count: a body that
+# already opens by saying an agent wrote it has disclosed exactly what this
+# exists to disclose. Anchored at the start, after leading whitespace - the
+# same words further down are prose ABOUT disclosure rather than the
+# disclosure, and still get one prepended.
+with_marker() {
+    local head="${1#"${1%%[![:space:]]*}"}"
+    case "$head" in
+        "$marker"*) printf '%s' "$1"; return 0 ;;
+    esac
+    printf '%s\n\n%s' "$marker" "$1"
+}
+
+# The path to a temp file holding the disclosed body. Set outside the command
+# substitution as well, so the caller can delete it afterwards.
 tmp=""
 disclosed() {
     tmp="$(mktemp)" || exit 1
-    printf '%s\n\n%s' "$marker" "$1" > "$tmp" || exit 1
+    with_marker "$1" > "$tmp" || exit 1
 }
 
 # Only the first body argument is rewritten. A second would mean the CLI is
@@ -272,18 +299,14 @@ while [ "$#" -gt 0 ]; do
                 ;;
             --body)
                 if [ "$#" -ge 2 ]; then
-                    args+=(--body "$marker
-
-$2")
+                    args+=(--body "$(with_marker "$2")")
                     rewrote=1
                     shift 2
                     continue
                 fi
                 ;;
             --body=*)
-                args+=("--body=$marker
-
-${1#--body=}")
+                args+=("--body=$(with_marker "${1#--body=}")")
                 rewrote=1
                 shift
                 continue
