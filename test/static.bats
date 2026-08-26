@@ -4568,14 +4568,25 @@ EOF
     local opening
     opening="$(sed -n '1,/^\*\*What bounds it:\*\*/p' "$REPO_ROOT/README.md" | tr '\n' ' ')"
     [ -n "$opening" ] || { echo "no opening section found"; return 1; }
-    grep -q 'past the container' <<< "$opening" \
+    grep -qi 'stop at the container' <<< "$opening" \
         || { echo "the opening no longer says where dejima differs"; return 1; }
-    grep -qi "field's default position" <<< "$opening" \
-        || { echo "the opening claims the premise as a differentiator again"; return 1; }
-    # The layers, named as layers rather than as a list of tools, so a fourth
-    # does not need the paragraph rewritten.
-    grep -qi 'each of those is a layer' <<< "$opening" \
+    # Layers, not a list of the tools, so a fourth does not need this rewritten.
+    grep -qi 'every layer' <<< "$opening" \
         || { echo "the layering is gone from the opening"; return 1; }
+
+    # And the pitch stays a pitch. A reader arriving here has a short attention
+    # budget, and the first draft of this spent it on how the differentiator was
+    # arrived at - a survey, a date, what the field believes - rather than on
+    # the differentiator. That is a history lesson, and it is the failure this
+    # budget exists to catch, because it is the one that reads as thorough.
+    local pitch words
+    pitch="$(sed -n "/^\*\*Agents work best/,/^An agent with permission prompts/p" \
+        "$REPO_ROOT/README.md" | sed '$d')"
+    words="$(wc -w <<< "$pitch")"
+    [ "$words" -le 100 ] \
+        || { echo "the opening pitch is $words words, budget is 100"; return 1; }
+    [ "$words" -ge 30 ] \
+        || { echo "the opening pitch is only $words words"; return 1; }
 }
 
 @test "the threat model names the handoff as a route in" {
