@@ -765,6 +765,13 @@ session, where the credential deliberately never goes.
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
+- A forge credential reaches the container as `-e NAME`, never
+  `-e NAME=value`. The value comes from the launcher's own environment, so it
+  sits in `/proc/<pid>/environ` (mode 0400, owner only) rather than in
+  `/proc/<pid>/cmdline`, which is world-readable and which `ps` prints to
+  anyone. `docker inspect` still shows the resolved value to whoever can
+  reach the daemon - that is daemon access rather than any process at all,
+  and it is not something the launcher can change.
 - The container runs with `no-new-privileges` and an explicit capability
   floor - `cap_drop: ALL` plus the seven it actually uses. Six are the
   entrypoint's own; the seventh is `KILL`, which nothing in the entrypoint
