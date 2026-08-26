@@ -2793,7 +2793,68 @@ STUB
         DEJIMA_DISCLOSE="$DISCLOSE" "$d/forge-cli" "$@"
 }
 
-@test "an agent-authored body says so, in every spelling the CLIs accept" {
+@test "the marker is added once, whatever the body already says" {
+    # Every issue on a project worked on this way opens with the marker, so an
+    # agent reading the existing ones concludes it is the house style and
+    # writes it in - and a second was added. Each doubled artifact taught the
+    # next agent to do the same, so it spread rather than settling.
+    #
+    # The marker is a statement and not a count: a body that already opens by
+    # saying an agent wrote it has disclosed the thing this exists to
+    # disclose.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/twice.XXXXXX")"
+    local DISCLOSE="issue forge-cli create"
+    local marker='**Filed by LLM agent**'
+    local f="$d/body"
+    printf '%s\n\nProse.\n' "$marker" > "$f"
+
+    # All four spellings, because two of them used to prepend the marker at
+    # their own call site rather than through the shared function - so a rule
+    # added in one place was not in force in the other.
+    local out
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body-file doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create "--body-file=$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body-file= doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create --body "$(cat "$f")")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create "--body=$(cat "$f")")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body= doubled it: $out"; return 1; }
+
+    # The same words further down are prose ABOUT disclosure, not the
+    # disclosure, and still get one prepended.
+    printf 'Prose first.\n\n%s\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 2 ] \
+        || { echo "a mention in the body was read as the disclosure: $out"; return 1; }
+}
+
+@test "the session is told the marker is added for it" {
+    # The other half, and the one that stops it being written in the first
+    # place: a session that is not told concludes from the existing issues
+    # that typing it is the house style.
+    local out
+    out="$(DEJIMA_DISCLOSE='issue gitea-issue create' bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$out"; return 1; }
+    grep -q 'Do not write that line' <<< "$out" \
+        || { echo "the briefing does not tell the session"; return 1; }
+
+    # And is not told when nothing would add one, which would be telling it
+    # something false and inviting exactly the behaviour being prevented.
+    out="$(DEJIMA_DISCLOSE= bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$out"; return 1; }
+    grep -q 'Do not write that line' <<< "$out" \
+        && { echo "told about a marker nothing adds"; return 1; }
+    return 0
+}
+
+@test "an agent-authored body says so, in every spelling the CLIs accept" {@test "an agent-authored body says so, in every spelling the CLIs accept" {
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/disclose.XXXXXX")"
     local DISCLOSE="pr forge-cli create"
     local f="$d/body"

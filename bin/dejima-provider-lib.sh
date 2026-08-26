@@ -1541,6 +1541,22 @@ tool_validate() {
     done
 }
 
+# That the authorship marker is added for the session, so it does not add one.
+#
+# Every issue and pull request on a project worked on this way opens with that
+# line, so an agent reading the existing ones concludes it is the house style
+# and writes it into the body - and the shadow then added a second. Each
+# doubled artifact taught the next agent to do the same. docker/forge-guard.sh
+# refuses to add a second now, which holds whatever the session does; this is
+# the other half, which stops it being written in the first place.
+_briefing_core_disclosure() {
+    printf '%s' "Bodies you write for the forge - pull requests, issues, comments - are
+marked as agent-written before they are sent. Do not write that line
+yourself: it is added for you, and one is what the artifact should carry.
+The existing issues on a project all open with it for this reason, not
+because it was typed."
+}
+
 # What the session is told about the optional tools this launch enabled.
 #
 # The heading is core's and the body is each tool's own instructions.md, so a
@@ -1600,6 +1616,13 @@ briefing_compose() {
     # docs/tools.md draws between a hardened tool and a bare install.
     if [ -n "${DEJIMA_TOOLS:-}" ]; then
         text+="$(_briefing_core_tools "${DEJIMA_TOOLS}")"
+        text+=$'\n\n'
+    fi
+    # Only when something actually discloses. A session told about a marker
+    # nothing adds would be told a falsehood, and would then reasonably write
+    # one itself - which is the failure this paragraph exists to stop.
+    if [ -n "${DEJIMA_DISCLOSE:-}" ]; then
+        text+="$(_briefing_core_disclosure)"
         text+=$'\n\n'
     fi
     # The harness fragment closes the briefing: it supplies both the resume
