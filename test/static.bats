@@ -4580,7 +4580,7 @@ EOF
     # the differentiator. That is a history lesson, and it is the failure this
     # budget exists to catch, because it is the one that reads as thorough.
     local pitch words
-    pitch="$(sed -n "/^\*\*Agents work best/,/^An agent with permission prompts/p" \
+    pitch="$(sed -n "/^\*\*Agents work best/,/^dejima is a \\*\\*sandboxed/p" \
         "$REPO_ROOT/README.md" | sed '$d')"
     words="$(wc -w <<< "$pitch")"
     [ "$words" -le 100 ] \
