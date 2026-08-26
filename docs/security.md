@@ -4,8 +4,8 @@
 
 **Threat model, honestly stated:** this reduces the blast radius of a
 misbehaving or prompt-injected coding agent - it does not make it safe to
-point at arbitrary untrusted or adversarial input, and it does not turn
-`--dangerously-skip-permissions` into something without real risk. Point it
+point at arbitrary untrusted or adversarial input, and it does not make
+running an agent with its permission prompts off safe. Point it
 at repositories you already trust. Everything below is about how bad a
 compromised session *inside* that trust boundary can get, not a claim that
 one can't happen.
@@ -264,8 +264,8 @@ can make; it is one the audit reports. See
 
 ## The mounted project is fully writable
 
-- `--dangerously-skip-permissions` removes your chance to review tool calls
-  before they run. Only point this at trusted repositories.
+- Running the harness with its permission prompts off removes your chance to
+  review tool calls before they run. Only point this at trusted repositories.
 - The mounted project itself has **no write protection**. `deny-dangerous-
   bash.sh`, `git-push-guard.sh` and `merge-guard.sh` are regex
   pattern-matching on the literal Bash command string - a fast-fail guard
@@ -760,7 +760,7 @@ session, where the credential deliberately never goes.
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
   that user via `gosu` before execing the configured command (`[core] command`,
-  `claude` by default). A compromised session can't
+  or the selected harness's own if that is unset). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that

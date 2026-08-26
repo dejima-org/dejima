@@ -34,9 +34,10 @@ across your network. **dejima puts a control on every layer it passes
 through.**
 
 dejima is a **sandboxed development environment for unsupervised agentic
-work**: a coding agent (Claude Code, or whatever command you point it at)
-running with `--dangerously-skip-permissions` inside a firewalled Docker
-container, against a project bind-mounted from your host. A prompt injection or
+work**: a coding agent running with its permission prompts off, inside a
+firewalled Docker container, against a project bind-mounted from your host.
+Claude Code and Cline today, selected in the config, and neither is a
+default. A prompt injection or
 a poisoned dependency can turn it mid-session and it will not announce that, so
 what it can reach, take and break is decided before it starts.
 
@@ -279,7 +280,7 @@ Ships today:
 
 - **Forges:** `none`, `gitea`, `github`
 - **Workflows:** `local-only`, `branch-push`, `worktree-pr`
-- **Harnesses:** `claude-code`
+- **Harnesses:** `claude-code`, `cline`
 
 The defaults are `forge = none` and `workflow = local-only`: a fresh install
 commits locally and pushes nowhere.
@@ -299,16 +300,20 @@ sandbox escape if you get it wrong.
 
 ### Core (required)
 
-1. **Install your harness on the host and sign in to it there**, before any
-   of the rest. dejima never authenticates anything: the credential proxy
-   holds the credential your harness wrote on the host and hands the
-   container a placeholder, so if there is nothing on the host there is
-   nothing to hold. A session in that state starts normally and then cannot
-   reach the model, which looks like a dejima fault and is not one. See
+1. **Install your harness on the host**, before any of the rest, and sign in
+   to it there if it needs a credential. dejima never authenticates
+   anything: the credential proxy holds what your harness wrote on the host
+   and hands the container a placeholder, so if there is nothing on the host
+   there is nothing to hold. A session in that state starts normally and
+   then cannot reach the model, which looks like a dejima fault and is not
+   one. A harness pointed at a model you serve yourself needs no credential
+   and none of this applies to it - see
    [Sign in on the host first](#sign-in-on-the-host-first).
-2. `./install.sh`: symlinks the CLIs into `~/.local/bin` and the hooks into
-   `~/.claude/hooks`, and writes a starter `~/.config/dejima/config` if none
-   exists yet. It is idempotent, so re-run it after pulling; it never
+2. `./install.sh`: symlinks the CLIs into `~/.local/bin`, writes a starter
+   `~/.config/dejima/config` if none exists yet, and registers whatever guard
+   hooks the harness you selected can host - into that harness's own config
+   directory, and only for the one selected. A harness that hosts none says
+   so and nothing is written. It is idempotent, so re-run it after pulling; it never
    overwrites an existing config.
 3. Put `~/.local/bin` on your `PATH` if it isn't already.
 That is enough to run `dejima`. No push credential is needed to get this far,
@@ -361,19 +366,20 @@ the table below.
 
 ## Usage
 
-Run `./install.sh` first; it symlinks the CLIs into `~/.local/bin` and the
-hooks into `~/.claude/hooks`, and everything below assumes those are on your
-`PATH`. See [Setup](#setup) for the rest of the first-run steps.
+Run `./install.sh` first; it symlinks the CLIs into `~/.local/bin`, and
+everything below assumes that is on your `PATH`. See [Setup](#setup) for the rest of the first-run steps.
 
 ```sh
 dejima                        # sandbox the current directory
 dejima ~/repos/some-project
 ```
 
-By default the container's entry point is bare `claude` (always running with
-`--dangerously-skip-permissions`, regardless of how it's invoked; see
-`docker/harness-wrapper.sh`), so a fresh clone of this repo works with no
-editor setup at all.
+The container's entry point is whatever the selected harness declares, always
+with that harness's own no-prompt flag applied regardless of how it is invoked
+(see `docker/harness-wrapper.sh`). There is no default: `[core] harness` has
+none and a launch is refused without it, which is what stops a later release
+changing your selection for you. Set it and a fresh clone of this repo works
+with no editor setup at all.
 
 The loop, in the part every workflow shares: point it at a project, ask for a
 change, and let the session work. What happens after that is the workflow you
@@ -473,6 +479,12 @@ that has never run the harness has none of it.
 So: run your harness once on the host, sign in, confirm it answers, and then
 point dejima at a project. When a credential expires, refresh it the same
 way - on the host, not in a session.
+
+**None of this applies to a harness pointed at a model you serve yourself.**
+There is no credential, so there is nothing for the proxy to hold and nothing
+to expire; what that setup needs instead is for the endpoint to be reachable
+from inside the container, which is an allowlist question rather than a
+sign-in one.
 
 ## Config parity with your host Claude Code setup
 
@@ -638,8 +650,8 @@ Two front doors and a notification path, none of which exist until you
 configure them.
 
 It is documented separately because getting the bind address wrong is the one
-mistake here that exposes a `--dangerously-skip-permissions` shell to your
-network, and that deserves more room than a section.
+mistake here that exposes a no-prompt agent shell to your network, and that
+deserves more room than a section.
 
 **→ [docs/remote-access.md](docs/remote-access.md)** - `[remote-access]`, picking a
 bind address and verifying it, the SSH and web front doors, reading and typing
@@ -677,8 +689,8 @@ under `~/.claude/projects`. After the container exits it diffs them and tells
 you what changed.
 
 It is **advisory, not a block**. It fires after the session has ended, so a
-finding is something to read and clean up before your next `git` or `claude`
-in that repo. Its diff is also time-windowed: it reports that a path changed
+finding is something to read and clean up before your next `git` command or
+session in that repo. Its diff is also time-windowed: it reports that a path changed
 while the session was running, not that the session changed it.
 
 `dejima-audit show` indexes what is waiting; `dejima-audit ack` walks it,
@@ -699,8 +711,9 @@ surface it watches, what it cannot see, and how the baseline works.
 
 What this sandbox does and does not protect you from - the containment
 boundary, what a compromised session can still reach, the deliberate
-trade-offs behind `--dangerously-skip-permissions`, and why the exit-time
-audit's findings are a time window, not a verdict on who caused them.
+trade-offs behind running an agent with no permission prompts, and why the
+exit-time audit's findings are a time window, not a verdict on who caused
+them.
 
 **→ [docs/security.md](docs/security.md)**
 
