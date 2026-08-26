@@ -6445,3 +6445,34 @@ _emit_mount_at() {
     grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
         || { echo "the layer build's status is not checked"; return 1; }
 }
+
+@test "the update check is wired into a launch, not only shipped" {
+    # A tool nothing calls is a tool that works in its own tests and never
+    # runs. The startup path is the only thing that makes this a check rather
+    # than a command nobody knows about.
+    grep -q 'dejima-update-check' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima never runs the update check"; return 1; }
+    # Advisory: a version check that fails must not take a launch with it.
+    grep -q 'dejima-update-check" || true' "$REPO_ROOT/bin/dejima" \
+        || { echo "a failed update check would stop the launch"; return 1; }
+    grep -q 'link_bin dejima-update-check' "$REPO_ROOT/install.sh" \
+        || { echo "it is not on PATH, so it cannot be run by hand"; return 1; }
+}
+
+@test "the docs disclose that dejima itself reaches the network from the host" {
+    # dejima's whole argument is about what leaves and through which control.
+    # A request it makes on its own account, at every startup, is the one an
+    # operator is least expecting and most entitled to know about.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'the one request dejima itself makes' <<< "$flat" \
+        || { echo "the host-side request is undisclosed"; return 1; }
+    grep -qi 'no other endpoint and no telemetry' <<< "$flat" \
+        || { echo "the scope of the request is unstated"; return 1; }
+    grep -q '\[core\] update_check = off' <<< "$flat" \
+        || { echo "the docs do not say how to turn it off"; return 1; }
+    # And why it is reached by URL. Without the reason, a later tidy-up reads
+    # the indirection as pointless and removes it.
+    grep -qi 'never by remote name' <<< "$flat" \
+        || { echo "the reason for the URL is gone"; return 1; }
+}

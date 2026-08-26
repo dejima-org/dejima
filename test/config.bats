@@ -27,7 +27,7 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$CONFIG_DIR" ${STUB_DIR:+"$STUB_DIR"}
+    rm -rf "$CONFIG_DIR" ${STUB_DIR:+"$STUB_DIR"} ${UPD_DIR:+"$UPD_DIR"}
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
@@ -2583,4 +2583,193 @@ STUB
     [[ "$df" == *'ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'* ]] \
         || { echo "the declared environment is missing from the layer:"; echo "$df"; return 1; }
     rm -rf "$workspace" "$RW_HOME" "$dockerfile_log"
+}
+
+# --- dejima-update-check: is this checkout behind the branch it tracks? ---
+#
+# A real checkout and a real repository for it to track, neither of them this
+# one. bin/ and the provider trees are copied rather than symlinked because
+# the script finds its own repository through readlink -f "$0", which would
+# follow a symlink straight back to the repository running the tests.
+#
+# No `git push` anywhere below: dejima's own forge guard refuses a push to a
+# path, so a fixture built that way passes on a host and fails inside a
+# sandbox. The remote is an ordinary repository committed to directly.
+_upd_commit() {
+    git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "$2"
+}
+
+_upd_fixture() {
+    UPD_DIR="$(mktemp -d)"
+    UPD_ORIGIN="$UPD_DIR/origin"
+    UPD_CHECKOUT="$UPD_DIR/checkout"
+    # Stated, not inherited: the cache lands under XDG_STATE_HOME, and a test
+    # that left it unset would write into whoever ran it.
+    export XDG_STATE_HOME="$UPD_DIR/state"
+    # -b trunk so the fixture does not depend on the host's
+    # init.defaultBranch, and so no guard has an opinion about the name.
+    git init -q -b trunk "$UPD_ORIGIN"
+    _upd_commit "$UPD_ORIGIN" first
+    git clone -q "$UPD_ORIGIN" "$UPD_CHECKOUT"
+    cp -r "$REPO_ROOT/bin" "$REPO_ROOT/forges" "$REPO_ROOT/harnesses" \
+          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$UPD_CHECKOUT/"
+    printf '[core]\nharness = claude-code\n' > "$CONFIG_DIR/config"
+}
+
+_upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
+
+@test "a checkout level with its remote says nothing" {
+    _upd_fixture
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "a checkout behind its remote is told, and told how to update" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"origin/trunk"* ]] \
+        || { echo "does not name what it is behind: $output"; return 1; }
+    # The path, because the checkout that is behind is not necessarily the
+    # directory the operator is standing in when they read this.
+    [[ "$output" == *"git -C $UPD_CHECKOUT pull"* ]] \
+        || { echo "does not say how to update: $output"; return 1; }
+}
+
+@test "the commit count is given only when the commits are actually here" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    # Nothing fetched, so the tip is a commit this checkout has never seen and
+    # there is no number to give. Counting what it can reach would report the
+    # commits it already has, which is zero, not the one it is missing.
+    run _upd_check
+    [[ "$output" != *" 0 "* ]] || { echo "invented a count: $output"; return 1; }
+    [[ "$output" == *"has commits this checkout does not"* ]] \
+        || { echo "$output"; return 1; }
+
+    git -C "$UPD_CHECKOUT" fetch -q origin
+    rm -rf "$XDG_STATE_HOME"
+    run _upd_check
+    [[ "$output" == *"has 1 commit this checkout does not"* ]] \
+        || { echo "no count once the commit is present: $output"; return 1; }
+}
+
+@test "a checkout ahead of its remote says nothing" {
+    _upd_fixture
+    _upd_commit "$UPD_CHECKOUT" local-work
+    run _upd_check
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "a detached HEAD is silence, not a git error on the terminal" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    git -C "$UPD_CHECKOUT" checkout -q --detach HEAD
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "[core] update_check off reaches the remote not at all" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    printf '[core]\nharness = claude-code\nupdate_check = off\n' > "$CONFIG_DIR/config"
+    run _upd_check
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+    # Silence alone would also be produced by asking and saying nothing. The
+    # cache is written on every lookup, including a failed one, so its absence
+    # is what shows no lookup happened.
+    [ ! -e "$XDG_STATE_HOME/dejima/update-check" ] \
+        || { echo "it asked anyway"; return 1; }
+}
+
+@test "the remote is asked once, and the cached answer is compared to HEAD" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] || { echo "$output"; return 1; }
+
+    # Unreachable now. A second run inside the interval still reports, which
+    # is what makes this a throttle on the network call rather than on the
+    # notice - told once and then silence would be worse than never telling.
+    mv "$UPD_ORIGIN" "$UPD_ORIGIN.gone"
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] \
+        || { echo "the notice lasted one launch: $output"; return 1; }
+
+    # And it stops the moment HEAD catches up, from the same cached answer,
+    # without waiting for the interval to expire.
+    mv "$UPD_ORIGIN.gone" "$UPD_ORIGIN"
+    git -C "$UPD_CHECKOUT" fetch -q origin
+    git -C "$UPD_CHECKOUT" reset -q --hard origin/trunk
+    run _upd_check
+    [ -z "$output" ] || { echo "still complaining after updating: $output"; return 1; }
+}
+
+@test "the remote is not reached through the checkout's own git config" {
+    # The whole reason this tool talks to a URL from outside the repository.
+    # dejima mounts its own checkout writable when that is the workspace, so
+    # .git/config there is session-writable - and core.sshCommand names a
+    # command git runs on the host. Reaching the remote by name would turn a
+    # session's config write into host execution on the next launch, with no
+    # operator action at all.
+    _upd_fixture
+    # No port in the URL: git refuses to pass one to an sshCommand it classes
+    # as "simple", which would fail the control for a reason unrelated to what
+    # it tests. .invalid never resolves, so the mitigated path fails at once
+    # instead of reaching for an sshd that may exist on whoever runs this.
+    git -C "$UPD_CHECKOUT" remote set-url origin ssh://git@example.invalid/x.git
+    # A file rather than a message: the tool sends git's stderr to /dev/null,
+    # so an assertion on what it printed would hold whether the command ran or
+    # not. Execution has to be observed by its effect.
+    local ran="$UPD_DIR/repo-config-ran"
+    git -C "$UPD_CHECKOUT" config core.sshCommand \
+        "sh -c 'touch $ran; exit 1' --"
+    git -C "$UPD_CHECKOUT" config credential.helper "!sh -c 'touch $ran'"
+
+    run _upd_check
+    [ ! -e "$ran" ] || { echo "the checkout's own config ran"; return 1; }
+
+    # The control, so this cannot pass because the threat quietly went away.
+    # If a future git stops honouring a repository's core.sshCommand here,
+    # that is worth knowing rather than reading as a mitigation working.
+    run timeout 20 git -C "$UPD_CHECKOUT" ls-remote origin
+    [ -e "$ran" ] \
+        || { echo "reaching it by name no longer runs repo config: $output"; return 1; }
+}
+
+@test "a remote URL that could name a command is refused, not run" {
+    _upd_fixture
+    local marker="$UPD_DIR/pwned" url
+    for url in "ext::sh -c \"touch $UPD_DIR/pwned\"" \
+               "--upload-pack=touch $UPD_DIR/pwned" \
+               "http://example.invalid/x.git"; do
+        # Written into the file directly: `git remote set-url` rejects a value
+        # starting with a dash itself, which would leave that case untested.
+        sed -i "s#\turl = .*#\turl = $url#" "$UPD_CHECKOUT/.git/config"
+        rm -rf "$XDG_STATE_HOME"
+        run _upd_check
+        [ "$status" -eq 0 ] || { echo "$url exited $status"; return 1; }
+        [ ! -e "$marker" ] || { echo "$url ran"; return 1; }
+        # Nothing recorded either, so a refused URL does not also poison the
+        # cache for the hour after someone fixes it.
+        [ ! -e "$XDG_STATE_HOME/dejima/update-check" ] \
+            || { echo "$url was attempted"; return 1; }
+    done
+}
+
+@test "a branch is compared against what it tracks, not against its own name" {
+    # `git worktree add -b x origin/development` leaves a branch called x
+    # tracking refs/heads/development. Asking the remote for refs/heads/x gets
+    # an empty answer, and an empty answer is indistinguishable from being up
+    # to date - so the whole check goes quiet on exactly the branches someone
+    # developing dejima is standing on.
+    _upd_fixture
+    git -C "$UPD_CHECKOUT" checkout -q -b feature --track origin/trunk
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [[ "$output" == *"origin/trunk"* ]] \
+        || { echo "compared against the wrong ref: $output"; return 1; }
 }
