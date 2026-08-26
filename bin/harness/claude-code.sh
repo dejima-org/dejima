@@ -10,8 +10,17 @@
 # reason this is code is the pairing in the second block, which resolves one
 # directory tree through the filenames of another.
 
-# Registers the waiting/done notification handlers into dejima's settings
-# layer, in the shape Claude Code reads them.
+# Registers the `done` notification handler into dejima's settings layer, in
+# the shape Claude Code reads them.
+#
+# Stop only, though the hook and the host-side watcher both understand
+# `waiting` as well. Claude Code raises Notification when it needs permission
+# to run something and when the prompt has sat idle, and a dejima session runs
+# with permission prompts off - so the first never happens, and what is left
+# is a timer that expires shortly after the Stop it follows. Registering both
+# put two pushes on the operator's phone for one event, a minute apart, the
+# second saying nothing the first had not. `waiting` stays in the enum for a
+# harness that can say it without having stopped first.
 #
 # Claude Code merges hook entries across settings layers rather than letting
 # the higher one replace the lower, so these are added to whatever the
@@ -25,8 +34,7 @@
 harness_register_notify() {
     local settings="$1" tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
-    if jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
-      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+    if jq '.hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
         "$settings" > "$tmp"; then
         mv "$tmp" "$settings"
     else

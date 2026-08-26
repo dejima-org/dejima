@@ -141,14 +141,14 @@ afterwards, runs on the host as your own user.
 
 ```
  ┌─ the sandbox container ────────────────────────────────────────────┐
- │  claude code, at a Notification or Stop hook                       │
+ │  claude code, at a Stop hook                                       │
  │       │                                                            │
  │       │  hooks/dejima-notify.sh writes an empty file named         │
- │       ▼  `waiting` or `done` - no content, no stdin, no network    │
+ │       ▼  `done` - no content, no stdin, no network                 │
  └───────┼────────────────────────────────────────────────────────────┘
  ════════╪═══ container boundary - one bind-mounted directory ═════════
  ┌───────▼─── your machine, as your user ─────────────────────────────┐
- │  ${XDG_RUNTIME_DIR}/dejima/notify/<run-id>/waiting                 │
+ │  ${XDG_RUNTIME_DIR}/dejima/notify/<run-id>/done                    │
  │       │                                                            │
  │       │  inotify, or a ~6s poll where inotify-tools is absent      │
  │       ▼                                                            │
@@ -161,13 +161,13 @@ afterwards, runs on the host as your own user.
          │  curl
          ▼
          your ntfy topic ──── push ────►  your phone
-                                          "dejima: <project> needs input"
+                                          "dejima: <project> finished"
                                           link: <base_url>/?arg=<run-id>
 ```
 
 The marker directory is the sandbox's entire surface here, and it is
 one-way: a name, out. Nothing the session writes reaches the push, which is
-why the notification says a project needs input and never what it is asking.
+why the notification says a project has stopped and never what it is asking.
 [Notifications](#notifications) has the detail, including where that
 guarantee actually lives.
 
@@ -758,14 +758,24 @@ what the outer proxy sends.
 
 ## Notifications
 
-`dejima` registers `hooks/dejima-notify.sh` as a `Notification` and `Stop`
-hook for a remote-enabled session, into the throwaway settings override layer
-it already generates - never into your real `~/.claude/settings.json`. Your
-own hooks keep running alongside it, since Claude Code merges hooks across
-layers rather than replacing. The layer is mounted read-only, so a session
-cannot unregister its own hook. The hook writes one empty file named
-`waiting` or `done` into this run's marker directory: no content, no stdin,
-no network.
+`dejima` registers `hooks/dejima-notify.sh` as a `Stop` hook for a
+remote-enabled session, into the throwaway settings override layer it already
+generates - never into your real `~/.claude/settings.json`. Your own hooks
+keep running alongside it, since Claude Code merges hooks across layers rather
+than replacing. The layer is mounted read-only, so a session cannot
+unregister its own hook. The hook writes one empty file named `done` into
+this run's marker directory: no content, no stdin, no network.
+
+**One push per stop, and not a second one a minute later.** The hook and the
+watcher both understand a `waiting` event as well, and Claude Code's
+`Notification` hook is where it would come from - but that hook fires when
+Claude needs permission to run something and when the prompt has sat idle,
+and a dejima session runs with permission prompts off. Only the timer is
+left, and it expires shortly after the Stop it follows, so registering both
+sent two pushes for one event with the second saying nothing the first had
+not. What is given up is being told about a session that has gone idle
+without having stopped first, which Claude Code cannot currently distinguish;
+a harness that can may register `waiting` and get its own notification.
 
 On the host, `dejima-notify-watch` turns those markers into ntfy pushes.
 Same installation shape as above:
@@ -811,8 +821,9 @@ than a new exposure, but a RAM-backed filesystem fails harder and sooner.
 There is deliberately no quota here; `rm -rf` on that run's marker directory (or
 logging out, which discards the tmpfs) is the recovery.
 
-**What a notification contains.** A title of `dejima: <project> needs input`
-(or `dejima: <project> finished`), a fixed one-line body, and - when
+**What a notification contains.** A title of `dejima: <project> finished`
+(or `dejima: <project> needs input`, for a harness that registers `waiting`),
+a fixed one-line body, and - when
 `base_url` is set - a click link of `<base_url>/?arg=<run-id>` that opens the
 web front door already attached to that session. `<project>` is the
 workspace directory's name, taken from the host-side registry and reduced to
@@ -860,9 +871,9 @@ the next one is worth checking.
    and `echo $DEJIMA_NOTIFY_DIR`. Both empty means `dejima` started this
    container with remote access off - `[remote-access] enabled` was off at
    launch, and no later change affects a session already running.
-2. **Is the hook registered?** The `Notification` and `Stop` entries live in
-   the throwaway override layer, not in your real `settings.json`:
-   `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 2.
+2. **Is the hook registered?** The `Stop` entry lives in the throwaway
+   override layer, not in your real `settings.json`:
+   `grep -c dejima-notify /etc/dejima-settings.json` from inside should be 1.
    That file is passed to the harness by `harness-wrapper.sh`, as whatever
    its manifest's `settings_args` names (`--settings` for Claude Code);
    if it is missing entirely, this container was not started by `dejima`.
