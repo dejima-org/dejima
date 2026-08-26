@@ -2496,6 +2496,53 @@ STUB
     rm -rf "$workspace" "$RW_HOME" "$root" "${docker_log:-}"
 }
 
+@test "a forge credential never reaches the docker command line" {
+    # /proc/<pid>/cmdline is world-readable, so a secret passed as
+    # `-e NAME=value` is visible to every process on the host via ps - and
+    # from there into whatever captures ps output. That is how #226 was
+    # found: an operator ran ps while debugging something unrelated and
+    # pasted the result.
+    #
+    # `-e NAME` takes the value from the launcher's own environment instead,
+    # where it lives in /proc/<pid>/environ - mode 0400, owner only.
+    #
+    # This repository already made the argument one layer down: gitea-pr
+    # feeds curl its auth header on stdin rather than as an argument, and
+    # says why. The test is here so the two cannot drift apart again.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local tokfile="$RW_HOME/tok" secret="tok-$RANDOM-do-not-leak"
+    printf '%s\n' "$secret" > "$tokfile"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = gitea' 'workflow = local-only' \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        "token_file = $tokfile"
+    STUB_DIR="$(mktemp -d)"
+    local argv_log; argv_log="$(mktemp)"
+    cat > "$STUB_DIR/docker" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$SANDBOX_TEST_ARGV_LOG"
+exit 0
+STUB
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG=/dev/null SANDBOX_TEST_ARGV_LOG="$argv_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local argv; argv="$(cat "$argv_log")"
+    [ -n "$argv" ] || { echo "the stub captured no docker invocation"; return 1; }
+    # The whole point.
+    [[ "$argv" != *"$secret"* ]] \
+        || { echo "the token is in the docker command line"; return 1; }
+    # And it is still passed, by name, or the forge simply has no credential.
+    [[ "$argv" == *"-e GITEA_TOKEN"* ]] \
+        || { echo "GITEA_TOKEN is not passed at all: $argv"; return 1; }
+    # Specifically the bare form. `-e GITEA_TOKEN=` would also match above.
+    [[ "$argv" != *"-e GITEA_TOKEN="* ]] \
+        || { echo "passed as NAME=value after all: $argv"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$STUB_DIR" "$argv_log"
+}
+
 @test "the harness layer creates the harness's own state directories and environment" {
     # These were in the base image, imposed on every image dejima builds. They
     # are the selected harness's now, and have to actually reach its layer -

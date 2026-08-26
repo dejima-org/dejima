@@ -1370,8 +1370,26 @@ LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 extra_mounts=()
 
 # The forge's own env vars, generated from its manifest's env_export list
-# rather than hardcoded - see forge_env_exports. -e here: passed straight
-# through to `docker compose run`, which takes -e alongside -v.
+# rather than hardcoded - see forge_env_exports.
+#
+# `-e NAME`, never `-e NAME=value`, for the ones that carry a secret - which
+# is every `@` reference, since those resolve to a credential FILE'S CONTENTS
+# rather than its path. A value in the argument list lands in
+# /proc/<pid>/cmdline, which is world-readable: `ps` prints the token to any
+# process on the host, and from there into whatever captures ps output. That
+# is not a hypothetical - it is how #226 was found, in a paste an operator
+# made while debugging something unrelated.
+#
+# The bare form takes the value from THIS process's environment instead,
+# where it sits in /proc/<pid>/environ - mode 0400, owner only.
+#
+# This repository already made the argument one layer down: a forge's own CLI
+# feeds curl its auth header on stdin rather than as an argument, and says why
+# in almost these words. The reasoning was right and it had not reached here.
+#
+# Docker still shows the resolved value to anyone who can `docker inspect`
+# the container, which the bare form does not change and cannot. What it
+# changes is the audience: daemon access rather than any process at all.
 _forge_env_lines=""
 if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
     # forge_env_exports has already explained why on stderr. It can fail
@@ -1381,8 +1399,15 @@ if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
 fi
 while IFS= read -r _forge_env; do
     [ -n "$_forge_env" ] || continue
-    extra_mounts+=(-e "$_forge_env")
+    # forge_env_exports emits nothing at all for a value that resolved empty,
+    # deliberately - see its own comment on why an empty -e for a variable
+    # compose already declares is not harmless. So every name reaching here
+    # has a value, and exporting it is what makes the bare -e below carry one.
+    _forge_env_name="${_forge_env%%=*}"
+    export "${_forge_env_name}=${_forge_env#*=}"
+    extra_mounts+=(-e "$_forge_env_name")
 done <<< "$_forge_env_lines"
+unset _forge_env_name
 
 # The resolved combination, for the briefing and the hooks that read it
 # (git-push-guard.sh's host allowlist and no-direct-push branches,
