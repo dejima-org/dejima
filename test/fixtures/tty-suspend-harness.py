@@ -36,11 +36,36 @@ CONTAINER = os.path.join(WORK, "container.py")
 # "Onward" is a file, which is what lets a test see whether a keystroke reached
 # the container or was turned into a signal before it could.
 open(CONTAINER, "w").write('''#!/usr/bin/env python3
-import os, signal, sys, termios, tty
+import fcntl, os, signal, struct, sys, termios, tty
 fd = 0
 saved = termios.tcgetattr(fd)
-signal.signal(signal.SIGWINCH,
-              lambda *a: (sys.stdout.write("CONTAINER-REDRAW\\r\\n"), sys.stdout.flush()))
+
+def _size():
+    return struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\\0" * 8))[:2]
+
+# Redraws only when the dimensions ACTUALLY moved, which is what both shipped
+# harnesses do. Measured on a pty, bytes written in a fixed window after each
+# kind of poke:
+#
+#                    idle   same-size SIGWINCH   size changed and back
+#   Claude Code         0                    0                    3337
+#   Cline               0                    0                   17810
+#   nvim (control)      0                 3356                    6724
+#
+# The first version of this stand-in redrew on the bare signal, like nvim. That
+# is the one behaviour the programs dejima actually runs do not have, so the
+# suite could not see that the resume poke was a no-op for both of them.
+_last = [_size()]
+
+def _on_winch(*a):
+    now = _size()
+    if now == _last[0]:
+        return
+    _last[0] = now
+    sys.stdout.write("CONTAINER-REDRAW\\r\\n")
+    sys.stdout.flush()
+
+signal.signal(signal.SIGWINCH, _on_winch)
 # The finding of #179, as something a test can observe: the client survives
 # SIGSTOP and does not survive SIGTSTP, so the launcher has to start it with
 # SIGTSTP already ignored. Read back rather than caught - installing a handler
