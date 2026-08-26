@@ -104,11 +104,30 @@ session_modes="$(stty -g < /dev/tty 2>/dev/null)" || exit 0
 on_cont() {
     stty "$session_modes" < /dev/tty 2>/dev/null || true
 
-    # One row shorter and back. Only the kernel's idea of the size changes -
-    # the terminal emulator is not told and does not need to be, because what
-    # a program reads is the kernel's value. It ends where it started, so a
-    # failure partway leaves the size wrong rather than the session unusable,
-    # which is why the restore is unconditional rather than guarded.
+    # One row shorter, held, and back. Only the kernel's idea of the size
+    # changes - the terminal emulator is not told and does not need to be,
+    # because what a program reads is the kernel's value. It ends where it
+    # started, so a failure partway leaves the size wrong rather than the
+    # session unusable, which is why the restore is unconditional.
+    #
+    # The hold is the whole of it, and the first version of this did not have
+    # one. Two ioctls back to back are not a resize a program can see: the
+    # signal arrives, the handler reads the size as it is NOW, and by then it
+    # is back where it started. Measured on a pty, bytes written after the
+    # poke:
+    #
+    #                  no hold   0.1s   0.2s
+    #     Cline              0      0  17810
+    #     Claude Code        0   3328   3328
+    #
+    # Cline sets the floor at something between 0.1 and 0.2 seconds. This uses
+    # half a second, which is 2.5x that - headroom for the hop this could not
+    # measure, since a real session's resize has to travel from the host tty
+    # through the container client and the daemon to the container's own tty
+    # before the harness sees it at all.
+    #
+    # The cost is that the terminal is one row short for half a second during
+    # a resume, while the harness is redrawing anyway.
     local size rows
     size="$(stty size < /dev/tty 2>/dev/null)" || size=""
     rows="${size%% *}"
@@ -118,6 +137,7 @@ on_cont() {
     esac
     if [ -n "$rows" ]; then
         stty rows "$((rows - 1))" < /dev/tty 2>/dev/null || true
+        sleep 0.5
         stty rows "$rows" < /dev/tty 2>/dev/null || true
     fi
 
