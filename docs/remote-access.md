@@ -67,6 +67,18 @@ approvals):
 | `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
 | `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
+**If this host sits behind a firewall it does not control**, the push has to
+be permitted outbound before any of this works. `dejima-notify-watch` runs on
+the host, not in the container, so the container's own allowlist has nothing
+to do with whether it can reach your ntfy server - and a self-hosted one on a
+private address is exactly the case a host-level egress filter drops.
+
+That failure is the quiet kind. Nothing errors, the config is correct,
+`systemctl --user status dejima-notify-watch` looks healthy, and the phone
+simply never buzzes. If you administer that filter, the rule is yours to add;
+if someone else does, this is the thing to ask them about before re-reading
+your config a third time.
+
 `ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
 scheme; a value without one is refused rather than guessed at, because
 `curl` reads a leading `-K/path` as an *option* that takes the request's URL
@@ -826,7 +838,20 @@ last point is what the enum is really for: ntfy's own headers include
 issue an arbitrary HTTP request, so a single attacker-controlled header
 would turn it into a confused deputy inside your network.
 
-**When no notification arrives.** Five things have to happen in order, and a
+**Where that guarantee stops is the container boundary.** `ntfy_url` is a
+credential for a channel your phone trusts, sitting in a file on this host.
+Anyone with your account on this machine can read it, publish whatever they
+like to that topic, drown it until you mute it, or subscribe to it if it is
+not write-only. None of that goes through the sandbox, so none of the
+reasoning above applies to it.
+
+Scope the topic accordingly: a token that can only write the topic dejima
+uses, and a **separate** topic for anything you want to trust more than you
+trust this host. Anything monitoring this machine's own health belongs in that
+second topic, with its credential not on this machine at all - a box that can
+forge alerts about itself is not reporting on itself.
+
+**When no notification arrives.** Six things have to happen in order, and a
 break in any of them looks identical from the phone - which is to say, like
 nothing at all. Walk them from the inside out; each step tells you whether
 the next one is worth checking.
@@ -859,7 +884,11 @@ the next one is worth checking.
    or 403 means the instance wants credentials, which the URL can carry as
    `https://<user>:<token>@<host>/<topic>` - nothing here sends an auth
    header of its own.
-5. **Is the phone subscribed to the topic the config names?** Last in the
+5. **Can this host reach the ntfy server at all?** `curl -sv "$ntfy_url"`
+   from the host, not from a session. A host-level egress filter this machine
+   does not control drops the push with nothing in any log here, and every
+   step above still passes - see the note under `ntfy_url` above.
+6. **Is the phone subscribed to the topic the config names?** Last in the
    list and first to check in practice, since it is the only link with no
    log anywhere. The topic in `ntfy_url` and the one in the app have to be
    the same string.

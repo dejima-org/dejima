@@ -4414,7 +4414,65 @@ EOF
         || { echo "the threat model reads as a Claude Code quirk"; return 1; }
 }
 
-@test "the negative space is collected where a reader will find it" {
+@test "remote access says the push has to leave the host" {
+    # dejima-notify-watch runs on the HOST, so the container's allowlist has
+    # nothing to do with whether it can reach an ntfy server. On a machine
+    # behind an egress filter it does not control - a devbox on a hypervisor -
+    # the push is dropped and every symptom points somewhere else: the config
+    # is correct, the unit is healthy, nothing errors, the phone is silent.
+    #
+    # Raised from the dejima-devbox-hardener side, where an operator hit it and
+    # fixed it by hand before either project documented it. Stated in general
+    # terms rather than naming that runbook, since it is true of any host
+    # behind a filter and a sibling's rule would go stale here.
+    local doc="$REPO_ROOT/docs/remote-access.md" flat
+    # Newlines flattened and emphasis stripped: the claims below are sentences,
+    # and one that happens to wrap, or to carry a `**`, would otherwise fail a
+    # grep for reasons that have nothing to do with what it says. Two of these
+    # did exactly that on the first run.
+    flat="$(tr '\n' ' ' < "$doc" | tr -d '*`')"
+    grep -q 'behind a firewall it does not control' <<< "$flat" \
+        || { echo "the outbound requirement is unstated again"; return 1; }
+    grep -q 'runs on the host, not in the container' <<< "$flat" \
+        || { echo "nothing says which side of the boundary the watcher is on"; return 1; }
+    # And in the walk, which is where someone with a silent phone actually is.
+    local walk
+    walk="$(sed -n '/^\*\*When no notification arrives/,/^## /p' "$doc")"
+    grep -q 'reach the ntfy server at all' <<< "$walk" \
+        || { echo "the troubleshooting walk has no step for it"; return 1; }
+    # The walk counts itself, and a step added without the count is a document
+    # arguing with itself in front of the reader.
+    local claimed steps
+    claimed="$(grep -oE '^\*\*When no notification arrives\.\*\* [A-Za-z]+' "$doc" | awk '{print $NF}')"
+    steps="$(grep -cE '^[0-9]+\. \*\*' <<< "$walk")"
+    case "$claimed:$steps" in
+        Five:5|Six:6|Seven:7|Eight:8) ;;
+        *) echo "the walk says '$claimed' and has $steps steps"; return 1 ;;
+    esac
+}
+
+@test "remote access says where the notification guarantee stops" {
+    # The page argues carefully that no sandbox-controlled bytes reach the
+    # phone, and that argument is about the CONTAINER boundary. ntfy_url is a
+    # credential for a channel the phone trusts, in a file on the host, and
+    # anyone with the operator's account can publish to it, drown it, or read
+    # it. None of that goes through the sandbox.
+    #
+    # It matters downstream: a monitoring design for these machines uses a
+    # separate topic whose credential is deliberately not on the box, so a
+    # compromised host cannot forge alerts about itself. That only works if
+    # the reader knows the box's own topic is not privileged.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/remote-access.md" | tr -d '*`')"
+    grep -q 'Where that guarantee stops' <<< "$flat" \
+        || { echo "the guarantee still reads as unbounded"; return 1; }
+    grep -qi 'separate topic' <<< "$flat" \
+        || { echo "nothing tells the reader to scope a second topic"; return 1; }
+    grep -qi 'forge alerts about itself' <<< "$flat" \
+        || { echo "the reason for the second topic is gone"; return 1; }
+}
+
+@test "the negative space is collected where a reader will find it" {@test "the negative space is collected where a reader will find it" {
     # A document organised by control makes a reader assemble what is NOT
     # covered themselves, and most will not. Every item here is documented
     # somewhere else too; this holds the collected list, at the top, because
