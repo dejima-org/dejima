@@ -4553,6 +4553,44 @@ EOF
 # its maintainer's, and saying so is the difference between disclosure and
 # letting a reader assume. Pinned because it is the kind of line that goes
 # quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README leads with what is different, not with the premise" {
+    # "Assume the agent is hostile" is the field's default position as of 2026
+    # - a survey of comparable projects found the premise everywhere. Opening
+    # on it claims novelty dejima does not have, and buries the thing it does:
+    # that the blast radius is followed past the container.
+    #
+    # Pinned because it is a positioning claim, and those drift back toward
+    # whatever is easiest to write.
+    # Everything before the first "What bounds it:" heading, with newlines
+    # flattened: the claims below are sentences, and a sentence that happens to
+    # wrap would otherwise fail a grep for reasons that have nothing to do with
+    # what it says.
+    local opening
+    opening="$(sed -n '1,/^\*\*What bounds it:\*\*/p' "$REPO_ROOT/README.md" | tr '\n' ' ')"
+    [ -n "$opening" ] || { echo "no opening section found"; return 1; }
+    grep -q 'past the container' <<< "$opening" \
+        || { echo "the opening no longer says where dejima differs"; return 1; }
+    grep -qi "field's default position" <<< "$opening" \
+        || { echo "the opening claims the premise as a differentiator again"; return 1; }
+    # The layers, named as layers rather than as a list of tools, so a fourth
+    # does not need the paragraph rewritten.
+    grep -qi 'each of those is a layer' <<< "$opening" \
+        || { echo "the layering is gone from the opening"; return 1; }
+}
+
+@test "the threat model names the handoff as a route in" {
+    # dejima tells agents to hand host-side work to the operator. That is a
+    # designed, frequent workflow and therefore a delivery mechanism, and it
+    # was the one route in that the ranked list did not name.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q 'operator running something the session asked them to run' "$tm" \
+        || { echo "the handoff is unnamed again"; return 1; }
+    # And is not read as an argument for removing the handoff, which would
+    # produce a session that works around the operator instead.
+    grep -qi 'not an argument for making the handoff harder' "$tm" \
+        || { echo "it reads as a case for removing the workflow"; return 1; }
+}
+
 @test "the README frames dejima as a development environment, not only a sandbox" {
     grep -q 'sandboxed development environment' "$REPO_ROOT/README.md"
     # The half that is not containment has to be visible as such. A reader

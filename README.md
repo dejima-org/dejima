@@ -27,6 +27,18 @@
 **Agents work best without you babysitting them. Bound the blast radius, let them
 work, and assume they are hostile.**
 
+Assuming that is not what makes dejima unusual. It is the field's default
+position as of 2026, and a survey of comparable projects found the premise
+everywhere. What the survey did not find anywhere was a project that follows
+the blast radius **past the container**.
+
+It does not stop there. A contained session can still open a pull request, and
+a runner builds that commit on a machine dejima never touches. An escape from
+the container arrives somewhere, and that somewhere has its own reach across
+your network. The next session on the project reads what this one left behind.
+Each of those is a layer, each has a control, and some of the controls are
+separate tools because they run in places dejima does not.
+
 An agent with permission prompts turned off gets a lot done. It can also be
 turned against you mid-session, by a prompt injection or a poisoned
 dependency, and it will not announce that it has been. dejima is built for
