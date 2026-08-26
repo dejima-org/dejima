@@ -23,10 +23,28 @@
 # when it takes the terminal at the prompt, and puts those same modes back on
 # `fg` rather than the ones the job was using - measured on both bash and zsh -
 # so without this the session comes back line-buffered and echoing. The SIGCONT
-# trap re-applies the modes the container run was using, then pokes the group
-# with SIGWINCH: the container client answers a resize by resizing the
-# container's TTY, which is what makes a full-screen harness repaint over
-# whatever the shell printed while the session was away.
+# trap re-applies the modes the container run was using.
+#
+# It then has to make the harness redraw, over whatever the shell printed while
+# the session was away. That used to be `kill -WINCH`, on the reasoning that a
+# resize is what makes a full-screen program repaint. The reasoning was right
+# and the signal was not enough: a program that answers SIGWINCH by re-reading
+# the size, seeing the same numbers and doing nothing gets a poke that costs it
+# nothing to ignore.
+#
+# Measured against the real programs rather than a stand-in, on a pty, counting
+# the bytes each wrote in a fixed window after each kind of poke:
+#
+#                       idle   same-size SIGWINCH   size changed and back
+#   Claude Code            0                    0                    3337
+#   Cline                  0                    0                   17810
+#   nvim (control)         0                 3356                    6724
+#
+# Both shipped harnesses ignore the signal outright. So the size is changed
+# and changed straight back, which is a genuine resize twice over: TIOCSWINSZ
+# raises SIGWINCH on the foreground process group by itself, the container
+# client answers a resize by resizing the container's TTY, and the harness
+# inside sees dimensions that actually moved.
 set -u
 
 usage() {
@@ -85,7 +103,28 @@ session_modes="$(stty -g < /dev/tty 2>/dev/null)" || exit 0
 
 on_cont() {
     stty "$session_modes" < /dev/tty 2>/dev/null || true
-    # The whole process group, since this script does not know the container
+
+    # One row shorter and back. Only the kernel's idea of the size changes -
+    # the terminal emulator is not told and does not need to be, because what
+    # a program reads is the kernel's value. It ends where it started, so a
+    # failure partway leaves the size wrong rather than the session unusable,
+    # which is why the restore is unconditional rather than guarded.
+    local size rows
+    size="$(stty size < /dev/tty 2>/dev/null)" || size=""
+    rows="${size%% *}"
+    case "$rows" in
+        ''|*[!0-9]*) rows="" ;;
+        *) [ "$rows" -gt 1 ] || rows="" ;;
+    esac
+    if [ -n "$rows" ]; then
+        stty rows "$((rows - 1))" < /dev/tty 2>/dev/null || true
+        stty rows "$rows" < /dev/tty 2>/dev/null || true
+    fi
+
+    # Kept as well as the resize, and not redundant: nvim is the measured
+    # example of a program that repaints on the bare signal, and a session
+    # running one under `--cmd` should not be worse off than a harness. The
+    # whole process group, since this script does not know the container
     # client's pid and SIGWINCH is ignored by default everywhere else in it.
     kill -WINCH 0 2>/dev/null || true
 }
