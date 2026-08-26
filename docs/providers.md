@@ -546,6 +546,16 @@ Two things it does not cover. A command that sends no body has none added -
 would be worse than leaving it. And running a forge CLI on the host, outside
 a sandbox, marks nothing: there the person running it wrote the body.
 
+**Once, whatever the body already says.** A body that already opens with the
+marker gets no second one - the marker is a statement rather than a count, and
+a body saying an agent wrote it has disclosed what this exists to disclose.
+That matters because agents write it themselves: every issue on a project
+worked on this way opens with that line, so one reading the existing issues
+concludes it is the house style. The same words further down the body are
+prose about disclosure rather than the disclosure, and still get one
+prepended. The session is also told the marker is added for it, which is the
+half that stops it being written at all.
+
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
 every session gets regardless (clone, fetch, `gh` API calls over port 443)
