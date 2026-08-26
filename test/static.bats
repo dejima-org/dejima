@@ -2435,7 +2435,33 @@ _install_forge_bins() {
         || { echo "the container did not receive the keystroke:"; echo "$output"; return 1; }
 }
 
-@test "the launcher never lets the container client see SIGTSTP" {
+@test "the resume resize is held long enough for anything to see it" {
+    # Two ioctls back to back are not a resize a program can observe: the
+    # signal arrives, the handler reads the size as it is NOW, and by then it
+    # is back where it started. Measured on a pty, bytes written after the
+    # poke - no hold: 0 from both harnesses; 0.2s: 17810 from Cline, 3328
+    # from Claude Code.
+    #
+    # This is asserted on the source rather than behaviourally, and the reason
+    # is worth writing down: the fixture's stand-in is a trivial program that
+    # handles the signal faster than either real harness, so it observes an
+    # intermediate size that they miss. It passed while both real programs
+    # failed. A test that cannot see the failure cannot guard the fix.
+    local f="$REPO_ROOT/bin/dejima-tty-suspend"
+    local block
+    block="$(sed -n '/stty rows "\$((rows - 1))"/,/stty rows "\$rows"/p' "$f")"
+    [ -n "$block" ] || { echo "the resize is gone"; return 1; }
+    grep -qE '^\s*sleep [0-9.]+' <<< "$block" \
+        || { echo "the resize is back-to-back, which no harness can see"; return 1; }
+    # And enough of one. The floor measured on a direct pty is between 0.1 and
+    # 0.2 seconds, before the hop through the client and the daemon.
+    local held
+    held="$(grep -oE '^\s*sleep [0-9.]+' <<< "$block" | grep -oE '[0-9.]+')"
+    awk -v h="$held" 'BEGIN { exit !(h >= 0.3) }' \
+        || { echo "held $held s, below the measured floor plus headroom"; return 1; }
+}
+
+@test "the launcher never lets the container client see SIGTSTP" {@test "the launcher never lets the container client see SIGTSTP" {
     # The whole of #179, in the end. The client survives SIGSTOP and does not
     # survive SIGTSTP: a catchable stop signal interrupts the read it is
     # blocked in, its input forwarding never recovers, and the session comes
