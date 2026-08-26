@@ -495,7 +495,8 @@ that immediately turned up a second thing, that `gh --repo owner/name pr merge
 N` walked straight past the merge block. Neither was a hard bug to find once
 anyone looked.
 
-Two known differences remain, both filed rather than fixed:
+Two differences from the gitea path remain, both now closed in code and worth
+knowing about because they are what a second forge costs:
 
 - **Review feedback needs its own tool.** `gh pr view --comments` prints
   reviews and comments with no resolution state anywhere in the output,
