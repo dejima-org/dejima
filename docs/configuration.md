@@ -2,10 +2,10 @@
 
 [← dejima README](../README.md)
 
-Day-to-day configuration once dejima is installed and running: what a
-project declares versus what you approve, config parity with your host agent
-harness setup, a different editor, writable host directories, shared
-scratch space, frontend testing, and what the sandbox knows about itself.
+Day-to-day configuration once dejima is installed and running. The reference
+table below is every key there is; the sections after it cover what a project
+declares versus what you approve, what carries over from your host, mounts and
+scratch space, and what the sandbox knows about itself.
 
 ## Configuration reference
 
@@ -49,7 +49,7 @@ config file behind them.
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
-| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
+| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |
 | `[epitaph] enabled` | `on` | keep the summary a harness writes when a session compacts; `--no-epitaph` skips it for one launch |
 | `[epitaph] dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
@@ -78,12 +78,11 @@ opting into when you pick one.
 ## Global and per-project domains and dependencies
 
 Allowed domains and dependencies each stack through their own layers. The
-layers **add** to each other, so a narrower layer can only widen what a
-broader one already permits: nothing at the project layer can withdraw a
-built-in domain, and nothing at the container layer can withdraw a project
-one. Ordering them least specific first is how they are listed below and how
-they are applied, and it means the set a session gets is the union of every
-layer that applies to it, never an override of one by another.
+layers **add** to each other, so a narrower layer can only widen what a broader
+one already permits: the set a session gets is the union of every layer that
+applies to it, never an override of one by another. Nothing at the project
+layer can withdraw a built-in domain, and nothing at the container layer can
+withdraw a project one.
 
 | Config | Layers, least specific first |
 | --- | --- |
@@ -102,61 +101,79 @@ A project can declare what it needs in two committed files:
                            # tarball:<name>@<sha256>:<url> release archive
 ```
 
-### Declaring that the history is evidence
+**Declaring grants nothing.** The project directory is bind-mounted
+read-write, so a session could write these files; they are read only to
+compare against reality and suggest a command. Approvals live outside the
+container under `~/.config/dejima/` (`$DEJIMA_CONFIG_DIR` relocates the
+tree) - global at its root, per project under `projects/<slug>/` - written
+only by tools you run on the host:
 
-A third file, approved the same way as the two above:
-
+```sh
+dejima-project status ~/myproject     # declared vs approved vs missing
+dejima-project approve ~/myproject    # review and approve the declared set
+dejima-allow --project ~/myproject crates.io
+dejima-allow --global crates.io       # applies to every project
+dejima-dep add --project ~/myproject cargo:cargo-nextest
+dejima-dep add --global cargo:cargo-nextest
 ```
-.dejima/corpus             # one rule per line; today, commit-per-step
-```
 
-An approved `commit-per-step` adds a paragraph to the session briefing
-requiring **one commit per plan step that writes a file**, rather than one
-commit per task, and explaining why. Absent or unapproved, nothing is added
-and nothing changes, which is the default for every project that has not asked
-for it.
+Two of those tools also write the declaration, so an approval you make by
+hand does not stay invisible to everyone else on the project:
+`dejima-allow --project` appends to `.dejima/allowed-domains`, and
+`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
+approval first - that is the part that grants - and report separately on the
+declaration, so a project you can't write to still gets you the approval.
+`--global` writes no declaration at all: there is no project to declare in.
 
-It goes through approval despite granting no capability, and that is
-deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
-session able to turn this on by writing a file would be writing the *next*
-session's system prompt. `bin/dejima` reads the approval store and never a
-project's declarations - a static test holds that it does not so much as name
-that directory.
+The declaration those two write still grants nothing, and writing to it does
+not promote it. That it is session-writable is exactly why both tools refuse to
+write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
+The refusal is the `open` itself rather than a check before it, so it holds even
+against a session still running while you type the command - see
+[Declaration files are session-writable](security.md#declaration-files-are-session-writable).
+The same write reads the file back to skip an already-declared entry, and that
+read is capped, since a session can make its own `.dejima/<kind>` arbitrarily
+large for free.
 
-An unknown rule is reported but never offered for approval. One that nothing
-implements would approve cleanly, sit in the store and do nothing, which reads
-as being in force when it is not.
+Neither writer has an inverse for the declaration. `dejima-dep remove
+--project` withdraws the approval and deliberately leaves the declaration
+alone (it says so, since `dejima-project approve` will otherwise offer the
+entry again); `dejima-allow --project` has no `remove` at all. Taking
+something back from the project itself means editing `.dejima/` and
+committing that.
 
-**Check the forge's merge policy before relying on this.** The briefing tells
-the agent how to commit, but the setting that can undo all of it is yours: a
-squash-merge is survivable, because a clone fetches remote branches and the
-step commits stay reachable through the branch ref, but deleting the branch
-afterwards removes the last thing pointing at them. Several forges offer
-"delete branch on merge" and some default it on. Measured both ways on a
-throwaway repository: squash-merge with the branch retained left every step
-commit reachable in a fresh clone; the same merge with the branch deleted first
-left none.
+`dejima-project status`/`approve` classify a declared entry against
+the union of global and project approvals, so something already approved
+globally shows as approved, not pending. Unlike `dejima-allow`,
+`dejima-dep`'s `--global` and `--project` are mutually exclusive -
+an entry belongs to exactly one scope. `dejima-dep` has no `--container`
+scope either, and refuses the flag rather than ignoring it: a dependency
+needs an image rebuild, so there is nothing to patch in a live session.
 
-So a project can adopt the rule, write every plan correctly, and still yield
-nothing, with no error anywhere - a squash-merged `main` looks perfectly
-healthy. dejima's own history is intact because it merges with merge commits.
+Approved domains join the allowlist at the next launch. `dejima-allow` can also
+patch a running session immediately, but only when run bare or with
+`--container` - approving here (`--project`/`--global`) never touches one; see
+[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
+A domain that resolves to a private address has no live patch at all. Approved
+dependencies are baked into a derived image built `FROM` the shared base -
+first `dejima:<username>-global` if the global store has any dependency
+approved, then `dejima:<username>-<slug>` on top of that if the project store
+does - so they take effect on the **next** launch. Because of that rebuild, the
+usual moment to approve is *after* leaving the sandbox, and persistence never
+requires a running container.
 
-The reason is recoverability rather than tidiness. A step is only legible
-afterwards if the file's state immediately before it and immediately after it
-can both be read back from history: before from the commit's parent, after
-from the commit. One commit carrying several steps that touch the same file
-destroys that, because no step in it can be isolated any more, and
-reconstructing one would mean building a file state the repository never held.
-Nothing recovers that later, so it has to be recorded while the work happens.
+`dejima-project approve` never attempts to patch a running session: it only
+ever calls `dejima-allow` without `--container`. If an individual approval
+can't be recorded - an unwritable store, a slug collision, a corrupt approval
+list - it reports that entry as not approved and keeps going, so one bad entry
+can't cost you the rest of the set. It then exits non-zero if anything failed,
+so `dejima-project approve ~/myproject && dejima` won't launch a session
+missing the approvals you just confirmed.
 
-It lives in the project rather than in `~/.config/dejima/config` because it is
-a fact about the repository. Anyone who clones it and runs dejima gets the same
-commit discipline, which is what makes the history uniformly usable: a rule
-half the contributors follow produces a history nothing can be taken from.
-
-What dejima does not do is say what the history is *for*. Collecting it, and
-deciding whether to, is the operator's business; the briefing states the rule
-the project already adopted and stops there.
+A session whose project declares something it doesn't have is told so in its
+startup context, with the exact command to hand you. Project approvals are
+inherited by subdirectories, so a git worktree under the project gets its
+parent's; global approvals apply everywhere regardless.
 
 ### Tarball dependencies
 
@@ -205,88 +222,53 @@ interpolated into a `RUN` line that runs as root at build time, so anything
 shell-active is refused outright rather than quoted around, and only `https`
 is accepted.
 
-**Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a session could write these files; they are read only to
-compare against reality and suggest a command. Approvals live outside the
-container under `~/.config/dejima/` (`$DEJIMA_CONFIG_DIR` relocates the
-tree) - global at its root, per project under `projects/<slug>/` - written
-only by tools you run on the host:
+### Declaring that the history is evidence
 
-```sh
-dejima-project status ~/myproject     # declared vs approved vs missing
-dejima-project approve ~/myproject    # review and approve the declared set
-dejima-allow --project ~/myproject crates.io
-dejima-allow --global crates.io       # applies to every project
-dejima-dep add --project ~/myproject cargo:cargo-nextest
-dejima-dep add --global cargo:cargo-nextest
+A third file, approved the same way as the two above:
+
+```
+.dejima/corpus             # one rule per line; today, commit-per-step
 ```
 
-Two of those tools also write the declaration, so an approval you make by
-hand does not stay invisible to everyone else on the project:
-`dejima-allow --project` appends to `.dejima/allowed-domains`, and
-`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
-approval first - that is the part that grants - and report separately on the
-declaration, so a project you can't write to still gets you the approval.
-`--global` writes no declaration at all: there is no project to declare in.
+An approved `commit-per-step` adds a paragraph to the session briefing
+requiring **one commit per plan step that writes a file**, rather than one
+commit per task, and explaining why. Absent or unapproved, nothing is added
+and nothing changes, which is the default for every project that has not asked
+for it.
 
-The declaration those two write still grants nothing; it is the same
-untrusted file the section above describes, and writing to it does not
-promote it. That it is session-writable is exactly why both tools refuse to
-write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
-The refusal is the `open` itself rather than a check before it, so it holds
-even against a session that is still running while you type the command. See
-[Declaration files are session-writable](security.md#declaration-files-are-session-writable)
-for what that defends against and how. The same write
-reads the file back to skip an already-declared entry, and that read is
-capped - a session can make its own `.dejima/<kind>` arbitrarily large for
-free, and an oversized one is refused rather than loaded into your memory.
+It goes through approval despite granting no capability, and that is
+deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
+session able to turn this on by writing a file would be writing the *next*
+session's system prompt. `bin/dejima` reads the approval store and never a
+project's declarations - a static test holds that it does not so much as name
+that directory.
 
-Neither writer has an inverse for the declaration. `dejima-dep remove
---project` withdraws the approval and deliberately leaves the declaration
-alone (it says so, since `dejima-project approve` will otherwise offer the
-entry again); `dejima-allow --project` has no `remove` at all. Taking
-something back from the project itself means editing `.dejima/` and
-committing that.
+An unknown rule is reported but never offered for approval. One that nothing
+implements would approve cleanly, sit in the store and do nothing, which reads
+as being in force when it is not.
 
-`dejima-project status`/`approve` classify a declared entry against
-the union of global and project approvals, so something already approved
-globally shows as approved, not pending. Unlike `dejima-allow`,
-`dejima-dep`'s `--global` and `--project` are mutually exclusive -
-an entry belongs to exactly one scope. `dejima-dep` has no `--container`
-scope either, and refuses the flag rather than ignoring it: a dependency
-needs an image rebuild, so there is nothing to patch in a live session.
+The reason is recoverability rather than tidiness. A step is legible afterwards
+only if the file's state immediately before and immediately after it can both
+be read back: before from the commit's parent, after from the commit. One
+commit carrying several steps that touch the same file destroys that, and
+nothing recovers it later, so it has to be recorded while the work happens.
 
-Approved domains join the allowlist at the next launch. `dejima-allow` can
-also patch a running session immediately, but only when it is run bare or
-with `--container` - approving here (`--project`/`--global`, with no
-`--container`) never touches one; see
-[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
-A domain that resolves to a private address has no live patch at all - an
-internally-routed host can only be approved and picked up at the next launch.
-Approved dependencies are baked into a derived image built `FROM` the shared
-base - first `dejima:<username>-global`, if the global store has any
-dependency approved, then `dejima:<username>-<slug>` on top of that,
-if the project store does - so they need an image rebuild: they take effect
-on the **next** launch.
+**Check the forge's merge policy before relying on this.** The setting that can
+undo all of it is yours. A squash-merge is survivable, because the step commits
+stay reachable through the branch ref, but "delete branch on merge" - which
+several forges offer and some default on - removes the last thing pointing at
+them. Measured both ways on a throwaway repository: squash-merge with the
+branch retained left every step commit reachable in a fresh clone; the same
+merge with the branch deleted first left none. So a project can adopt the rule,
+write every plan correctly, and still yield nothing, with no error anywhere.
+dejima's own history is intact because it merges with merge commits.
 
-Because of that rebuild, the usual moment to approve is *after* leaving the
-sandbox - so persistence (`--global` or `--project`) never requires a running
-container.
-
-`dejima-project approve` never attempts to patch a running session: it only
-ever calls `dejima-allow` without `--container`, so recording the approval
-is the only thing it does. If an individual approval can't be recorded - an
-unwritable store, a slug collision, a corrupt approval list - it reports
-that entry as not approved and keeps going, rather than stopping at the
-first failure; that holds for dependencies and domains alike, so one bad
-entry can't cost you the rest of the set. It then exits non-zero if anything
-failed, so `dejima-project approve ~/myproject && dejima` won't launch a
-session missing the approvals you just confirmed.
-
-A session whose project declares something it doesn't have is told so in its
-startup context, with the exact command to hand you. Project approvals are
-inherited by subdirectories, so a git worktree under the project gets its
-parent's; global approvals apply everywhere regardless.
+It lives in the project rather than in `~/.config/dejima/config` because it is
+a fact about the repository: anyone who clones it gets the same commit
+discipline, and a rule half the contributors follow produces a history nothing
+can be taken from. What dejima does not do is say what the history is *for*.
+Collecting it is the operator's business; the briefing states the rule the
+project adopted and stops there.
 
 ## Config parity with your host agent harness setup
 
@@ -643,6 +625,26 @@ directory, which a config file has no equivalent of. And a path containing a
 colon is refused outright: both lists are colon-separated, so such a path
 cannot be represented in one at all and would otherwise split into two
 mounts that each fail the existence check.
+
+## Suspending a session
+
+Ctrl-Z backgrounds all of dejima - the container, the credential proxy, the
+conversation shipper - and `fg` brings back a working session, with the terminal
+put back the way the harness had it.
+
+That takes doing, because a container run holds the terminal in raw mode, where
+Ctrl-Z is not a signal at all: it is a byte, delivered to whatever is running
+inside. A harness that implements Ctrl-Z itself then stops itself, and nothing
+in a container can continue it - there is no job-control shell in there. So
+dejima takes that one character back for the host while a session runs
+(`bin/dejima-tty-suspend`). Ctrl-C and Ctrl-\ are deliberately left alone and
+still reach the session, which is how a harness expects to be interrupted.
+
+Suspending is not detaching. A suspended session is stopped, so it makes no
+progress until you resume it, and it belongs to the terminal you started it
+from. For a session that keeps working while you are away, or that you want to
+pick up from somewhere else, run dejima inside tmux and use
+[`dejima-attach`](remote-access.md).
 
 ## Shared scratch space
 
