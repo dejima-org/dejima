@@ -529,15 +529,15 @@ the public half as a Gitea deploy key scoped to just the repos that need
 push access, then set it in the config:
 
 ```
-[core]
+[identity.default]
 ssh_key = ~/.ssh/dejima_ed25519
 ```
 
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
 deletes the plaintext copy immediately after - the sandbox user itself never
 has a path to the raw key, only the agent socket (see
-[security notes](security.md) for the full mount rationale). Setting
-`[core] ssh_key` means a live forwarded agent is no longer required at all.
+[security notes](security.md) for the full mount rationale). Setting it means
+a live forwarded agent is no longer required at all.
 
 ## Using a different editor/application
 
