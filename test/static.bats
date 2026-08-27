@@ -2839,6 +2839,31 @@ STUB
     out="$(_disclose_shim "$d" create --body-file "$f")"
     [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 2 ] \
         || { echo "a mention in the body was read as the disclosure: $out"; return 1; }
+
+    # Trailing whitespace after it is still just the marker: invisible, and
+    # changing nothing about what the line says.
+    printf '%s   \n\nProse.\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "trailing space stopped it counting as disclosed: $out"; return 1; }
+}
+
+@test "a marker with the session's own words welded on gets a clean one" {
+    # Skipping on a PREFIX made the marker line agent-authorable: the body
+    # opens with the marker, adds to it on the same line, and the disclosure
+    # dejima writes is the one the session finished. dejima says one thing
+    # about agent authorship, and this is the line it says it on.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/weld.XXXXXX")"
+    local DISCLOSE="issue forge-cli create"
+    local marker='**Filed by LLM agent**'
+    local f="$d/body" out
+    printf '%s - reviewed and confirmed by a person\n\nProse.\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    # A clean marker line of its own, above whatever the session wrote.
+    [ "$(head -1 <<< "$out")" = "$marker" ] \
+        || { echo "the first line is the session's: $(head -1 <<< "$out")"; return 1; }
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 2 ] \
+        || { echo "the welded line was accepted as the disclosure: $out"; return 1; }
 }
 
 @test "the session is told the marker is added for it" {
