@@ -773,10 +773,11 @@ session, where the credential deliberately never goes.
   reach the daemon - that is daemon access rather than any process at all,
   and it is not something the launcher can change.
 - The container runs with `no-new-privileges` and an explicit capability
-  floor - `cap_drop: ALL` plus the seven it actually uses. Six are the
-  entrypoint's own; the seventh is `KILL`, which nothing in the entrypoint
-  needs and `dejima-allow --container` does, because adding a domain to a
-  running session signals dnsmasq and dnsmasq runs as its own user. The first means a setuid binary or a file capability cannot raise
+  floor - `cap_drop: ALL` plus the ones it actually uses: what the
+  entrypoint's root phase needs, and `KILL`. `KILL` is there for
+  `dejima-allow --container`, not for the entrypoint - adding a domain to a
+  running session signals dnsmasq, and dnsmasq runs as its own user. The list
+  itself is in `docker/docker-compose.yml`, which is where it stays correct. The first means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
   would have to take; the second means the capabilities nothing here uses were
   never in the bounding set to be regained. Both are asserted against a running
