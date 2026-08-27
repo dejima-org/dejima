@@ -925,7 +925,7 @@ assert_remedy_forges_exist() {
     done
 }
 
-@test "rtk is declared with its telemetry switched off in the image" {@test "rtk is declared with its telemetry switched off in the image" {
+@test "rtk is declared with its telemetry switched off in the image" {
     # Two independent offs, because either one can be wrong: the tool's own
     # switch here, and the firewall, which does not allowlist the endpoint.
     [[ "$(lib manifest_get tool rtk image_env)" == *"RTK_TELEMETRY_DISABLED=1"* ]] \
