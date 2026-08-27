@@ -1785,28 +1785,87 @@ EOF
 # The assertion is one-sided on purpose: the victim must never be written. The
 # refusal count is only there to prove the swap window was real, so a run where
 # the swapper never landed cannot pass vacuously.
+#
+# Each half restores state before swapping again, and that is what keeps the
+# window open rather than tidiness. declare_entry calls os.makedirs the moment
+# the directory is missing, so the writer puts a real directory back at the
+# path while the symlink is meant to be there. A swapper that only tried
+# unlink() then hit "Is a directory", left `held` stranded, and every later
+# rename failed with "Directory not empty" - it went through the motions for
+# the rest of the run without ever planting another symlink. The window closed
+# in the first few milliseconds, the refusal count stopped rising, and a run
+# where it closed before the writer's first attempt scored zero and failed a
+# test whose guarantee had held perfectly. Discarding what the writer put there
+# is also what a hostile session does: it owns that directory.
 swap_loop() {
-    python3 - "$1" "$2" <<'PY' &
-import os, sys, time
+    SWAP_HEALTH="$(mktemp)"
+    python3 - "$1" "$2" "$SWAP_HEALTH" <<'PY' &
+import errno, os, shutil, stat, sys, time
 
-path, target = sys.argv[1], sys.argv[2]
+path, target, health_at = sys.argv[1], sys.argv[2], sys.argv[3]
 held = path + ".held"
+
+def clear(p):
+    # Whatever is at the path, gone - a symlink this loop planted, or the
+    # directory the writer recreated underneath it.
+    try:
+        if stat.S_ISDIR(os.lstat(p).st_mode):
+            shutil.rmtree(p)
+        else:
+            os.unlink(p)
+    except OSError as e:
+        if e.errno != errno.ENOENT:
+            raise
+
+# The longest run of cycles that planted nothing, which is what the test
+# asserts on. A count of successful plants does not separate the two cases:
+# the wedge took about a second to happen, so a broken swapper still plants
+# a hundred times and then never again. Losing a single cycle to the writer
+# recreating the directory at the wrong moment is normal and self-correcting;
+# never recovering is the bug.
+plants = streak = worst = 0
 end = time.time() + 60
 while time.time() < end:
     try:
-        os.rename(path, held)
+        if not os.path.lexists(held):
+            os.rename(path, held)
+        clear(path)
         os.symlink(target, path)
+        plants += 1
+        streak = 0
     except OSError:
-        pass
+        streak += 1
+        worst = max(worst, streak)
+    # Written as it goes: this process is killed, not allowed to finish.
+    # Through a rename, because the reader is a shell that may look at any
+    # moment - truncate-then-write hands it an empty file often enough to
+    # matter, which reads as "the swapper never planted anything".
+    with open(health_at + ".tmp", "w") as fh:
+        fh.write("%d %d\n" % (plants, worst))
+    os.replace(health_at + ".tmp", health_at)
     time.sleep(0.004)
     try:
-        os.unlink(path)
+        clear(path)
         os.rename(held, path)
     except OSError:
         pass
     time.sleep(0.004)
 PY
     SWAPPER=$!
+}
+
+# Plants, and the longest run of cycles that planted nothing.
+assert_swap_window_stayed_open() {
+    local plants=0 worst=0
+    # || true and the defaults: the file does not exist until the swapper's
+    # first cycle, and an empty read there is "nothing yet", not a value.
+    read -r plants worst < "$SWAP_HEALTH" || true
+    plants="${plants:-0}"; worst="${worst:-0}"
+    rm -f "$SWAP_HEALTH"
+    [ "$plants" -gt 20 ] \
+        || { echo "the swapper planted only $plants time(s)"; return 1; }
+    [ "$worst" -lt 10 ] \
+        || { echo "the swapper stalled for $worst consecutive cycles"; return 1; }
 }
 
 declare_repeatedly() {
@@ -1831,6 +1890,10 @@ declare_repeatedly() {
     kill "$SWAPPER" 2>/dev/null || true
     [ "$(cat "$victim")" = "original" ]
     [ "$refused" -gt 0 ]
+    # The window stayed open for the whole run rather than closing after the
+    # first collision - the failure that made this test flaky while the guard
+    # it covers was working.
+    assert_swap_window_stayed_open
     rm -rf "$(dirname "$victim")"
 }
 
@@ -1846,6 +1909,10 @@ declare_repeatedly() {
     kill "$SWAPPER" 2>/dev/null || true
     [ "$(cat "$elsewhere/allowed-domains")" = "original" ]
     [ "$refused" -gt 0 ]
+    # The window stayed open for the whole run rather than closing after the
+    # first collision - the failure that made this test flaky while the guard
+    # it covers was working.
+    assert_swap_window_stayed_open
     rm -rf "$elsewhere"
 }
 
