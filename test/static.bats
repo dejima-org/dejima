@@ -2323,7 +2323,9 @@ _install_forge_bins() {
     # They sit either side of one attach - pick a session, then use it - and a
     # palette that drifts on one side makes them look like different programs.
     # Both files carry the hex, so both can be read.
-    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-attach"
+    # The palette moved to the library the two pickers share; the page's is
+    # still its own, which is the pair this compares.
+    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-tui-lib.sh"
     local hex checked=0
     while IFS= read -r hex; do
         grep -qi -- "$hex" "$attach" \
@@ -6306,7 +6308,7 @@ _emit_mount_at() {
     # And the other direction for the shared libraries, which are the entries
     # most easily forgotten because nothing puts them on PATH.
     for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
-             bin/dejima-harness-lib.sh docker/install-forge-bins.sh; do
+             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
 }

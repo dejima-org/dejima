@@ -575,8 +575,8 @@ EOF
     run "$REPO_ROOT/bin/dejima-allow" crates.io
     [ "$status" -ne 0 ]
     [[ "$output" == *"Multiple running dejima containers"* ]] || { echo "$output"; return 1; }
-    grep -qE 'dejima-run-aaaa +alpha' <<< "$output" || { echo "$output"; return 1; }
-    grep -qE 'dejima-run-bbbb +beta' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'alpha +dejima-run-aaaa' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'beta +dejima-run-bbbb' <<< "$output" || { echo "$output"; return 1; }
     rm -rf "$STUB_DIR"
 }
 
@@ -589,8 +589,8 @@ EOF
     run "$REPO_ROOT/bin/dejima-allow" crates.io
     # beta is first in the attach listing, so beta is 1 - not alpha, which
     # docker happens to report first.
-    grep -qE 'beta .*\(dejima-attach 1\)' <<< "$output" || { echo "$output"; return 1; }
-    grep -qE 'alpha .*\(dejima-attach 2\)' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE '^ *beta .*\(dejima-attach 1\)' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE '^ *alpha .*\(dejima-attach 2\)' <<< "$output" || { echo "$output"; return 1; }
     rm -rf "$STUB_DIR"
 }
 
@@ -607,7 +607,7 @@ EOF
     chmod +x "$STUB_DIR/dejima-attach"
     run "$REPO_ROOT/bin/dejima-allow" crates.io
     [ "$status" -ne 0 ]
-    grep -qE 'dejima-run-aaaa +alpha' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'alpha +dejima-run-aaaa' <<< "$output" || { echo "$output"; return 1; }
     [[ "$output" != *"dejima-attach 1"* ]] || { echo "invented a number: $output"; return 1; }
     [[ "$output" != *"Remote access is not configured"* ]] \
         || { echo "leaked the attach refusal: $output"; return 1; }
@@ -1926,4 +1926,71 @@ declare_repeatedly() {
     [ "$status" -ne 124 ]
     [ "$status" -eq 0 ]
     [[ "$output" == *"Removed apt:ripgrep"* ]]
+}
+
+@test "with no terminal the multi-container case stays a list and an exit" {
+    # The picker must never be what a script meets. `run` gives no tty, which
+    # is the same shape as cron, a pipe, or an agent running this: a prompt
+    # there is a hang nobody can answer.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ] || { echo "a script got no error: $output"; return 1; }
+    [[ "$output" == *"specify one with --container"* ]] \
+        || { echo "the flag is not offered: $output"; return 1; }
+    [[ "$output" != *"q to quit"* ]] || { echo "prompted with no tty: $output"; return 1; }
+    # And the line an agent is pointed at stays, since this is the path an
+    # agent's operator reads.
+    [[ "$output" == *"don't let it guess one"* ]] \
+        || { echo "the guess-one warning is gone: $output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the picker acts on the row that was picked" {
+    # The number typed indexes the rows as printed. Worth its own test because
+    # the failure is silent: the wrong session is patched, the domain is
+    # allowed, and everything reports success.
+    stub_two_containers
+    local out
+    # beta is docker's second row, so 2 is beta - and 1 must not be.
+    # || true: the stub's reachability probe decides the exit status, and this
+    # is a test about which container was acted on, not about that.
+    out="$(printf '2\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" == *dejima-run-bbbb* ]] \
+        || { echo "picking 2 did not act on the second row: $out"; return 1; }
+    [[ "$out" != *"inside dejima-run-aaaa"* ]] \
+        || { echo "picking 2 acted on the first row: $out"; return 1; }
+    out="$(printf '1\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" == *dejima-run-aaaa* ]] \
+        || { echo "picking 1 did not act on the first row: $out"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "quitting the picker allows nothing" {
+    stub_two_containers
+    local out
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null)"
+    [[ "$out" != *Resolving* ]] || { echo "q went ahead anyway: $out"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the picker's columns are padded to what is in them" {
+    # "dejima-sandbox-run-" plus twelve hex digits is 31 characters, and the
+    # column was a fixed 28 - so every real name overran it and the project
+    # beside it started one space later than the row above. That is the whole
+    # complaint: there is no telling where the name stops.
+    stub_two_containers
+    local out proj_cols
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null \
+        | sed 's/\x1b\[[0-9;]*m//g; s/\r$//')"
+    # The container name starts at the same column on every row, header
+    # included, which is what padding to the widest value buys.
+    proj_cols="$(grep -oE '^ +[0-9]+ +[a-z]+ +dejima-run' <<< "$out" \
+        | awk '{ print index($0, "dejima-run") }' | sort -u | wc -l)"
+    [ "$proj_cols" -eq 1 ] \
+        || { echo "rows start the name at different columns:"; echo "$out"; return 1; }
+    rm -rf "$STUB_DIR"
 }

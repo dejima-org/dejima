@@ -775,8 +775,9 @@ start_tmux() {
         [ "$(printf '%02x%02x%02x' "$r" "$g" "$b")" = "$hex" ]
     done < <(sed -n \
         "s/.*38;2;\([0-9]*\);\([0-9]*\);\([0-9]*\)m'.*# \([a-z_0-9]*\) *#\([0-9a-f]*\).*/\1 \2 \3 \4 \5/p" \
-        "$REPO_ROOT/bin/dejima-attach")
-    [ "$seen" -eq "${#gruvbox[@]}" ]
+        "$REPO_ROOT/bin/dejima-tui-lib.sh")
+    [ "$seen" -eq "${#gruvbox[@]}" ] \
+        || { echo "found $seen of ${#gruvbox[@]} palette entries"; return 1; }
 }
 
 @test "attaching creates a grouped session on the requested window and disposes of it on detach" {

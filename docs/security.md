@@ -981,12 +981,15 @@ is precisely when nothing is running to probe in the first place. Pass
 `dejima-allow --global --container <id> crates.io` records the approval and
 patches that session immediately, in that order, so the approval is never
 lost to a live-session failure. If more than one dejima container is
-running, the bare form above refuses and asks you to disambiguate with
-`--container <name>` - `docker ps` finds it, or use the
-container's own ID, which `sandbox-context.sh` already hands the agent in
-its startup context (and which is always available inside the sandbox as
-`cat /etc/hostname`), so there's no need for it to guess one and risk
-"successfully" updating someone else's session instead.
+running, the bare form above refuses rather than guessing. On a terminal it
+offers the running sessions to pick from, by project; anywhere else - a
+script, a pipe, a session asking its operator to run this - it prints the same
+rows and stops, because a prompt nobody can answer is worse than a refusal.
+Either way the answer is in front of you instead of in a separate `docker ps`.
+A session has its own ID regardless: `sandbox-context.sh` hands it to the
+agent in its startup context, and `cat /etc/hostname` has it inside the
+sandbox, so there is no need for it to guess one and risk "successfully"
+updating someone else's session instead.
 
 A domain allowed this way stays allowed for the rest of the session even
 if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
