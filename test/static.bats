@@ -4385,7 +4385,38 @@ EOF
 # else is or isn't mitigated on their runners, so it is pinned in all three
 # places rather than left to survive a future edit on its own. Presence-only
 # greps, same caveat as the two above.
-@test "README and docs/security.md both disclose that push access is CI code execution" {
+@test "the port-22 claim names both properties it rests on" {
+    # "GitHub's ranges are allowlisted on port 443 only, so port 22 is
+    # physically unreachable" is an IPv4 statement. The allowlist decides what
+    # is reachable over v4; what makes port 22 unreachable AT ALL is that the
+    # container blocks IPv6 as well, since an allowlist naming one address
+    # family says nothing about the other.
+    #
+    # The claim is true. The risk is that it stays readable if either property
+    # quietly stops holding - which is what a reader cannot check and what a
+    # future change would not trip over.
+    #
+    # Found by the reciprocal of it: dejima-ci-hardener made the same claim,
+    # about dejima's behaviour, naming one half. They found theirs after this
+    # side pointed at the wrong document, and this side had it too.
+    # Flattened and stripped of emphasis before every match, without
+    # exception. Assertions on prose fail on a line break otherwise, which has
+    # cost four separate debugging detours in this suite - including one in
+    # this very test, where the loop flattened and the check after it did not.
+    local f flat readme
+    for f in README.md docs/providers.md; do
+        flat="$(tr '\n' ' ' < "$REPO_ROOT/$f" | tr -d '*`')"
+        grep -q 'port 22' <<< "$flat" || continue
+        grep -qiE 'IPv6' <<< "$flat" \
+            || { echo "$f argues about port 22 without naming the IPv6 half"; return 1; }
+    done
+    # And the half that holds it up is the one that can fail closed.
+    readme="$(tr '\n' ' ' < "$REPO_ROOT/README.md" | tr -d '*`')"
+    grep -q 'refuses to start' <<< "$readme" \
+        || { echo "nothing says what happens when IPv6 cannot be filtered"; return 1; }
+}
+
+@test "README and docs/security.md both disclose that push access is CI code execution" {@test "README and docs/security.md both disclose that push access is CI code execution" {
     for f in README.md docs/security.md; do
         grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
         grep -qi 'forge = none' "$REPO_ROOT/$f"

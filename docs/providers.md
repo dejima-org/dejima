@@ -546,6 +546,16 @@ Two things it does not cover. A command that sends no body has none added -
 would be worse than leaving it. And running a forge CLI on the host, outside
 a sandbox, marks nothing: there the person running it wrote the body.
 
+**Once, whatever the body already says.** A body that already opens with the
+marker gets no second one - the marker is a statement rather than a count, and
+a body saying an agent wrote it has disclosed what this exists to disclose.
+That matters because agents write it themselves: every issue on a project
+worked on this way opens with that line, so one reading the existing issues
+concludes it is the house style. The same words further down the body are
+prose about disclosure rather than the disclosure, and still get one
+prepended. The session is also told the marker is added for it, which is the
+half that stops it being written at all.
+
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
 every session gets regardless (clone, fetch, `gh` API calls over port 443)
@@ -553,7 +563,10 @@ never needs port 22 at all. It opens it through core's existing GitHub push
 grant (`ALLOW_GITHUB_PUSH`, the same one `--allow-github-push` uses), which
 its `hosts_allowlisted_by_core = on` is what asks for: port 22 to GitHub's
 published ranges and nothing else, logged like every other allowed
-connection and verified by the firewall's own startup self-check. Only when
+connection and verified by the firewall's own startup self-check. The
+port restriction is an IPv4 statement; what makes port 22 shut *at all*
+without this grant is that the container blocks IPv6 as well, so an
+allowlist naming one address family is not the whole of it. Only when
 the selected workflow actually pushes - `forge = github` with
 `workflow = local-only` leaves port 22 shut. And `[forge.github] push_token_file` is
 deliberately a *separate*, write-capable token from `[github] token_file`
