@@ -502,7 +502,8 @@ _identity_fixture() {
         "token_file = $ID_DIR/default-token" \
         '[identity.work]' "ssh_key = $ID_DIR/work-key" 'user_name = A Name' \
         'user_email = name@work.example' "token_file = $ID_DIR/work-token" \
-        '[identity.oss]' "ssh_key = $ID_DIR/oss-key"
+        '[identity.oss]' "ssh_key = $ID_DIR/oss-key" \
+        '[identity.keyless]' "token_file = $ID_DIR/work-token"
 }
 
 @test "an identity supplies the ssh key and the forge credential" {
@@ -515,15 +516,59 @@ _identity_fixture() {
     rm -rf "$ID_DIR"
 }
 
-@test "a key the identity does not name falls through to the file" {
-    # An identity overrides what it names. Treating it as a replacement for
-    # the whole section would make a half-filled one silently unset the rest.
+@test "an identity that leaves a credential to the section beneath it is refused" {
+    # This used to fall through: oss names no token_file, so [forge.gitea]
+    # answered for it, and a session launched as oss talked to the forge as
+    # whichever account owns that token. An identity is how one session's
+    # account is kept separate from another's, so a credential crossing that
+    # line is the feature not working rather than a convenience it offers.
     _identity_fixture
     run "$REPO_ROOT/bin/dejima" --identity oss --print-config
+    [ "$status" -ne 0 ] || { echo "the borrowed token was accepted: $output"; return 1; }
+    # Which credential, by name - "something is wrong with your identity" is
+    # not something an operator can act on.
+    [[ "$output" == *"[forge.gitea] token_file"* ]] \
+        || { echo "the refusal does not name the credential: $output"; return 1; }
+    # And nothing resolved is printed, for the same reason the missing-section
+    # refusal prints nothing: it would show this machine's token under oss.
+    [[ "$output" != *"forge.gitea.token_file=$ID_DIR/default-token"* ]] \
+        || { echo "printed the borrowed credential anyway: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity that leaves the ssh key to [core] is refused" {
+    # The other half, and the one the ambiguity was about: [core] ssh_key is
+    # the key a session gets when no identity is named, so an identity that
+    # names none is asking to push as itself with the default account's key.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity keyless --print-config
+    [ "$status" -ne 0 ] || { echo "the borrowed key was accepted: $output"; return 1; }
+    [[ "$output" == *"[core] ssh_key"* ]] \
+        || { echo "the refusal does not name the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a credential belonging to a forge this launch does not use is not borrowed" {
+    # Only the selected forge's keys. Refusing over a value nothing on this
+    # launch reads would make an unrelated section able to block a launch.
+    _identity_fixture
+    printf '[forge.github]\npush_token_file = %s\n' "$ID_DIR/default-token" \
+        >> "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -eq 0 ] \
+        || { echo "an unused forge's credential blocked the launch: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "with no identity named, the config's own credentials are the ones used" {
+    # The unnamed default, which is what [core] ssh_key means. Nothing about
+    # the refusals above touches a host that never names an identity.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --print-config
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qx "core.ssh_key=$ID_DIR/oss-key" <<< "$output" || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/default-key" <<< "$output" || { echo "$output"; return 1; }
     grep -qx "forge.gitea.token_file=$ID_DIR/default-token" <<< "$output" \
-        || { echo "oss has no token_file and did not fall through: $output"; return 1; }
+        || { echo "$output"; return 1; }
     rm -rf "$ID_DIR"
 }
 
@@ -2895,4 +2940,57 @@ EOF
     run grep -c 'ls-remote' "$git_log"
     [ "$output" -eq 0 ] || { echo "the launch called out:"; grep ls-remote "$git_log"; return 1; }
     rm -rf "$workspace" "$GIT_WRAP"
+}
+
+@test "[identity.default] is what a launch acts under when none is named" {
+    # The unnamed default gets a name, which is what lets it carry a git name
+    # and a forge credential beside the key rather than those coming from
+    # three different places.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/tok"
+    write_config '[core]' 'forge = gitea' \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        '[identity.default]' "ssh_key = $ID_DIR/default-key" \
+        "token_file = $ID_DIR/tok" 'user_name = dejima agent'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/default-key" <<< "$output" \
+        || { echo "the default identity did not supply the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "[core] ssh_key alongside [identity.default] is refused, not ranked" {
+    # Two spellings of one thing. Which key a session pushed with is not
+    # something to work out from precedence rules.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/new-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
+        '[identity.default]' "ssh_key = $ID_DIR/new-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ] || { echo "both spellings were accepted: $output"; return 1; }
+    [[ "$output" == *"[core] ssh_key"* ]] && [[ "$output" == *"[identity.default]"* ]] \
+        || { echo "the refusal does not name both: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "[core] ssh_key on its own still works, and says what replaced it" {
+    # Deprecated, not removed: it is how every config written before
+    # identities existed says this.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "a pre-identity config stopped working: $output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/old-key" <<< "$output" || { echo "$output"; return 1; }
+    [[ "$output" == *"[identity.default]"* ]] \
+        || { echo "nothing said what replaced it: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a named identity still beats [identity.default]" {
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/bot-key"
+    write_config '[core]' 'forge = none' \
+        '[identity.default]' "ssh_key = $ID_DIR/default-key" \
+        '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
+    run "$REPO_ROOT/bin/dejima" --identity bot --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/bot-key" <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
 }

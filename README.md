@@ -169,11 +169,12 @@ push.
 
 It also needs a git push credential, and which one you give it matters:
 
-- **`[core] ssh_key`, a key of the session's own**, belonging to an account
-  that is not you. This is the one to set up. It gives the sandbox an identity
-  separable from yours, so what it pushes is visibly its work and the
-  permissions you grant it are its permissions rather than all of yours. It
-  also works unattended, which a forwarded agent does not.
+- **`[identity.default] ssh_key`, a key of the session's own**, belonging to
+  an account that is not you. This is the one to set up. It gives the sandbox
+  an identity separable from yours, so what it pushes is visibly its work and
+  the permissions you grant it are its permissions rather than all of yours. It
+  also works unattended, which a forwarded agent does not. (`[core] ssh_key` is
+  the same key under its old name, and still read.)
   → [Headless git push without agent forwarding](docs/configuration.md#headless-git-push-without-agent-forwarding)
 - **`ssh-agent` with your own key added** (`ssh-add -l` lists it), as the
   fallback. The container sees a forwarded socket and never the private key,

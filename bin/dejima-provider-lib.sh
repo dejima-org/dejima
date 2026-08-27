@@ -751,16 +751,169 @@ identity_exists() {
     return 1
 }
 
+# The credential keys the selected identity leaves to the section beneath it,
+# as "<section> <key>" lines, empty when there are none.
+#
+# Only the selected forge's, because refusing over a credential belonging to a
+# forge this launch does not use would be refusing over a value nothing reads.
+#
+# "Set" means written in the config file, not resolved from a schema default.
+# A forge whose credential key carries a default still hands an identity that
+# names none the machine's own path, and that is not caught here - see
+# docs/configuration.md, which says so rather than leaving it to be found.
+identity_borrowed_credentials() {
+    local name="$1" forge="$2" key
+    if ! config_is_set "identity.$name" ssh_key && config_is_set core ssh_key; then
+        printf 'core	ssh_key
+'
+    fi
+    for key in $(manifest_get forge "$forge" identity_keys); do
+        if ! config_is_set "identity.$name" "$key" \
+            && config_is_set "forge.$forge" "$key"; then
+            printf 'forge.%s	%s
+' "$forge" "$key"
+        fi
+    done
+}
+
+# Whether the selected identity, if there is one, is one a session can act
+# under without borrowing from anyone.
+#
+# Two refusals, one reason. A name with no section resolves to nothing and
+# falls through to the machine's own credentials; a section that names only
+# some of them falls through for the rest. Either way a session launched as
+# this identity acts under another account, and nothing says so. Pushing under
+# the wrong key fails loudly; pushing under the default key when you asked for
+# another one does not fail at all, which is the direction worth being careful
+# about.
+#
+# One function rather than a check at each caller: bin/dejima's --print-config
+# needs the same answer, because every value it prints resolves THROUGH the
+# identity and printing this machine's credentials under an identity's name is
+# the confusion the refusal exists to prevent.
+#
+# Guarded on the config existing rather than swallowing config_get's stderr:
+# with no file at all it says so, and a selection validated without one is a
+# legitimate case this must stay silent for.
+# The identity in force: [core] identity when it names one, and otherwise the
+# reserved `default` section when the config has one.
+#
+# `default` is what [core] ssh_key was without a name. Giving it one is what
+# lets a host state its ordinary account the same way it states any other,
+# with a git name and a forge credential beside the key rather than those
+# coming from three different places.
+#
+# Empty when neither applies, which is the pre-identity config and still a
+# supported one.
+# Assigns rather than prints, and every caller uses this form. identity_get
+# runs on every config_get through bin/dejima's wrapper, and `$(...)` around
+# an answer this cheap costs a fork per read - which is most of what a launch
+# spends on config.
+identity_selected_into() {
+    local __var="$1" __name=""
+    if config_exists; then
+        __name="$(config_get core identity)" || __name=""
+        if [ -z "$__name" ] && _identity_section_present default; then
+            __name=default
+        fi
+    fi
+    printf -v "$__var" '%s' "$__name"
+}
+
+identity_selected() {
+    local _n
+    identity_selected_into _n
+    printf '%s' "$_n"
+}
+
+# Whether a section has any key in the parsed config, read straight off the
+# parse rather than through identity_exists.
+#
+# identity_exists walks every forge's manifest to decide which keys count, and
+# bin/dejima's config_get wrapper reaches this on every single read - which
+# turned a --print-config from three seconds into forty. It does not need the
+# manifest: the parser refuses an unknown key outright, so anything present
+# under identity.<name> in a config that validated is already one of the keys
+# identity_exists would have accepted.
+_identity_section_present() {
+    local name="$1" k
+    config_exists || return 1
+    config_validate || return 1
+    for k in "${!_CFG_SEEN[@]}"; do
+        case "$k" in "identity.$name".*) return 0 ;; esac
+    done
+    return 1
+}
+
+identity_validate() {
+    local forge="$1" name="" borrowed section key
+    name="$(identity_selected)"
+
+    # [core] ssh_key is the default identity under its old name, so a config
+    # holding both says the same thing twice and dejima would have to pick.
+    # Refused rather than ranked: which key a session pushed with is not a
+    # thing to work out from precedence rules.
+    if identity_exists default && config_is_set core ssh_key; then
+        echo "[core] ssh_key is set and so is [identity.default], which is the same" >&2
+        echo "thing under two names - the key a session gets when none is asked for." >&2
+        echo "Move it into [identity.default] and remove [core] ssh_key." >&2
+        echo "See docs/configuration.md, \"Identities\"." >&2
+        return 1
+    fi
+
+    # Deprecated, not removed: it is how every config written before
+    # identities existed says this, and those still work. Said once per
+    # launch, where an operator will see it, because the replacement is
+    # better in a way a changelog will not communicate - a named identity
+    # carries the git name and the forge credential too.
+    if [ -z "$name" ] && config_is_set core ssh_key; then
+        echo "Note: [core] ssh_key is the old spelling of [identity.default] ssh_key." >&2
+        echo "It still works. An [identity.default] section can carry the git name and" >&2
+        echo "the forge credential beside the key, which this cannot." >&2
+    fi
+
+    [ -n "$name" ] || return 0
+
+    if ! identity_exists "$name"; then
+        echo "[core] identity is '$name', and no [identity.$name] section sets" >&2
+        echo "anything in $(config_path). An identity that resolves to nothing would" >&2
+        echo "quietly use this machine's own credentials instead - refusing rather than" >&2
+        echo "doing that. See docs/configuration.md, \"Identities\"." >&2
+        return 1
+    fi
+
+    borrowed="$(identity_borrowed_credentials "$name" "$forge")"
+    [ -n "$borrowed" ] || return 0
+    echo "[identity.$name] leaves a credential to the section beneath it, so a" >&2
+    echo "session launched as '$name' would act under whichever account owns:" >&2
+    while IFS=$'\t' read -r section key; do
+        [ -n "$key" ] || continue
+        echo "  [$section] $key" >&2
+    done <<< "$borrowed"
+    echo "An identity is how one session's account is kept separate from another's;" >&2
+    echo "set each of those under [identity.$name], or unset it in the section named." >&2
+    echo "See docs/configuration.md, \"Identities\"." >&2
+    return 1
+}
+
 identity_get() {
     local section="$1" key="$2" name value pname
     [ "$section.$key" != "core.identity" ] || return 1
-    name="$(config_get core identity)" || return 1
-    [ -n "$name" ] || return 1
+    # Which keys an identity could own, before working out which identity is
+    # in force: this runs on every config_get, and all but a handful of keys
+    # are ones no identity can answer for. Resolving the identity first meant
+    # doing that work ~40 times a launch to discard it ~35 of those times.
     case "$section" in
-        core)      [ "$key" = ssh_key ] || return 1 ;;
-        forge.*)   _forge_owns_identity_key "${section#forge.}" "$key" || return 1 ;;
-        identity.*) return 1 ;;
-        *) return 1 ;;
+        core)       [ "$key" = ssh_key ] || return 1 ;;
+        forge.*)    ;;
+        *)          return 1 ;;
+    esac
+    identity_selected_into name
+    [ -n "$name" ] || return 1
+    # The manifest lookup last, for the same reason: it forks, and by here
+    # there is an identity that might actually answer.
+    case "$section" in
+        forge.*) _forge_owns_identity_key "${section#forge.}" "$key" || return 1 ;;
     esac
     value="$(config_get "identity.$name" "$key")" || return 1
     [ -n "$value" ] || return 1
@@ -784,7 +937,7 @@ _forge_owns_identity_key() {
 # globally would be a new way to get the same answer.
 identity_git_field() {
     local field="$1" name
-    name="$(config_get core identity)" || return 1
+    name="$(identity_selected)" || return 1
     [ -n "$name" ] || return 1
     config_get "identity.$name" "$field"
 }
@@ -864,22 +1017,7 @@ provider_validate_selection() {
     # quietly absent, because an operator who has them everywhere else would
     # otherwise have to read a manifest to find out they are gone here.
     #
-    # An identity that names nothing is refused rather than ignored. Falling
-    # through to the machine's own credentials would mean pushing under the
-    # wrong account with nothing saying so, which is the failure this feature
-    # exists to remove rather than one it may introduce.
-    # Guarded on the config existing rather than swallowing config_get's
-    # stderr: with no file at all it says so, and a selection validated
-    # without one is a legitimate case this must stay silent for.
-    local _identity=""
-    config_exists && { _identity="$(config_get core identity)" || _identity=""; }
-    if [ -n "$_identity" ] && ! identity_exists "$_identity"; then
-        echo "[core] identity is '$_identity', and no [identity.$_identity] section sets" >&2
-        echo "anything in $(config_path). An identity that resolves to nothing would" >&2
-        echo "quietly use this machine's own credentials instead - refusing rather than" >&2
-        echo "doing that. See docs/configuration.md, \"Identities\"." >&2
-        return 1
-    fi
+    identity_validate "$forge" || return 1
 
     # A name outside this set is a hard error rather than an unknown guard
     # treated as absent: a typo would otherwise silently turn a guard off,

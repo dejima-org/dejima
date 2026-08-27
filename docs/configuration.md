@@ -26,12 +26,12 @@ config file behind them.
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | *(the selected harness's own `command`)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
-| `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. A name with no section is refused rather than falling back |
+| `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. Unset selects `[identity.default]` where the config has one. A name with no section is refused rather than falling back |
 | `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
 | `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
-| `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
+| `[core] ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
@@ -462,15 +462,30 @@ says which of its own keys those are (`identity_keys` in its manifest), so
 `token_file` belongs to an identity on the gitea path and `push_token_file`
 does on the GitHub one, and neither is a list core keeps its own copy of.
 
-**A key an identity does not set falls through to the file.** An identity that
-names no `token_file` gets whatever `[forge.gitea] token_file` holds. An
-identity is an override for what it names, not a replacement for the section.
+**`default` is the account a session gets when none is named.** With `[core]
+identity` unset, an `[identity.default]` section is what a launch acts under -
+the ordinary account, given a name so it can carry the git name and the forge
+credential too.
+
+**`[core] ssh_key` is that key under its old name, and is deprecated.** A
+config with no `[identity.default]` reads it as before; a config with both is
+refused rather than ranked, because which key a session pushed with should not
+depend on precedence rules. Every launch that sets it says so and prints the
+section to move it into - including launches running as some other identity,
+which are one `[identity.default]` away from that refusal.
+
+**A credential does not fall through.** An identity that names some and leaves
+the rest to the section beneath it is refused, naming each one: an identity is
+how one session's account stays separate from another's. "Set" means written
+in the file, so a forge key carrying a schema default - `[forge.gitea]
+token_file` - still answers for an identity that names none.
 
 **A name with no section is refused.** `[core] identity = agent-gihub` does not
 quietly use this machine's own credentials - it stops the launch and says so.
 Pushing under the wrong key fails loudly; pushing under your default key when
 you asked for another one does not fail at all, which is the direction worth
 being careful about.
+
 
 **`user_name` and `user_email` reach the container's git config**, appended to
 the copy dejima already makes of your `~/.gitconfig`. Your real one is not

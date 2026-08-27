@@ -446,13 +446,9 @@ if [ "$PRINT_CONFIG" = 1 ]; then
     # nothing would show this machine's own credentials as though they were
     # the identity's - the exact confusion the refusal exists to prevent, in
     # the one command an operator runs to check what they configured.
-    _identity=""
-    config_exists && { _identity="$(config_get core identity)" || _identity=""; }
-    if [ -n "$_identity" ] && ! identity_exists "$_identity"; then
-        echo "[core] identity is '$_identity', and no [identity.$_identity] section sets" >&2
-        echo "anything in $(config_path)." >&2
-        exit 1
-    fi
+    # The forge is read here rather than taken from DEJIMA_FORGE_NAME, which
+    # is resolved further down, past this early exit.
+    identity_validate "$(config_get core forge)" || exit 1
     while IFS= read -r _key; do
         _section="${_key%.*}"
         _leaf="${_key##*.}"
