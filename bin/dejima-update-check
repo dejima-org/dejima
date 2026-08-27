@@ -163,6 +163,12 @@ if git -C "$REPO_ROOT" cat-file -e "$tip^{commit}" 2>/dev/null; then
 fi
 
 color_init
+# Both come out of the checkout's .git/config, which is session-writable when
+# dejima's own checkout is the workspace - the same reason the remote is
+# reached by URL rather than by name. A name carrying escape sequences would
+# fire on the terminal of the operator this is trying to inform.
+_remote_shown="$(sanitize "$remote")"
+_branch_shown="$(sanitize "${upstream#refs/heads/}")"
 # The count only when it is known. It is not, whenever the remote's tip is a
 # commit this checkout has never fetched, which is the common case - and a
 # number invented for those would be the number of commits it can see, not the
@@ -170,9 +176,9 @@ color_init
 if [ -n "$count" ] && [ "$count" != "0" ]; then
     if [ "$count" = "1" ]; then noun="commit"; else noun="commits"; fi
     printf '%sdejima%s: %s/%s has %s %s this checkout does not.\n' \
-        "$C_KEY" "$C_RESET" "$remote" "${upstream#refs/heads/}" "$C_INFO$count$C_RESET" "$noun" >&2
+        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" "$C_INFO$count$C_RESET" "$noun" >&2
 else
     printf '%sdejima%s: %s/%s has commits this checkout does not.\n' \
-        "$C_KEY" "$C_RESET" "$remote" "${upstream#refs/heads/}" >&2
+        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" >&2
 fi
 printf '  Update with %sgit -C %s pull%s\n' "$C_KEY" "$REPO_ROOT" "$C_RESET" >&2

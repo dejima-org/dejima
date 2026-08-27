@@ -6565,3 +6565,31 @@ _emit_mount_at() {
     grep -qi 'never by remote name' <<< "$flat" \
         || { echo "the reason for the URL is gone"; return 1; }
 }
+
+@test "the epitaph renderer strips exactly what the shared sanitize() does" {
+    # `list` is a python renderer that parses the header fields itself, so
+    # there is nothing to hand it a string the shell already cleaned - the
+    # rule ends up written twice. This keeps the second copy honest, and it
+    # reads the real definition out of the script rather than restating it,
+    # so a change there is a change here.
+    local py_clean nasty out_sh out_py
+    py_clean="$(sed -n '/^_BAD = re.compile(/,/^    return _BAD.sub/p' \
+        "$REPO_ROOT/bin/dejima-epitaph")"
+    [ -n "$py_clean" ] || { echo "the renderer's clean() is not where this looks"; return 1; }
+    # One of each class the comment in dejima-color-lib.sh names: C0, BEL, a
+    # C1 control, a bidi override, a bidi isolate, DEL. No NUL - it cannot
+    # survive argv, and neither implementation is reached that way.
+    nasty="$(python3 -c 'import sys
+sys.stdout.write("a\u001b[2Jb\u0007c\u009bd\u202ee\u2066f\u007fg")')"
+    out_sh="$(bash -c 'source "$1"; sanitize "$2"' _ \
+        "$REPO_ROOT/bin/dejima-color-lib.sh" "$nasty")"
+    out_py="$(python3 -c "
+import re, sys
+$py_clean
+sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
+    [ "$out_sh" = "$out_py" ] \
+        || { printf 'shell: %q\npython: %q\n' "$out_sh" "$out_py"; return 1; }
+    # And both actually removed something, so agreeing on "no change" cannot
+    # pass this.
+    [ "$out_sh" != "$nasty" ] || { echo "neither stripped anything"; return 1; }
+}
