@@ -862,14 +862,34 @@ identity_validate() {
     fi
 
     # Deprecated, not removed: it is how every config written before
-    # identities existed says this, and those still work. Said once per
-    # launch, where an operator will see it, because the replacement is
-    # better in a way a changelog will not communicate - a named identity
-    # carries the git name and the forge credential too.
-    if [ -z "$name" ] && config_is_set core ssh_key; then
-        echo "Note: [core] ssh_key is the old spelling of [identity.default] ssh_key." >&2
-        echo "It still works. An [identity.default] section can carry the git name and" >&2
-        echo "the forge credential beside the key, which this cannot." >&2
+    # identities existed says this, and those still work. Warned on every
+    # launch that has it set, not only the ones using it - a config with
+    # [core] ssh_key and a named identity is one migration away from the
+    # refusal above, and finding that out on the launch that breaks is worse
+    # than being told now.
+    #
+    # Every launch rather than once, because there is nowhere to record
+    # "once" that a session could not reach, and a deprecation nobody sees
+    # until removal is not a deprecation.
+    if config_is_set core ssh_key; then
+        printf '  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
+            "${C_WARN:-}" "${C_RESET:-}" >&2
+        printf '  under its old name.\n' >&2
+        if [ -n "$name" ]; then
+            printf '  This launch runs as %s%s%s, so it is not the key being used here.\n' \
+                "${C_KEY:-}" "$name" "${C_RESET:-}" >&2
+        else
+            printf '  Nothing else names an account, so it is the key this launch uses.\n' >&2
+        fi
+        printf '  Move it into an [identity.default] section, which can carry the git\n' >&2
+        printf '  name and the forge credential belonging to that same account:\n\n' >&2
+        # The value in the file, not through config_get: in this process
+        # config_get is bin/dejima's wrapper, so with a named identity in
+        # force it answers with THAT identity's key - and printing it as the
+        # thing to move would name a key the operator is not being asked to
+        # touch.
+        printf '      [identity.default]\n      ssh_key = %s\n\n' \
+            "$(_config_get_from_file core ssh_key)" >&2
     fi
 
     [ -n "$name" ] || return 0

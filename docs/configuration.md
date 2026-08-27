@@ -486,7 +486,6 @@ Pushing under the wrong key fails loudly; pushing under your default key when
 you asked for another one does not fail at all, which is the direction worth
 being careful about.
 
-
 **`user_name` and `user_email` reach the container's git config**, appended to
 the copy dejima already makes of your `~/.gitconfig`. Your real one is not
 touched, which was already true and is what the copy exists for.

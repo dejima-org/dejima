@@ -2994,3 +2994,41 @@ EOF
     grep -qx "core.ssh_key=$ID_DIR/bot-key" <<< "$output" || { echo "$output"; return 1; }
     rm -rf "$ID_DIR"
 }
+
+@test "the [core] ssh_key deprecation is warned even when a launch does not use it" {
+    # A config with [core] ssh_key and a named identity is one migration away
+    # from the refusal - adding [identity.default] would stop it starting.
+    # Finding that out on the launch that breaks is worse than being told now,
+    # so the warning is about the config rather than about this launch.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/bot-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
+        'identity = bot' '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"[core] ssh_key is deprecated"* ]] \
+        || { echo "no migration warning: $output"; return 1; }
+    # And says it is not the key in play, so the reader is not left thinking
+    # this launch pushed with it.
+    [[ "$output" == *"runs as bot"* ]] \
+        || { echo "the warning does not say which account is in force: $output"; return 1; }
+    # The path, because "move it" is not actionable without knowing what.
+    [[ "$output" == *"$ID_DIR/old-key"* ]] \
+        || { echo "the warning does not name the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a migrated config is warned about nothing" {
+    # The other half of a deprecation warning: it has to stop. One that fires
+    # after the migration is one an operator learns to ignore, which is how
+    # the next warning gets missed too.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/key"
+    write_config '[core]' 'forge = none' \
+        '[identity.default]' "ssh_key = $ID_DIR/key" 'user_name = dejima agent'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"deprecated"* ]] \
+        || { echo "still warning after the migration: $output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/key" <<< "$output" \
+        || { echo "the migrated key is not the one in force: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
