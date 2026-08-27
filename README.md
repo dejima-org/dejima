@@ -397,9 +397,12 @@ On a pushing workflow, `merge-guard.sh` and `git-push-guard.sh` are fast-fail
 guards against an overeager agent, not a boundary against a hostile one. If
 you hand a session a forge token that can merge, that token is in its
 environment and it can call the merge endpoint directly; the hooks will not
-stop it. The merge guard is also per-workflow and inert unless that workflow
-turns it on. Branch protection on the remote, and a token scoped to less than
-merge, are what actually stop a merge from happening without you.
+stop it. The merge guard is per-workflow as a mechanism, and every workflow
+dejima ships turns it on - so a merge attempted from inside a session is
+refused whichever one you selected, and the switch exists for a third-party
+workflow rather than as a choice among these. Branch protection on the
+remote, and a token scoped to less than merge, are what actually stop a merge
+from happening without you.
 
 What holds across all three is where they stop: none of them puts work on
 your default branch. `local-only` never leaves the machine, and the pushing
@@ -748,6 +751,7 @@ covers, and how to run them.
 | [threat-model.md](docs/threat-model.md) | What is assumed hostile, and where each layer's compromise stops |
 | [research-review.md](docs/research-review.md) | Checking the threat model against the field's, and the standing questions that are the agenda |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
+| [tools.md](docs/tools.md) | The optional tools a session can be given, and what hardening each one carries |
 | [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |

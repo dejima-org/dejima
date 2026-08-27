@@ -6667,3 +6667,56 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     grep -qi 'gone idle without having stopped' <<< "$flat" \
         || { echo "the docs do not say what is given up"; return 1; }
 }
+
+@test "the README's docs index names every doc a reader is meant to find" {
+    # tools.md shipped and the index did not gain a row, so the only new
+    # reader-facing document of that release was reachable only by knowing it
+    # existed. Derived from the directory rather than from a list here, which
+    # is what makes it catch the next one.
+    local f name missing=""
+    for f in "$REPO_ROOT"/docs/*.md; do
+        name="$(basename "$f")"
+        # release.md is the maintainer's process, deliberately not offered to
+        # a reader arriving at the README.
+        [ "$name" = "release.md" ] && continue
+        grep -q "(docs/$name)" "$REPO_ROOT/README.md" \
+            || missing="$missing $name"
+    done
+    [ -z "$missing" ] || { echo "shipped but not in the README index:$missing"; return 1; }
+}
+
+@test "the docs do not count the capabilities the container is granted" {
+    # The count said seven and compose granted eight. A number in prose that
+    # has to match a list in a file is a number that goes wrong quietly, and
+    # the repo's own rule is not to write one - so the doc names the split and
+    # points at the file that holds the list.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qiE 'cap_drop: ALL plus the (two|three|four|five|six|seven|eight|nine|ten) ' <<< "$flat" \
+        && { echo "the capability floor is described by counting again"; return 1; }
+    grep -q 'docker/docker-compose.yml' <<< "$flat" \
+        || { echo "the doc does not say where the real list is"; return 1; }
+    return 0
+}
+
+@test "the README says every shipped workflow blocks merges, because they all do" {
+    # Derived from the manifests: the claim and the thing it describes move
+    # together, so a workflow shipped with block_merge off fails this rather
+    # than leaving the README quietly wrong.
+    local d name off=""
+    for d in "$REPO_ROOT"/workflows/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ "$(lib manifest_get workflow "$name" block_merge)" = "on" ] || off="$off $name"
+    done
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/README.md" | tr -d '*`' | tr -s ' ')"
+    if [ -z "$off" ]; then
+        grep -qi 'every workflow dejima ships turns it on' <<< "$flat" \
+            || { echo "all of them block merges and the README does not say so"; return 1; }
+    else
+        grep -qi 'every workflow dejima ships turns it on' <<< "$flat" \
+            && { echo "the README claims all of them, but these do not:$off"; return 1; }
+    fi
+    return 0
+}
