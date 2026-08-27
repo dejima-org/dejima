@@ -26,7 +26,7 @@ config file behind them.
 | `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
 | `[core] command` | *(the selected harness's own `command`)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
-| `[core] identity` | unset | which `[identity.<name>]` section supplies this project's credentials and git name; also settable per launch with `--identity`. A name with no section is refused rather than falling back |
+| `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. A name with no section is refused rather than falling back |
 | `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
 | `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
@@ -427,29 +427,55 @@ Dockerfile directly puts it outside that record.
 
 ## Identities
 
-One machine, several accounts. A `[identity.<name>]` section groups the things
-that belong to a **person** rather than to a project - the SSH key, the forge
-token, the name on the commits - so that selecting an account is one word
-rather than four edits.
+**Several accounts on one machine, and none of them yours.** An
+`[identity.<name>]` section groups what one session acts as - the SSH key, the
+forge token, the name on the commits - so that pointing a launch at a
+different account is one word rather than four edits.
+
+The rest of these documents ask you to give a session an account of its own -
+the README under [Using this responsibly](../README.md#using-this-responsibly),
+and security.md's [Give the sandbox its own
+identity](security.md#give-the-sandbox-its-own-identity). This is how you
+have more than one of them, which you will: an account is scoped to what it
+may reach, and one account scoped to everything any session might ever need
+is the thing separate accounts existed to avoid.
+
+So the sections are per **agent account**, not per person:
 
 ```ini
-[identity.work]
-ssh_key    = ~/.ssh/id_work
-user_name  = A Name
-user_email = name@work.example
-token_file = ~/.config/gitea/work-token
+# Pushes to the gitea forge, and can reach nothing on GitHub.
+[identity.agent-gitea]
+ssh_key    = ~/.ssh/id_agent_gitea
+user_name  = dejima agent (gitea)
+user_email = agent-gitea@example.invalid
+token_file = ~/.config/gitea/agent-token
 
-[identity.oss]
-ssh_key                = ~/.ssh/id_oss
-user_email             = name@personal.example
-push_token_file        = ~/.config/gh/oss-push
+# A GitHub account, with push rights to the repositories this host works on.
+[identity.agent-github]
+ssh_key         = ~/.ssh/id_agent_github
+user_name       = dejima agent (github)
+user_email      = agent-github@example.invalid
+push_token_file = ~/.config/gh/agent-push
+
+# A second GitHub account, for a repository the one above may not touch.
+[identity.agent-vendor]
+ssh_key         = ~/.ssh/id_agent_vendor
+user_name       = dejima agent (vendor)
+user_email      = agent-vendor@example.invalid
+push_token_file = ~/.config/gh/vendor-push
 ```
 
-Select one with `[core] identity = work`, or per launch with
-`--identity oss`.
+Select one with `[core] identity = agent-gitea`, or per launch with
+`--identity agent-github` - which is how one host runs a session against each
+of these at the same time, each pushing as itself.
+
+**The separation is the point.** Three accounts means three things you can
+scope, revoke and read in a log independently: a session that turns out to
+have been prompt-injected reached what its own account could reach, and
+answering "what did it touch" does not start with "everything I can touch".
 
 **What an identity may set** is deliberately narrow: `ssh_key`, `user_name`,
-`user_email`, and whichever keys the forges declare as a person's. A forge
+`user_email`, and whichever keys the forges declare as an account's. A forge
 says which of its own keys those are (`identity_keys` in its manifest), so
 `token_file` belongs to an identity on the gitea path and `push_token_file`
 does on the GitHub one, and neither is a list core keeps its own copy of.
@@ -469,10 +495,16 @@ being careful about.
 the copy dejima already makes of your `~/.gitconfig`. Your real one is not
 touched, which was already true and is what the copy exists for.
 
-This is the half of per-project configuration that a project cannot carry: a
-project's `.dejima/` is committed and shared with everyone working on it, and
-a key path is yours and your machine's. A project can say which identity it
-wants; only you can say where that identity's key lives.
+**Selection is the host's, not the project's.** There is no `.dejima/` kind
+for an identity and a project cannot name one: a project's `.dejima/` is
+committed and shared with everyone working on it, and both the credential and
+which account this host holds are that host's own. `[core] identity` and
+`--identity` are the whole of it today.
+
+A project-side layer would be a different thing than it sounds - not "this
+project's credentials", which cannot be shared, but "this project wants
+whichever account you have called X". That does not exist yet, and this
+document will say so until it does.
 
 ## Headless git push without agent forwarding
 

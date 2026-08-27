@@ -767,7 +767,9 @@ identity_get() {
     printf '%s' "$value"
 }
 
-# Whether one forge declared this key as a person's rather than a project's.
+# Whether one forge declared this key as naming an account rather than the
+# forge itself - a credential a session acts under, not a setting like an API
+# URL that every session on this host shares.
 _forge_owns_identity_key() {
     local forge="$1" key="$2" k
     for k in $(manifest_get forge "$forge" identity_keys); do
