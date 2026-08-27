@@ -263,7 +263,7 @@ list_sessions() {
             # ever race it. Removing it under a live session is not a leak
             # being tidied but a session being broken - Docker recreates the
             # bind source root-owned, hooks/dejima-notify.sh then fails on
-            # every Notification and Stop for the rest of the run, and nothing
+            # every notification for the rest of the run, and nothing
             # rewrites the registry entry to make the session visible again.
             continue
         elif [ "$rc" -ne 0 ]; then

@@ -6618,3 +6618,20 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     # pass this.
     [ "$out_sh" != "$nasty" ] || { echo "neither stripped anything"; return 1; }
 }
+
+@test "the docs say why only one notification event is registered" {
+    # A dropped notification looks like a bug from the phone, so the reason
+    # has to be readable without going to the plugin - and without it, the
+    # obvious "fix" is to register Notification again and put the second push
+    # back.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/remote-access.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'One push per stop, and not a second one a minute later' <<< "$flat" \
+        || { echo "the single-event choice is unexplained"; return 1; }
+    grep -qi 'runs with permission prompts off' <<< "$flat" \
+        || { echo "why Notification has only a timer left is unstated"; return 1; }
+    # And what it costs, which is the half a reader is owed before deciding
+    # the trade was made for them correctly.
+    grep -qi 'gone idle without having stopped' <<< "$flat" \
+        || { echo "the docs do not say what is given up"; return 1; }
+}
