@@ -1263,8 +1263,8 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 
 # core.command permits a leading "-" (it is validated as a generic identifier,
 # shared with other keys that have no such concern) but entrypoint.sh expands
-# it unquoted into `gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"` - a
-# leading dash there would be parsed as an option to gosu, not as the command.
+# it unquoted into `gosu "$SANDBOX_USER" $SANDBOX_CMD "$@"` - a leading dash
+# there would be parsed as an option to gosu, not as the command.
 # Refuse here, at the point this value is wired in, rather than relax the
 # schema type for every other identifier-typed key.
 SANDBOX_CMD="$(config_get core command)"

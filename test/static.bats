@@ -17,6 +17,14 @@ setup() {
 # mentioning one.
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
+# Prose greps go through this, never straight at the file. A sentence in a
+# hard-wrapped document contains newlines, and its continuation may be
+# indented, so a phrase spanning a wrap matches nothing - the assertion
+# fails on a reflow that changed no words. Squeeze after flattening or the
+# indent becomes a run of spaces and the same grep still misses. Emphasis
+# markers go too: `**word**` is the same prose as `word`.
+flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
+
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
     [ "$status" -ne 0 ]
@@ -4351,7 +4359,7 @@ EOF
     # Presence-only grep - it confirms the caveat sentence exists in the
     # Security notes teaser, not that the linked docs/security.md
     # explanation it points readers to is itself correct or complete.
-    grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
+    flat_prose "$REPO_ROOT/README.md" | grep -q 'not a verdict on who caused them'
 }
 
 # Was: that the cross-session false-positive case is documented. The finding
@@ -4461,7 +4469,7 @@ EOF
     # and one that happens to wrap, or to carry a `**`, would otherwise fail a
     # grep for reasons that have nothing to do with what it says. Two of these
     # did exactly that on the first run.
-    flat="$(tr '\n' ' ' < "$doc" | tr -d '*`')"
+    flat="$(flat_prose "$doc")"
     grep -q 'behind a firewall it does not control' <<< "$flat" \
         || { echo "the outbound requirement is unstated again"; return 1; }
     grep -q 'runs on the host, not in the container' <<< "$flat" \
@@ -4494,7 +4502,7 @@ EOF
     # compromised host cannot forge alerts about itself. That only works if
     # the reader knows the box's own topic is not privileged.
     local flat
-    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/remote-access.md" | tr -d '*`')"
+    flat="$(flat_prose "$REPO_ROOT/docs/remote-access.md")"
     grep -q 'Where that guarantee stops' <<< "$flat" \
         || { echo "the guarantee still reads as unbounded"; return 1; }
     grep -qi 'separate topic' <<< "$flat" \
@@ -4739,6 +4747,52 @@ EOF
         || { echo "the opening pitch is only $words words"; return 1; }
 }
 
+@test "the README's provider lists match what is shipped" {
+    # It listed claude-code as the only harness for as long as cline had been
+    # shipping: a hand-maintained list of directories goes stale in the
+    # direction of telling a reader the thing they came for does not exist.
+    # Asserted against the LIST line, not the whole file - a provider name
+    # appears elsewhere in the README, so a whole-file grep passes while the
+    # list itself is wrong. The first version of this did exactly that and
+    # survived deleting cline.
+    local axis dir name line
+    for axis in forges workflows harnesses; do
+        case "$axis" in
+            forges)     line="$(grep -n '^- .*Forges:' "$REPO_ROOT/README.md" | head -1)" ;;
+            workflows)  line="$(grep -n '^- .*Workflows:' "$REPO_ROOT/README.md" | head -1)" ;;
+            harnesses)  line="$(grep -n '^- .*Harnesses:' "$REPO_ROOT/README.md" | head -1)" ;;
+        esac
+        [ -n "$line" ] || { echo "the README has no $axis list at all"; return 1; }
+        for dir in "$REPO_ROOT/$axis"/*/; do
+            [ -d "$dir" ] || continue
+            name="$(basename "$dir")"
+            grep -q "\`$name\`" <<< "$line" \
+                || { echo "$axis/$name ships and the README's list omits it"; return 1; }
+        done
+    done
+}
+
+@test "the README does not state one harness's specifics as universal" {
+    # Claude Code is the primary tenant and not the only one. Claims that read
+    # as universal and were not: that you must sign in on the host, when a
+    # harness pointed at a model you serve yourself needs no credential; that
+    # install.sh writes hooks into ~/.claude, when the selected harness's
+    # plugin does and only for the one selected; and the pitch naming one
+    # harness's no-prompt flag as the mechanism.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/README.md")"
+
+    # The flag belongs to one harness; each declares its own no_confirm_args.
+    run grep -c 'dangerously-skip-permissions' <<< "$flat"
+    [ "$output" -eq 0 ] \
+        || { echo "the README states one harness's no-prompt flag as the mechanism"; return 1; }
+
+    # The sign-in prerequisite is real and conditional, and the conditional
+    # half is what goes missing.
+    grep -qi 'sign in to it there if it needs a credential' <<< "$flat" \
+        || { echo "the sign-in prerequisite reads as unconditional again"; return 1; }
+}
+
 @test "the threat model names the handoff as a route in" {
     # dejima tells agents to hand host-side work to the operator. That is a
     # designed, frequent workflow and therefore a delivery mechanism, and it
@@ -4766,6 +4820,10 @@ EOF
     # Code by default", which is the promise that change exists to not make.
     run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    # The same promise in the Usage section's spelling, which survived the
+    # first fix because it named the binary rather than the harness.
+    run grep -c 'entry point is bare' <<< "$(flat_prose "$REPO_ROOT/README.md")"
+    [ "$output" -eq 0 ] || { echo "the README names a default entry point"; return 1; }
 }
 
 @test "the README says the prose is written by agents" {
@@ -5682,7 +5740,7 @@ _harness_proxied_domain() {
     # meet it.
     grep -q '^## Sign in on the host first' "$REPO_ROOT/README.md"
     sed -n '/^### Core (required)/,/^That is enough to run/p' "$REPO_ROOT/README.md" \
-        | grep -qi 'sign in to it there'
+        | tr '\n' ' ' | tr -d '*`' | tr -s ' ' | grep -qi 'sign in to it there'
     grep -q 'Sign in on the host first' "$REPO_ROOT/docs/security.md"
 }
 
