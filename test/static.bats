@@ -6755,3 +6755,22 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     fi
     return 0
 }
+
+@test "identity_get decides a key is not an identity's before resolving one" {
+    # bin/dejima's config_get wrapper calls identity_get on every read, and
+    # all but a handful of keys are ones no identity can answer for. With the
+    # resolution first, a --print-config went from 2.4s to 41s: it walked
+    # every forge manifest per key to find out the key was core.harness.
+    #
+    # Asserted by order rather than by timing, which would be a flaky test
+    # about the machine it runs on.
+    local body guard resolve
+    body="$(sed -n '/^identity_get() {/,/^}/p' "$REPO_ROOT/bin/dejima-provider-lib.sh")"
+    [ -n "$body" ] || { echo "identity_get is not where this looks"; return 1; }
+    guard="$(grep -n 'core)' <<< "$body" | head -1 | cut -d: -f1)"
+    resolve="$(grep -n 'identity_selected_into' <<< "$body" | head -1 | cut -d: -f1)"
+    [ -n "$guard" ] && [ -n "$resolve" ] \
+        || { echo "the guard or the resolution moved out of identity_get"; return 1; }
+    [ "$guard" -lt "$resolve" ] \
+        || { echo "the identity is resolved before the key is known to need one"; return 1; }
+}
