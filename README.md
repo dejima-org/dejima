@@ -210,7 +210,8 @@ after that is the workflow you configured: `local-only` commits and pushes
 nowhere, `branch-push` stops at the push, and `worktree-pr` pushes a branch and
 opens a pull request, then stops. What holds across all three is where they
 stop - **none of them puts work on your default branch**, so the last step is
-yours in every case.
+yours in every case. That comes from how the workflows are arranged, not from
+anything enforced against a session that does not want to cooperate.
 
 The container's main process is whatever the selected harness declares, always
 with that harness's own no-prompt flag applied regardless of how it is invoked
@@ -322,6 +323,9 @@ exist is your call.
   malware arrives through allowlisted sources. Keeping that out of `main` is
   your job, not the container's, and people reading your `main` will hold you
   to it whoever's name is on the commit.
+- **Understand what you ship.** dejima makes development fast enough that not
+  reading the diff gets tempting. A good model is not a substitute for
+  engineering judgement or human review, and nothing here changes that.
 - **This is not a blastproof box.** It is an improvement over running an agent
   directly on your machine, and a determined attacker, or one with a container
   escape, defeats all of it. An escape does not leave the picture, it moves to

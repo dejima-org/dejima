@@ -138,7 +138,8 @@ enough that reading every diff starts to feel like the slow part of the loop,
 and skipping it works fine, repeatedly, until the one time it doesn't. A
 reviewer who only reads the changes that felt risky catches none of the ones
 that didn't feel risky, which is the shape a subtle bug, or a prompt-injected
-change dressed up as something ordinary, takes.
+change dressed up as something ordinary, takes. Nothing about a faster loop
+changes what engineering judgement is for.
 
 ## This is not a blastproof box.
 
