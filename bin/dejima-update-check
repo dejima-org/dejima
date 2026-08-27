@@ -67,12 +67,18 @@ REPO_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 # often the operator is told.
 CHECK_INTERVAL=3600
 
-# Not ~/.local/share/dejima, where the audit store and the epitaphs live: those
-# are the operator's records, each with a config key pointing at it. This is a
-# timestamp and a hash that can be deleted at any moment with no loss, which is
-# what XDG's state directory is for.
+# Alongside everything else dejima keeps on the host. This was under
+# XDG_STATE_HOME, which is where a throwaway timestamp belongs by the letter
+# of the spec - but it made ~/.local/state a fifth place dejima writes, for
+# one file, and `mkdir -p` created that base directory on hosts that had no
+# other use for it. One root is worth more than the distinction.
+#
+# No config key, where the four directories beside it have one: those are
+# records an operator reads or a directory that gets mounted, and this is a
+# hash that can be deleted at any moment with no loss. Nothing is served by
+# being able to move it.
 _cache_file() {
-    printf '%s/dejima/update-check' "${XDG_STATE_HOME:-$HOME/.local/state}"
+    printf '%s/.local/share/dejima/update-check' "$HOME"
 }
 
 # Only the transports that cannot name a command to run. `ext::` is refused by

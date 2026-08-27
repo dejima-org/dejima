@@ -6645,3 +6645,21 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     grep -qi 'gone idle without having stopped' <<< "$flat" \
         || { echo "the docs do not say what is given up"; return 1; }
 }
+
+@test "dejima writes host state under one root, not a new base directory per file" {
+    # The update check put its cache under XDG_STATE_HOME, which is where the
+    # spec says a throwaway timestamp goes - and made ~/.local/state a fifth
+    # place dejima writes, for one file, created by mkdir -p on hosts with no
+    # other use for it. Everything durable dejima keeps is under
+    # ~/.local/share/dejima or ~/.config/dejima; the runtime registry is the
+    # one deliberate exception, and it is not durable.
+    # Code, not comments: _cache_file's own comment says what it moved away
+    # from and why, and a grep that counted that would fail on the fix.
+    local f hit=""
+    for f in "$REPO_ROOT"/bin/*; do
+        [ -f "$f" ] || continue
+        grep -v '^[[:space:]]*#' "$f" \
+            | grep -q 'XDG_STATE_HOME\|\.local/state' && hit="$hit $(basename "$f")"
+    done
+    [ -z "$hit" ] || { echo "a new state root is back in:$hit"; return 1; }
+}
