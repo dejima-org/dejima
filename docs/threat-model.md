@@ -2,15 +2,15 @@
 
 [← dejima README](../README.md)
 
+What dejima defends, what it does not, and where its boundary passes out of
+its hands. [security.md](security.md) is the control-by-control account; this
+is the shape of the thing those controls are arranged against.
+
 **And none of it has been reviewed by anyone else.** This is early
 development: the reasoning here is one person's, the tests assert what that
 person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
-
-What dejima defends, what it does not, and where its boundary passes out of
-its hands. [security.md](security.md) is the control-by-control account; this
-is the shape of the thing those controls are arranged against.
 
 ## What this tool assumes
 

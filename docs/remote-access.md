@@ -50,193 +50,7 @@ front door opening *inward*, and that is a full sandbox escape rather than a
 degradation. [Verifying it](#verifying-it) is two commands, and worth
 running.
 
-## `[remote-access]`
-
-A section of the single config file, at `~/.config/dejima/config`
-(`$DEJIMA_CONFIG_DIR` relocates the whole config tree, same as it does for
-approvals):
-
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `enabled` | `off` | the switch - nothing below runs until this is `on` |
-| `ntfy_url` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
-| `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
-| `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
-| `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
-| `ttyd_button_colors` | unset | whether the toolbar is colour-coded by what each button does, in the same gruvbox palette the session picker uses. Unset means yes; `off` restores the grey every key had before. See "Reading it on a phone" |
-| `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
-| `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
-
-**If this host sits behind a firewall it does not control**, the push has to
-be permitted outbound before any of this works. `dejima-notify-watch` runs on
-the host, not in the container, so the container's own allowlist has nothing
-to do with whether it can reach your ntfy server - and a self-hosted one on a
-private address is exactly the case a host-level egress filter drops.
-
-That failure is the quiet kind. Nothing errors, the config is correct,
-`systemctl --user status dejima-notify-watch` looks healthy, and the phone
-simply never buzzes. If you administer that filter, the rule is yours to add;
-if someone else does, this is the thing to ask them about before re-reading
-your config a third time.
-
-`ntfy_url` and `base_url` must carry an explicit `http://` or `https://`
-scheme; a value without one is refused rather than guessed at, because
-`curl` reads a leading `-K/path` as an *option* that takes the request's URL
-from that file instead. Values are restricted to
-`A-Za-z0-9:/._~?=%@+-`: no whitespace and nothing shell-active, since these
-end up in an HTTP header and in a URL handed to a phone.
-
-**A malformed config is a hard failure, not a warning.** The whole file is
-validated on every read, not just the key being asked for: an unknown key, a
-value outside that character set, or a line that doesn't parse makes
-`dejima-ttyd` and `dejima-notify-watch` refuse to start and say which line
-was wrong. A `ttyd_port` that isn't a number in 1-65535 is refused the same
-way, as is a `ttyd_font_size` outside 8-72 - a size big enough to make one
-glyph wider than the viewport renders a terminal that shows nothing, which
-reads as a broken front door rather than as a typo three sections away. A
-`ttyd_tmux_prefix` that is not a control chord is refused here too, rather
-than on the phone, hours later, by whoever presses `PREFIX` and gets nothing.
-
-`dejima-ttyd` and `dejima-notify-watch` are the two scripts that read a
-*value* out of the config, so a typo anywhere in the file refuses their
-start. `dejima` reads values too (`audit dir` among them) and refuses the
-same way. `dejima-attach` alone only asks `remote_enabled` - deliberately
-bypassing the whole-file validation, so a typo elsewhere in the config can't
-lock you out of the terminal you'd fix it from.
-
-```
-# ~/.config/dejima/config - substitute your own topic and hostname
-[remote-access]
-enabled = on
-ntfy_url = https://ntfy.example.invalid/your-topic-here
-base_url = https://dejima.example.invalid
-ttyd_port = 7681
-# ttyd_font_size = 20      # optional, and applies to the desktop too
-# ttyd_tmux_prefix = C-a   # optional; the page assumes stock C-b without it
-```
-
-**Editing this changes nothing until the services restart.** Every value
-is read once, at process start - `dejima-ttyd` reads `ttyd_port`,
-`ttyd_font_size` and `ttyd_tmux_prefix` and then `exec`s `ttyd` with them
-baked into its argv. So:
-
-```sh
-systemctl --user restart dejima-ttyd.service
-systemctl --user restart dejima-notify-watch.service   # if ntfy_url changed
-pgrep -a ttyd    # confirm the argv is what you just configured
-```
-
-Skipping this is quiet rather than loud: nothing warns, and the front door
-keeps serving with the old settings, which reads as "the setting had no
-effect" rather than as "the process is older than the file".
-
-## How it works
-
-Almost none of this is in the sandbox. The container writes one empty file
-and knows nothing else about the feature; everything that turns that into a
-notification, and everything that puts a terminal in front of you
-afterwards, runs on the host as your own user.
-
-### The session asks you something
-
-```
- ┌─ the sandbox container ────────────────────────────────────────────┐
- │  claude code, at a Stop hook                                       │
- │       │                                                            │
- │       │  hooks/dejima-notify.sh writes an empty file named         │
- │       ▼  `done` - no content, no stdin, no network                 │
- └───────┼────────────────────────────────────────────────────────────┘
- ════════╪═══ container boundary - one bind-mounted directory ═════════
- ┌───────▼─── your machine, as your user ─────────────────────────────┐
- │  ${XDG_RUNTIME_DIR}/dejima/notify/<run-id>/done                    │
- │       │                                                            │
- │       │  inotify, or a ~6s poll where inotify-tools is absent      │
- │       ▼                                                            │
- │  dejima-notify-watch  (systemd --user)                             │
- │       │  consumes the marker by NAME; never reads its content      │
- │       │  every byte of the push is composed from host-side data    │
- │       ▼                                                            │
- └───────┼────────────────────────────────────────────────────────────┘
- ════════╪═══════════════ off your machine ════════════════════════════
-         │  curl
-         ▼
-         your ntfy topic ──── push ────►  your phone
-                                          "dejima: <project> finished"
-                                          link: <base_url>/?arg=<run-id>
-```
-
-The marker directory is the sandbox's entire surface here, and it is
-one-way: a name, out. Nothing the session writes reaches the push, which is
-why the notification says a project has stopped and never what it is asking.
-[Notifications](#notifications) has the detail, including where that
-guarantee actually lives.
-
-### You come back
-
-```
-    browser, on the link from the push          any plain SSH client
-         │                                              │
-         │  https://<base_url>/?arg=<run-id>            │  ssh dejima-box
-         │  HTTP Basic over TLS                         │  key with a
-         ▼                                              ▼  forced command
- ════════╪══════════════════ your LAN ══════════════════╪══════════════
- ┌─ your machine, as your user ───────────────────────────────────────┐
- │  nginx, listening on ONE LAN address        sshd                   │
- │   TLS + auth_basic, plus a default_server    authorized_keys with  │
- │   that refuses every other name              a forced command      │
- │       │                                              │             │
- │       │  proxy_pass http://127.0.0.1:7681            │             │
- │       ▼                                              │             │
- │  ttyd --interface 127.0.0.1 --check-origin --url-arg │             │
- │       │                                              │             │
- │       └──────────────────────┬───────────────────────┘             │
- │                              ▼                                     │
- │                    dejima-attach [<run-id>]                        │
- │                              │  a grouped tmux session             │
- │                              ▼                                     │
- │                    YOUR TMUX SERVER                                │
- │                     the sandbox's window - and every other         │
- │                     window on it, one prefix key away              │
- └────────────────────────────────────────────────────────────────────┘
- ═════════════════════ container boundary ═════════════════════════════
- ┌─ the sandbox container ────────────────────────────────────────────┐
- │  routes to the Docker bridge gateway - your host - and to nothing  │
- │  else of yours. Neither front door is on that address, which is    │
- │  the whole reason `ttyd` is on loopback and nginx is on one        │
- │  named LAN interface. A proxy on `0.0.0.0` or on a bridge puts a   │
- │  host shell in here.                                               │
- └────────────────────────────────────────────────────────────────────┘
-```
-
-The web door is the one the notification links into: the browser hits your
-reverse proxy, which authenticates and forwards to a `ttyd` that only this
-host can open a socket to, and `ttyd` runs `dejima-attach` with the run id
-from `?arg=`. The SSH door skips all of that. It is a key in your own
-`authorized_keys` pinned to a forced command, so a plain SSH app on the
-phone runs `dejima-attach` and nothing else no matter what it asks to run,
-and lands on a numbered picker of live sessions. It needs no proxy, no
-`ttyd`, and no notification to have been sent.
-
-Both converge on `dejima-attach`, and both end at *your* tmux server. That
-convergence is the point: the controls worth spending effort on are the two
-front doors, because behind them there is no further boundary to cross - a
-grouped tmux session shares every window on the server, and the prefix key
-opens new ones regardless.
-
-### What `off` means
-
-With `[remote-access] enabled` off (the default), `dejima` builds a
-`docker compose` invocation with nothing remote-access in it: no
-session state is written, no marker directory is created or mounted, and no
-notification hook is registered. `dejima-attach`, `dejima-ttyd` and
-`dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
-three onto `PATH` and stops there - it runs no `systemctl`, copies no unit,
-and starts nothing.
-
 ## The bind address is the one thing to get right
-
-This is the step that carries the whole feature's security, and the only one
-where a plausible-looking choice is a full sandbox escape.
 
 `docker/init-firewall.sh` deliberately ACCEPTs container OUTPUT to the
 container's default-route address - the Docker bridge gateway, which is your
@@ -319,6 +133,72 @@ is why this is worth doing even if you are confident about the proxy. `test/runt
 asserts this same containment property against a live container (with a
 positive control on the same path, so a passing result can't come from the
 container reaching nothing), and it passes on a real Docker host.
+
+## `[remote-access]`
+
+A section of the single config file, at `~/.config/dejima/config`
+(`$DEJIMA_CONFIG_DIR` relocates the whole config tree, same as it does for
+approvals):
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `off` | the switch - nothing below runs until this is `on` |
+| `ntfy_url` | unset | ntfy topic to push notifications to. `dejima-notify-watch` refuses to start without it; nothing else reads it |
+| `base_url` | unset | public base URL of the web front door, used to build the notification's deep link. Absent, pushes still go out - just with no link on them |
+| `ttyd_port` | `7681` | loopback port `ttyd` listens on. The reverse proxy has to `proxy_pass` to the same one |
+| `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
+| `ttyd_button_colors` | unset | whether the toolbar is colour-coded by what each button does, in the same gruvbox palette the session picker uses. Unset means yes; `off` restores the grey every key had before. See "Reading it on a phone" |
+| `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
+| `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
+
+```
+# ~/.config/dejima/config - substitute your own topic and hostname
+[remote-access]
+enabled = on
+ntfy_url = https://ntfy.example.invalid/your-topic-here
+base_url = https://dejima.example.invalid
+ttyd_port = 7681
+# ttyd_font_size = 20      # optional, and applies to the desktop too
+# ttyd_tmux_prefix = C-a   # optional; the page assumes stock C-b without it
+```
+
+**Editing this changes nothing until the services restart.** Every value is
+read once, at process start, and baked into `ttyd`'s argv. Skipping the restart
+is quiet rather than loud: the front door keeps serving with the old settings,
+which reads as "the setting had no effect".
+
+```sh
+systemctl --user restart dejima-ttyd.service
+systemctl --user restart dejima-notify-watch.service   # if ntfy_url changed
+pgrep -a ttyd    # confirm the argv is what you just configured
+```
+
+**If this host sits behind a firewall it does not control**, the push has to be
+permitted outbound before any of this works. `dejima-notify-watch` runs on the
+host, not in the container, so the container's own allowlist has nothing to do
+with whether it can reach your ntfy server - and a self-hosted one on a private
+address is exactly the case a host-level egress filter drops. That failure is
+the quiet kind: nothing errors, `systemctl --user status dejima-notify-watch`
+looks healthy, and the phone simply never buzzes.
+
+**A malformed config is a hard failure, not a warning.** The whole file is
+validated on every read, not just the key being asked for, so an unknown key or
+an unparseable line makes `dejima-ttyd` and `dejima-notify-watch` refuse to
+start and say which line was wrong. So does an out-of-range `ttyd_port`
+(1-65535) or `ttyd_font_size` (8-72), or a `ttyd_tmux_prefix` that is not a
+control chord - refused here rather than on the phone, hours later, by whoever
+presses `PREFIX` and gets nothing.
+
+`ntfy_url` and `base_url` must carry an explicit `http://` or `https://` scheme
+and are restricted to `A-Za-z0-9:/._~?=%@+-`. A value without a scheme is
+refused rather than guessed at, because `curl` reads a leading `-K/path` as an
+*option* that takes the request's URL from that file instead; the character set
+is because these end up in an HTTP header and in a URL handed to a phone.
+
+`dejima` itself refuses the same way, since it reads values too.
+`dejima-attach` alone reads only `remote_enabled`, deliberately bypassing the
+whole-file validation, so a typo elsewhere in the config can't lock you out of
+the terminal you'd fix it from.
 
 ## SSH front door
 
@@ -465,6 +345,109 @@ and forgotten. What matters in it:
 - **A long `proxy_read_timeout`.** An attached terminal sits idle for hours;
   nginx's default is 60 seconds.
 
+## How it works
+
+Almost none of this is in the sandbox. The container writes one empty file
+and knows nothing else about the feature; everything that turns that into a
+notification, and everything that puts a terminal in front of you
+afterwards, runs on the host as your own user.
+
+### The session asks you something
+
+```
+ ┌─ the sandbox container ────────────────────────────────────────────┐
+ │  claude code, at a Stop hook                                       │
+ │       │                                                            │
+ │       │  hooks/dejima-notify.sh writes an empty file named         │
+ │       ▼  `done` - no content, no stdin, no network                 │
+ └───────┼────────────────────────────────────────────────────────────┘
+ ════════╪═══ container boundary - one bind-mounted directory ═════════
+ ┌───────▼─── your machine, as your user ─────────────────────────────┐
+ │  ${XDG_RUNTIME_DIR}/dejima/notify/<run-id>/done                    │
+ │       │                                                            │
+ │       │  inotify, or a ~6s poll where inotify-tools is absent      │
+ │       ▼                                                            │
+ │  dejima-notify-watch  (systemd --user)                             │
+ │       │  consumes the marker by NAME; never reads its content      │
+ │       │  every byte of the push is composed from host-side data    │
+ │       ▼                                                            │
+ └───────┼────────────────────────────────────────────────────────────┘
+ ════════╪═══════════════ off your machine ════════════════════════════
+         │  curl
+         ▼
+         your ntfy topic ──── push ────►  your phone
+                                          "dejima: <project> finished"
+                                          link: <base_url>/?arg=<run-id>
+```
+
+The marker directory is the sandbox's entire surface here, and it is
+one-way: a name, out. Nothing the session writes reaches the push, which is
+why the notification says a project has stopped and never what it is asking.
+[Notifications](#notifications) has the detail, including where that
+guarantee actually lives.
+
+### You come back
+
+```
+    browser, on the link from the push          any plain SSH client
+         │                                              │
+         │  https://<base_url>/?arg=<run-id>            │  ssh dejima-box
+         │  HTTP Basic over TLS                         │  key with a
+         ▼                                              ▼  forced command
+ ════════╪══════════════════ your LAN ══════════════════╪══════════════
+ ┌─ your machine, as your user ───────────────────────────────────────┐
+ │  nginx, listening on ONE LAN address        sshd                   │
+ │   TLS + auth_basic, plus a default_server    authorized_keys with  │
+ │   that refuses every other name              a forced command      │
+ │       │                                              │             │
+ │       │  proxy_pass http://127.0.0.1:7681            │             │
+ │       ▼                                              │             │
+ │  ttyd --interface 127.0.0.1 --check-origin --url-arg │             │
+ │       │                                              │             │
+ │       └──────────────────────┬───────────────────────┘             │
+ │                              ▼                                     │
+ │                    dejima-attach [<run-id>]                        │
+ │                              │  a grouped tmux session             │
+ │                              ▼                                     │
+ │                    YOUR TMUX SERVER                                │
+ │                     the sandbox's window - and every other         │
+ │                     window on it, one prefix key away              │
+ └────────────────────────────────────────────────────────────────────┘
+ ═════════════════════ container boundary ═════════════════════════════
+ ┌─ the sandbox container ────────────────────────────────────────────┐
+ │  routes to the Docker bridge gateway - your host - and to nothing  │
+ │  else of yours. Neither front door is on that address, which is    │
+ │  the whole reason `ttyd` is on loopback and nginx is on one        │
+ │  named LAN interface. A proxy on `0.0.0.0` or on a bridge puts a   │
+ │  host shell in here.                                               │
+ └────────────────────────────────────────────────────────────────────┘
+```
+
+The web door is the one the notification links into: the browser hits your
+reverse proxy, which authenticates and forwards to a `ttyd` that only this
+host can open a socket to, and `ttyd` runs `dejima-attach` with the run id
+from `?arg=`. The SSH door skips all of that. It is a key in your own
+`authorized_keys` pinned to a forced command, so a plain SSH app on the
+phone runs `dejima-attach` and nothing else no matter what it asks to run,
+and lands on a numbered picker of live sessions. It needs no proxy, no
+`ttyd`, and no notification to have been sent.
+
+Both converge on `dejima-attach`, and both end at *your* tmux server. That
+convergence is the point: the controls worth spending effort on are the two
+front doors, because behind them there is no further boundary to cross - a
+grouped tmux session shares every window on the server, and the prefix key
+opens new ones regardless.
+
+### What `off` means
+
+With `[remote-access] enabled` off (the default), `dejima` builds a
+`docker compose` invocation with nothing remote-access in it: no
+session state is written, no marker directory is created or mounted, and no
+notification hook is registered. `dejima-attach`, `dejima-ttyd` and
+`dejima-notify-watch` each refuse to run at all. `install.sh` symlinks those
+three onto `PATH` and stops there - it runs no `systemctl`, copies no unit,
+and starts nothing.
+
 ## Reading it on a phone
 
 `dejima-ttyd` launches `ttyd` with `--index web/index.html`, which replaces
@@ -474,15 +457,13 @@ there is nothing to turn on.
 `ttyd`'s own page is close to unusable on a phone for anything beyond typing,
 and not because of a setting anyone missed. xterm.js turns a tap into a mouse
 click, but a touch *drag* is consumed by the browser as viewport scrolling and
-never becomes a mouse drag - so nothing downstream ever sees one. tmux binds
-`MouseDrag1Border` to `resize-pane -M` by default and nvim resizes splits from
-separator drags whenever `mouse` is on; both have always worked, and simply
-never received a drag event from a touch client. The same missing drag is why
-selecting text is impossible, and scrolling an application's output with it.
-Then there is no Ctrl key, the tmux status bar's window names are a few pixels
-wide, and `ttyd` serves no viewport meta tag at all - so a phone lays the page
-out at a virtual desktop width and scales the result down, which no font size
-can rescue.
+never becomes a mouse drag, so nothing downstream ever sees one: tmux's
+`resize-pane -M` and nvim's split-separator drags have always worked and simply
+never received the event. The same missing drag is why selecting text and
+scrolling an application's output are impossible. Then there is no Ctrl key,
+the tmux status bar's window names are a few pixels wide, and `ttyd` serves no
+viewport meta tag at all, so a phone lays the page out at a virtual desktop
+width and scales the result down, which no font size can rescue.
 
 ### Gestures
 
