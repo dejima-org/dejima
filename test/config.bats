@@ -2773,3 +2773,72 @@ _upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
     [[ "$output" == *"origin/trunk"* ]] \
         || { echo "compared against the wrong ref: $output"; return 1; }
 }
+
+# --- what a session wrote, on its way to the operator's terminal ---
+#
+# Reading an epitaph is the tool's stated purpose, and every byte of one came
+# from a session transcript. Same class as the audit findings, which is why
+# both go through the same sanitize()/sanitize_body() in dejima-color-lib.sh.
+# Colour is off in these: bats captures the output, so nothing is a terminal
+# and every escape byte left is one the fixture planted.
+_epitaph_hostile() {
+    _epitaph_fixture
+    # \u001b through the JSON, which is how it would actually arrive: the
+    # extractor decodes it, so the store holds a real ESC byte.
+    local f="$EPI_TR/$EPI_SLUG/s1.jsonl"
+    {
+        printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"\\u001b[31mmanual","preTokens":900,"postTokens":90}}\n'
+        printf '{"type":"user","isCompactSummary":true,"uuid":"aaaabbbb","sessionId":"s1","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"first line\\u001b[2Jcleared\\nsecond\\u0007 line"}}\n'
+    } > "$f"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
+}
+
+@test "showing an epitaph strips the escapes a session put in it" {
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" show 1 "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    [[ "$output" != *$'\007'* ]] || { echo "a BEL reached the terminal"; return 1; }
+    # The text either side of the escape survives - this strips control bytes,
+    # it does not drop the content they were hidden in.
+    [[ "$output" == *"first line"* ]] && [[ "$output" == *"cleared"* ]] \
+        || { echo "$output"; return 1; }
+    # And it is still a body: the field rule would have taken the newlines
+    # with the rest of C0 and folded the whole epitaph onto one line.
+    [ "${#lines[@]}" -gt 1 ] || { echo "the body was folded to one line"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "searching epitaphs strips the escapes out of what it prints" {
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" search 'line' "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    [[ "$output" == *"first line"* ]] || { echo "the hit is gone entirely: $output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "listing epitaphs strips the escapes out of the header fields" {
+    # trigger comes off the transcript, and the filename is built from its
+    # timestamp and uuid - so the row is session-authored on both sides.
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "the update notice strips the escapes out of a remote's name" {
+    # Both the remote name and the branch it tracks are read from the
+    # checkout's .git/config, which is session-writable when dejima's own
+    # checkout is the workspace.
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    git -C "$UPD_CHECKOUT" config "branch.trunk.remote" "$(printf 'ori\033[2Jgin')"
+    git -C "$UPD_CHECKOUT" config "remote.$(printf 'ori\033[2Jgin').url" "$UPD_ORIGIN"
+    git -C "$UPD_CHECKOUT" config "remote.$(printf 'ori\033[2Jgin').fetch" '+refs/heads/*:refs/remotes/o/*'
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] \
+        || { echo "no notice at all: $output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal: $output"; return 1; }
+}

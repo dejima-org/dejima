@@ -234,6 +234,15 @@ KEY, DIM, OK, RESET = (os.environ.get(k, "") for k in ("C_KEY", "C_DIM", "C_OK",
 ROW = "%s  %-16s  %-6s %6s %5s  %s"
 print(DIM + ROW % ("%4s" % "#", "when", "how", "ctx", "size", "transcript") + RESET)
 
+# The bash side's sanitize(), stated again because this renderer parses the
+# fields itself and there is nothing to hand it a cleaned string. The classes
+# are pinned equal to that one by a test rather than by this comment.
+_BAD = re.compile(
+    "[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")
+
+def clean(s):
+    return _BAD.sub("", s)
+
 for i, path in enumerate(sys.argv[2:], 1):
     try:
         with open(path, errors="replace") as fh:
@@ -261,11 +270,11 @@ for i, path in enumerate(sys.argv[2:], 1):
     else:
         state = DIM + "aged out" + RESET
     row = ROW % (KEY + "%4d" % i + RESET,
-                 h.get("at", "")[:16].replace("T", " ") or "?",
-                 h.get("trigger", "?")[:6], ctx,
+                 clean(h.get("at", ""))[:16].replace("T", " ") or "?",
+                 clean(h.get("trigger", "?"))[:6], ctx,
                  "%dK" % ((os.path.getsize(path) + 1023) // 1024), state)
     if show_slug:
-        row += "  " + DIM + os.path.basename(os.path.dirname(path))[:30] + RESET
+        row += "  " + DIM + clean(os.path.basename(os.path.dirname(path)))[:30] + RESET
     print(row)
 PY
     printf '\n  %sdejima-epitaph show <n>%s opens one; %sdejima-epitaph search <pattern>%s finds one.\n' \
@@ -291,9 +300,15 @@ search)
         hits=$((hits + 1))
         # The index is this file's position in the SAME listing `list`
         # prints, so `show <n>` after a search means what the search showed.
+        # The name is built from the transcript's own timestamp and uuid
+        # fields, so it is session-authored too - not just the body under it.
         printf '\n%s%4d%s  %s%s%s\n' "$C_KEY" "$i" "$C_RESET" \
-            "$C_DIM" "$(basename "$f")" "$C_RESET"
-        grep -inE --color=$gcolor -- "$pattern" "$f" 2>/dev/null \
+            "$C_DIM" "$(sanitize "$(basename "$f")")" "$C_RESET"
+        # Sanitized BEFORE grep, not after: grep adds its own colour when the
+        # output is a terminal, and cleaning afterwards would strip the
+        # highlight along with the planted bytes.
+        sanitize_body < "$f" \
+            | grep -inE --color=$gcolor -- "$pattern" 2>/dev/null \
             | head -3 | sed 's/^/        /' | cut -c1-100
     done
     if [ "$hits" -eq 0 ]; then
@@ -329,7 +344,11 @@ show)
     # editor, and neither must a test.
     ed="${VISUAL:-${EDITOR:-}}"
     if [ -z "$ed" ] || [ ! -t 1 ] || [ ! -t 0 ]; then
-        cat "$file"
+        # The body is what a session wrote, and printing it IS this tool's
+        # purpose - so it is the one place the operator's terminal meets those
+        # bytes directly. sanitize_body rather than sanitize: the field rule
+        # takes LF too, and an epitaph is not one line.
+        sanitize_body < "$file"
         exit 0
     fi
     # Through `sh -c` so $EDITOR may carry flags (`code -w`, `emacsclient

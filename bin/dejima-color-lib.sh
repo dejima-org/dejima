@@ -17,6 +17,33 @@
 #
 # The variables are always DEFINED, empty when colour is off, so callers
 # interpolate them unconditionally and no call site needs an if.
+# Session-authored text on its way to the operator's terminal. A planted value
+# containing C0 escapes can scroll, clear or overwrite what is being read; C1
+# controls and Unicode bidi overrides/isolates (U+202A-U+202E, U+2066-U+2069)
+# reverse or reorder the displayed text without touching the bytes an operator
+# would grep for. Stripped at the display boundary, after all parsing and
+# TAB-splitting is done.
+#
+# Two forms, because the rule differs. A field is one line, so every C0 byte
+# goes - including LF, which is what keeps a planted newline from forging a
+# second row. A body is many lines, and applying the field rule to one would
+# fold a whole epitaph onto a single line, so there LF and TAB survive and
+# nothing else does. CR goes either way: it is the overwrite-this-line trick.
+_sanitize_c1_bidi() {
+    LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g'
+}
+
+sanitize() {
+    printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | _sanitize_c1_bidi
+}
+
+# Reads the text on stdin rather than taking it as an argument: the callers
+# are whole files, and a body large enough to be worth keeping is not worth
+# passing through argv.
+sanitize_body() {
+    LC_ALL=C tr -d '\000-\010\013-\037\177' | _sanitize_c1_bidi
+}
+
 color_init() {
     local fd="${1:-1}"
     C_RESET=""; C_CRIT=""; C_WARN=""; C_INFO=""; C_PATH=""
