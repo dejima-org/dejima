@@ -2469,7 +2469,7 @@ _install_forge_bins() {
         || { echo "held $held s, below the measured floor plus headroom"; return 1; }
 }
 
-@test "the launcher never lets the container client see SIGTSTP" {@test "the launcher never lets the container client see SIGTSTP" {
+@test "the launcher never lets the container client see SIGTSTP" {
     # The whole of #179, in the end. The client survives SIGSTOP and does not
     # survive SIGTSTP: a catchable stop signal interrupts the read it is
     # blocked in, its input forwarding never recovers, and the session comes
@@ -2862,7 +2862,7 @@ STUB
     return 0
 }
 
-@test "an agent-authored body says so, in every spelling the CLIs accept" {@test "an agent-authored body says so, in every spelling the CLIs accept" {
+@test "an agent-authored body says so, in every spelling the CLIs accept" {
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/disclose.XXXXXX")"
     local DISCLOSE="pr forge-cli create"
     local f="$d/body"
@@ -4114,7 +4114,7 @@ STUB
         || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
 }
 
-@test "the approval store is never mounted into the container" {@test "the approval store is never mounted into the container" {
+@test "the approval store is never mounted into the container" {
     # The store is the only thing that actually grants anything, and the
     # container runs an agent with no tool-use confirmations - mounting it
     # anywhere, at any mode, would let a session widen its own next launch
@@ -4424,7 +4424,7 @@ EOF
         || { echo "nothing says what happens when IPv6 cannot be filtered"; return 1; }
 }
 
-@test "README and docs/security.md both disclose that push access is CI code execution" {@test "README and docs/security.md both disclose that push access is CI code execution" {
+@test "README and docs/security.md both disclose that push access is CI code execution" {
     for f in README.md docs/security.md; do
         grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
         grep -qi 'forge = none' "$REPO_ROOT/$f"
@@ -4511,7 +4511,7 @@ EOF
         || { echo "the reason for the second topic is gone"; return 1; }
 }
 
-@test "the negative space is collected where a reader will find it" {@test "the negative space is collected where a reader will find it" {
+@test "the negative space is collected where a reader will find it" {
     # A document organised by control makes a reader assemble what is NOT
     # covered themselves, and most will not. Every item here is documented
     # somewhere else too; this holds the collected list, at the top, because
