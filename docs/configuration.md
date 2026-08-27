@@ -462,12 +462,11 @@ says which of its own keys those are (`identity_keys` in its manifest), so
 `token_file` belongs to an identity on the gitea path and `push_token_file`
 does on the GitHub one, and neither is a list core keeps its own copy of.
 
-**A key an identity does not set falls through to the file.** The `oss`
-identity above names no `token_file`, so `[forge.gitea] token_file` answers
-for it. An identity is an override for what it names, not a replacement for
-the section.
+**A key an identity does not set falls through to the file.** An identity that
+names no `token_file` gets whatever `[forge.gitea] token_file` holds. An
+identity is an override for what it names, not a replacement for the section.
 
-**A name with no section is refused.** `[core] identity = wrok` does not
+**A name with no section is refused.** `[core] identity = agent-gihub` does not
 quietly use this machine's own credentials - it stops the launch and says so.
 Pushing under the wrong key fails loudly; pushing under your default key when
 you asked for another one does not fail at all, which is the direction worth

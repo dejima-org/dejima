@@ -4687,6 +4687,25 @@ EOF
     run grep -c 'identity.work\|identity.oss' <<< "$flat"
     [ "$output" -eq 0 ] \
         || { echo "the person-shaped example is back"; return 1; }
+
+    # Every identity the prose names has to be one the example block defines.
+    # Renaming the examples left `oss` and `wrok` behind as references to
+    # sections that no longer existed, and the greps above passed throughout:
+    # they match the section-header spelling, and the prose says "the oss
+    # identity". The one deliberate exception is the name introduced as having
+    # no section, which is the point of that sentence - so it is allowed only
+    # on the sentence that makes it.
+    local doc="$REPO_ROOT/docs/configuration.md" defined name
+    defined="$(grep -oE '^\[identity\.[a-z0-9-]+\]' "$doc" | sed 's/^\[identity\.//; s/\]$//')"
+    [ -n "$defined" ] || { echo "the identity example block is gone"; return 1; }
+    for name in $(grep -oE '(--identity|\[core\] identity =) *`?[a-z][a-z0-9-]*' "$doc" \
+                      | grep -oE '[a-z][a-z0-9-]*$' | sort -u); do
+        [ "$name" = "identity" ] && continue
+        grep -qx "$name" <<< "$defined" && continue
+        grep -qE "no section is refused.{0,80}$name" \
+            <<< "$(tr '\n' ' ' < "$doc" | tr -s ' ')" \
+            || { echo "the prose names identity '$name', which no section defines"; return 1; }
+    done
 }
 
 @test "core never reads a harness's config by a literal harness name" {
