@@ -254,11 +254,21 @@ read_body_or_die() {
 # exists to disclose. Anchored at the start, after leading whitespace - the
 # same words further down are prose ABOUT disclosure rather than the
 # disclosure, and still get one prepended.
+#
+# The whole first LINE has to be the marker, not just begin with it. A prefix
+# test let a body open `**Filed by LLM agent** - reviewed and confirmed by a
+# person` and skip, which makes the marker line itself agent-authorable: the
+# one line here exists to write is the one the session gets to finish. Trailing
+# whitespace is allowed because it is invisible and changes nothing.
 with_marker() {
-    local head="${1#"${1%%[![:space:]]*}"}"
-    case "$head" in
-        "$marker"*) printf '%s' "$1"; return 0 ;;
-    esac
+    local head first
+    head="${1#"${1%%[![:space:]]*}"}"
+    first="${head%%$'\n'*}"
+    first="${first%"${first##*[![:space:]]}"}"
+    if [ "$first" = "$marker" ]; then
+        printf '%s' "$1"
+        return 0
+    fi
     printf '%s\n\n%s' "$marker" "$1"
 }
 

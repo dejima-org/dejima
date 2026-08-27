@@ -819,8 +819,10 @@ fi
 # The last two path components of origin's URL, which is the same
 # "<owner>/<name>" both forges use and covers ssh, scp-style and https
 # remotes without parsing any of them as a URL. No origin, or a workspace
-# that is not a checkout, leaves this empty and the guard does nothing: the
-# comparison would have nothing to be right about.
+# that is not a checkout, leaves this empty - and the guard then refuses any
+# --repo or GH_REPO outright rather than waving it through. A workspace with
+# no origin has nothing such a flag could legitimately name, so "cannot
+# confirm" is not a reason to allow it.
 DEJIMA_FORGE_REPO_FLAGS="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_flags)"
 DEJIMA_FORGE_REPO_ENV="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_env)"
 DEJIMA_FORGE_REPO=""
