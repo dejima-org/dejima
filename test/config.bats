@@ -1377,13 +1377,11 @@ EOF
     docker_log="$(mktemp)"
     # A launch runs dejima-update-check, which would ls-remote this checkout's
     # own origin. Off here rather than in each fixture's config, because the
-    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
-    # reason: left alone the cache lands under the test's HOME, so every test
-    # misses and calls out again; exported by whoever ran the suite, it lands
-    # in their real state directory.
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
     printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK="${RW_AGENT_SOCK-}" \
-        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$1"
 }
@@ -1506,7 +1504,6 @@ EOF
     # Same as _rw_launch: the launch would otherwise reach the network.
     printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
-        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$@" "$ws"
 }
