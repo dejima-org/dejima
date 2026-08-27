@@ -1377,13 +1377,11 @@ EOF
     docker_log="$(mktemp)"
     # A launch runs dejima-update-check, which would ls-remote this checkout's
     # own origin. Off here rather than in each fixture's config, because the
-    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
-    # reason: left alone the cache lands under the test's HOME, so every test
-    # misses and calls out again; exported by whoever ran the suite, it lands
-    # in their real state directory.
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
     printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK="${RW_AGENT_SOCK-}" \
-        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$1"
 }
@@ -1506,7 +1504,6 @@ EOF
     # Same as _rw_launch: the launch would otherwise reach the network.
     printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
-        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$@" "$ws"
 }
@@ -2623,9 +2620,9 @@ _upd_fixture() {
     UPD_DIR="$(mktemp -d)"
     UPD_ORIGIN="$UPD_DIR/origin"
     UPD_CHECKOUT="$UPD_DIR/checkout"
-    # Stated, not inherited: the cache lands under XDG_STATE_HOME, and a test
-    # that left it unset would write into whoever ran it.
-    export XDG_STATE_HOME="$UPD_DIR/state"
+    # Stated, not inherited: the cache lands under $HOME, and a test that left
+    # that alone would write into whoever ran it.
+    export HOME="$UPD_DIR/home"
     # -b trunk so the fixture does not depend on the host's
     # init.defaultBranch, and so no guard has an opinion about the name.
     git init -q -b trunk "$UPD_ORIGIN"
@@ -2637,6 +2634,9 @@ _upd_fixture() {
 }
 
 _upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
+
+# Where _cache_file puts it, named once rather than at each assertion.
+_upd_cache() { printf '%s/.local/share/dejima/update-check' "$HOME"; }
 
 @test "a checkout level with its remote says nothing" {
     _upd_fixture
@@ -2670,7 +2670,7 @@ _upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
         || { echo "$output"; return 1; }
 
     git -C "$UPD_CHECKOUT" fetch -q origin
-    rm -rf "$XDG_STATE_HOME"
+    rm -f "$(_upd_cache)"
     run _upd_check
     [[ "$output" == *"has 1 commit this checkout does not"* ]] \
         || { echo "no count once the commit is present: $output"; return 1; }
@@ -2701,7 +2701,7 @@ _upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
     # Silence alone would also be produced by asking and saying nothing. The
     # cache is written on every lookup, including a failed one, so its absence
     # is what shows no lookup happened.
-    [ ! -e "$XDG_STATE_HOME/dejima/update-check" ] \
+    [ ! -e "$(_upd_cache)" ] \
         || { echo "it asked anyway"; return 1; }
 }
 
@@ -2769,13 +2769,13 @@ _upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
         # Written into the file directly: `git remote set-url` rejects a value
         # starting with a dash itself, which would leave that case untested.
         sed -i "s#\turl = .*#\turl = $url#" "$UPD_CHECKOUT/.git/config"
-        rm -rf "$XDG_STATE_HOME"
+        rm -f "$(_upd_cache)"
         run _upd_check
         [ "$status" -eq 0 ] || { echo "$url exited $status"; return 1; }
         [ ! -e "$marker" ] || { echo "$url ran"; return 1; }
         # Nothing recorded either, so a refused URL does not also poison the
         # cache for the hour after someone fixes it.
-        [ ! -e "$XDG_STATE_HOME/dejima/update-check" ] \
+        [ ! -e "$(_upd_cache)" ] \
             || { echo "$url was attempted"; return 1; }
     done
 }

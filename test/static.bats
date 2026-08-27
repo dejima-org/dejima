@@ -4141,6 +4141,24 @@ STUB
         || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
 }
 
+@test "dejima writes host state under one root, not a new base directory per file" {
+    # The update check put its cache under XDG_STATE_HOME, which is where the
+    # spec says a throwaway timestamp goes - and made ~/.local/state a fifth
+    # place dejima writes, for one file, created by mkdir -p on hosts with no
+    # other use for it. Everything durable dejima keeps is under
+    # ~/.local/share/dejima or ~/.config/dejima; the runtime registry is the
+    # one deliberate exception, and it is not durable.
+    # Code, not comments: _cache_file's own comment says what it moved away
+    # from and why, and a grep that counted that would fail on the fix.
+    local f hit=""
+    for f in "$REPO_ROOT"/bin/*; do
+        [ -f "$f" ] || continue
+        grep -v '^[[:space:]]*#' "$f" \
+            | grep -q 'XDG_STATE_HOME\|\.local/state' && hit="$hit $(basename "$f")"
+    done
+    [ -z "$hit" ] || { echo "a new state root is back in:$hit"; return 1; }
+}
+
 @test "the approval store is never mounted into the container" {
     # The store is the only thing that actually grants anything, and the
     # container runs an agent with no tool-use confirmations - mounting it
@@ -5257,13 +5275,11 @@ EOF
 startup_warning_launch() {
     # A launch runs dejima-update-check, which would ls-remote this checkout's
     # own origin. Off here rather than in each fixture's config, because the
-    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
-    # reason: left alone the cache lands under the test's HOME, so every test
-    # misses and calls out again; exported by whoever ran the suite, it lands
-    # in their real state directory.
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
     printf '[core]\nupdate_check = off\n' >> "$DEJIMA_T/config/config"
     HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
-        XDG_STATE_HOME="$DEJIMA_T/state" \
         DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
         SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \

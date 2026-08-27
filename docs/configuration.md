@@ -28,7 +28,7 @@ config file behind them.
 | `[core] command` | *(the selected harness's own `command`)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
 | `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. A name with no section is refused rather than falling back |
 | `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
-| `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord |
+| `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
 | `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
