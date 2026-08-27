@@ -1892,6 +1892,12 @@ if ! _unwired="$(harness_guards_wired)"; then
     printf '  Run %s./install.sh%s to register them.\n' "$C_KEY" "$C_RESET" >&2
 fi
 
+# Before the image build, which is the long part: an operator who wants the
+# newer dejima would rather know now than after waiting for a build of the one
+# they have. Advisory and best-effort - see bin/dejima-update-check for why it
+# never reaches the remote through this checkout's own git config.
+"$SCRIPT_DIR/dejima-update-check" || true
+
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
 "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true

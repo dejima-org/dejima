@@ -1067,6 +1067,33 @@ name. It belongs in that harness's worked example in
 [development.md](development.md#adding-a-new-harness) alongside the rest of
 what it can and cannot do.
 
+## The one request dejima itself makes
+
+Everything above bounds what a *session* reaches. dejima's own host side
+reaches one place, once an hour at most: `bin/dejima-update-check` asks the
+remote your checkout already tracks for the tip of the branch it already
+follows, so that a launch can say when the checkout is behind. It is
+`ls-remote`, so no objects are downloaded, and `[core] update_check = off`
+stops it entirely. There is no other endpoint and no telemetry - a domain
+you have not already configured dejima to push to is never contacted.
+
+It reaches that remote by URL, from outside the repository, and never by
+remote name. `git ls-remote origin` reads the checkout's own config for how
+to get there, and `core.sshCommand`, `credential.helper` and
+`url.<base>.insteadOf` each name a command git then runs on the host. dejima
+mounts its own checkout writable when that checkout is the workspace, so a
+session that wrote `.git/config` there would otherwise get host execution out
+of the next launch. That is the same class as the `core.hooksPath` route
+above, with one difference worth stating: `hooksPath` waits for the operator
+to run a git command, and a check that runs at every startup does not wait
+for anything. Handing the URL to a git started outside the repository leaves
+none of that config in the path, and `protocol.allow` holds the transports to
+ones that cannot name a command.
+
+What still crosses is the URL itself, which a session with that same write can
+point at a host of its choosing. That costs one outbound request and no
+execution, and the audit reports the config change it took.
+
 ## Network request logging
 
 If `[logging] loki_url` is set (see Prerequisites in the README), every DNS query and every new

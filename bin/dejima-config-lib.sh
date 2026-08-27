@@ -45,6 +45,7 @@ core.command	?identifier
 core.identity	?identifier
 core.tools	?list:identifier
 core.firewall	bool	on
+core.update_check	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
 core.known_hosts	path	~/.ssh/known_hosts
