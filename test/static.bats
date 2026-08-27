@@ -5231,7 +5231,15 @@ EOF
 # tty" path - real interactive [c]ontinue/[q]uit behavior needs a pty, which
 # isn't available here (see the task report).
 startup_warning_launch() {
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
+    # reason: left alone the cache lands under the test's HOME, so every test
+    # misses and calls out again; exported by whoever ran the suite, it lands
+    # in their real state directory.
+    printf '[core]\nupdate_check = off\n' >> "$DEJIMA_T/config/config"
     HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+        XDG_STATE_HOME="$DEJIMA_T/state" \
         DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
         SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \

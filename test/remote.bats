@@ -178,8 +178,16 @@ launch() {
     conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
     mkdir -p "$(dirname "$conf")"
     # No default, so a config that launches must select one.
-    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
+    # reason: left alone the cache lands under the test's HOME, so every test
+    # misses and calls out again; exported by whoever ran the suite, it lands
+    # in their real state directory.
+    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n' \
+        "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
+        XDG_STATE_HOME="$LAUNCH_DIR/state" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \

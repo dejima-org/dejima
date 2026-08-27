@@ -1375,7 +1375,15 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
     docker_log="$(mktemp)"
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. XDG_STATE_HOME is stated for the mirror
+    # reason: left alone the cache lands under the test's HOME, so every test
+    # misses and calls out again; exported by whoever ran the suite, it lands
+    # in their real state directory.
+    printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK="${RW_AGENT_SOCK-}" \
+        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$1"
 }
@@ -1495,7 +1503,10 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
     docker_log="$(mktemp)"
+    # Same as _rw_launch: the launch would otherwise reach the network.
+    printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        XDG_STATE_HOME="$RW_HOME/.local/state" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$@" "$ws"
 }
@@ -2595,8 +2606,17 @@ STUB
 # No `git push` anywhere below: dejima's own forge guard refuses a push to a
 # path, so a fixture built that way passes on a host and fails inside a
 # sandbox. The remote is an ordinary repository committed to directly.
+# GIT_CONFIG_GLOBAL and _SYSTEM neutralised alongside the identity this
+# already pins: a host with commit.gpgsign on, or an insteadOf rewrite, would
+# otherwise reach into a fixture that is supposed to depend on nothing.
+_upd_git() {
+    local d="$1"; shift
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        git -C "$d" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"
+}
+
 _upd_commit() {
-    git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "$2"
+    _upd_git "$1" commit -q --allow-empty -m "$2"
 }
 
 _upd_fixture() {
@@ -2841,4 +2861,38 @@ _epitaph_hostile() {
     [[ "$output" == *"commits this checkout does not"* ]] \
         || { echo "no notice at all: $output"; return 1; }
     [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal: $output"; return 1; }
+}
+
+@test "a launch does not reach the network to check for updates" {
+    # dejima-update-check runs on every launch, and this suite drives dozens
+    # of them. Each gets its own HOME and so its own empty cache, so without
+    # the fixtures turning it off every one of them would ls-remote the real
+    # origin: a five-second stall apiece wherever that origin is unreachable,
+    # and an $output that depends on how far behind the checkout happens to
+    # be. CI never sees it - a pull_request checkout is a detached HEAD, and
+    # the tool exits on that before it looks at a remote.
+    local workspace git_log real_git
+    _rw_setup
+    workspace="$(mktemp -d)"; git -C "$workspace" init -q
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    git_log="$(mktemp)"
+    real_git="$(command -v git)"
+    # A wrapper rather than a replacement: bin/dejima uses git for other
+    # things on this path, and a stub that answered nothing would fail the
+    # launch for an unrelated reason. On PATH rather than in _rw_launch's own
+    # stub directory, which it recreates on every call.
+    GIT_WRAP="$(mktemp -d)"
+    cat > "$GIT_WRAP/git" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$*" >> "$git_log"
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$GIT_WRAP/git"
+    PATH="$GIT_WRAP:$PATH"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$git_log" ] || { echo "the wrapper was never reached, so this proves nothing"; return 1; }
+    run grep -c 'ls-remote' "$git_log"
+    [ "$output" -eq 0 ] || { echo "the launch called out:"; grep ls-remote "$git_log"; return 1; }
+    rm -rf "$workspace" "$GIT_WRAP"
 }
