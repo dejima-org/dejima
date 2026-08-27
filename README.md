@@ -108,6 +108,21 @@ anywhere that being wrong about it would matter.
 not a fix, not a release. [SECURITY.md](SECURITY.md) has the detail, and is
 where to report a vulnerability rather than in a public issue.
 
+A note from the developer about the voice in this repository:
+
+> dejima is developed in dejima, and that means the words are written rapidly
+> by AI agents. That applies to this README, the docs, the commit messages,
+> the pull requests, and the code comments. I periodically take passes at
+> smoothing out the AI voice in the docs, but it's inefficient to do with
+> every pull request. I'm prioritizing thorough documentation over human
+> voice. If you feel something sounds painfully "AI", it is.
+>
+> The artwork (logo, wordmark, etc.) is a different story. It's made by a
+> human, and no AI tools were used to create it. See
+> [ATTRIBUTION.md](ATTRIBUTION.md).
+
+[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
+
 ## Setup
 
 This repo only holds the tooling; no project lives here. Point it at a project
@@ -457,8 +472,8 @@ deploy key in `[core] ssh_key` rather than a forwarded personal agent. The one
 exception is `[github] token_file`: pointed at a write-scoped token, it enables
 HTTPS push over port 443 independently of that flag, so keep it read-only.
 
-**→ [docs/security.md](docs/security.md#github-push-blocked-by-default-optional-opt-in)**
-- what a forwarded personal agent changes, and the persistent alternative.
+**→ [docs/security.md](docs/security.md#github-push-blocked-by-default-optional-opt-in)** -
+what a forwarded personal agent changes, and the persistent alternative.
 
 ## Exit-time audit
 
@@ -570,21 +585,6 @@ walls. The in-session hooks catch the obvious cases, but nobody is reviewing
 each action before it lands, and a bad `rm` in the mounted project is just a
 bad `rm`. That produces more care, not less, the way you drive differently on a
 road with no barrier.
-
-A note from the developer about the voice in this repository:
-
-> dejima is developed in dejima, and that means the words are written rapidly
-> by AI agents. That applies to this README, the docs, the commit messages,
-> the pull requests, and the code comments. I periodically take passes at
-> smoothing out the AI voice in the docs, but it's inefficient to do with
-> every pull request. I'm prioritizing thorough documentation over human
-> voice. If you feel something sounds painfully "AI", it is.
->
-> The artwork (logo, wordmark, etc.) is a different story. It's made by a
-> human, and no AI tools were used to create it. See
-> [ATTRIBUTION.md](ATTRIBUTION.md).
-
-[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
 ## The name
 
