@@ -4649,6 +4649,28 @@ EOF
     done
 }
 
+@test "identities are documented as the session's accounts, not the operator's" {
+    # configuration.md described an [identity.<name>] as grouping what belongs
+    # to a person rather than a project, and gave "work" and "oss" as the
+    # example - one human's two accounts. Both README and security.md tell you
+    # the opposite: give the session an account that is not you. An identity
+    # is how a host holds several of those, one per session.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/configuration.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'several accounts on one machine, and none of them yours' <<< "$flat" \
+        || { echo "identities read as an operator's own accounts again"; return 1; }
+    # The reason there is more than one, which is the whole feature.
+    grep -qi 'scope, revoke and read in a log independently' <<< "$flat" \
+        || { echo "the separation is unexplained"; return 1; }
+    # And the claim that sent someone looking for a project-side setting that
+    # does not exist.
+    grep -qi 'there is no .dejima/ kind for an identity' <<< "$flat" \
+        || { echo "the docs no longer say a project cannot select one"; return 1; }
+    run grep -c 'identity.work\|identity.oss' <<< "$flat"
+    [ "$output" -eq 0 ] \
+        || { echo "the person-shaped example is back"; return 1; }
+}
+
 @test "core never reads a harness's config by a literal harness name" {
     # `keys` is declared per harness, so a fixed [harness.<name>] at a call
     # site makes it a declaration only one harness can ever be read through:
