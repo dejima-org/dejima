@@ -6774,3 +6774,29 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     [ "$guard" -lt "$resolve" ] \
         || { echo "the identity is resolved before the key is known to need one"; return 1; }
 }
+
+@test "the docs say a suspended job is not a paused session" {
+    # Ctrl-Z stops bin/dejima on the host; the container keeps running with
+    # its grants. A stopped job reads as a paused agent, and the person most
+    # likely to be misled is the one who suspended it because they were uneasy
+    # about what it was doing.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'Ctrl-Z stops the observer, not the session' <<< "$flat" \
+        || { echo "the suspend caveat is not in the negative-space list"; return 1; }
+    grep -qi 'keeps making requests' <<< "$flat" \
+        || { echo "it does not say the session keeps running"; return 1; }
+}
+
+@test "the self-hosting caveat names every manifest a session can aim at the next launch" {
+    # forge.conf was named and tool.conf was not, though the host reads both
+    # and the image build installs what tool.conf points at, as root.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    # tool.conf, not tools/*/tool.conf: the normalisation strips the emphasis
+    # markers and takes the glob's asterisk with them.
+    grep -q 'tool.conf' <<< "$flat" \
+        || { echo "tool.conf is not named as session-writable input"; return 1; }
+    grep -qi 'downloads and installs as root' <<< "$flat" \
+        || { echo "what a tool.conf edit buys is unstated"; return 1; }
+}

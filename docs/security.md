@@ -44,6 +44,14 @@ than the thing inferred from silence.
   session that loops until someone notices is not prevented, and this is a
   deliberate omission rather than an oversight - see
   [Why there are no timeouts](#why-there-are-no-timeouts).
+- **A suspended job. Ctrl-Z stops the observer, not the session.** It
+  suspends `bin/dejima` on the host; the container keeps running, with its
+  mounts, its firewall grants and its forge token, and keeps making requests
+  while the terminal looks stopped. That is deliberate - SIGSTOP mid-tool-call
+  leaves a session wherever it was, and the feature exists to get the terminal
+  back rather than to pause the work - but a stopped job reads as a paused
+  agent, and the difference matters most to whoever suspends one because they
+  are uneasy about what it is doing.
 - **The first layer's controls against an agent that has stopped
   cooperating.** The briefing and `.dejima.md` are advice. They shape what a
   cooperating agent does and stop nothing that has decided otherwise. Only the
@@ -255,8 +263,13 @@ reason, alongside `bin/`, `hooks/`, `docker/` and `test/`. They hold no code
 and nothing executes them, but what they hold decides what the next launch
 permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`, which
 `entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so a
-line added to a manifest widens the egress boundary on the next run. An
-ordinary edit is a diff you are about to read and is not reported; one git
+line added to a manifest widens the egress boundary on the next run.
+`tools/*/tool.conf` is the same class, and is read by the host rather than the
+container: it names a tarball URL, the sha256 checked against it and the
+layout it is unpacked with, all consumed by the image build - so a session
+that edits one chooses what the next launch downloads and installs as root.
+
+An ordinary edit is a diff you are about to read and is not reported; one git
 cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
 or `skip-worktree` - is a CRITICAL finding. It is still a change a session
 can make; it is one the audit reports. See
