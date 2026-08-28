@@ -23,6 +23,7 @@ Usage: dejima-audit <snapshot|compare|show|ack> [workspace] [state-file]
   show [--full]    index of reports waiting to be read; --full prints one
   ack              walk a report finding by finding and record a decision
                    ([o] at the prompt opens the file in $VISUAL/$EDITOR)
+  --print-paths    the resolved store paths, one per line, for scripts
 
   workspace defaults to the enclosing git repository, else $PWD.
 
@@ -791,17 +792,9 @@ id_severity() {
     esac
 }
 
-# Every finding interpolates workspace-controlled text (paths, config values)
-# into a terminal. A planted value containing C0 escapes can scroll, clear or
-# overwrite the report; C1 controls and Unicode bidi overrides/isolates
-# (U+202A-U+202E, U+2066-U+2069) can visually reverse or reorder the
-# displayed text without touching the bytes an operator would grep for - so
-# strip all of these at the display boundary, after all parsing and
-# TAB-splitting is done.
-sanitize() {
-    printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' \
-        | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g'
-}
+# sanitize() and sanitize_body() come from dejima-color-lib.sh - every finding
+# here interpolates workspace-controlled text (paths, config values) into a
+# terminal, and so does every epitaph, so the rule has one definition.
 
 # sanitize() is lossy, so an ID must never pass through it. `ack` derives the
 # baseline id from the report text and the next `compare` matches it against

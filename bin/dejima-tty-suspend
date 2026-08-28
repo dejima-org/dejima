@@ -1,0 +1,159 @@
+#!/bin/bash
+# Makes Ctrl-Z suspend the whole launch instead of disappearing into the
+# container. Started in the background by bin/dejima for the duration of the
+# container run; not something to run by hand.
+#
+# `docker compose run` puts the terminal in raw mode to proxy the container's
+# TTY, and raw mode has ISIG off - so Ctrl-Z is not a signal at all, it is the
+# byte 0x1a, delivered to whatever is running in the container. A harness that
+# implements Ctrl-Z itself (nvim and Claude Code both do) then restores the
+# terminal and stops, and nothing inside a container can continue it: there is
+# no job-control shell in there. The session is wedged, the host never noticed,
+# and there is no job to `fg`. That is #179.
+#
+# So the one character that means "suspend" is taken back for the host, and
+# only that one: intr and quit stay undefined, so Ctrl-C and Ctrl-\ still reach
+# the session as bytes, which is how a harness expects to be interrupted.
+#
+# Everything host-side is in one process group - this script, the container
+# run, the credential proxy, the conversation shipper - so the kernel stops and
+# continues all of it together. Nothing here forwards signals.
+#
+# On resume the terminal has to be put back. The shell restores its OWN modes
+# when it takes the terminal at the prompt, and puts those same modes back on
+# `fg` rather than the ones the job was using - measured on both bash and zsh -
+# so without this the session comes back line-buffered and echoing. The SIGCONT
+# trap re-applies the modes the container run was using.
+#
+# It then has to make the harness redraw, over whatever the shell printed while
+# the session was away. That used to be `kill -WINCH`, on the reasoning that a
+# resize is what makes a full-screen program repaint. The reasoning was right
+# and the signal was not enough: a program that answers SIGWINCH by re-reading
+# the size, seeing the same numbers and doing nothing gets a poke that costs it
+# nothing to ignore.
+#
+# Measured against the real programs rather than a stand-in, on a pty, counting
+# the bytes each wrote in a fixed window after each kind of poke:
+#
+#                       idle   same-size SIGWINCH   size changed and back
+#   Claude Code            0                    0                    3337
+#   Cline                  0                    0                   17810
+#   nvim (control)         0                 3356                    6724
+#
+# Both shipped harnesses ignore the signal outright. So the size is changed
+# and changed straight back, which is a genuine resize twice over: TIOCSWINSZ
+# raises SIGWINCH on the foreground process group by itself, the container
+# client answers a resize by resizing the container's TTY, and the harness
+# inside sees dimensions that actually moved.
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage: dejima-tty-suspend
+
+Reclaims Ctrl-Z for the host while a dejima session runs, so that suspending
+backgrounds the whole launch and `fg` brings back a working session. Without
+it Ctrl-Z is delivered into the container as a keystroke and the session is
+left suspended with no way to resume it.
+
+Started in the background by bin/dejima and stopped when the session ends.
+Running it by hand does nothing useful: it acts on the terminal it inherits
+and exits on its own if no container run takes that terminal over.
+
+Options:
+  -h, --help   Show this help.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    "") ;;
+    *) usage >&2; exit 1 ;;
+esac
+
+# A terminal to act on, or nothing to do. bin/dejima starts this in the
+# background, where the shell gives stdin /dev/null, so every stty below reads
+# the terminal by name rather than from a descriptor.
+[ -e /dev/tty ] || exit 0
+stty -a < /dev/tty >/dev/null 2>&1 || exit 0
+
+# Wait for the container run to take the terminal, which is what "-isig" in the
+# settings means. Applying the reclaim before that would just be overwritten by
+# it. Bounded rather than open-ended: a launch that fails before attaching
+# should leave this script gone, not waiting.
+attached=0
+for _ in $(seq 1 100); do
+    if stty -a < /dev/tty 2>/dev/null | grep -q -- '-isig'; then
+        attached=1
+        break
+    fi
+    sleep 0.05
+done
+[ "$attached" = 1 ] || exit 0
+
+# isig turns the signal characters back on; the three that are not wanted are
+# undefined by name, so only susp survives. dsusp is not on Linux terminals but
+# is named anyway for the cost of nothing, and ignored where it does not exist.
+stty isig susp '^Z' intr undef quit undef < /dev/tty 2>/dev/null ||
+    stty isig susp '^Z' intr undef quit undef dsusp undef < /dev/tty 2>/dev/null ||
+    exit 0
+
+# What the session's terminal looks like now, to be put back on resume.
+session_modes="$(stty -g < /dev/tty 2>/dev/null)" || exit 0
+
+on_cont() {
+    stty "$session_modes" < /dev/tty 2>/dev/null || true
+
+    # One row shorter, held, and back. Only the kernel's idea of the size
+    # changes - the terminal emulator is not told and does not need to be,
+    # because what a program reads is the kernel's value. It ends where it
+    # started, so a failure partway leaves the size wrong rather than the
+    # session unusable, which is why the restore is unconditional.
+    #
+    # The hold is the whole of it, and the first version of this did not have
+    # one. Two ioctls back to back are not a resize a program can see: the
+    # signal arrives, the handler reads the size as it is NOW, and by then it
+    # is back where it started. Measured on a pty, bytes written after the
+    # poke:
+    #
+    #                  no hold   0.1s   0.2s
+    #     Cline              0      0  17810
+    #     Claude Code        0   3328   3328
+    #
+    # Cline sets the floor at something between 0.1 and 0.2 seconds. This uses
+    # half a second, which is 2.5x that - headroom for the hop this could not
+    # measure, since a real session's resize has to travel from the host tty
+    # through the container client and the daemon to the container's own tty
+    # before the harness sees it at all.
+    #
+    # The cost is that the terminal is one row short for half a second during
+    # a resume, while the harness is redrawing anyway.
+    local size rows
+    size="$(stty size < /dev/tty 2>/dev/null)" || size=""
+    rows="${size%% *}"
+    case "$rows" in
+        ''|*[!0-9]*) rows="" ;;
+        *) [ "$rows" -gt 1 ] || rows="" ;;
+    esac
+    if [ -n "$rows" ]; then
+        stty rows "$((rows - 1))" < /dev/tty 2>/dev/null || true
+        sleep 0.5
+        stty rows "$rows" < /dev/tty 2>/dev/null || true
+    fi
+
+    # Kept as well as the resize, and not redundant: nvim is the measured
+    # example of a program that repaints on the bare signal, and a session
+    # running one under `--cmd` should not be worse off than a harness. The
+    # whole process group, since this script does not know the container
+    # client's pid and SIGWINCH is ignored by default everywhere else in it.
+    kill -WINCH 0 2>/dev/null || true
+}
+trap on_cont CONT
+
+# Idle until the session ends and bin/dejima stops this. `wait` rather than a
+# bare sleep: a trap runs the moment it interrupts a wait, where it would
+# otherwise be held until the sleep finished.
+while :; do
+    sleep 300 &
+    wait $! 2>/dev/null || true
+done

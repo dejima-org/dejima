@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Notification/Stop hook. bin/dejima registers it, per session, into the
-# throwaway settings.json copy it generates for a session that has remote
-# access enabled, and nowhere else. Every sandbox gets such a copy, derived
-# from the operator's real settings.json; registering it in that real file
+# Notification hook. The selected harness's plugin registers it, per session,
+# into the throwaway settings.json copy bin/dejima generates for a session
+# that has remote access enabled, and nowhere else. Every sandbox gets such a
+# copy, derived from the operator's real settings.json; registering it there
 # instead would put this hook into all of them - and into the host's own
 # Claude Code, which reads that file directly - where there is no marker
 # directory to write into. The copy is mounted read-only (see

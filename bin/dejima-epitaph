@@ -21,7 +21,20 @@
 # file it came from. This preserves what was recorded, it does not attest to
 # it.
 #
-# Usage: dejima-epitaph save <workspace>
+# Usage: dejima-epitaph save   <workspace>
+#        dejima-epitaph list   [--all] [workspace]
+#        dejima-epitaph search [--all] <pattern> [workspace]
+#        dejima-epitaph show   [n | name] [workspace]
+#
+# `save` is what bin/dejima's exit trap runs. The other three are the
+# operator's, and they only ever read from the host: nothing here gives a
+# container a path to the store, and nothing here hands an epitaph back to a
+# session. That second one is the load-bearing half. A session can write its
+# own transcript, so it can author what its own epitaph says - delivering
+# that to a later session automatically would plant instructions in its
+# premises, which is the channel the never-mounted store exists to close
+# (#104). Printing to the operator's terminal keeps a person in the middle,
+# and that is the whole design rather than a missing feature.
 set -uo pipefail
 
 # --help before anything else runs: no libraries sourced, no config read. The
@@ -32,24 +45,28 @@ case "${1:-}" in
         cat <<'DEJIMA_EPITAPH_HELP'
 dejima-epitaph - keep what a session worked out before its context was compacted
 
-Usage: dejima-epitaph save <workspace>
+Usage: dejima-epitaph save   <workspace>
+       dejima-epitaph list   [--all] [workspace]
+       dejima-epitaph search [--all] <pattern> [workspace]
+       dejima-epitaph show   [n | name] [workspace]
 
-  save <workspace>   extract any compaction summaries from that workspace's
-                     transcripts and keep them
-
-Run by bin/dejima when a session exits, not usually by hand.
+  save     extract any compaction summaries from that workspace's transcripts
+           and keep them. Run by bin/dejima when a session exits, not by hand
+  list     what is kept, oldest first, and whether the session behind each is
+           still resumable - where it is, resuming beats reading a summary
+  search   case-insensitive regex over the bodies, reporting each hit's
+           position in the listing list prints
+  show     open one in $VISUAL or $EDITOR, or print it where there is no
+           terminal to open an editor on
+  --all    widen list and search to every project rather than this one
 
 A harness that compacts a long session writes a summary of what it is about to
-forget. For some harnesses that summary is the only durable account of a long
-session's reasoning, and it goes away with the container. This keeps it.
+forget, and it goes away with the container. This keeps it, host-side, in a
+store nothing mounts - so one session cannot read what an earlier one concluded
+or edit what this one is about to record.
 
-What a compaction looks like in a transcript is the harness's business, so the
-selected harness's plugin does the extracting; everything else here is dejima's:
-where the store is, that nothing mounts it, and that a directory appears only
-once something has been written into it.
-
-The store is host-side and never mounted, so one session cannot read what an
-earlier one concluded or edit what this one is about to record.
+Reading works with [epitaph] enabled off: turning the feature off is when
+reviewing and clearing the store is most likely.
 
 Nothing is kept when the selected harness does not lose anything to compaction,
 which is not a failure - it means the transcript already holds it all.
@@ -65,13 +82,293 @@ source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 source "$(dirname "$(readlink -f "$0")")/dejima-slug-lib.sh"
 # shellcheck source=dejima-harness-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-harness-lib.sh"
+# shellcheck source=dejima-color-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
 config_validate || exit 1
+color_init 1
 
-cmd="${1:-}"; ws_arg="${2:-}"
+usage() {
+    cat >&2 <<'EOF'
+usage: dejima-epitaph save   <workspace>
+       dejima-epitaph list   [--all] [workspace]
+       dejima-epitaph search [--all] <pattern> [workspace]
+       dejima-epitaph show   [n | name] [workspace]
 
-[ "$(config_get epitaph enabled)" = "on" ] || exit 0
+n is a position in the listing `list` and `search` print, so it means what
+those just showed - including under --all, which numbers every project's
+epitaphs in one sequence.
+EOF
+    exit 2
+}
+
+cmd="${1:-}"
+shift 2>/dev/null || true
+# --all anywhere, so it reads naturally either side of a search pattern.
+ALL=0; args=()
+for a in ${@+"$@"}; do
+    case "$a" in
+        --all) ALL=1 ;;
+        -h|--help) usage ;;
+        *) args+=("$a") ;;
+    esac
+done
+set -- ${args[@]+"${args[@]}"}
+
 STORE="$(config_get epitaph dir)"
 
+# `enabled` gates writing, not reading. Turning epitaph off must not strand
+# what it already kept behind a config key: an operator who switches it off
+# is the one most likely to want to look at, and get rid of, the existing
+# store.
+case "$cmd" in
+    save) [ "$(config_get epitaph enabled)" = "on" ] || exit 0 ;;
+    list|search|show) ;;
+    *) usage ;;
+esac
+
+# Every epitaph belonging to $1, oldest first. The sort key is the basename,
+# not the path: names begin with the timestamp, so this is chronological
+# across a workspace's several slugs rather than grouped by whichever slug
+# directory each file happens to sit in.
+_epitaphs_in() {
+    local f
+    [ -d "$1" ] || return 0
+    for f in "$1"/*.md; do
+        [ -f "$f" ] || continue
+        printf '%s\t%s\n' "$(basename "$f")" "$f"
+    done
+}
+epitaph_files() {
+    local ws="$1" slug d
+    {
+        if [ "$ALL" = 1 ]; then
+            for d in "$STORE"/*/; do _epitaphs_in "${d%/}"; done
+        else
+            while IFS= read -r slug; do
+                [ -n "$slug" ] || continue
+                _epitaphs_in "$STORE/$slug"
+            done < <(workspace_slugs_sorted "$ws")
+        fi
+    } | sort | cut -f2-
+}
+
+# The workspace to read from: the one given, else this checkout. Tries the
+# worktree top and then the main checkout that worktree belongs to, taking
+# the first that actually has epitaphs - the same shape as dejima-audit's
+# resolve_ws, and it matters more here. A worktree only has epitaphs of its
+# own if dejima was launched against the worktree itself; run from one after
+# working in the main checkout, the answer is the main checkout.
+resolve_ws() {
+    local given="$1" top common main c
+    if [ -n "$given" ]; then
+        ( cd "$given" 2>/dev/null && pwd ) || printf '%s' "$given"
+        return
+    fi
+    top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=""
+    common="$(git rev-parse --git-common-dir 2>/dev/null)" || common=""
+    main=""
+    if [ -n "$common" ]; then
+        common="$(readlink -f "$common" 2>/dev/null)" || common=""
+        [ -n "$common" ] && main="$(dirname "$common")"
+    fi
+    for c in "$top" "$main" "$PWD"; do
+        [ -n "$c" ] || continue
+        [ -n "$(epitaph_files "$c")" ] || continue
+        printf '%s' "$c"
+        return
+    done
+    printf '%s' "$PWD"
+}
+
+case "$cmd" in
+list)
+    ws="$(resolve_ws "${1:-}")"
+    mapfile -t FILES < <(epitaph_files "$ws")
+    if [ "${#FILES[@]}" -eq 0 ]; then
+        if [ "$ALL" = 1 ]; then echo "dejima epitaph: nothing kept yet." >&2
+        else echo "dejima epitaph: nothing kept for $ws." >&2; fi
+        exit 0
+    fi
+    if [ "$ALL" = 1 ]; then printf '%s epitaph(s), all projects\n\n' "${#FILES[@]}"
+    else printf '%s epitaph(s) for %s%s%s\n\n' "${#FILES[@]}" "$C_PATH" "$ws" "$C_RESET"; fi
+    # One python pass rather than one per file, and python rather than three
+    # greps and a stat because this reads the header of every epitaph in the
+    # store under --all.
+    #
+    # Deliberately no topic column. Every Claude Code summary opens on the
+    # same boilerplate, the "Primary Request" section that follows is written
+    # four different ways across the summaries here, and what it opens on is
+    # usually scene-setting rather than the request. Nothing extractable
+    # tells the reader which session this was, and a column repeating the
+    # same sentence down eight rows reads as a broken tool while leaving
+    # discoverability exactly where it was. `search` is the answer to "which
+    # one was it"; this is the answer to "what is here".
+    #
+    # Which sessions still have a transcript is the harness's answer, not
+    # something to work out from a filename: the id is in the name for one
+    # harness and is the directory for the next. Under --all the workspace is
+    # not passed, because a store key is a slug and a slug does not resolve
+    # back to a path - the plugin answers for every key it holds instead. A
+    # harness that does not implement the hook returns nothing, and every row
+    # then says so rather than claiming the transcript is gone.
+    harness_plugin_load "$(config_get core harness)"
+    live=""
+    if [ "$ALL" = 1 ]; then live="$(harness_hook harness_live_sessions)"
+    else live="$(harness_hook harness_live_sessions "$ws")"; fi
+    C_KEY="$C_KEY" C_DIM="$C_DIM" C_OK="$C_OK" C_RESET="$C_RESET" \
+    DEJIMA_LIVE_SESSIONS="$live" DEJIMA_HAS_LIVE="$(declare -F harness_live_sessions >/dev/null && echo 1)" \
+    python3 - "$ALL" ${FILES[@]+"${FILES[@]}"} <<'PY'
+import os, re, sys
+
+show_slug = sys.argv[1] == "1"
+# "<key>\t<session-id>" per live transcript. The distinction that matters is
+# an empty set from a harness that answered versus no answer at all: the
+# first means aged out, the second means unknown.
+known = os.environ.get("DEJIMA_HAS_LIVE") == "1"
+live = set(os.environ.get("DEJIMA_LIVE_SESSIONS", "").splitlines())
+KEY, DIM, OK, RESET = (os.environ.get(k, "") for k in ("C_KEY", "C_DIM", "C_OK", "C_RESET"))
+
+# The index is padded before it is coloured: a width in the format string
+# counts the escape sequence's bytes and knocks every row out of line the
+# moment colour is on.
+ROW = "%s  %-16s  %-6s %6s %5s  %s"
+print(DIM + ROW % ("%4s" % "#", "when", "how", "ctx", "size", "transcript") + RESET)
+
+# The bash side's sanitize(), stated again because this renderer parses the
+# fields itself and there is nothing to hand it a cleaned string. The classes
+# are pinned equal to that one by a test rather than by this comment.
+_BAD = re.compile(
+    "[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")
+
+def clean(s):
+    return _BAD.sub("", s)
+
+for i, path in enumerate(sys.argv[2:], 1):
+    try:
+        with open(path, errors="replace") as fh:
+            head = [next(fh, "") for _ in range(12)]
+    except OSError:
+        continue
+    h = {}
+    for l in head:
+        m = re.match(r"- (session|at|trigger|tokens): (.*)", l)
+        if m:
+            h[m.group(1)] = m.group(2).strip()
+    sid = h.get("session", "")
+    # How much context the session had accumulated by the time it compacted:
+    # the one field here that separates a long session from a short one, and
+    # it is recorded rather than guessed at.
+    m = re.match(r"(\d+) before", h.get("tokens", ""))
+    ctx = "%dk" % (int(m.group(1)) / 1000) if m else "?"
+    # The store key is the directory this epitaph sits in, which is dejima's
+    # own arrangement; pairing it with the session id is what makes the answer
+    # unambiguous under --all, where two projects can hold the same id.
+    if not known:
+        state = DIM + "?" + RESET
+    elif "%s\t%s" % (os.path.basename(os.path.dirname(path)), sid) in live:
+        state = OK + "resumable" + RESET
+    else:
+        state = DIM + "aged out" + RESET
+    row = ROW % (KEY + "%4d" % i + RESET,
+                 clean(h.get("at", ""))[:16].replace("T", " ") or "?",
+                 clean(h.get("trigger", "?"))[:6], ctx,
+                 "%dK" % ((os.path.getsize(path) + 1023) // 1024), state)
+    if show_slug:
+        row += "  " + DIM + clean(os.path.basename(os.path.dirname(path)))[:30] + RESET
+    print(row)
+PY
+    printf '\n  %sdejima-epitaph show <n>%s opens one; %sdejima-epitaph search <pattern>%s finds one.\n' \
+        "$C_KEY" "$C_RESET" "$C_KEY" "$C_RESET"
+    # `resumable` means the transcript this was distilled from is still on
+    # disk, so `claude --resume <session>` gives the real session rather than
+    # a summary of it. That is the better recovery whenever it is available;
+    # the epitaph is what remains once the harness has aged the transcript out.
+    exit 0
+    ;;
+search)
+    pattern="${1:-}"; [ -n "$pattern" ] || usage
+    ws="$(resolve_ws "${2:-}")"
+    mapfile -t FILES < <(epitaph_files "$ws")
+    [ "${#FILES[@]}" -gt 0 ] || { echo "dejima epitaph: nothing kept for $ws." >&2; exit 0; }
+    # Case-insensitive extended regex, so a bare word works and a pattern is
+    # available without a second flag to remember.
+    gcolor=never; [ -n "$C_RESET" ] && gcolor=always
+    i=0; hits=0
+    for f in ${FILES[@]+"${FILES[@]}"}; do
+        i=$((i + 1))
+        grep -qiE -- "$pattern" "$f" 2>/dev/null || continue
+        hits=$((hits + 1))
+        # The index is this file's position in the SAME listing `list`
+        # prints, so `show <n>` after a search means what the search showed.
+        # The name is built from the transcript's own timestamp and uuid
+        # fields, so it is session-authored too - not just the body under it.
+        printf '\n%s%4d%s  %s%s%s\n' "$C_KEY" "$i" "$C_RESET" \
+            "$C_DIM" "$(sanitize "$(basename "$f")")" "$C_RESET"
+        # Sanitized BEFORE grep, not after: grep adds its own colour when the
+        # output is a terminal, and cleaning afterwards would strip the
+        # highlight along with the planted bytes.
+        sanitize_body < "$f" \
+            | grep -inE --color=$gcolor -- "$pattern" 2>/dev/null \
+            | head -3 | sed 's/^/        /' | cut -c1-100
+    done
+    if [ "$hits" -eq 0 ]; then
+        printf 'dejima epitaph: no epitaph matches %s (searched %s).\n' "$pattern" "$i" >&2
+    else
+        printf '\n%s of %s epitaph(s) match. %sdejima-epitaph show <n>%s opens one.\n' \
+            "$hits" "$i" "$C_KEY" "$C_RESET"
+    fi
+    exit 0
+    ;;
+show)
+    sel="${1:-}"; ws_arg="${2:-}"
+    # A lone argument that names a directory is the workspace, not a
+    # selector: `dejima-epitaph show ~/workspace/thing` is the obvious thing
+    # to type and would otherwise be read as a name to match.
+    if [ -n "$sel" ] && [ -z "$ws_arg" ] && [ -d "$sel" ]; then ws_arg="$sel"; sel=""; fi
+    ws="$(resolve_ws "$ws_arg")"
+    mapfile -t FILES < <(epitaph_files "$ws")
+    [ "${#FILES[@]}" -gt 0 ] || { echo "dejima epitaph: nothing kept for $ws." >&2; exit 0; }
+    file=""
+    case "$sel" in
+        "") file="${FILES[-1]}" ;;
+        *[!0-9]*)
+            for f in ${FILES[@]+"${FILES[@]}"}; do
+                case "$(basename "$f")" in "$sel"*) file="$f"; break ;; esac
+            done ;;
+        *)
+            [ "$sel" -ge 1 ] 2>/dev/null && [ "$sel" -le "${#FILES[@]}" ] \
+                && file="${FILES[$((sel - 1))]}" ;;
+    esac
+    [ -n "$file" ] || { echo "dejima epitaph: no epitaph '$sel' in ${#FILES[@]} kept for $ws." >&2; exit 1; }
+    # Piped or redirected, print it: `show | grep` must not try to open an
+    # editor, and neither must a test.
+    ed="${VISUAL:-${EDITOR:-}}"
+    if [ -z "$ed" ] || [ ! -t 1 ] || [ ! -t 0 ]; then
+        # The body is what a session wrote, and printing it IS this tool's
+        # purpose - so it is the one place the operator's terminal meets those
+        # bytes directly. sanitize_body rather than sanitize: the field rule
+        # takes LF too, and an epitaph is not one line.
+        sanitize_body < "$file"
+        exit 0
+    fi
+    # Through `sh -c` so $EDITOR may carry flags (`code -w`, `emacsclient
+    # -nw`), with the path passed as an argument rather than interpolated so
+    # a space in it stays one word.
+    sh -c "$ed \"\$1\"" sh "$file"
+    # An editor writes through a temp file and renames it into place, which
+    # leaves the result at the umask's mode rather than the 0600 `save`
+    # wrote. The 0700 directory means nothing else could read it either way;
+    # the mode is restated because it is what this store promises, not
+    # because the directory needs the help.
+    chmod 600 "$file" 2>/dev/null || true
+    exit 0
+    ;;
+esac
+
+# Everything below is `save`. Reading the store is dejima's own business and
+# needs the plugin only to label a row (see `list` above, which tolerates its
+# absence); extracting an epitaph is entirely the plugin's, so from here a
+# missing one is fatal rather than a blank column.
 harness_plugin_load "$(config_get core harness)"
 
 # With no harness selected nothing knows what a compaction looks like, so
@@ -87,14 +384,11 @@ if [ -z "$(config_get core harness)" ]; then
     exit 0
 fi
 
+ws_arg="${1:-}"
+
 ws="$ws_arg"
 [ -n "$ws" ] || ws="$(pwd)"
 ws="$(cd "$ws" 2>/dev/null && pwd)" || exit 0
-
-case "$cmd" in
-    save) ;;
-    *) echo "usage: dejima-epitaph save <workspace>" >&2; exit 2 ;;
-esac
 
 # One file per summary, named for the moment it was written, so a directory
 # listing is a timeline. Keyed on the summary record's own uuid: `save` runs
@@ -161,6 +455,13 @@ echo "dejima: wrote $saved epitaph(s) to $STORE" >&2
 # operators who already centralise session logs. Host-side rather than
 # through the container's log-shipper, so the same "never in the session's
 # reach" property holds for the shipping path too.
+#
+# DEJIMA_EPITAPH_NO_SHIP is bin/dejima's --no-log reaching the one decision it
+# cannot make on this tool's behalf. Honoured from the environment, which
+# nothing else here is, because it can only ever suppress: a stale export
+# keeps an epitaph off the wire and never puts one on it. The epitaph is still
+# written either way - the store is the durable copy, and this is the bonus.
+[ "${DEJIMA_EPITAPH_NO_SHIP:-0}" != 1 ] || exit 0
 [ "$(config_get epitaph loki)" = "on" ] || exit 0
 loki="$(config_get logging loki_url)"
 [ -n "$loki" ] || exit 0

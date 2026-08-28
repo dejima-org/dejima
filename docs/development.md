@@ -25,20 +25,24 @@ run them.
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
 | `hooks/merge-guard.sh` | `PreToolUse` hook: blocks the configured forge's merge command (`DEJIMA_MERGE_BLOCK`) in the sandbox: merging is a human decision |
-| `hooks/dejima-notify.sh` | `Notification`/`Stop` hook: drops an empty `waiting`/`done` marker for a remote-enabled session - see [docs/remote-access.md](remote-access.md) |
+| `hooks/dejima-notify.sh` | Drops an empty `waiting`/`done` marker for a remote-enabled session. Registered as a `Stop` hook only; `waiting` is there for a harness that can say it without having stopped - see [docs/remote-access.md](remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
 | `bin/dejima-dep` | Review and approve project dependencies declared in `.dejima/dependencies` |
 | `bin/dejima-config-lib.sh` | The config file's schema, parser and value validators, plus the dependency-spec grammar. The base layer: it sources nothing, so everything else can source it. Not on PATH |
 | `bin/dejima-provider-lib.sh` | Parses forge/workflow/harness manifests and composes the session briefing; not on PATH: see [docs/providers.md](providers.md) |
 | `forges/`, `workflows/`, `harnesses/` | Provider directories for the three axes selected by `[core] forge`/`workflow`/`harness` (data, never sourced or executed); see [docs/providers.md](providers.md) |
+| `tools/` | Optional tools a launch can add to its image - not an axis, since a launch enables zero or more. Same manifest rules, and a bar for what may be added: see [docs/tools.md](tools.md) |
 | `docs/release.md` | The pass a `development` -> `main` release goes through, and why each part of it is not a test |
 | `forges/gitea/bin/` | The gitea forge's own CLIs, baked into the image so the sandbox can act on them: `gitea-pr` (create a PR, read its comments, merge it), `gitea-issue` (list, view, create, comment on, close and reopen issues) and `gitea-actions` (read CI runs and job logs) |
+| `forges/github/bin/` | The github forge's one CLI: `github-pr comments`, which shows unresolved review threads. `gh` covers everything else, but thread resolution lives only in GitHub's GraphQL API, so `gh pr view --comments` cannot tell a closed thread from an open one |
 | `bin/dejima-notify-watch` | Host-side watcher: turns markers into ntfy pushes composed entirely from host data |
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
 | `bin/dejima-conversation-ship` | Host-side: ships session transcripts to Loki when `[logging] conversation` is on. Reads them where they already are, so the session is not in the path of its own oversight log |
-| `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. Run from `bin/dejima`'s exit trap |
+| `bin/dejima-tui-lib.sh` | The palette, heading and numbered prompt `dejima-attach` and `dejima-allow` share. Rows stay with each tool, which lists a different thing from a different source. Not on PATH |
+| `bin/dejima-update-check` | Host-side: says at startup when this checkout is behind the branch it tracks. Reaches the remote by URL from outside the repository, so the checkout's own git config never names a command it runs |
+| `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. `save` runs from `bin/dejima`'s exit trap; `list`/`search`/`show` are the operator's, and only ever read |
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
 | `bin/dejima-color-lib.sh` | The colour and terminal-detection helpers the CLIs share. Not on PATH |
@@ -48,6 +52,7 @@ run them.
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
 | `docs/ci.md` | What push access grants a session on your CI host, and how to bound it - runner hardening, and an egress allowlist read from `main` |
 | `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
+| `docs/research-review.md` | When to check dejima's reasoning against the field's, the standing questions that are the agenda, and the queue of bypasses not yet run against this implementation |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
 
 `bin/dejima` is the entry point: it resolves the project path,
@@ -495,6 +500,7 @@ harness-specific path resolving to nothing is the honest answer.
 | State layout | the project key - cwd with every non-alphanumeric replaced by `-` - is Claude Code's scheme, and dejima reproduces it in four places | `bin/dejima-slug-lib.sh`, `bin/dejima-project-lib.sh`, `docker/log-shipper.sh` |
 | Per-project scoping | `projects/` is mounted one slug at a time and `file-history/` one session at a time, the second resolved by pairing `projects/<slug>/<id>.jsonl` with `file-history/<id>` (#104). In the plugin | `bin/harness/claude-code.sh` |
 | Transcript discovery | where this workspace's transcripts are, what they are called and how they are nested. `harness_transcript_files` in the plugin, answering one `<key>\t<path>` line per file; core takes the key as the store it files under and refuses one that is not a slug this workspace owns. Both `dejima-epitaph` and `dejima-conversation-ship` used to carry Claude Code's layout directly | `bin/harness/<name>.sh`, `bin/dejima-epitaph`, `bin/dejima-conversation-ship` |
+| Live sessions | which sessions still have a transcript, as `<key>\t<session-id>` lines. `harness_live_sessions` in the plugin, because the id is in the filename for one harness and is the directory name for the next; `dejima-epitaph list` matches an epitaph's own session id against the answer to say whether resuming the real session is still on offer. Optional: a plugin that does not implement it leaves the column unknown rather than claiming a transcript is gone | `bin/harness/<name>.sh`, `bin/dejima-epitaph` |
 | Transcript update model | whether a transcript is appended to or replaced wholesale. The manifest's `transcript_update`; the shipper implements both and neither is guessed | `harnesses/<name>/harness.conf` |
 | Transcript format | the transform from transcript bytes to log lines. In the plugin; the discovery, shipping, batching and Loki labels stay core's | `bin/harness/<name>.sh` |
 | Compaction format | what a compaction looks like in a transcript, given one file at a time. In the plugin; the store, which keys are legitimate, its modes and the provenance note stay core's | `bin/harness/<name>.sh` |

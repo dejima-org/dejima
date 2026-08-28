@@ -29,9 +29,14 @@ Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>
 
 Scope, which decides who the grant is for and how long it lasts:
   (none)             the running container, right now, until it exits. Finds it
-                     if exactly one is running; refuses if none or several.
+                     if exactly one is running. With several, it offers them to
+                     pick from on a terminal, and lists them and stops anywhere
+                     else - a prompt is no use to a script.
   --container <id>   the same, for a named container. Use this when a session
                      told you its own id rather than letting anything guess.
+                     With several running, they are listed by project and by
+                     the number the dejima-attach picker gives each one. On a
+                     terminal it offers them to pick from instead.
   --project [path]   every future session in one project. Also writes the domain
                      to that project's .dejima/allowed-domains, so it is shared
                      with everyone working on it. Path defaults to $PWD.
@@ -61,6 +66,11 @@ source "$SCRIPT_DIR/dejima-project-lib.sh"
 # reason init-firewall.sh and dns-proxy.sh share this file.
 # shellcheck source=../docker/fixed-domains.sh
 source "$SCRIPT_DIR/../docker/fixed-domains.sh"
+# The palette, heading and prompt dejima-attach uses. Picking one session out
+# of several is the same job here, and an operator holding one terminal should
+# not meet two different answers to it.
+# shellcheck source=dejima-tui-lib.sh
+source "$SCRIPT_DIR/dejima-tui-lib.sh"
 
 usage() {
     echo "Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>" >&2
@@ -129,25 +139,133 @@ fi
 # This is the only thing that decides. Deliberately not an environment
 # variable as well: a firewall CLI with an environment-triggered no-op path
 # is one an env var can silently disarm.
+# A container list an operator can act on without asking the agent anything.
+#
+# The name alone is a run id, which is exactly what someone with three
+# sessions open does not know. What they do know is which project each one is
+# working on, and - where remote access is on - the number the dejima-attach
+# picker gives it, because that is the list they are already reading.
+#
+# The project comes from the container's own working directory rather than
+# from the session registry, so it is there for every session and not only a
+# remote-enabled one. The picker number comes from `dejima-attach --list`,
+# whose rows the picker numbers 1..N in the order they are printed; absent
+# where remote access is off, which is a column missing rather than a failure.
+#
+# Reads only. Nothing here decides which container is acted on - that is the
+# caller's --container, or the single running one.
+# Fills CT_IDS, CT_NAMES, CT_PROJECTS and CT_ATTACH, in the order docker
+# listed them, and measures the widest project and name for the renderers
+# below. Padding to the widest value rather than to a guess is not cosmetic
+# here: "dejima-sandbox-run-" plus twelve hex digits is 31 characters, so a
+# fixed 28 ran every name straight into the project beside it and there was
+# no telling where one ended.
+CT_IDS=(); CT_NAMES=(); CT_PROJECTS=(); CT_ATTACH=()
+CT_W_NAME=0; CT_W_PROJECT=0; CT_HAS_ATTACH=0
+collect_containers() {
+    local listing="$1" name id project row n=0 idx
+    local -A attach_index=()
+    while IFS=$'\t' read -r _ _ _ _ _ row; do
+        [ -n "$row" ] || continue
+        n=$((n + 1))
+        attach_index["$row"]="$n"
+    done < <(dejima-attach --list 2>/dev/null || true)
+    while IFS=$'\t' read -r name id; do
+        [ -n "$name" ] || continue
+        project="$(docker inspect -f '{{.Config.WorkingDir}}' "$id" 2>/dev/null)" || project=""
+        [ -n "$project" ] && project="$(basename "$project")"
+        project="${project:-?}"
+        idx="${attach_index[${id:0:12}]:-}"
+        CT_IDS+=("$id"); CT_NAMES+=("$name"); CT_PROJECTS+=("$project")
+        CT_ATTACH+=("$idx")
+        [ -z "$idx" ] || CT_HAS_ATTACH=1
+        [ "${#name}" -le "$CT_W_NAME" ] || CT_W_NAME="${#name}"
+        [ "${#project}" -le "$CT_W_PROJECT" ] || CT_W_PROJECT="${#project}"
+    done <<< "$listing"
+}
+
+# The non-interactive form: a list to read, with the flag that acts on a row.
+# This is what a script gets, and what an agent is shown when it asks the
+# operator to run one of these.
+describe_containers() {
+    local i
+    for i in "${!CT_IDS[@]}"; do
+        printf '  %-*s  %-*s  %s\n' \
+            "$CT_W_PROJECT" "${CT_PROJECTS[$i]}" \
+            "$CT_W_NAME" "${CT_NAMES[$i]}" \
+            "${CT_ATTACH[$i]:+(dejima-attach ${CT_ATTACH[$i]})}"
+    done
+}
+
+# The interactive form. Same rows, numbered, under dejima-attach's heading -
+# an operator with several sessions open is choosing between the same things
+# in both tools, and picking by project is the only way they can.
+#
+# Headed, where dejima-attach's rows are not: there the coloured state word
+# says what each column is, and vertical space on a phone is the scarce
+# thing. Here the columns are two names and a number, which say nothing about
+# themselves.
+pick_container() {
+    local i
+    tui_banner 'running sessions'
+    # The attach column is absent, not blank, when no session has a number -
+    # remote access off is the ordinary case, and a labelled empty column
+    # reads as something that failed.
+    if [ "$CT_HAS_ATTACH" -eq 1 ]; then
+        printf '      %s%-*s  %-*s  %s%s\n' "$C_SUBTLE" \
+            "$CT_W_PROJECT" "project" "$CT_W_NAME" "container" "attach" "$C_OFF"
+    else
+        printf '      %s%-*s  %s%s\n' "$C_SUBTLE" \
+            "$CT_W_PROJECT" "project" "container" "$C_OFF"
+    fi
+    for i in "${!CT_IDS[@]}"; do
+        printf '  %s%2d%s  %s%-*s%s  %s%-*s%s  %s%s%s\n' \
+            "$C_WARN" "$((i + 1))" "$C_OFF" \
+            "$C_BOLD$C_TEXT" "$CT_W_PROJECT" "${CT_PROJECTS[$i]}" "$C_OFF" \
+            "$C_LINK" "$CT_W_NAME" "${CT_NAMES[$i]}" "$C_OFF" \
+            "$C_MUTED" "${CT_ATTACH[$i]}" "$C_OFF"
+    done
+    tui_pick "${#CT_IDS[@]}" "allow $domain in"
+    container="${CT_NAMES[$((TUI_CHOICE - 1))]}"
+}
+
 session_wanted=1
 if [ -n "$project" ] || [ "$global" -eq 1 ]; then
     [ -n "$container" ] || session_wanted=0
 fi
 if [ "$session_wanted" -eq 1 ]; then
     if [ -z "$container" ]; then
-        containers=$(docker ps --filter "label=com.docker.compose.project=dejima" --filter "status=running" --format '{{.Names}}')
+        containers=$(docker ps --filter "label=com.docker.compose.project=dejima" \
+            --filter "status=running" --format '{{.Names}}	{{.ID}}')
         count=$(echo "$containers" | grep -c . || true)
         if [ "$count" -eq 0 ]; then
             echo "No running dejima container found." >&2
             exit 1
         elif [ "$count" -gt 1 ]; then
-            echo "Multiple running dejima containers found; specify one with --container:" >&2
-            echo "$containers" >&2
-            echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
-            echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
-            exit 1
+            collect_containers "$containers"
+            # A person at a terminal gets to choose; anything else gets the
+            # list and the flag. Both ends are checked because the prompt is
+            # useless without somewhere to draw it and something to read the
+            # answer from, and half of either is how a script ends up hung on
+            # a read nobody can answer.
+            if [ -t 0 ] && [ -t 1 ]; then
+                pick_container
+            else
+                echo "Multiple running dejima containers found; specify one with --container:" >&2
+                echo "" >&2
+                describe_containers >&2
+                echo "" >&2
+                echo "(a sandboxed agent's own container ID is printed in its startup context," >&2
+                echo "or by 'cat /etc/hostname' inside that sandbox - don't let it guess one)" >&2
+                exit 1
+            fi
         fi
-        container="$containers"
+        # Only when nothing above chose one. This line used to be reachable
+        # only in the single-container case, because the multi-container
+        # branch exited - now that the picker returns from it, an
+        # unconditional assignment here would silently discard the choice and
+        # act on whichever session docker happened to list first.
+        [ -n "$container" ] || container="${containers%%$'\t'*}"
     fi
 
     # The DNS proxy (dns-proxy.sh) NXDOMAINs anything not in its allowlist, so

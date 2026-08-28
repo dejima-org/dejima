@@ -123,6 +123,9 @@ operator can set, resolved the same way as any other config key
 | `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
 | `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a command string, for the harnesses that can. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
+| `repo_flags` | `?list:flag` | (empty) | The option names this forge's CLI accepts for naming a repository other than the one the session was launched against - `--repo -R` for `gh`. `docker/forge-guard.sh` refuses a value that is not that repository, in every spelling (`--repo x`, `--repo=x`, and a one-dash flag with its value attached). Fast-fail, not a boundary, for the same reason `merge_block` is not one: the session holds the token. Leave it empty for a CLI that resolves the repo itself and refuses another host, as the gitea ones do - a forge is not required to be aimable. |
+| `identity_keys` | `?list:identifier` | (empty) | Which of this forge's own `keys` name an **account** rather than the forge itself - the credential paths, which differ per session, where an API URL does not. One declaration, two rules: a key named here is one an `[identity.<name>]` section may set, and one a project may not declare in its own `.dejima/`. Core keeps no list of its own, so a forge whose credential is spelled differently needs no change here. The identity inherits the type from this forge's `keys` entry, not a second copy of it. |
+| `repo_env` | `?identifier` | (empty) | The environment variable this forge's CLI reads for the same thing - `GH_REPO`. Declared separately because it takes no argument and would otherwise be the way around every flag above. |
 | `disclose` | `?disclosures` | (empty) | Which of this forge's commands send a body the session authored, as comma-separated `kind:command prefix` entries - `pr:gh pr create, issue:gh issue create, ...`. `docker/forge-guard.sh` prepends a marker to the body of a matching command, so a PR, issue or comment an agent wrote says so. The three kinds are `pr`, `issue` and `comment`; the wording of each marker is core's, not the manifest's, so that dejima says one thing about agent authorship whichever forge is selected. Unlike `merge_block` this does not depend on the workflow: what a workflow permits is a policy, who wrote the text is a fact. |
 | `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
 | `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work - checked at launch by two refusal rules (partly-configured, and none-configured-with-a-fixed-host) when the workflow pushes; see [Validation](#validation). A key with a non-empty schema default never counts as missing for either check. |
@@ -257,6 +260,26 @@ resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.
 
+## Tool
+
+Not an axis: a launch selects one forge, one workflow and one harness, and
+enables zero or more tools. Everything else about it is the same - a manifest
+that is data, validated by the same schema machinery, never sourced.
+
+The keys are deliberately few. A tool declares what it is, what installs it,
+what its environment needs and what the session should be told about it. There
+is no key for a hook, a mount, a domain or a guard, because a tool that needed
+one of those would be a change to the boundary rather than a program on PATH.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `description` | `text` | *(required)* | One line, shown when the layer builds and in the session briefing. |
+| `install` | `depspec` | *(required)* | The same grammar a dependency uses. In practice a `tarball:` spec, because a tool has to be pinned by digest - see [docs/tools.md](tools.md) for why that is a rule rather than a preference. |
+| `install_layout` | `enum:prefix\|binary` | `prefix` | The archive's shape. `prefix` is one enclosing directory, stripped so `bin/` lands in the same place whatever the release called its top level. `binary` is an archive that IS the executable: stripping a component there would strip the binary and extract nothing, silently. |
+| `image_env` | `?list:envpair` | (empty) | `NAME=VALUE` pairs the layer sets. **Every name must be namespaced to the tool** - `RTK_*` for `rtk` - and a launch refuses one that is not. This becomes a Dockerfile `ENV`, which every process in the container inherits, so a bare `NO_COLOR` or `DO_NOT_TRACK` changes the harness and everything else too. A harness manifest may use bare names there because a harness is the container's main process; a tool is one program among many. |
+| `command` | `identifier` | *(required)* | What it puts on PATH. |
+| `instructions` | `?relpath` | (empty) | A markdown fragment appended to the session briefing under a core-owned heading, so a tool describes itself once and every harness gets the same words. This is the whole of the per-harness wiring: dejima renders it rather than letting the tool's installer patch a harness config. |
+
 ## Session briefing composition
 
 The text a `SessionStart` hook injects into the agent is assembled
@@ -346,6 +369,12 @@ itself:
 - `DEJIMA_BLOCKED_BRANCHES` - the workflow's `blocked_branches`.
 - `DEJIMA_MERGE_BLOCK` - the forge's `merge_block`, but only when the
   workflow's `block_merge = on`; otherwise empty.
+- `DEJIMA_FORGE_REPO_FLAGS` and `DEJIMA_FORGE_REPO_ENV` - the forge's
+  `repo_flags` and `repo_env`, with `DEJIMA_FORGE_REPO` holding the
+  `<owner>/<name>` of the workspace's `origin` remote. Empty when the forge
+  declares neither, and also when the workspace has no origin to read - in
+  which case a command naming any repository is refused, since there is
+  nothing it could legitimately be naming.
 - Whatever the forge's own `env_export` names (e.g. `GITEA_API`,
   `GITEA_SSH_HOST`, `GITEA_TOKEN`).
 
@@ -466,18 +495,26 @@ that immediately turned up a second thing, that `gh --repo owner/name pr merge
 N` walked straight past the merge block. Neither was a hard bug to find once
 anyone looked.
 
-Two known differences remain, both filed rather than fixed:
+Two differences from the gitea path remain, both now closed in code and worth
+knowing about because they are what a second forge costs:
 
-- **Review feedback is thinner.** `gitea-pr comments` shows unresolved review
-  threads and hides the rest; GitHub does not expose thread resolution through
-  the REST API `gh` uses for this, so working through PR feedback there
-  re-reads threads already dealt with, with no signal that it is doing so.
-- **`gh --repo` reaches past the sandboxed repository.** The gitea CLIs refuse
-  an origin that is not on the configured host, so they can only act on the
-  repo the sandbox was launched against. `gh` takes `--repo` on nearly every
-  subcommand, and `forge = github` supplies a deliberately write-capable
-  token. A per-repository fine-grained PAT is the shape of `push_token_file`
-  that makes this moot.
+- **Review feedback needs its own tool.** `gh pr view --comments` prints
+  reviews and comments with no resolution state anywhere in the output,
+  because the REST API it uses does not carry any - `isResolved` exists only
+  on `reviewThreads` in GraphQL. So this forge ships `github-pr comments`,
+  which does that one query and otherwise matches `gitea-pr comments`:
+  unresolved threads by default, `--all` to include the resolved ones marked
+  as such, and a count of what was hidden. Everything else `gitea-pr` does has
+  a `gh` subcommand already.
+- **`gh` can be aimed past the sandboxed repository, and is stopped.** The
+  gitea CLIs refuse an origin that is not on the configured host, so they can
+  only act on the repo the sandbox was launched against. `gh` takes `--repo`
+  on nearly every subcommand and reads `GH_REPO`, so this forge declares both
+  (`repo_flags`, `repo_env`) and `docker/forge-guard.sh` refuses a value that
+  is not the launched-against repository. Fast-fail, not a boundary, exactly
+  as `merge_block` is: the session holds the token and could call the API
+  directly. What actually bounds it is the token's scope, so a per-repository
+  fine-grained PAT is the expected shape of `push_token_file`.
 
 So: if you have a choice, `gitea` is the better-worn path. Choose `github`
 because that is where your repositories are, which is a good reason - and
@@ -509,6 +546,16 @@ Two things it does not cover. A command that sends no body has none added -
 would be worse than leaving it. And running a forge CLI on the host, outside
 a sandbox, marks nothing: there the person running it wrote the body.
 
+**Once, whatever the body already says.** A body that already opens with the
+marker gets no second one - the marker is a statement rather than a count, and
+a body saying an agent wrote it has disclosed what this exists to disclose.
+That matters because agents write it themselves: every issue on a project
+worked on this way opens with that line, so one reading the existing issues
+concludes it is the house style. The same words further down the body are
+prose about disclosure rather than the disclosure, and still get one
+prepended. The session is also told the marker is added for it, which is the
+half that stops it being written at all.
+
 **Selecting `forge = github` is a real posture change, not just a config
 choice.** It opens `ssh.github.com:22` for push - the read-only GitHub access
 every session gets regardless (clone, fetch, `gh` API calls over port 443)
@@ -516,7 +563,10 @@ never needs port 22 at all. It opens it through core's existing GitHub push
 grant (`ALLOW_GITHUB_PUSH`, the same one `--allow-github-push` uses), which
 its `hosts_allowlisted_by_core = on` is what asks for: port 22 to GitHub's
 published ranges and nothing else, logged like every other allowed
-connection and verified by the firewall's own startup self-check. Only when
+connection and verified by the firewall's own startup self-check. The
+port restriction is an IPv4 statement; what makes port 22 shut *at all*
+without this grant is that the container blocks IPv6 as well, so an
+allowlist naming one address family is not the whole of it. Only when
 the selected workflow actually pushes - `forge = github` with
 `workflow = local-only` leaves port 22 shut. And `[forge.github] push_token_file` is
 deliberately a *separate*, write-capable token from `[github] token_file`

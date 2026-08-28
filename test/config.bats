@@ -27,7 +27,7 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$CONFIG_DIR" ${STUB_DIR:+"$STUB_DIR"}
+    rm -rf "$CONFIG_DIR" ${STUB_DIR:+"$STUB_DIR"} ${UPD_DIR:+"$UPD_DIR"}
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
@@ -487,6 +487,145 @@ write_config() {
         || { echo "the refusal does not name the key: $output"; return 1; }
 }
 
+# --- identities: the half of a project's config that belongs to a person -----
+#
+# A project's .dejima/ is committed and shared; an ssh key path and a token
+# path are per-user and per-machine. An identity is where those live, so a
+# project can name an account without naming a path.
+
+_identity_fixture() {
+    ID_DIR="$(mktemp -d)"
+    : > "$ID_DIR/default-key"; : > "$ID_DIR/work-key"; : > "$ID_DIR/oss-key"
+    : > "$ID_DIR/default-token"; : > "$ID_DIR/work-token"
+    write_config '[core]' 'forge = gitea' "ssh_key = $ID_DIR/default-key" \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        "token_file = $ID_DIR/default-token" \
+        '[identity.work]' "ssh_key = $ID_DIR/work-key" 'user_name = A Name' \
+        'user_email = name@work.example' "token_file = $ID_DIR/work-token" \
+        '[identity.oss]' "ssh_key = $ID_DIR/oss-key" \
+        '[identity.keyless]' "token_file = $ID_DIR/work-token"
+}
+
+@test "an identity supplies the ssh key and the forge credential" {
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    grep -qx "forge.gitea.token_file=$ID_DIR/work-token" <<< "$output" \
+        || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity that leaves a credential to the section beneath it is refused" {
+    # This used to fall through: oss names no token_file, so [forge.gitea]
+    # answered for it, and a session launched as oss talked to the forge as
+    # whichever account owns that token. An identity is how one session's
+    # account is kept separate from another's, so a credential crossing that
+    # line is the feature not working rather than a convenience it offers.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity oss --print-config
+    [ "$status" -ne 0 ] || { echo "the borrowed token was accepted: $output"; return 1; }
+    # Which credential, by name - "something is wrong with your identity" is
+    # not something an operator can act on.
+    [[ "$output" == *"[forge.gitea] token_file"* ]] \
+        || { echo "the refusal does not name the credential: $output"; return 1; }
+    # And nothing resolved is printed, for the same reason the missing-section
+    # refusal prints nothing: it would show this machine's token under oss.
+    [[ "$output" != *"forge.gitea.token_file=$ID_DIR/default-token"* ]] \
+        || { echo "printed the borrowed credential anyway: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity that leaves the ssh key to [core] is refused" {
+    # The other half, and the one the ambiguity was about: [core] ssh_key is
+    # the key a session gets when no identity is named, so an identity that
+    # names none is asking to push as itself with the default account's key.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity keyless --print-config
+    [ "$status" -ne 0 ] || { echo "the borrowed key was accepted: $output"; return 1; }
+    [[ "$output" == *"[core] ssh_key"* ]] \
+        || { echo "the refusal does not name the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a credential belonging to a forge this launch does not use is not borrowed" {
+    # Only the selected forge's keys. Refusing over a value nothing on this
+    # launch reads would make an unrelated section able to block a launch.
+    _identity_fixture
+    printf '[forge.github]\npush_token_file = %s\n' "$ID_DIR/default-token" \
+        >> "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -eq 0 ] \
+        || { echo "an unused forge's credential blocked the launch: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "with no identity named, the config's own credentials are the ones used" {
+    # The unnamed default, which is what [core] ssh_key means. Nothing about
+    # the refusals above touches a host that never names an identity.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/default-key" <<< "$output" || { echo "$output"; return 1; }
+    grep -qx "forge.gitea.token_file=$ID_DIR/default-token" <<< "$output" \
+        || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity that names nothing is refused, not ignored" {
+    # The whole point of the refusal: falling through to this machine's own
+    # credentials would push under the wrong account with nothing saying so.
+    # Pushing under the wrong key fails loudly; pushing under the default key
+    # when you asked for another does not fail at all.
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity wrok --print-config
+    [ "$status" -ne 0 ] || { echo "a nonexistent identity was accepted"; return 1; }
+    [[ "$output" == *"wrok"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"core.ssh_key="* ]] \
+        || { echo "printed a resolved config under an identity that does not exist"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a flag beats the identity, and the identity beats the file" {
+    _identity_fixture
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    # [core] identity in the file, overridden by the flag.
+    write_config '[core]' 'identity = work' "ssh_key = $ID_DIR/default-key" \
+        '[identity.work]' "ssh_key = $ID_DIR/work-key" \
+        '[identity.oss]' "ssh_key = $ID_DIR/oss-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    grep -qx "core.ssh_key=$ID_DIR/work-key" <<< "$output" || { echo "$output"; return 1; }
+    run "$REPO_ROOT/bin/dejima" --identity oss --print-config
+    grep -qx "core.ssh_key=$ID_DIR/oss-key" <<< "$output" \
+        || { echo "--identity did not beat [core] identity: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity may only set what a person owns" {
+    # Not a second config file with different rules about what may be in it.
+    _identity_fixture
+    write_config '[core]' 'forge = gitea' '[identity.work]' 'firewall = off'
+    run "$REPO_ROOT/bin/dejima" --identity work --print-config
+    [ "$status" -ne 0 ] || { echo "an identity set [core] firewall"; return 1; }
+    [[ "$output" == *"firewall"* ]] || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "an identity's git name reaches the container's gitconfig copy" {
+    # Appended to the COPY dejima already makes, so the real ~/.gitconfig is
+    # untouched - which was already true and is what the copy is for.
+    _identity_fixture
+    grep -q 'identity_git_field' "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer reads the identity's git name"; return 1; }
+    # Written with git itself rather than printf: the value is the operator's
+    # own text, and a name with a quote or a backslash in it has to survive
+    # into a file git reads back the same way.
+    grep -q 'git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig"' "$REPO_ROOT/bin/dejima" \
+        || { echo "the git name is no longer written with git"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
 @test "--harness selects a harness for one launch without changing the default" {
     # A host keeps one harness as its default and reaches another when it wants
     # to. Everything else was already in place - harnesses configure side by
@@ -637,6 +776,88 @@ write_config() {
     [[ "$output" == *"core.firewall=off"* ]]
     run "$REPO_ROOT/bin/dejima" --cmd nvim --print-config
     [[ "$output" == *"core.command=nvim"* ]]
+}
+
+@test "the narrowing flags only ever narrow" {
+    # Each of these turns something off for one launch and has no counterpart
+    # that turns it on. A config saying off is a decision; a flag that could
+    # undo it in passing would make the file's answer the weaker one.
+    write_config '[logging]' 'loki_url = https://loki.example.com' 'conversation = on' \
+        '[epitaph]' 'enabled = on' \
+        '[audit]' 'strict = off'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"logging.conversation=on"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-conversation --print-config
+    [[ "$output" == *"logging.conversation=off"* ]] || { echo "$output"; return 1; }
+    # and only that: the DNS and firewall log still ships.
+    [[ "$output" == *"logging.loki_url=https://loki.example.com"* ]] \
+        || { echo "--no-conversation took the whole log with it"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-log --print-config
+    grep -qx 'logging.loki_url=' <<< "$output" || { echo "$output"; return 1; }
+    # --no-log implies --no-conversation: shipping the transcript needs an
+    # endpoint, and leaving the key on while clearing the endpoint would read
+    # as conversation logging still being in force.
+    [[ "$output" == *"logging.conversation=off"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --no-epitaph --print-config
+    [[ "$output" == *"epitaph.enabled=off"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --strict-audit --print-config
+    [[ "$output" == *"audit.strict=on"* ]] || { echo "$output"; return 1; }
+
+    # None of them takes a value, so none can be turned back on by passing one.
+    local f
+    for f in --no-log --no-conversation --no-epitaph --strict-audit; do
+        run "$REPO_ROOT/bin/dejima" "$f" on --print-config
+        [ "$status" -ne 0 ] || { echo "$f accepted a value: $output"; return 1; }
+    done
+}
+
+@test "a harness-key flag sets the selected harness's key" {
+    # --model is one flag over harnesses that spell the setting differently or
+    # do not have it at all, so what it resolves to depends on the selection.
+    write_config '[core]' 'harness = cline' \
+        '[harness.cline]' 'model = from-the-file'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [[ "$output" == *"harness.cline.model=from-the-file"* ]] || { echo "$output"; return 1; }
+
+    run "$REPO_ROOT/bin/dejima" --model from-the-flag --base-url http://127.0.0.1:8080 \
+        --context-window 60000 --print-config
+    [[ "$output" == *"harness.cline.model=from-the-flag"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.base_url=http://127.0.0.1:8080"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.context_window=60000"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a harness-key flag is resolved after every flag, not where it appears" {
+    # --harness may come after --model, so which harness the key belongs to is
+    # not known until the whole line has been read. Resolving eagerly would
+    # bind the flag to whatever the config happened to say.
+    write_config '[core]' 'harness = claude-code'
+    run "$REPO_ROOT/bin/dejima" --model chosen --harness cline --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.model=chosen"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a harness-key flag is refused for a harness without that key" {
+    # Silently doing nothing is the failure worth avoiding: --model against a
+    # harness with no model setting reads as having chosen one.
+    write_config '[core]' 'harness = claude-code'
+    run "$REPO_ROOT/bin/dejima" --model x --print-config
+    [ "$status" -ne 0 ] || { echo "--model was accepted for claude-code"; return 1; }
+    [[ "$output" == *"claude-code"* ]] || { echo "the refusal does not name the harness: $output"; return 1; }
+    [[ "$output" == *"model"* ]] || { echo "the refusal does not name the key: $output"; return 1; }
+}
+
+@test "a harness-key flag names itself in a validation failure" {
+    # _set_override reports the key by default, and --context-window's key is
+    # context_window - an option nobody can type.
+    write_config '[core]' 'harness = cline'
+    run "$REPO_ROOT/bin/dejima" --context-window 5 --print-config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--context-window"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"--context_window"* ]] || { echo "reported the key, not the flag: $output"; return 1; }
 }
 
 @test "a flag value is validated against the same schema type" {
@@ -1199,6 +1420,12 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
     docker_log="$(mktemp)"
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
+    printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK="${RW_AGENT_SOCK-}" \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$1"
@@ -1319,6 +1546,8 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
     docker_log="$(mktemp)"
+    # Same as _rw_launch: the launch would otherwise reach the network.
+    printf '[core]\nupdate_check = off\n' >> "$CONFIG_DIR/config"
     HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
         SANDBOX_TEST_DOCKER_LOG="$docker_log" \
         run "$REPO_ROOT/bin/dejima" "$@" "$ws"
@@ -1755,19 +1984,32 @@ _epitaph_fixture() {
     EPI_SLUG="$(printf '%s' "$EPI_WS" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$EPI_TR/$EPI_SLUG"
     # The transcripts directory reaches the tool through the harness's own
-    # config key now, not as an argument: where transcripts live is the
-    # harness's, and dejima-epitaph no longer knows the shape of it.
+    # config key, not as an argument: where transcripts live is the harness's,
+    # and dejima-epitaph no longer knows the shape of it. `list` needs the same
+    # key to report whether the session behind an epitaph is still resumable.
     write_config '[epitaph]' "dir = $EPI_STORE" \
         '[harness.claude-code]' "projects_dir = $EPI_TR"
 }
 
-# One compact_boundary carrying the metadata, then the summary itself.
+# One compact_boundary carrying the metadata, then the summary itself. The
+# session id matches the transcript's filename, as Claude Code's own do -
+# that pairing is what `list` resolves to decide a session is still there.
 _epitaph_transcript() {
     local f="$EPI_TR/$EPI_SLUG/$1.jsonl" text="${2:-worked out X}" uid="${3:-aaaabbbb}"
+    local ts="${4:-2026-01-02T03:04:05.000Z}"
     {
         printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":900,"postTokens":90}}\n'
-        printf '{"type":"user","isCompactSummary":true,"uuid":"%s","sessionId":"s-1","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"%s"}}\n' "$uid" "$text"
+        printf '{"type":"user","isCompactSummary":true,"uuid":"%s","sessionId":"%s","timestamp":"%s","message":{"content":"%s"}}\n' "$uid" "$1" "$ts" "$text"
     } > "$f"
+}
+
+# Three epitaphs in a known order, so an index means something to assert on.
+_epitaph_three() {
+    _epitaph_fixture
+    _epitaph_transcript s1 "the firewall drops IPv6"      aaaa1111 2026-01-02T03:04:05.000Z
+    _epitaph_transcript s2 "the DNS proxy rewrote resolv" bbbb2222 2026-02-03T04:05:06.000Z
+    _epitaph_transcript s3 "worked out the audit baseline" cccc3333 2026-03-04T05:06:07.000Z
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
 }
 
 @test "an epitaph is written out of the container's reach" {
@@ -1839,6 +2081,128 @@ _epitaph_transcript() {
     [ -n "$(find "$EPI_STORE/$EPI_SLUG" -name '*.md' 2>/dev/null)" ] \
         || { echo "the workspace's own epitaph was not kept"; return 1; }
     git -C "$EPI_WS" worktree remove --force "$wt" 2>/dev/null || true
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list shows one row per epitaph, oldest first" {
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    # Chronological by the timestamp in the name, which is what makes an
+    # index stable enough for `show <n>` to mean anything.
+    grep -q '^ *1  2026-01-02' <<< "$output" || { echo "$output"; return 1; }
+    grep -q '^ *3  2026-03-04' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list says whether the session behind an epitaph is still resumable" {
+    # Resuming the real session beats reading a summary of it, so the listing
+    # has to say which of the two is still on offer.
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    rm -f "$EPI_TR/$EPI_SLUG/s2.jsonl"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 2 ] || { echo "$output"; return 1; }
+    grep -q '^ *2  .*aged out' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "reading the store is not gated on [epitaph] enabled" {
+    # Turning epitaph off must not strand what it already kept: the operator
+    # who switches it off is the one most likely to want to look at, and get
+    # rid of, what is there.
+    _epitaph_three
+    write_config '[epitaph]' "dir = $EPI_STORE" 'enabled = off' \
+        '[harness.claude-code]' "projects_dir = $EPI_TR"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    # Writing still is.
+    _epitaph_transcript s4 "should not be kept" dddd4444 2026-04-05T06:07:08.000Z
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
+    [ "$(find "$EPI_STORE" -name '*.md' | wc -l)" -eq 3 ]
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "list says the resumable state is unknown rather than guessing it" {
+    # Which sessions still have a transcript is the harness's answer. With no
+    # harness there is nobody to ask, and "aged out" would be a claim this
+    # cannot support - the transcripts may be sitting right there. The config
+    # is written directly because write_config seeds a harness otherwise.
+    _epitaph_three
+    printf '[epitaph]\ndir = %s\n' "$EPI_STORE" > "$CONFIG_DIR/config"
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c 'resumable' <<< "$output")" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c 'aged out' <<< "$output")" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +[0-9]+  [0-9]{4}-' <<< "$output")" -eq 3 ] || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "search finds an epitaph by content and reports its listing index" {
+    # The names are a timestamp and a uuid, so nothing about a filename says
+    # which session it was. Search is the only way in.
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" search "resolv" "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '1 of 3' <<< "$output" || { echo "$output"; return 1; }
+    # The index it prints is the position in the same listing `list` shows,
+    # so `show <n>` straight after a search opens what the search found.
+    grep -qE '^ *2  20260203' <<< "$output" || { echo "$output"; return 1; }
+    run "$REPO_ROOT/bin/dejima-epitaph" show 2 "$EPI_WS"
+    grep -q 'the DNS proxy rewrote resolv' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "search matching nothing says so without failing" {
+    _epitaph_three
+    run "$REPO_ROOT/bin/dejima-epitaph" search "nothing-in-any-of-them" "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'no epitaph matches' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "show writes to stdout when there is no terminal to open an editor on" {
+    # `dejima-epitaph show | grep` must not try to launch an editor, and a
+    # test is the same case as a pipe.
+    _epitaph_three
+    run env VISUAL=/bin/false EDITOR=/bin/false \
+        "$REPO_ROOT/bin/dejima-epitaph" show 1 "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'the firewall drops IPv6' <<< "$output" || { echo "$output"; return 1; }
+    # Newest by default.
+    run env VISUAL=/bin/false "$REPO_ROOT/bin/dejima-epitaph" show "$EPI_WS"
+    grep -q 'worked out the audit baseline' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "show opens the editor and leaves the epitaph at 0600" {
+    command -v script >/dev/null 2>&1 || skip "no script(1) to allocate a pty"
+    _epitaph_three
+    local ed; ed="$(mktemp -d)"
+    # Rewrites through a temp file and a rename, which is what an editor
+    # does and what drops the mode to the umask's.
+    printf '#!/bin/bash\nprintf "%%s\\n" "$1" > %s/got\nprintf edited > "$1.t" && mv "$1.t" "$1"\n' \
+        "$ed" > "$ed/ed"
+    chmod +x "$ed/ed"
+    local f; f="$(find "$EPI_STORE" -name '*.md' | sort | head -1)"
+    chmod 600 "$f"
+    run env VISUAL="$ed/ed" EDITOR="$ed/ed" script -qec \
+        "$REPO_ROOT/bin/dejima-epitaph show 1 $EPI_WS" /dev/null
+    [ -f "$ed/got" ] || { echo "the editor was never run: $output"; return 1; }
+    [ "$(cat "$ed/got")" = "$f" ] || { echo "opened $(cat "$ed/got"), wanted $f"; return 1; }
+    [ "$(stat -c %a "$f")" = "600" ] \
+        || { echo "left at $(stat -c %a "$f") after the editor rewrote it"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS" "$ed"
+}
+
+@test "an unknown epitaph subcommand is refused" {
+    _epitaph_fixture
+    run "$REPO_ROOT/bin/dejima-epitaph" delete-everything "$EPI_WS"
+    [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+    grep -q 'usage:' <<< "$output" || { echo "$output"; return 1; }
     rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
 }
 
@@ -2185,6 +2549,53 @@ STUB
     rm -rf "$workspace" "$RW_HOME" "$root" "${docker_log:-}"
 }
 
+@test "a forge credential never reaches the docker command line" {
+    # /proc/<pid>/cmdline is world-readable, so a secret passed as
+    # `-e NAME=value` is visible to every process on the host via ps - and
+    # from there into whatever captures ps output. That is how #226 was
+    # found: an operator ran ps while debugging something unrelated and
+    # pasted the result.
+    #
+    # `-e NAME` takes the value from the launcher's own environment instead,
+    # where it lives in /proc/<pid>/environ - mode 0400, owner only.
+    #
+    # This repository already made the argument one layer down: gitea-pr
+    # feeds curl its auth header on stdin rather than as an argument, and
+    # says why. The test is here so the two cannot drift apart again.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local tokfile="$RW_HOME/tok" secret="tok-$RANDOM-do-not-leak"
+    printf '%s\n' "$secret" > "$tokfile"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = gitea' 'workflow = local-only' \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        "token_file = $tokfile"
+    STUB_DIR="$(mktemp -d)"
+    local argv_log; argv_log="$(mktemp)"
+    cat > "$STUB_DIR/docker" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$SANDBOX_TEST_ARGV_LOG"
+exit 0
+STUB
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_DOCKER_LOG=/dev/null SANDBOX_TEST_ARGV_LOG="$argv_log" \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local argv; argv="$(cat "$argv_log")"
+    [ -n "$argv" ] || { echo "the stub captured no docker invocation"; return 1; }
+    # The whole point.
+    [[ "$argv" != *"$secret"* ]] \
+        || { echo "the token is in the docker command line"; return 1; }
+    # And it is still passed, by name, or the forge simply has no credential.
+    [[ "$argv" == *"-e GITEA_TOKEN"* ]] \
+        || { echo "GITEA_TOKEN is not passed at all: $argv"; return 1; }
+    # Specifically the bare form. `-e GITEA_TOKEN=` would also match above.
+    [[ "$argv" != *"-e GITEA_TOKEN="* ]] \
+        || { echo "passed as NAME=value after all: $argv"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$STUB_DIR" "$argv_log"
+}
+
 @test "the harness layer creates the harness's own state directories and environment" {
     # These were in the base image, imposed on every image dejima builds. They
     # are the selected harness's now, and have to actually reach its layer -
@@ -2225,4 +2636,399 @@ STUB
     [[ "$df" == *'ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'* ]] \
         || { echo "the declared environment is missing from the layer:"; echo "$df"; return 1; }
     rm -rf "$workspace" "$RW_HOME" "$dockerfile_log"
+}
+
+# --- dejima-update-check: is this checkout behind the branch it tracks? ---
+#
+# A real checkout and a real repository for it to track, neither of them this
+# one. bin/ and the provider trees are copied rather than symlinked because
+# the script finds its own repository through readlink -f "$0", which would
+# follow a symlink straight back to the repository running the tests.
+#
+# No `git push` anywhere below: dejima's own forge guard refuses a push to a
+# path, so a fixture built that way passes on a host and fails inside a
+# sandbox. The remote is an ordinary repository committed to directly.
+# GIT_CONFIG_GLOBAL and _SYSTEM neutralised alongside the identity this
+# already pins: a host with commit.gpgsign on, or an insteadOf rewrite, would
+# otherwise reach into a fixture that is supposed to depend on nothing.
+_upd_git() {
+    local d="$1"; shift
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        git -C "$d" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"
+}
+
+_upd_commit() {
+    _upd_git "$1" commit -q --allow-empty -m "$2"
+}
+
+_upd_fixture() {
+    UPD_DIR="$(mktemp -d)"
+    UPD_ORIGIN="$UPD_DIR/origin"
+    UPD_CHECKOUT="$UPD_DIR/checkout"
+    # Stated, not inherited: the cache lands under $HOME, and a test that left
+    # that alone would write into whoever ran it.
+    export HOME="$UPD_DIR/home"
+    # -b trunk so the fixture does not depend on the host's
+    # init.defaultBranch, and so no guard has an opinion about the name.
+    git init -q -b trunk "$UPD_ORIGIN"
+    _upd_commit "$UPD_ORIGIN" first
+    git clone -q "$UPD_ORIGIN" "$UPD_CHECKOUT"
+    cp -r "$REPO_ROOT/bin" "$REPO_ROOT/forges" "$REPO_ROOT/harnesses" \
+          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$UPD_CHECKOUT/"
+    printf '[core]\nharness = claude-code\n' > "$CONFIG_DIR/config"
+}
+
+_upd_check() { "$UPD_CHECKOUT/bin/dejima-update-check" 2>&1; }
+
+# Where _cache_file puts it, named once rather than at each assertion.
+_upd_cache() { printf '%s/.local/share/dejima/update-check' "$HOME"; }
+
+@test "a checkout level with its remote says nothing" {
+    _upd_fixture
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "a checkout behind its remote is told, and told how to update" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"origin/trunk"* ]] \
+        || { echo "does not name what it is behind: $output"; return 1; }
+    # The path, because the checkout that is behind is not necessarily the
+    # directory the operator is standing in when they read this.
+    [[ "$output" == *"git -C $UPD_CHECKOUT pull"* ]] \
+        || { echo "does not say how to update: $output"; return 1; }
+}
+
+@test "the commit count is given only when the commits are actually here" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    # Nothing fetched, so the tip is a commit this checkout has never seen and
+    # there is no number to give. Counting what it can reach would report the
+    # commits it already has, which is zero, not the one it is missing.
+    run _upd_check
+    [[ "$output" != *" 0 "* ]] || { echo "invented a count: $output"; return 1; }
+    [[ "$output" == *"has commits this checkout does not"* ]] \
+        || { echo "$output"; return 1; }
+
+    git -C "$UPD_CHECKOUT" fetch -q origin
+    rm -f "$(_upd_cache)"
+    run _upd_check
+    [[ "$output" == *"has 1 commit this checkout does not"* ]] \
+        || { echo "no count once the commit is present: $output"; return 1; }
+}
+
+@test "a checkout ahead of its remote says nothing" {
+    _upd_fixture
+    _upd_commit "$UPD_CHECKOUT" local-work
+    run _upd_check
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "a detached HEAD is silence, not a git error on the terminal" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    git -C "$UPD_CHECKOUT" checkout -q --detach HEAD
+    run _upd_check
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+}
+
+@test "[core] update_check off reaches the remote not at all" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    printf '[core]\nharness = claude-code\nupdate_check = off\n' > "$CONFIG_DIR/config"
+    run _upd_check
+    [ -z "$output" ] || { echo "said: $output"; return 1; }
+    # Silence alone would also be produced by asking and saying nothing. The
+    # cache is written on every lookup, including a failed one, so its absence
+    # is what shows no lookup happened.
+    [ ! -e "$(_upd_cache)" ] \
+        || { echo "it asked anyway"; return 1; }
+}
+
+@test "the remote is asked once, and the cached answer is compared to HEAD" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] || { echo "$output"; return 1; }
+
+    # Unreachable now. A second run inside the interval still reports, which
+    # is what makes this a throttle on the network call rather than on the
+    # notice - told once and then silence would be worse than never telling.
+    mv "$UPD_ORIGIN" "$UPD_ORIGIN.gone"
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] \
+        || { echo "the notice lasted one launch: $output"; return 1; }
+
+    # And it stops the moment HEAD catches up, from the same cached answer,
+    # without waiting for the interval to expire.
+    mv "$UPD_ORIGIN.gone" "$UPD_ORIGIN"
+    git -C "$UPD_CHECKOUT" fetch -q origin
+    git -C "$UPD_CHECKOUT" reset -q --hard origin/trunk
+    run _upd_check
+    [ -z "$output" ] || { echo "still complaining after updating: $output"; return 1; }
+}
+
+@test "the remote is not reached through the checkout's own git config" {
+    # The whole reason this tool talks to a URL from outside the repository.
+    # dejima mounts its own checkout writable when that is the workspace, so
+    # .git/config there is session-writable - and core.sshCommand names a
+    # command git runs on the host. Reaching the remote by name would turn a
+    # session's config write into host execution on the next launch, with no
+    # operator action at all.
+    _upd_fixture
+    # No port in the URL: git refuses to pass one to an sshCommand it classes
+    # as "simple", which would fail the control for a reason unrelated to what
+    # it tests. .invalid never resolves, so the mitigated path fails at once
+    # instead of reaching for an sshd that may exist on whoever runs this.
+    git -C "$UPD_CHECKOUT" remote set-url origin ssh://git@example.invalid/x.git
+    # A file rather than a message: the tool sends git's stderr to /dev/null,
+    # so an assertion on what it printed would hold whether the command ran or
+    # not. Execution has to be observed by its effect.
+    local ran="$UPD_DIR/repo-config-ran"
+    git -C "$UPD_CHECKOUT" config core.sshCommand \
+        "sh -c 'touch $ran; exit 1' --"
+    git -C "$UPD_CHECKOUT" config credential.helper "!sh -c 'touch $ran'"
+
+    run _upd_check
+    [ ! -e "$ran" ] || { echo "the checkout's own config ran"; return 1; }
+
+    # The control, so this cannot pass because the threat quietly went away.
+    # If a future git stops honouring a repository's core.sshCommand here,
+    # that is worth knowing rather than reading as a mitigation working.
+    run timeout 20 git -C "$UPD_CHECKOUT" ls-remote origin
+    [ -e "$ran" ] \
+        || { echo "reaching it by name no longer runs repo config: $output"; return 1; }
+}
+
+@test "a remote URL that could name a command is refused, not run" {
+    _upd_fixture
+    local marker="$UPD_DIR/pwned" url
+    for url in "ext::sh -c \"touch $UPD_DIR/pwned\"" \
+               "--upload-pack=touch $UPD_DIR/pwned" \
+               "http://example.invalid/x.git"; do
+        # Written into the file directly: `git remote set-url` rejects a value
+        # starting with a dash itself, which would leave that case untested.
+        sed -i "s#\turl = .*#\turl = $url#" "$UPD_CHECKOUT/.git/config"
+        rm -f "$(_upd_cache)"
+        run _upd_check
+        [ "$status" -eq 0 ] || { echo "$url exited $status"; return 1; }
+        [ ! -e "$marker" ] || { echo "$url ran"; return 1; }
+        # Nothing recorded either, so a refused URL does not also poison the
+        # cache for the hour after someone fixes it.
+        [ ! -e "$(_upd_cache)" ] \
+            || { echo "$url was attempted"; return 1; }
+    done
+}
+
+@test "a branch is compared against what it tracks, not against its own name" {
+    # `git worktree add -b x origin/development` leaves a branch called x
+    # tracking refs/heads/development. Asking the remote for refs/heads/x gets
+    # an empty answer, and an empty answer is indistinguishable from being up
+    # to date - so the whole check goes quiet on exactly the branches someone
+    # developing dejima is standing on.
+    _upd_fixture
+    git -C "$UPD_CHECKOUT" checkout -q -b feature --track origin/trunk
+    _upd_commit "$UPD_ORIGIN" second
+    run _upd_check
+    [[ "$output" == *"origin/trunk"* ]] \
+        || { echo "compared against the wrong ref: $output"; return 1; }
+}
+
+# --- what a session wrote, on its way to the operator's terminal ---
+#
+# Reading an epitaph is the tool's stated purpose, and every byte of one came
+# from a session transcript. Same class as the audit findings, which is why
+# both go through the same sanitize()/sanitize_body() in dejima-color-lib.sh.
+# Colour is off in these: bats captures the output, so nothing is a terminal
+# and every escape byte left is one the fixture planted.
+_epitaph_hostile() {
+    _epitaph_fixture
+    # \u001b through the JSON, which is how it would actually arrive: the
+    # extractor decodes it, so the store holds a real ESC byte.
+    local f="$EPI_TR/$EPI_SLUG/s1.jsonl"
+    {
+        printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"\\u001b[31mmanual","preTokens":900,"postTokens":90}}\n'
+        printf '{"type":"user","isCompactSummary":true,"uuid":"aaaabbbb","sessionId":"s1","timestamp":"2026-01-02T03:04:05.000Z","message":{"content":"first line\\u001b[2Jcleared\\nsecond\\u0007 line"}}\n'
+    } > "$f"
+    "$REPO_ROOT/bin/dejima-epitaph" save "$EPI_WS" >/dev/null 2>&1
+}
+
+@test "showing an epitaph strips the escapes a session put in it" {
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" show 1 "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    [[ "$output" != *$'\007'* ]] || { echo "a BEL reached the terminal"; return 1; }
+    # The text either side of the escape survives - this strips control bytes,
+    # it does not drop the content they were hidden in.
+    [[ "$output" == *"first line"* ]] && [[ "$output" == *"cleared"* ]] \
+        || { echo "$output"; return 1; }
+    # And it is still a body: the field rule would have taken the newlines
+    # with the rest of C0 and folded the whole epitaph onto one line.
+    [ "${#lines[@]}" -gt 1 ] || { echo "the body was folded to one line"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "searching epitaphs strips the escapes out of what it prints" {
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" search 'line' "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    [[ "$output" == *"first line"* ]] || { echo "the hit is gone entirely: $output"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "listing epitaphs strips the escapes out of the header fields" {
+    # trigger comes off the transcript, and the filename is built from its
+    # timestamp and uuid - so the row is session-authored on both sides.
+    _epitaph_hostile
+    run "$REPO_ROOT/bin/dejima-epitaph" list "$EPI_WS"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal"; return 1; }
+    rm -rf "$EPI_STORE" "$EPI_TR" "$EPI_WS"
+}
+
+@test "the update notice strips the escapes out of a remote's name" {
+    # Both the remote name and the branch it tracks are read from the
+    # checkout's .git/config, which is session-writable when dejima's own
+    # checkout is the workspace.
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    git -C "$UPD_CHECKOUT" config "branch.trunk.remote" "$(printf 'ori\033[2Jgin')"
+    git -C "$UPD_CHECKOUT" config "remote.$(printf 'ori\033[2Jgin').url" "$UPD_ORIGIN"
+    git -C "$UPD_CHECKOUT" config "remote.$(printf 'ori\033[2Jgin').fetch" '+refs/heads/*:refs/remotes/o/*'
+    run _upd_check
+    [[ "$output" == *"commits this checkout does not"* ]] \
+        || { echo "no notice at all: $output"; return 1; }
+    [[ "$output" != *$'\033'* ]] || { echo "an escape reached the terminal: $output"; return 1; }
+}
+
+@test "a launch does not reach the network to check for updates" {
+    # dejima-update-check runs on every launch, and this suite drives dozens
+    # of them. Each gets its own HOME and so its own empty cache, so without
+    # the fixtures turning it off every one of them would ls-remote the real
+    # origin: a five-second stall apiece wherever that origin is unreachable,
+    # and an $output that depends on how far behind the checkout happens to
+    # be. CI never sees it - a pull_request checkout is a detached HEAD, and
+    # the tool exits on that before it looks at a remote.
+    local workspace git_log real_git
+    _rw_setup
+    workspace="$(mktemp -d)"; git -C "$workspace" init -q
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    git_log="$(mktemp)"
+    real_git="$(command -v git)"
+    # A wrapper rather than a replacement: bin/dejima uses git for other
+    # things on this path, and a stub that answered nothing would fail the
+    # launch for an unrelated reason. On PATH rather than in _rw_launch's own
+    # stub directory, which it recreates on every call.
+    GIT_WRAP="$(mktemp -d)"
+    cat > "$GIT_WRAP/git" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$*" >> "$git_log"
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$GIT_WRAP/git"
+    PATH="$GIT_WRAP:$PATH"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$git_log" ] || { echo "the wrapper was never reached, so this proves nothing"; return 1; }
+    run grep -c 'ls-remote' "$git_log"
+    [ "$output" -eq 0 ] || { echo "the launch called out:"; grep ls-remote "$git_log"; return 1; }
+    rm -rf "$workspace" "$GIT_WRAP"
+}
+
+@test "[identity.default] is what a launch acts under when none is named" {
+    # The unnamed default gets a name, which is what lets it carry a git name
+    # and a forge credential beside the key rather than those coming from
+    # three different places.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/tok"
+    write_config '[core]' 'forge = gitea' \
+        '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
+        '[identity.default]' "ssh_key = $ID_DIR/default-key" \
+        "token_file = $ID_DIR/tok" 'user_name = dejima agent'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/default-key" <<< "$output" \
+        || { echo "the default identity did not supply the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "[core] ssh_key alongside [identity.default] is refused, not ranked" {
+    # Two spellings of one thing. Which key a session pushed with is not
+    # something to work out from precedence rules.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/new-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
+        '[identity.default]' "ssh_key = $ID_DIR/new-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ] || { echo "both spellings were accepted: $output"; return 1; }
+    [[ "$output" == *"[core] ssh_key"* ]] && [[ "$output" == *"[identity.default]"* ]] \
+        || { echo "the refusal does not name both: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "[core] ssh_key on its own still works, and says what replaced it" {
+    # Deprecated, not removed: it is how every config written before
+    # identities existed says this.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "a pre-identity config stopped working: $output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/old-key" <<< "$output" || { echo "$output"; return 1; }
+    [[ "$output" == *"[identity.default]"* ]] \
+        || { echo "nothing said what replaced it: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a named identity still beats [identity.default]" {
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/bot-key"
+    write_config '[core]' 'forge = none' \
+        '[identity.default]' "ssh_key = $ID_DIR/default-key" \
+        '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
+    run "$REPO_ROOT/bin/dejima" --identity bot --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/bot-key" <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "the [core] ssh_key deprecation is warned even when a launch does not use it" {
+    # A config with [core] ssh_key and a named identity is one migration away
+    # from the refusal - adding [identity.default] would stop it starting.
+    # Finding that out on the launch that breaks is worse than being told now,
+    # so the warning is about the config rather than about this launch.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/bot-key"
+    write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
+        'identity = bot' '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"[core] ssh_key is deprecated"* ]] \
+        || { echo "no migration warning: $output"; return 1; }
+    # And says it is not the key in play, so the reader is not left thinking
+    # this launch pushed with it.
+    [[ "$output" == *"runs as bot"* ]] \
+        || { echo "the warning does not say which account is in force: $output"; return 1; }
+    # The path, because "move it" is not actionable without knowing what.
+    [[ "$output" == *"$ID_DIR/old-key"* ]] \
+        || { echo "the warning does not name the key: $output"; return 1; }
+    rm -rf "$ID_DIR"
+}
+
+@test "a migrated config is warned about nothing" {
+    # The other half of a deprecation warning: it has to stop. One that fires
+    # after the migration is one an operator learns to ignore, which is how
+    # the next warning gets missed too.
+    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/key"
+    write_config '[core]' 'forge = none' \
+        '[identity.default]' "ssh_key = $ID_DIR/key" 'user_name = dejima agent'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"deprecated"* ]] \
+        || { echo "still warning after the migration: $output"; return 1; }
+    grep -qx "core.ssh_key=$ID_DIR/key" <<< "$output" \
+        || { echo "the migrated key is not the one in force: $output"; return 1; }
+    rm -rf "$ID_DIR"
 }

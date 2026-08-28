@@ -10,8 +10,17 @@
 # reason this is code is the pairing in the second block, which resolves one
 # directory tree through the filenames of another.
 
-# Registers the waiting/done notification handlers into dejima's settings
-# layer, in the shape Claude Code reads them.
+# Registers the `done` notification handler into dejima's settings layer, in
+# the shape Claude Code reads them.
+#
+# Stop only, though the hook and the host-side watcher both understand
+# `waiting` as well. Claude Code raises Notification when it needs permission
+# to run something and when the prompt has sat idle, and a dejima session runs
+# with permission prompts off - so the first never happens, and what is left
+# is a timer that expires shortly after the Stop it follows. Registering both
+# put two pushes on the operator's phone for one event, a minute apart, the
+# second saying nothing the first had not. `waiting` stays in the enum for a
+# harness that can say it without having stopped first.
 #
 # Claude Code merges hook entries across settings layers rather than letting
 # the higher one replace the lower, so these are added to whatever the
@@ -25,8 +34,7 @@
 harness_register_notify() {
     local settings="$1" tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
-    if jq '.hooks.Notification = ((.hooks.Notification // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh waiting"}]}])
-      | .hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+    if jq '.hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
         "$settings" > "$tmp"; then
         mv "$tmp" "$settings"
     else
@@ -442,6 +450,36 @@ harness_transcript_files() {
             printf '%s\t%s\n' "$slug" "$f"
         done
     done < <(workspace_slugs_sorted "$ws")
+}
+
+# Which sessions still have a transcript on disk, as "<key>\t<session-id>"
+# lines. `dejima-epitaph list` matches an epitaph's own session id against
+# this to say whether resuming the real session is still on offer, and it has
+# no way to work that out for itself: the id is in the filename here and is
+# the directory name for the next harness.
+#
+# $1 is a workspace, or absent for every key this harness holds transcripts
+# under - which is what `list --all` needs, since a store key is a slug and a
+# slug does not resolve back to a path.
+harness_live_sessions() {
+    local ws="${1:-}" projects key f d
+    projects="$(harness_config_get projects_dir)"
+    [ -n "$projects" ] || return 0
+    if [ -n "$ws" ]; then
+        while IFS=$'\t' read -r key f; do
+            [ -n "$f" ] || continue
+            printf '%s\t%s\n' "$key" "$(basename "$f" .jsonl)"
+        done < <(harness_transcript_files "$ws")
+        return 0
+    fi
+    for d in "$projects"/*/; do
+        [ -d "$d" ] || continue
+        key="$(basename "$d")"
+        for f in "$d"/*.jsonl; do
+            [ -f "$f" ] || continue
+            printf '%s\t%s\n' "$key" "$(basename "$f" .jsonl)"
+        done
+    done
 }
 
 # Compaction summaries out of this harness's transcripts.

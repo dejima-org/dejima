@@ -44,6 +44,11 @@ _provider_axis_dir() {
         forge)    printf 'forges' ;;
         workflow) printf 'workflows' ;;
         harness)  printf 'harnesses' ;;
+        # Not an axis in the select-one sense the other three are: a launch
+        # enables zero or more tools, and none is the default. It is here
+        # because everything else about it is the same - a manifest that is
+        # data, validated by the same schema machinery, never sourced.
+        tool)     printf 'tools' ;;
         *) echo "unknown provider axis: $1" >&2; return 1 ;;
     esac
 }
@@ -53,6 +58,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
+        tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
 }
@@ -143,6 +149,9 @@ capabilities	?list:identifier
 pr_command	?command
 issue_command	?command
 merge_block	?command
+repo_flags	?list:flag
+repo_env	?identifier
+identity_keys	?list:identifier
 disclose	?disclosures
 keys	?list:keyspec
 requires	?list:identifier
@@ -152,6 +161,22 @@ fixed_hosts	?list:hostname
 hosts_allowlisted_by_core	bool	off
 install	?list:installspec
 env_export	?list:export
+EOF
+            ;;
+        # An optional tool. Deliberately small: a tool declares what it is,
+        # what installs it, what its environment needs and what the session
+        # should be told about it - and nothing that could change what dejima
+        # permits. There is no key here for a hook, a mount, a domain or a
+        # guard, because a tool that needed one of those would be a change to
+        # the boundary rather than a program on PATH, and would have to be
+        # argued for rather than declared.
+        tool) cat <<'EOF'
+description	text
+install	depspec
+install_layout	enum:prefix|binary	prefix
+image_env	?list:envpair
+command	identifier
+instructions	?relpath
 EOF
             ;;
         workflow) cat <<'EOF'
@@ -270,6 +295,13 @@ _provider_valid_value() {
             # a bare command name and a multi-word one like "gh pr" both fit
             # and nothing shell-active does.
             [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*( [A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]
+            ;;
+        flag)
+            # A command-line option name, compared against argv by
+            # docker/forge-guard.sh. The leading dash is required: without it
+            # the guard would be comparing a word that could just as well be a
+            # subcommand or a value.
+            [[ "$value" =~ ^--?[A-Za-z0-9][A-Za-z0-9-]*$ ]]
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no
@@ -600,9 +632,52 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
+        # An identity is the operator's own name for a set of credentials, so
+        # there is no directory to check it against - only that it is a name
+        # at all. Unlike a provider, an unused one is not a misconfiguration:
+        # having [identity.oss] on a machine that never selects it is the
+        # normal state of a second account.
+        identity.*)
+            name="${section#identity.}"
+            valid_provider_name "$name"
+            return
+            ;;
         *) return 1 ;;
     esac
     provider_dir "$axis" "$name" >/dev/null 2>&1
+}
+
+# The keys an [identity.<name>] section may carry, as "<key>\t<type>" lines.
+#
+# ssh_key and the git identity are core's, because every forge needs the same
+# two answers to "who is pushing". Everything else is declared by a forge's
+# identity_keys and typed by that forge's own keys entry, so the identity
+# inherits the validation the forge already wrote rather than a second copy of
+# it that could disagree.
+#
+# A key name declared by two forges resolves to one type here, which is why a
+# static test refuses that collision rather than this function guessing.
+_identity_key_specs() {
+    printf 'ssh_key	?path
+'
+    printf 'user_name	?text
+'
+    printf 'user_email	?text
+'
+    local forge key spec
+    for forge in $(provider_list forge); do
+        for key in $(manifest_get forge "$forge" identity_keys); do
+            for spec in $(_provider_keys_field forge "$forge"); do
+                [ "${spec%%:*}" = "$key" ] || continue
+                # The forge's own type, with its default deliberately dropped:
+                # a default belongs to the forge's section, and repeating it
+                # here would make an identity that names no token look like one
+                # that named the default path.
+                printf '%s\t?%s\n' "$key" \
+                    "$(cut -f2 <<< "$(_provider_keyspec_parse "$spec")" | sed 's/^?//')"
+            done
+        done
+    done
 }
 
 # Looks up one [forge.<name>]/[harness.<name>] key's TYPE<TAB>DEFAULT in that
@@ -612,6 +687,17 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
+        identity.*)
+            rest="${want#identity.}"
+            key="${rest#*.}"
+            [ "$key" != "$rest" ] || return 1
+            while IFS=$'\t' read -r pname ptype; do
+                [ "$pname" = "$key" ] || continue
+                printf '%s\t' "$ptype"
+                return 0
+            done < <(_identity_key_specs)
+            return 1
+            ;;
         *) return 1 ;;
     esac
     rest="${want#*.}"
@@ -630,6 +716,250 @@ _config_extra_spec() {
         return 0
     done
     return 1
+}
+
+# What the selected identity says about one key, if anything.
+#
+# An identity answers for the credentials and the git name a PERSON brings to
+# a project, which is the half a project cannot declare: .dejima/ is committed
+# and shared, and a key path is per-user and per-machine. The project (or the
+# operator) names an identity; the identity supplies the paths.
+#
+# Returns 1 for a key no identity owns, which is most of them - the caller
+# then reads the config file as before. Deliberately narrow: an identity that
+# could set any key would be a second config file with different rules about
+# what may be in it.
+#
+# core.identity itself is excluded, and not merely by convention: the caller
+# that consults this is bin/dejima's config_get wrapper, so answering for the
+# key that names the identity would recurse into itself.
+# Whether the named identity exists in the config at all - any of its keys
+# being present is enough, because a section with no keys is not a section
+# the parser records.
+#
+# The check that matters: [core] identity naming a section nobody wrote is a
+# silent fall-through to the machine's defaults, which is the wrong direction
+# to be wrong in. Pushing under the wrong key fails loudly; pushing under the
+# default key when you asked for another one does not fail at all.
+identity_exists() {
+    local name="$1" key
+    [ -n "$name" ] || return 1
+    valid_provider_name "$name" || return 1
+    while IFS=$'\t' read -r key _; do
+        config_is_set "identity.$name" "$key" && return 0
+    done < <(_identity_key_specs)
+    return 1
+}
+
+# The credential keys the selected identity leaves to the section beneath it,
+# as "<section> <key>" lines, empty when there are none.
+#
+# Only the selected forge's, because refusing over a credential belonging to a
+# forge this launch does not use would be refusing over a value nothing reads.
+#
+# "Set" means written in the config file, not resolved from a schema default.
+# A forge whose credential key carries a default still hands an identity that
+# names none the machine's own path, and that is not caught here - see
+# docs/configuration.md, which says so rather than leaving it to be found.
+identity_borrowed_credentials() {
+    local name="$1" forge="$2" key
+    if ! config_is_set "identity.$name" ssh_key && config_is_set core ssh_key; then
+        printf 'core	ssh_key
+'
+    fi
+    for key in $(manifest_get forge "$forge" identity_keys); do
+        if ! config_is_set "identity.$name" "$key" \
+            && config_is_set "forge.$forge" "$key"; then
+            printf 'forge.%s	%s
+' "$forge" "$key"
+        fi
+    done
+}
+
+# Whether the selected identity, if there is one, is one a session can act
+# under without borrowing from anyone.
+#
+# Two refusals, one reason. A name with no section resolves to nothing and
+# falls through to the machine's own credentials; a section that names only
+# some of them falls through for the rest. Either way a session launched as
+# this identity acts under another account, and nothing says so. Pushing under
+# the wrong key fails loudly; pushing under the default key when you asked for
+# another one does not fail at all, which is the direction worth being careful
+# about.
+#
+# One function rather than a check at each caller: bin/dejima's --print-config
+# needs the same answer, because every value it prints resolves THROUGH the
+# identity and printing this machine's credentials under an identity's name is
+# the confusion the refusal exists to prevent.
+#
+# Guarded on the config existing rather than swallowing config_get's stderr:
+# with no file at all it says so, and a selection validated without one is a
+# legitimate case this must stay silent for.
+# The identity in force: [core] identity when it names one, and otherwise the
+# reserved `default` section when the config has one.
+#
+# `default` is what [core] ssh_key was without a name. Giving it one is what
+# lets a host state its ordinary account the same way it states any other,
+# with a git name and a forge credential beside the key rather than those
+# coming from three different places.
+#
+# Empty when neither applies, which is the pre-identity config and still a
+# supported one.
+# Assigns rather than prints, and every caller uses this form. identity_get
+# runs on every config_get through bin/dejima's wrapper, and `$(...)` around
+# an answer this cheap costs a fork per read - which is most of what a launch
+# spends on config.
+identity_selected_into() {
+    local __var="$1" __name=""
+    if config_exists; then
+        __name="$(config_get core identity)" || __name=""
+        if [ -z "$__name" ] && _identity_section_present default; then
+            __name=default
+        fi
+    fi
+    printf -v "$__var" '%s' "$__name"
+}
+
+identity_selected() {
+    local _n
+    identity_selected_into _n
+    printf '%s' "$_n"
+}
+
+# Whether a section has any key in the parsed config, read straight off the
+# parse rather than through identity_exists.
+#
+# identity_exists walks every forge's manifest to decide which keys count, and
+# bin/dejima's config_get wrapper reaches this on every single read - which
+# turned a --print-config from three seconds into forty. It does not need the
+# manifest: the parser refuses an unknown key outright, so anything present
+# under identity.<name> in a config that validated is already one of the keys
+# identity_exists would have accepted.
+_identity_section_present() {
+    local name="$1" k
+    config_exists || return 1
+    config_validate || return 1
+    for k in "${!_CFG_SEEN[@]}"; do
+        case "$k" in "identity.$name".*) return 0 ;; esac
+    done
+    return 1
+}
+
+identity_validate() {
+    local forge="$1" name="" borrowed section key
+    name="$(identity_selected)"
+
+    # [core] ssh_key is the default identity under its old name, so a config
+    # holding both says the same thing twice and dejima would have to pick.
+    # Refused rather than ranked: which key a session pushed with is not a
+    # thing to work out from precedence rules.
+    if identity_exists default && config_is_set core ssh_key; then
+        echo "[core] ssh_key is set and so is [identity.default], which is the same" >&2
+        echo "thing under two names - the key a session gets when none is asked for." >&2
+        echo "Move it into [identity.default] and remove [core] ssh_key." >&2
+        echo "See docs/configuration.md, \"Identities\"." >&2
+        return 1
+    fi
+
+    # Deprecated, not removed: it is how every config written before
+    # identities existed says this, and those still work. Warned on every
+    # launch that has it set, not only the ones using it - a config with
+    # [core] ssh_key and a named identity is one migration away from the
+    # refusal above, and finding that out on the launch that breaks is worse
+    # than being told now.
+    #
+    # Every launch rather than once, because there is nowhere to record
+    # "once" that a session could not reach, and a deprecation nobody sees
+    # until removal is not a deprecation.
+    if config_is_set core ssh_key; then
+        printf '  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
+            "${C_WARN:-}" "${C_RESET:-}" >&2
+        printf '  under its old name.\n' >&2
+        if [ -n "$name" ]; then
+            printf '  This launch runs as %s%s%s, so it is not the key being used here.\n' \
+                "${C_KEY:-}" "$name" "${C_RESET:-}" >&2
+        else
+            printf '  Nothing else names an account, so it is the key this launch uses.\n' >&2
+        fi
+        printf '  Move it into an [identity.default] section, which can carry the git\n' >&2
+        printf '  name and the forge credential belonging to that same account:\n\n' >&2
+        # The value in the file, not through config_get: in this process
+        # config_get is bin/dejima's wrapper, so with a named identity in
+        # force it answers with THAT identity's key - and printing it as the
+        # thing to move would name a key the operator is not being asked to
+        # touch.
+        printf '      [identity.default]\n      ssh_key = %s\n\n' \
+            "$(_config_get_from_file core ssh_key)" >&2
+    fi
+
+    [ -n "$name" ] || return 0
+
+    if ! identity_exists "$name"; then
+        echo "[core] identity is '$name', and no [identity.$name] section sets" >&2
+        echo "anything in $(config_path). An identity that resolves to nothing would" >&2
+        echo "quietly use this machine's own credentials instead - refusing rather than" >&2
+        echo "doing that. See docs/configuration.md, \"Identities\"." >&2
+        return 1
+    fi
+
+    borrowed="$(identity_borrowed_credentials "$name" "$forge")"
+    [ -n "$borrowed" ] || return 0
+    echo "[identity.$name] leaves a credential to the section beneath it, so a" >&2
+    echo "session launched as '$name' would act under whichever account owns:" >&2
+    while IFS=$'\t' read -r section key; do
+        [ -n "$key" ] || continue
+        echo "  [$section] $key" >&2
+    done <<< "$borrowed"
+    echo "An identity is how one session's account is kept separate from another's;" >&2
+    echo "set each of those under [identity.$name], or unset it in the section named." >&2
+    echo "See docs/configuration.md, \"Identities\"." >&2
+    return 1
+}
+
+identity_get() {
+    local section="$1" key="$2" name value pname
+    [ "$section.$key" != "core.identity" ] || return 1
+    # Which keys an identity could own, before working out which identity is
+    # in force: this runs on every config_get, and all but a handful of keys
+    # are ones no identity can answer for. Resolving the identity first meant
+    # doing that work ~40 times a launch to discard it ~35 of those times.
+    case "$section" in
+        core)       [ "$key" = ssh_key ] || return 1 ;;
+        forge.*)    ;;
+        *)          return 1 ;;
+    esac
+    identity_selected_into name
+    [ -n "$name" ] || return 1
+    # The manifest lookup last, for the same reason: it forks, and by here
+    # there is an identity that might actually answer.
+    case "$section" in
+        forge.*) _forge_owns_identity_key "${section#forge.}" "$key" || return 1 ;;
+    esac
+    value="$(config_get "identity.$name" "$key")" || return 1
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+# Whether one forge declared this key as naming an account rather than the
+# forge itself - a credential a session acts under, not a setting like an API
+# URL that every session on this host shares.
+_forge_owns_identity_key() {
+    local forge="$1" key="$2" k
+    for k in $(manifest_get forge "$forge" identity_keys); do
+        [ "$k" = "$key" ] && return 0
+    done
+    return 1
+}
+
+# The git name and address the identity carries, for the gitconfig copy the
+# container gets. Not core config keys: the host's own ~/.gitconfig is where
+# they come from without an identity, and adding a second place to set them
+# globally would be a new way to get the same answer.
+identity_git_field() {
+    local field="$1" name
+    name="$(identity_selected)" || return 1
+    [ -n "$name" ] || return 1
+    config_get "identity.$name" "$field"
 }
 
 # One key of the SELECTED harness, rather than of a harness named literally
@@ -707,6 +1037,8 @@ provider_validate_selection() {
     # quietly absent, because an operator who has them everywhere else would
     # otherwise have to read a manifest to find out they are gone here.
     #
+    identity_validate "$forge" || return 1
+
     # A name outside this set is a hard error rather than an unknown guard
     # treated as absent: a typo would otherwise silently turn a guard off,
     # which is the failure this whole declaration exists to prevent.
@@ -967,9 +1299,9 @@ What this means:
   it appears to. If a task needs one more domain and nothing else, that's
   a quick fix, not a reason to stop. Tell the user to run, from a terminal
   outside the sandbox, whichever of these matches why the domain is needed:
-    bin/dejima-allow --container {{container_id}} <domain>  # just this session
-    bin/dejima-allow --project <path> <domain>              # this project, always
-    bin/dejima-allow --global <domain>                      # every project
+    dejima-allow --container {{container_id}} <domain>  # just this session
+    dejima-allow --project <path> <domain>              # this project, always
+    dejima-allow --global <domain>                      # every project
   Pick deliberately rather than asking for all three: a domain this project
   needs is --project, not --global - a global grant widens every other
   project's firewall too, which is rarely what one project's dependency
@@ -1337,6 +1669,77 @@ _briefing_substitute() {
 # the resume command) - in that reading order. Every {{key}} is substituted
 # except {{session_id}}/{{container_id}}, deferred as @@SESSION_ID@@ and
 # @@CONTAINER_ID@@ for the hook that mounts this at session start.
+# A tool's manifest, plus the one rule its schema cannot express.
+#
+# image_env becomes a Dockerfile ENV, which every process in the container
+# inherits - not just the tool that declared it. A harness may set a bare name
+# there because a harness IS the container's main process; a tool is one
+# program among many and may not.
+#
+# This is not hypothetical. rtk shipped with NO_COLOR=1, reasoning that its
+# output lands in a model's context where an escape sequence is noise. The
+# reasoning was fine, the scope was wrong, and a launch with that tool enabled
+# lost colour in the harness, git, ls and everything else. The rule that would
+# have caught it is that a tool's variables must be namespaced to the tool.
+#
+# Uppercased, with anything that is not alphanumeric folded to an underscore,
+# so a tool named `my-tool` claims `MY_TOOL_*`.
+tool_validate() {
+    local name="$1" prefix pair varname
+    manifest_validate tool "$name" || return 1
+    prefix="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]' | tr -c '[:alnum:]' '_')_"
+    for pair in $(manifest_get tool "$name" image_env); do
+        varname="${pair%%=*}"
+        case "$varname" in
+            "$prefix"*) continue ;;
+        esac
+        echo "tool '$name' declares image_env $varname, which is not its own." >&2
+        echo "A tool's image_env reaches every process in the container, so a bare" >&2
+        echo "name like NO_COLOR or DO_NOT_TRACK changes the harness and everything" >&2
+        echo "else too. Name it ${prefix}something, or do not set it." >&2
+        return 1
+    done
+}
+
+# That the authorship marker is added for the session, so it does not add one.
+#
+# Every issue and pull request on a project worked on this way opens with that
+# line, so an agent reading the existing ones concludes it is the house style
+# and writes it into the body - and the shadow then added a second. Each
+# doubled artifact taught the next agent to do the same. docker/forge-guard.sh
+# refuses to add a second now, which holds whatever the session does; this is
+# the other half, which stops it being written in the first place.
+_briefing_core_disclosure() {
+    printf '%s' "Bodies you write for the forge - pull requests, issues, comments - are
+marked as agent-written before they are sent. Do not write that line
+yourself: it is added for you, and one is what the artifact should carry.
+The existing issues on a project all open with it for this reason, not
+because it was typed."
+}
+
+# What the session is told about the optional tools this launch enabled.
+#
+# The heading is core's and the body is each tool's own instructions.md, so a
+# tool describes itself once and every harness gets the same words. Nothing
+# here can change what the session may do - a tool's manifest has no key for
+# that - which is what makes rendering a project-selectable fragment into the
+# briefing safe at all.
+_briefing_core_tools() {
+    local tools="$1" tool frag dir out=""
+    out="Extra tools this session has, beyond the usual shell:"
+    for tool in $tools; do
+        dir="$(provider_dir tool "$tool")" || continue
+        frag="$(manifest_get tool "$tool" instructions)" || frag=""
+        out+=$'\n\n'
+        out+="- **$tool** - $(manifest_get tool "$tool" description)"
+        if [ -n "$frag" ] && [ -f "$dir/$frag" ]; then
+            out+=$'\n\n'
+            out+="$(sed 's/^/  /' "$dir/$frag")"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 briefing_compose() {
     local forge="$1" workflow="$2" harness="$3"
     local caps autonomy workflow_frag harness_frag text
@@ -1364,6 +1767,22 @@ briefing_compose() {
     fi
     if [ "${DEJIMA_CORPUS:-off}" = "on" ]; then
         text+="$(_briefing_core_corpus)"
+        text+=$'\n\n'
+    fi
+    # Optional tools, from DEJIMA_TOOLS. A tool the session is not told about
+    # is one it will not use, so the manifest's instructions fragment is the
+    # whole of the wiring for a harness: dejima renders it rather than letting
+    # the tool's own installer patch a config, which is the difference
+    # docs/tools.md draws between a hardened tool and a bare install.
+    if [ -n "${DEJIMA_TOOLS:-}" ]; then
+        text+="$(_briefing_core_tools "${DEJIMA_TOOLS}")"
+        text+=$'\n\n'
+    fi
+    # Only when something actually discloses. A session told about a marker
+    # nothing adds would be told a falsehood, and would then reasonably write
+    # one itself - which is the failure this paragraph exists to stop.
+    if [ -n "${DEJIMA_DISCLOSE:-}" ]; then
+        text+="$(_briefing_core_disclosure)"
         text+=$'\n\n'
     fi
     # The harness fragment closes the briefing: it supplies both the resume

@@ -1,0 +1,190 @@
+#!/bin/bash
+# Says when the dejima checkout a launch is running from is behind the branch
+# it tracks. Advisory: it prints and returns, and the session starts either
+# way. dejima updates by `git pull`, so "a newer version" means commits on the
+# branch this checkout already follows - there is no release channel to ask.
+#
+# The remote is contacted by URL, from outside the repository, and never by
+# remote name. `git ls-remote origin` reads the checkout's own config for how
+# to reach that remote, and core.sshCommand, credential.helper and
+# url.<base>.insteadOf each name a command git then runs on the host - which
+# is measurable, not theoretical. dejima mounts its own checkout writable when
+# it is the workspace (bin/dejima warns about this), so a session that wrote
+# .git/config there would get host execution out of the *next* launch. That is
+# the same class as the core.hooksPath route docs/security.md describes, with
+# one difference that matters: this one would fire on its own, where hooksPath
+# waits for the operator to run a git command. Reading the URL here and handing
+# it to a git started outside the repository leaves none of that config in the
+# path, and protocol.allow keeps the transports to the two that cannot name a
+# command.
+#
+# What still crosses that line is the URL itself, which a session with the same
+# write can point elsewhere. That costs one outbound request to a host of its
+# choosing, and no execution; dejima-audit reports the config change it took.
+#
+# Runs on the host, before the container exists.
+set -uo pipefail
+
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_UPDATE_CHECK_HELP'
+dejima-update-check - say when this dejima checkout is behind its remote
+
+Usage: dejima-update-check
+
+Compares the checkout bin/dejima runs from against the branch it tracks and
+prints one line when the remote has commits this checkout does not. Run at
+startup by bin/dejima; safe to run by hand.
+
+Silent when the checkout is current or ahead, when [core] update_check is off,
+when HEAD is detached or the branch has no counterpart on the remote, and
+whenever the remote cannot be reached. A version check that cannot answer is
+not a reason to interrupt a launch.
+
+The remote is asked at most once an hour. In between, the answer it last gave
+is compared against the current HEAD, so the notice goes away as soon as you
+pull rather than an hour later. Nothing is fetched either way - this reads one
+branch tip and no objects.
+
+See docs/configuration.md.
+DEJIMA_UPDATE_CHECK_HELP
+        exit 0 ;;
+esac
+
+# provider-lib rather than config-lib alone: an unknown key in the config file
+# is fatal, and [forge.<name>]/[harness.<name>] keys are only known once the
+# manifests are loaded.
+# shellcheck source=dejima-provider-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
+# shellcheck source=dejima-color-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
+
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+
+# How long the remote's answer stands before it is asked again. Every launch
+# reads the cached tip and compares it to HEAD; only the network call is
+# throttled, so this is a bound on staleness of the remote half, not on how
+# often the operator is told.
+CHECK_INTERVAL=3600
+
+# Alongside everything else dejima keeps on the host. This was under
+# XDG_STATE_HOME, which is where a throwaway timestamp belongs by the letter
+# of the spec - but it made ~/.local/state a fifth place dejima writes, for
+# one file, and `mkdir -p` created that base directory on hosts that had no
+# other use for it. One root is worth more than the distinction.
+#
+# No config key, where the four directories beside it have one: those are
+# records an operator reads or a directory that gets mounted, and this is a
+# hash that can be deleted at any moment with no loss. Nothing is served by
+# being able to move it.
+_cache_file() {
+    printf '%s/.local/share/dejima/update-check' "$HOME"
+}
+
+# Only the transports that cannot name a command to run. `ext::` is refused by
+# git itself, but the check is written against the shape of the URL rather than
+# against one scheme's current default, and a leading dash would be read as an
+# option by whatever eventually splits this.
+_usable_url() {
+    case "$1" in
+        -*|*'::'*)                return 1 ;;
+        https://*|ssh://*|file://*|/*) return 0 ;;
+        *@*:*)                    return 0 ;;   # scp-like, which is ssh
+        *)                        return 1 ;;
+    esac
+}
+
+# The remote's tip for one branch, or nothing. GIT_DIR and GIT_WORK_TREE are
+# dropped so an inherited one cannot put a repository's config back in the path
+# that -C '/' takes it out of.
+_remote_tip() {
+    local url="$1" ref="$2" out timeout=()
+    command -v timeout >/dev/null 2>&1 && timeout=(timeout 5)
+    out="$(env -u GIT_DIR -u GIT_WORK_TREE "${timeout[@]}" \
+        git -C / \
+            -c protocol.allow=never \
+            -c protocol.https.allow=always \
+            -c protocol.ssh.allow=always \
+            -c protocol.file.allow=always \
+            ls-remote --heads "$url" "$ref" 2>/dev/null)" || return 1
+    printf '%s' "${out%%$'\t'*}"
+}
+
+# stderr dropped rather than shown: a config this cannot read is one bin/dejima
+# has already refused to start on, and a version check is not the place anyone
+# should first hear about it.
+[ "$(config_get core update_check 2>/dev/null)" = "on" ] || exit 0
+
+git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || exit 0
+# --quiet so a detached HEAD is silence rather than an error on the terminal.
+branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)" || exit 0
+head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" || exit 0
+
+# The branch's own remote, falling back to origin: a branch created locally has
+# no branch.<name>.remote until it is pushed, and comparing it against origin's
+# branch of the same name is the right answer when there is one and silence
+# when there is not.
+remote="$(git -C "$REPO_ROOT" config --get "branch.$branch.remote" 2>/dev/null)"
+[ -n "$remote" ] || remote=origin
+# The ref it tracks, which is not always its own name - `git worktree add -b x
+# origin/development` leaves a branch called x tracking refs/heads/development.
+# Asking for refs/heads/x there gets an empty answer and reports nothing, which
+# looks exactly like being up to date.
+upstream="$(git -C "$REPO_ROOT" config --get "branch.$branch.merge" 2>/dev/null)"
+case "$upstream" in refs/heads/*) ;; *) upstream="refs/heads/$branch" ;; esac
+url="$(git -C "$REPO_ROOT" config --get "remote.$remote.url" 2>/dev/null)" || exit 0
+[ -n "$url" ] || exit 0
+_usable_url "$url" || exit 0
+
+cache="$(_cache_file)"
+tip=""
+if [ -f "$cache" ]; then
+    read -r c_branch c_tip < "$cache" 2>/dev/null || true
+    c_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    if [ "${c_branch:-}" = "$upstream" ] && [ "$c_age" -lt "$CHECK_INTERVAL" ]; then
+        tip="${c_tip:-}"
+        cached=1
+    fi
+fi
+
+if [ -z "${cached:-}" ]; then
+    # A failed lookup is recorded, not just skipped. Without that, a checkout
+    # with no route to its remote pays the timeout on every single launch.
+    tip="$(_remote_tip "$url" "$upstream")" || tip=""
+    mkdir -p "$(dirname "$cache")" 2>/dev/null \
+        && printf '%s %s\n' "$upstream" "${tip:--}" > "$cache" 2>/dev/null
+fi
+
+# "-" is a recorded failure; empty is a branch the remote does not have.
+case "${tip:-}" in ""|"-") exit 0 ;; esac
+[ "$tip" = "$head_sha" ] && exit 0
+
+# Ahead, or on a branch that has since been rewritten: having the commit and
+# it being an ancestor of HEAD are two different questions, and only the second
+# means there is nothing to report.
+count=""
+if git -C "$REPO_ROOT" cat-file -e "$tip^{commit}" 2>/dev/null; then
+    git -C "$REPO_ROOT" merge-base --is-ancestor "$tip" HEAD 2>/dev/null && exit 0
+    count="$(git -C "$REPO_ROOT" rev-list --count "HEAD..$tip" 2>/dev/null)"
+fi
+
+color_init
+# Both come out of the checkout's .git/config, which is session-writable when
+# dejima's own checkout is the workspace - the same reason the remote is
+# reached by URL rather than by name. A name carrying escape sequences would
+# fire on the terminal of the operator this is trying to inform.
+_remote_shown="$(sanitize "$remote")"
+_branch_shown="$(sanitize "${upstream#refs/heads/}")"
+# The count only when it is known. It is not, whenever the remote's tip is a
+# commit this checkout has never fetched, which is the common case - and a
+# number invented for those would be the number of commits it can see, not the
+# number there are.
+if [ -n "$count" ] && [ "$count" != "0" ]; then
+    if [ "$count" = "1" ]; then noun="commit"; else noun="commits"; fi
+    printf '%sdejima%s: %s/%s has %s %s this checkout does not.\n' \
+        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" "$C_INFO$count$C_RESET" "$noun" >&2
+else
+    printf '%sdejima%s: %s/%s has commits this checkout does not.\n' \
+        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" >&2
+fi
+printf '  Update with %sgit -C %s pull%s\n' "$C_KEY" "$REPO_ROOT" "$C_RESET" >&2

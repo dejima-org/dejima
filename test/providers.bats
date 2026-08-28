@@ -5,6 +5,7 @@
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    LIB_PROJECT="$REPO_ROOT/bin/dejima-project-lib.sh"
     CONFIG_DIR="$(mktemp -d)"
     export DEJIMA_CONFIG_DIR="$CONFIG_DIR"
 }
@@ -622,7 +623,7 @@ assert_remedy_forges_exist() {
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$(lib manifest_get workflow branch-push push)" = "on" ]
     [ "$(lib manifest_get workflow branch-push blocked_branches)" = "main master" ]
-    [ "$(lib manifest_get workflow branch-push block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow branch-push block_merge)" = "on" ]
     [ "$(lib manifest_get workflow branch-push requires_worktree)" = "on" ]
     [ "$(lib manifest_get workflow branch-push autonomy)" = "push-branch" ]
     # Requires no capability, so it is usable against a forge that offers
@@ -770,11 +771,51 @@ assert_remedy_forges_exist() {
     grep -q 'export DEJIMA_GITHUB_PUSH' "$REPO_ROOT/bin/dejima"
 }
 
+@test "no shipped workflow tells the agent not to merge without blocking it" {
+    # Every shipped briefing says some version of "do not merge". Two of them
+    # said it with block_merge off, which made the sentence an assertion
+    # nothing held: the forge's CLI is installed by the FORGE, so `<pr> merge`
+    # is on PATH whenever a forge is selected, whatever the workflow tells the
+    # agent to do. The manifest that was off carried a reason - "nothing here
+    # ever reaches a forge's PR interface" - and the reason was false.
+    #
+    # Asserted as an invariant over every workflow rather than as three pinned
+    # values, because a fourth workflow gets this wrong the same way. A
+    # workflow that genuinely means to permit merging has to say so in its
+    # briefing and change this test on purpose.
+    local wf name
+    for wf in "$REPO_ROOT"/workflows/*/; do
+        [ -d "$wf" ] || continue
+        name="$(basename "$wf")"
+        [ "$(lib manifest_get workflow "$name" block_merge)" = "on" ] \
+            || { echo "$name leaves merging unguarded"; return 1; }
+        grep -qi 'merg' "$wf/briefing.md" \
+            || { echo "$name's briefing says nothing about merging"; return 1; }
+    done
+}
+
+@test "a workflow blocking merges reaches the guard with the forge's command" {
+    # block_merge is only half of it: what actually refuses the command is
+    # DEJIMA_MERGE_BLOCK, resolved from the FORGE's merge_block and passed to
+    # docker/forge-guard.sh. A workflow with the flag on and a forge that
+    # names no command blocks nothing, which is correct - there is nothing to
+    # block - but the pairing is what has to hold.
+    local wf
+    for wf in branch-push local-only worktree-pr; do
+        [ "$(lib manifest_get workflow "$wf" block_merge)" = "on" ] || continue
+        [ -n "$(lib manifest_get forge gitea merge_block)" ] \
+            || { echo "gitea names no merge command for $wf to block"; return 1; }
+    done
+    grep -q 'DEJIMA_MERGE_BLOCK="$(manifest_get forge "$DEJIMA_FORGE_NAME" merge_block)"' \
+        "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer resolves the forge's merge command"; return 1; }
+}
+
 @test "local-only pushes nothing and blocks no branches" {
     run lib manifest_validate workflow local-only
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$(lib manifest_get workflow local-only push)" = "off" ]
-    [ "$(lib manifest_get workflow local-only block_merge)" = "off" ]
+    [ "$(lib manifest_get workflow local-only block_merge)" = "on" ]
     [ "$(lib manifest_get workflow local-only requires_worktree)" = "off" ]
     [ "$(lib manifest_get workflow local-only autonomy)" = "commit" ]
     # blocked_branches is empty BECAUSE push is off - there is no push to
@@ -787,6 +828,144 @@ assert_remedy_forges_exist() {
     run lib provider_validate_selection none local-only claude-code
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ -z "$output" ]
+}
+
+# --- optional tools ----------------------------------------------------------
+
+@test "every shipped tool is pinned by digest, not fetched from a moving ref" {
+    # The bar docs/tools.md sets, asserted rather than described. A tool that
+    # installs from whatever a branch points at today is one nothing has
+    # reviewed, and it would build differently on different days with no
+    # change to this repository.
+    local tool spec
+    for tool in $(lib provider_list tool); do
+        run lib manifest_validate tool "$tool"
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        spec="$(lib manifest_get tool "$tool" install)"
+        [[ "$spec" == tarball:* ]] \
+            || { echo "$tool does not install from a pinned artifact: $spec"; return 1; }
+        # valid_tarball_spec already requires a 64-hex digest and an https
+        # URL; this is the part it cannot check - that the URL names a
+        # version rather than a branch.
+        [[ "$spec" != *"/refs/heads/"* && "$spec" != *"/master/"* && "$spec" != *"/main/"* ]] \
+            || { echo "$tool installs from a moving ref: $spec"; return 1; }
+    done
+}
+
+@test "a tool cannot declare anything that changes what dejima permits" {
+    # The manifest has no key for a hook, a mount, a domain or a guard. A tool
+    # that needed one would be a change to the boundary rather than a program
+    # on PATH, and adding the key is the moment to argue about it - not the
+    # moment a manifest quietly starts carrying one.
+    local key
+    for key in guards hooks mounts api_domains fixed_hosts install_hook \
+               briefing no_confirm_args settings_args; do
+        run lib manifest_get tool rtk "$key"
+        [ "$status" -ne 0 ] \
+            || { echo "the tool schema accepts '$key', which it must not"; return 1; }
+    done
+}
+
+@test "rtk declares the archive shape its release actually has" {
+    # Inspected: `tar tzf rtk-x86_64-unknown-linux-musl.tar.gz` lists one
+    # entry, `rtk`, with no enclosing directory. Declared `prefix`, the layer
+    # would strip that single component, extract nothing, and build cleanly -
+    # a tool the session is told it has and does not.
+    #
+    # Pinned here because the emitter test below exercises both shapes with an
+    # explicit setting and so cannot notice this manifest changing.
+    [ "$(lib manifest_get tool rtk install_layout)" = "binary" ] \
+        || { echo "rtk's release is a bare binary and the manifest no longer says so"; return 1; }
+}
+
+@test "a tool may only set environment variables that are its own" {
+    # image_env becomes a Dockerfile ENV, which every process in the container
+    # inherits - not just the tool that declared it. rtk shipped with
+    # NO_COLOR=1, reasoning that its output lands in a model's context where an
+    # escape sequence is noise. The reasoning was fine and the scope was wrong:
+    # a launch with the tool enabled lost colour in the harness, in git, in ls,
+    # in everything.
+    #
+    # A harness may set a bare name there, because a harness IS the container's
+    # main process. A tool is one program among many.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/toolenv.XXXXXX")"
+    mkdir -p "$d/tools/probe"
+    local sha; sha="$(printf 'a%.0s' {1..64})"
+    local bad
+    for bad in 'NO_COLOR=1' 'DO_NOT_TRACK=1' 'PATH=/x' 'PROBEISH_X=1'; do
+        printf 'description = x\ninstall = tarball:p@%s:https://e.example/p.tgz\ncommand = p\nimage_env = %s\n' \
+            "$sha" "$bad" > "$d/tools/probe/tool.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; tool_validate probe' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted image_env $bad"; return 1; }
+        [[ "$output" == *"not its own"* ]] || { echo "$output"; return 1; }
+    done
+
+    # Namespaced to the tool, which is what a tool's own switch looks like.
+    printf 'description = x\ninstall = tarball:p@%s:https://e.example/p.tgz\ncommand = p\nimage_env = PROBE_TELEMETRY=0 PROBE_QUIET=1\n' \
+        "$sha" > "$d/tools/probe/tool.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" bash -c 'source "$1"; tool_validate probe' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "no shipped tool takes the colour out of the rest of the container" {
+    # The specific regression, pinned by name as well as by the rule above:
+    # these are the bare names most likely to look like a tool's own business
+    # and reach everything.
+    local tool pair
+    for tool in $(lib provider_list tool); do
+        run lib tool_validate "$tool"
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        for pair in $(lib manifest_get tool "$tool" image_env); do
+            case "${pair%%=*}" in
+                NO_COLOR|TERM|CLICOLOR|CLICOLOR_FORCE|FORCE_COLOR)
+                    echo "$tool sets ${pair%%=*} for the whole container"; return 1 ;;
+            esac
+        done
+    done
+}
+
+@test "rtk is declared with its telemetry switched off in the image" {
+    # Two independent offs, because either one can be wrong: the tool's own
+    # switch here, and the firewall, which does not allowlist the endpoint.
+    [[ "$(lib manifest_get tool rtk image_env)" == *"RTK_TELEMETRY_DISABLED=1"* ]] \
+        || { echo "rtk's telemetry switch is no longer set"; return 1; }
+    # And the endpoint stays out of what core allowlists.
+    run grep -rn 'telemetry.rtk-ai' "$REPO_ROOT/docker" "$REPO_ROOT/bin"
+    [ "$status" -ne 0 ] || { echo "the telemetry endpoint reached the allowlist:"; echo "$output"; return 1; }
+}
+
+@test "a tool's archive shape decides how it is unpacked" {
+    # A bare-binary archive stripped of a component extracts NOTHING, and does
+    # it silently: the layer builds, and the tool is not in it.
+    local spec
+    spec="tarball:x@$(printf 'a%.0s' {1..64}):https://e.example/x.tgz"
+    run env DEJIMA_TARBALL_STRIP=binary bash -c \
+        'source "$1"; generate_spec_dockerfile base "$2"' _ "$LIB_PROJECT" "$spec"
+    [[ "$output" == *"tar -C /opt/dejima/x/bin -xaf"* ]] \
+        || { echo "binary layout still strips a component: $output"; return 1; }
+    run env DEJIMA_TARBALL_STRIP=prefix bash -c \
+        'source "$1"; generate_spec_dockerfile base "$2"' _ "$LIB_PROJECT" "$spec"
+    [[ "$output" == *"--strip-components=1"* ]] \
+        || { echo "prefix layout stopped stripping: $output"; return 1; }
+    # Both verify before they unpack. A tar extracted first and checked after
+    # has already written whatever it contained.
+    [[ "$output" == *"sha256sum -c -"*"tar -C"* ]] \
+        || { echo "the digest is no longer checked before unpacking"; return 1; }
+}
+
+@test "the briefing names the tools a launch enabled, and says nothing when there are none" {
+    run env DEJIMA_TOOLS=rtk bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Extra tools this session has"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"rtk git status"* ]] \
+        || { echo "the tool's own instructions did not reach the briefing"; return 1; }
+
+    run env DEJIMA_TOOLS= bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ "$LIB"
+    [[ "$output" != *"Extra tools this session has"* ]] \
+        || { echo "a heading with nothing under it"; return 1; }
 }
 
 @test "the github forge pushes with its own token, not the read-only one" {
@@ -803,7 +982,92 @@ assert_remedy_forges_exist() {
     # declared: the entrypoint links the merge shadow only over a command that
     # is behind /usr/local/lib/dejima/forge, and refuses to start otherwise.
     # This forge shipping nothing of its own is what "system:" says.
-    [ "$(lib manifest_get forge github install)" = "system:gh" ]
+    # system:gh AND the one CLI this forge ships. install-forge-bins.sh fails
+    # the build in both directions - a declared file that is missing, and a
+    # file under bin/ that no manifest declares - so this is the declaration
+    # an operator reads to know what lands in the image.
+    [ "$(lib manifest_get forge github install)" = "system:gh bin/github-pr" ]
+}
+
+@test "each forge declares which of its keys belong to a person" {
+    # The credential paths, which a project may not declare and an identity
+    # may set. One declaration drives both rules, so they cannot disagree
+    # about which key is which.
+    [ "$(lib manifest_get forge gitea identity_keys)" = "token_file" ]
+    [ "$(lib manifest_get forge github identity_keys)" = "push_token_file" ]
+    [ -z "$(lib manifest_get forge none identity_keys)" ]
+    # And every one of them is a key that forge actually has, or the identity
+    # would offer a setting nothing reads.
+    local forge key spec found
+    for forge in $(lib provider_list forge); do
+        for key in $(lib manifest_get forge "$forge" identity_keys); do
+            found=0
+            for spec in $(lib manifest_get forge "$forge" keys); do
+                [ "${spec%%:*}" = "$key" ] && found=1
+            done
+            [ "$found" -eq 1 ] \
+                || { echo "$forge names identity key '$key' and has no such key"; return 1; }
+        done
+    done
+}
+
+@test "no two forges claim the same identity key name" {
+    # An identity's keys are unqualified, so one name resolving to two forges'
+    # types would make the validation depend on which forge was read first.
+    # Refused here rather than guessed at in _identity_key_specs.
+    local forge key seen=""
+    for forge in $(lib provider_list forge); do
+        for key in $(lib manifest_get forge "$forge" identity_keys); do
+            case " $seen " in
+                *" $key "*) echo "two forges declare identity key '$key'"; return 1 ;;
+            esac
+            seen="$seen $key"
+        done
+    done
+}
+
+@test "the identity key set is core's two plus whatever the forges declare" {
+    # ssh_key and the git name are core's, because every forge needs the same
+    # answer to "who is pushing". The credentials are not, and are typed by
+    # the forge that owns them rather than by a second copy here.
+    local specs
+    specs="$(lib _identity_key_specs)"
+    grep -qP '^ssh_key\t\?path$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^user_name\t\?text$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^user_email\t\?text$' <<< "$specs" || { echo "$specs"; return 1; }
+    grep -qP '^token_file\t\?path$' <<< "$specs" \
+        || { echo "token_file did not inherit gitea's type: $specs"; return 1; }
+}
+
+@test "the github forge declares how its CLI can be aimed at another repo" {
+    # gh takes --repo on nearly every subcommand and reads GH_REPO, so the
+    # ordinary path can act on a repository the session has nothing to do
+    # with (#187). The guard is generic; the manifest is what makes it fire.
+    [ "$(lib manifest_get forge github repo_flags)" = "--repo -R" ]
+    [ "$(lib manifest_get forge github repo_env)" = "GH_REPO" ]
+    # The gitea CLIs resolve the repo from origin and refuse another host, so
+    # there is nothing to declare and nothing for the guard to compare. A
+    # forge is not required to be aimable.
+    [ -z "$(lib manifest_get forge gitea repo_flags)" ]
+    [ -z "$(lib manifest_get forge gitea repo_env)" ]
+}
+
+@test "a repo flag has to look like a flag" {
+    # It is compared against argv. A bare word would be indistinguishable from
+    # a subcommand or a value, and would refuse commands at random.
+    local d bad; d="$(mktemp -d "$BATS_TEST_TMPDIR/flagtype.XXXXXX")"
+    mkdir -p "$d/forges/probe"
+    for bad in "repo" "--" "-" "--repo=x"; do
+        printf 'repo_flags = %s\n' "$bad" > "$d/forges/probe/forge.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted repo_flags = $bad"; return 1; }
+    done
+    # Space-separated, like every other manifest list.
+    printf 'repo_flags = --repo -R\n' > "$d/forges/probe/forge.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "the briefing does not call GitHub read-only when the forge can push to it" {

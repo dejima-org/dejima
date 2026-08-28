@@ -2,10 +2,10 @@
 
 [← dejima README](../README.md)
 
-Day-to-day configuration once dejima is installed and running: what a
-project declares versus what you approve, config parity with your host agent
-harness setup, a different editor, writable host directories, shared
-scratch space, frontend testing, and what the sandbox knows about itself.
+Day-to-day configuration once dejima is installed and running. The reference
+table below is every key there is; the sections after it cover what a project
+declares versus what you approve, what carries over from your host, mounts and
+scratch space, and what the sandbox knows about itself.
 
 ## Configuration reference
 
@@ -23,19 +23,22 @@ config file behind them.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection. Also settable per launch with `--harness`, which is how a host keeps one harness as its default and reaches another when it wants to |
-| `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
 | `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
-| `[core] command` | `claude` | container's main process (e.g. `nvim`), also settable per launch with `--cmd` |
+| `[core] command` | *(the selected harness's own `command`)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
+| `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. Unset selects `[identity.default]` where the config has one. A name with no section is refused rather than falling back |
+| `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
+| `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
-| `[core] ssh_key` | unset | dedicated deploy key for headless/unattended git push |
+| `[core] ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release |
-| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted |
-| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one |
+| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release. Also settable per launch with `--model` |
+| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted. Also settable per launch with `--base-url` |
+| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one. Also settable per launch with `--context-window` |
 | `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
 | `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
@@ -46,21 +49,25 @@ config file behind them.
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
-| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](docs/security.md)) |
-| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint |
-| `[epitaph] enabled` | `on` | keep the summary Claude Code writes when a session compacts |
+| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](security.md)) |
+| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |
+| `[epitaph] enabled` | `on` | keep the summary a harness writes when a session compacts; `--no-epitaph` skips it for one launch |
 | `[epitaph] dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
 | `[epitaph] loki` | `off` | also push each epitaph to `[logging] loki_url`, host-side |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md |
+| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md. `--no-conversation` turns it off for one launch, and `--no-log` implies it |
 | `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
 | `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
 | `[audit] keep` | `10` | how many past findings/baselines to retain |
-| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings |
+| `[audit] diffs` | `on` | keep the diff of what changed alongside each finding; `off` records that something changed without retaining the content |
+| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings; also settable per launch with `--strict-audit` |
 | `[remote-access] enabled` | `off` | the switch: nothing in "Remote access" below runs until this is `on` |
 | `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
 | `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
 | `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
 | `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
+| `[remote-access] ttyd_tmux_prefix` | unset | the tmux prefix the page's buttons send; the page assumes stock `C-b` without it |
+| `[remote-access] ttyd_focus_on_tap` | unset | `on` lets a tap on the terminal raise the phone keyboard; unset means only the KBD button does |
+| `[remote-access] ttyd_button_colors` | unset | `off` returns the toolbar to monochrome |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
 **No forge is the default**: `[core] forge = none` with
@@ -71,12 +78,11 @@ opting into when you pick one.
 ## Global and per-project domains and dependencies
 
 Allowed domains and dependencies each stack through their own layers. The
-layers **add** to each other, so a narrower layer can only widen what a
-broader one already permits: nothing at the project layer can withdraw a
-built-in domain, and nothing at the container layer can withdraw a project
-one. Ordering them least specific first is how they are listed below and how
-they are applied, and it means the set a session gets is the union of every
-layer that applies to it, never an override of one by another.
+layers **add** to each other, so a narrower layer can only widen what a broader
+one already permits: the set a session gets is the union of every layer that
+applies to it, never an override of one by another. Nothing at the project
+layer can withdraw a built-in domain, and nothing at the container layer can
+withdraw a project one.
 
 | Config | Layers, least specific first |
 | --- | --- |
@@ -95,61 +101,79 @@ A project can declare what it needs in two committed files:
                            # tarball:<name>@<sha256>:<url> release archive
 ```
 
-### Declaring that the history is evidence
+**Declaring grants nothing.** The project directory is bind-mounted
+read-write, so a session could write these files; they are read only to
+compare against reality and suggest a command. Approvals live outside the
+container under `~/.config/dejima/` (`$DEJIMA_CONFIG_DIR` relocates the
+tree) - global at its root, per project under `projects/<slug>/` - written
+only by tools you run on the host:
 
-A third file, approved the same way as the two above:
-
+```sh
+dejima-project status ~/myproject     # declared vs approved vs missing
+dejima-project approve ~/myproject    # review and approve the declared set
+dejima-allow --project ~/myproject crates.io
+dejima-allow --global crates.io       # applies to every project
+dejima-dep add --project ~/myproject cargo:cargo-nextest
+dejima-dep add --global cargo:cargo-nextest
 ```
-.dejima/corpus             # one rule per line; today, commit-per-step
-```
 
-An approved `commit-per-step` adds a paragraph to the session briefing
-requiring **one commit per plan step that writes a file**, rather than one
-commit per task, and explaining why. Absent or unapproved, nothing is added
-and nothing changes, which is the default for every project that has not asked
-for it.
+Two of those tools also write the declaration, so an approval you make by
+hand does not stay invisible to everyone else on the project:
+`dejima-allow --project` appends to `.dejima/allowed-domains`, and
+`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
+approval first - that is the part that grants - and report separately on the
+declaration, so a project you can't write to still gets you the approval.
+`--global` writes no declaration at all: there is no project to declare in.
 
-It goes through approval despite granting no capability, and that is
-deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
-session able to turn this on by writing a file would be writing the *next*
-session's system prompt. `bin/dejima` reads the approval store and never a
-project's declarations - a static test holds that it does not so much as name
-that directory.
+The declaration those two write still grants nothing, and writing to it does
+not promote it. That it is session-writable is exactly why both tools refuse to
+write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
+The refusal is the `open` itself rather than a check before it, so it holds even
+against a session still running while you type the command - see
+[Declaration files are session-writable](security.md#declaration-files-are-session-writable).
+The same write reads the file back to skip an already-declared entry, and that
+read is capped, since a session can make its own `.dejima/<kind>` arbitrarily
+large for free.
 
-An unknown rule is reported but never offered for approval. One that nothing
-implements would approve cleanly, sit in the store and do nothing, which reads
-as being in force when it is not.
+Neither writer has an inverse for the declaration. `dejima-dep remove
+--project` withdraws the approval and deliberately leaves the declaration
+alone (it says so, since `dejima-project approve` will otherwise offer the
+entry again); `dejima-allow --project` has no `remove` at all. Taking
+something back from the project itself means editing `.dejima/` and
+committing that.
 
-**Check the forge's merge policy before relying on this.** The briefing tells
-the agent how to commit, but the setting that can undo all of it is yours: a
-squash-merge is survivable, because a clone fetches remote branches and the
-step commits stay reachable through the branch ref, but deleting the branch
-afterwards removes the last thing pointing at them. Several forges offer
-"delete branch on merge" and some default it on. Measured both ways on a
-throwaway repository: squash-merge with the branch retained left every step
-commit reachable in a fresh clone; the same merge with the branch deleted first
-left none.
+`dejima-project status`/`approve` classify a declared entry against
+the union of global and project approvals, so something already approved
+globally shows as approved, not pending. Unlike `dejima-allow`,
+`dejima-dep`'s `--global` and `--project` are mutually exclusive -
+an entry belongs to exactly one scope. `dejima-dep` has no `--container`
+scope either, and refuses the flag rather than ignoring it: a dependency
+needs an image rebuild, so there is nothing to patch in a live session.
 
-So a project can adopt the rule, write every plan correctly, and still yield
-nothing, with no error anywhere - a squash-merged `main` looks perfectly
-healthy. dejima's own history is intact because it merges with merge commits.
+Approved domains join the allowlist at the next launch. `dejima-allow` can also
+patch a running session immediately, but only when run bare or with
+`--container` - approving here (`--project`/`--global`) never touches one; see
+[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
+A domain that resolves to a private address has no live patch at all. Approved
+dependencies are baked into a derived image built `FROM` the shared base -
+first `dejima:<username>-global` if the global store has any dependency
+approved, then `dejima:<username>-<slug>` on top of that if the project store
+does - so they take effect on the **next** launch. Because of that rebuild, the
+usual moment to approve is *after* leaving the sandbox, and persistence never
+requires a running container.
 
-The reason is recoverability rather than tidiness. A step is only legible
-afterwards if the file's state immediately before it and immediately after it
-can both be read back from history: before from the commit's parent, after
-from the commit. One commit carrying several steps that touch the same file
-destroys that, because no step in it can be isolated any more, and
-reconstructing one would mean building a file state the repository never held.
-Nothing recovers that later, so it has to be recorded while the work happens.
+`dejima-project approve` never attempts to patch a running session: it only
+ever calls `dejima-allow` without `--container`. If an individual approval
+can't be recorded - an unwritable store, a slug collision, a corrupt approval
+list - it reports that entry as not approved and keeps going, so one bad entry
+can't cost you the rest of the set. It then exits non-zero if anything failed,
+so `dejima-project approve ~/myproject && dejima` won't launch a session
+missing the approvals you just confirmed.
 
-It lives in the project rather than in `~/.config/dejima/config` because it is
-a fact about the repository. Anyone who clones it and runs dejima gets the same
-commit discipline, which is what makes the history uniformly usable: a rule
-half the contributors follow produces a history nothing can be taken from.
-
-What dejima does not do is say what the history is *for*. Collecting it, and
-deciding whether to, is the operator's business; the briefing states the rule
-the project already adopted and stops there.
+A session whose project declares something it doesn't have is told so in its
+startup context, with the exact command to hand you. Project approvals are
+inherited by subdirectories, so a git worktree under the project gets its
+parent's; global approvals apply everywhere regardless.
 
 ### Tarball dependencies
 
@@ -198,88 +222,53 @@ interpolated into a `RUN` line that runs as root at build time, so anything
 shell-active is refused outright rather than quoted around, and only `https`
 is accepted.
 
-**Declaring grants nothing.** The project directory is bind-mounted
-read-write, so a session could write these files; they are read only to
-compare against reality and suggest a command. Approvals live outside the
-container under `~/.config/dejima/` (`$DEJIMA_CONFIG_DIR` relocates the
-tree) - global at its root, per project under `projects/<slug>/` - written
-only by tools you run on the host:
+### Declaring that the history is evidence
 
-```sh
-dejima-project status ~/myproject     # declared vs approved vs missing
-dejima-project approve ~/myproject    # review and approve the declared set
-dejima-allow --project ~/myproject crates.io
-dejima-allow --global crates.io       # applies to every project
-dejima-dep add --project ~/myproject cargo:cargo-nextest
-dejima-dep add --global cargo:cargo-nextest
+A third file, approved the same way as the two above:
+
+```
+.dejima/corpus             # one rule per line; today, commit-per-step
 ```
 
-Two of those tools also write the declaration, so an approval you make by
-hand does not stay invisible to everyone else on the project:
-`dejima-allow --project` appends to `.dejima/allowed-domains`, and
-`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
-approval first - that is the part that grants - and report separately on the
-declaration, so a project you can't write to still gets you the approval.
-`--global` writes no declaration at all: there is no project to declare in.
+An approved `commit-per-step` adds a paragraph to the session briefing
+requiring **one commit per plan step that writes a file**, rather than one
+commit per task, and explaining why. Absent or unapproved, nothing is added
+and nothing changes, which is the default for every project that has not asked
+for it.
 
-The declaration those two write still grants nothing; it is the same
-untrusted file the section above describes, and writing to it does not
-promote it. That it is session-writable is exactly why both tools refuse to
-write a `.dejima` directory or a `.dejima/<kind>` file that is a **symlink**.
-The refusal is the `open` itself rather than a check before it, so it holds
-even against a session that is still running while you type the command. See
-[Declaration files are session-writable](security.md#declaration-files-are-session-writable)
-for what that defends against and how. The same write
-reads the file back to skip an already-declared entry, and that read is
-capped - a session can make its own `.dejima/<kind>` arbitrarily large for
-free, and an oversized one is refused rather than loaded into your memory.
+It goes through approval despite granting no capability, and that is
+deliberate. `.dejima/` lives in the workspace, which is session-writable, so a
+session able to turn this on by writing a file would be writing the *next*
+session's system prompt. `bin/dejima` reads the approval store and never a
+project's declarations - a static test holds that it does not so much as name
+that directory.
 
-Neither writer has an inverse for the declaration. `dejima-dep remove
---project` withdraws the approval and deliberately leaves the declaration
-alone (it says so, since `dejima-project approve` will otherwise offer the
-entry again); `dejima-allow --project` has no `remove` at all. Taking
-something back from the project itself means editing `.dejima/` and
-committing that.
+An unknown rule is reported but never offered for approval. One that nothing
+implements would approve cleanly, sit in the store and do nothing, which reads
+as being in force when it is not.
 
-`dejima-project status`/`approve` classify a declared entry against
-the union of global and project approvals, so something already approved
-globally shows as approved, not pending. Unlike `dejima-allow`,
-`dejima-dep`'s `--global` and `--project` are mutually exclusive -
-an entry belongs to exactly one scope. `dejima-dep` has no `--container`
-scope either, and refuses the flag rather than ignoring it: a dependency
-needs an image rebuild, so there is nothing to patch in a live session.
+The reason is recoverability rather than tidiness. A step is legible afterwards
+only if the file's state immediately before and immediately after it can both
+be read back: before from the commit's parent, after from the commit. One
+commit carrying several steps that touch the same file destroys that, and
+nothing recovers it later, so it has to be recorded while the work happens.
 
-Approved domains join the allowlist at the next launch. `dejima-allow` can
-also patch a running session immediately, but only when it is run bare or
-with `--container` - approving here (`--project`/`--global`, with no
-`--container`) never touches one; see
-[Adding a domain to a running session](security.md#adding-a-domain-to-a-running-session).
-A domain that resolves to a private address has no live patch at all - an
-internally-routed host can only be approved and picked up at the next launch.
-Approved dependencies are baked into a derived image built `FROM` the shared
-base - first `dejima:<username>-global`, if the global store has any
-dependency approved, then `dejima:<username>-<slug>` on top of that,
-if the project store does - so they need an image rebuild: they take effect
-on the **next** launch.
+**Check the forge's merge policy before relying on this.** The setting that can
+undo all of it is yours. A squash-merge is survivable, because the step commits
+stay reachable through the branch ref, but "delete branch on merge" - which
+several forges offer and some default on - removes the last thing pointing at
+them. Measured both ways on a throwaway repository: squash-merge with the
+branch retained left every step commit reachable in a fresh clone; the same
+merge with the branch deleted first left none. So a project can adopt the rule,
+write every plan correctly, and still yield nothing, with no error anywhere.
+dejima's own history is intact because it merges with merge commits.
 
-Because of that rebuild, the usual moment to approve is *after* leaving the
-sandbox - so persistence (`--global` or `--project`) never requires a running
-container.
-
-`dejima-project approve` never attempts to patch a running session: it only
-ever calls `dejima-allow` without `--container`, so recording the approval
-is the only thing it does. If an individual approval can't be recorded - an
-unwritable store, a slug collision, a corrupt approval list - it reports
-that entry as not approved and keeps going, rather than stopping at the
-first failure; that holds for dependencies and domains alike, so one bad
-entry can't cost you the rest of the set. It then exits non-zero if anything
-failed, so `dejima-project approve ~/myproject && dejima` won't launch a
-session missing the approvals you just confirmed.
-
-A session whose project declares something it doesn't have is told so in its
-startup context, with the exact command to hand you. Project approvals are
-inherited by subdirectories, so a git worktree under the project gets its
-parent's; global approvals apply everywhere regardless.
+It lives in the project rather than in `~/.config/dejima/config` because it is
+a fact about the repository: anyone who clones it gets the same commit
+discipline, and a rule half the contributors follow produces a history nothing
+can be taken from. What dejima does not do is say what the history is *for*.
+Collecting it is the operator's business; the briefing states the rule the
+project adopted and stops there.
 
 ## Config parity with your host agent harness setup
 
@@ -418,6 +407,100 @@ editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
 
+## Identities
+
+**Several accounts on one machine, and none of them yours.** An
+`[identity.<name>]` section groups what one session acts as - the SSH key, the
+forge token, the name on the commits - so that pointing a launch at a
+different account is one word rather than four edits.
+
+The rest of these documents ask you to give a session an account of its own -
+the README under [Using this responsibly](../README.md#using-this-responsibly),
+and security.md's [Give the sandbox its own
+identity](security.md#give-the-sandbox-its-own-identity). This is how you
+have more than one of them, which you will: an account is scoped to what it
+may reach, and one account scoped to everything any session might ever need
+is the thing separate accounts existed to avoid.
+
+So the sections are per **agent account**, not per person:
+
+```ini
+# Pushes to the gitea forge, and can reach nothing on GitHub.
+[identity.agent-gitea]
+ssh_key    = ~/.ssh/id_agent_gitea
+user_name  = dejima agent (gitea)
+user_email = agent-gitea@example.invalid
+token_file = ~/.config/gitea/agent-token
+
+# A GitHub account, with push rights to the repositories this host works on.
+[identity.agent-github]
+ssh_key         = ~/.ssh/id_agent_github
+user_name       = dejima agent (github)
+user_email      = agent-github@example.invalid
+push_token_file = ~/.config/gh/agent-push
+
+# A second GitHub account, for a repository the one above may not touch.
+[identity.agent-vendor]
+ssh_key         = ~/.ssh/id_agent_vendor
+user_name       = dejima agent (vendor)
+user_email      = agent-vendor@example.invalid
+push_token_file = ~/.config/gh/vendor-push
+```
+
+Select one with `[core] identity = agent-gitea`, or per launch with
+`--identity agent-github` - which is how one host runs a session against each
+of these at the same time, each pushing as itself.
+
+**The separation is the point.** Three accounts means three things you can
+scope, revoke and read in a log independently: a session that turns out to
+have been prompt-injected reached what its own account could reach, and
+answering "what did it touch" does not start with "everything I can touch".
+
+**What an identity may set** is deliberately narrow: `ssh_key`, `user_name`,
+`user_email`, and whichever keys the forges declare as an account's. A forge
+says which of its own keys those are (`identity_keys` in its manifest), so
+`token_file` belongs to an identity on the gitea path and `push_token_file`
+does on the GitHub one, and neither is a list core keeps its own copy of.
+
+**`default` is the account a session gets when none is named.** With `[core]
+identity` unset, an `[identity.default]` section is what a launch acts under -
+the ordinary account, given a name so it can carry the git name and the forge
+credential too.
+
+**`[core] ssh_key` is that key under its old name, and is deprecated.** A
+config with no `[identity.default]` reads it as before; a config with both is
+refused rather than ranked, because which key a session pushed with should not
+depend on precedence rules. Every launch that sets it says so and prints the
+section to move it into - including launches running as some other identity,
+which are one `[identity.default]` away from that refusal.
+
+**A credential does not fall through.** An identity that names some and leaves
+the rest to the section beneath it is refused, naming each one: an identity is
+how one session's account stays separate from another's. "Set" means written
+in the file, so a forge key carrying a schema default - `[forge.gitea]
+token_file` - still answers for an identity that names none.
+
+**A name with no section is refused.** `[core] identity = agent-gihub` does not
+quietly use this machine's own credentials - it stops the launch and says so.
+Pushing under the wrong key fails loudly; pushing under your default key when
+you asked for another one does not fail at all, which is the direction worth
+being careful about.
+
+**`user_name` and `user_email` reach the container's git config**, appended to
+the copy dejima already makes of your `~/.gitconfig`. Your real one is not
+touched, which was already true and is what the copy exists for.
+
+**Selection is the host's, not the project's.** There is no `.dejima/` kind
+for an identity and a project cannot name one: a project's `.dejima/` is
+committed and shared with everyone working on it, and both the credential and
+which account this host holds are that host's own. `[core] identity` and
+`--identity` are the whole of it today.
+
+A project-side layer would be a different thing than it sounds - not "this
+project's credentials", which cannot be shared, but "this project wants
+whichever account you have called X". That does not exist yet, and this
+document will say so until it does.
+
 ## Headless git push without agent forwarding
 
 **The reason to do this is identity, not uptime.** A forwarded agent
@@ -446,15 +529,15 @@ the public half as a Gitea deploy key scoped to just the repos that need
 push access, then set it in the config:
 
 ```
-[core]
+[identity.default]
 ssh_key = ~/.ssh/dejima_ed25519
 ```
 
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
 deletes the plaintext copy immediately after - the sandbox user itself never
 has a path to the raw key, only the agent socket (see
-[security notes](security.md) for the full mount rationale). Setting
-`[core] ssh_key` means a live forwarded agent is no longer required at all.
+[security notes](security.md) for the full mount rationale). Setting it means
+a live forwarded agent is no longer required at all.
 
 ## Using a different editor/application
 
@@ -556,6 +639,26 @@ colon is refused outright: both lists are colon-separated, so such a path
 cannot be represented in one at all and would otherwise split into two
 mounts that each fail the existence check.
 
+## Suspending a session
+
+Ctrl-Z backgrounds all of dejima - the container, the credential proxy, the
+conversation shipper - and `fg` brings back a working session, with the terminal
+put back the way the harness had it.
+
+That takes doing, because a container run holds the terminal in raw mode, where
+Ctrl-Z is not a signal at all: it is a byte, delivered to whatever is running
+inside. A harness that implements Ctrl-Z itself then stops itself, and nothing
+in a container can continue it - there is no job-control shell in there. So
+dejima takes that one character back for the host while a session runs
+(`bin/dejima-tty-suspend`). Ctrl-C and Ctrl-\ are deliberately left alone and
+still reach the session, which is how a harness expects to be interrupted.
+
+Suspending is not detaching. A suspended session is stopped, so it makes no
+progress until you resume it, and it belongs to the terminal you started it
+from. For a session that keeps working while you are away, or that you want to
+pick up from somewhere else, run dejima inside tmux and use
+[`dejima-attach`](remote-access.md).
+
 ## Shared scratch space
 
 `~/shared` is a read-write bind mount of `[core] share_dir` (default
@@ -580,6 +683,54 @@ goes away with it.
 means anything you left in it is readable by every session after the one you
 left it for. A credential dropped in there to get one job done, and then
 forgotten, is a credential you have handed to every session since.
+
+## Reading what a session left behind
+
+When a session compacts, the summary it writes is the only durable account of
+what a long session worked out - and it goes with the container. dejima keeps
+a copy host-side, in `[epitaph] dir`, from `bin/dejima`'s exit trap. That
+directory is never mounted into a container.
+
+Three commands read it, all defaulting to the repository you are standing in:
+
+```sh
+dejima-epitaph list                  # what is kept, oldest first
+dejima-epitaph search "dns proxy"    # which one was it
+dejima-epitaph show 12               # open it in $VISUAL or $EDITOR
+```
+
+`show` takes a position from the listing that `list` and `search` print, or
+an epitaph's filename, and defaults to the newest. It opens an editor when
+there is a terminal to open one on and writes to stdout when there is not, so
+`dejima-epitaph show | grep` behaves. `--all` widens `list` and `search` to
+every project on the machine, which is also how to see everything the store
+holds.
+
+**`list` says whether each session is still resumable.** Where it is, the
+transcript the summary came from is still on disk, and `claude --resume
+<session>` gives you the session itself rather than a summary of it. The
+epitaph is what remains after the harness ages that transcript out.
+
+**Nothing here hands an epitaph back to a session, and that is deliberate.**
+A session can write its own transcript, so it can author what its own epitaph
+says. Delivering that to a later session automatically would plant text in
+its premises as established background, which is the channel the
+never-mounted store exists to close. Reading one and deciding what to do with
+it is the operator's, which is why `show` opens an editor rather than
+injecting anything: the header it opens on records that this preserves what
+was written rather than vouching for it.
+
+**Kept until you delete them.** There is no rotation. Epitaphs are an
+archive, and a count-based cap would delete oldest-first - the entries most
+likely to hold reasoning nobody remembers. They are small (tens of KB each,
+against transcripts a hundred times that), so the store is a housekeeping
+question rather than a disk one: `[epitaph] dir` is a plain directory of
+plain markdown, and `rm` is the current answer.
+
+Setting `[epitaph] enabled = off` stops new ones being kept. It does not hide
+what is already there: `list`, `search` and `show` keep working, because
+turning the feature off is the point at which wanting to review and clear the
+store is most likely.
 
 ## Testing frontend changes
 

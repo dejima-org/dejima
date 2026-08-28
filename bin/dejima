@@ -30,26 +30,34 @@ Usage: dejima [options] [workspace] [-- args...]
   -- args...   everything after is passed to the harness command untouched
 
 Options (each overrides the config file for one launch only):
-  --forge <name>          which forge integration to use for this launch
+  --harness <name>        which harness to run
+  --forge <name>          which forge integration to use
   --workflow <name>       what the agent is told to do with its work
   --cmd <command>         run this instead of the harness's own command
-  --ro,  --extra-readonly <path>    also mount this host path read-only
-  --rw,  --extra-read-write <path>  also mount this host path read-write
-  --allow-github-push     open GitHub's push path (port 22) for this launch
+  --identity <name>       which [identity.<name>] supplies the credentials
+  -i, --include <tool>    add an optional tool to this launch (repeatable);
+                          see docs/tools.md for what dejima ships
+  --model <id>            the selected harness's model, where it has one;
+  --base-url <url>          its endpoint, and how much context it may use.
+  --context-window <n>      Refused for a harness with no such setting
+  --ro <path>             mount read-only; --rw read-write. Repeatable. Long
+                          forms --extra-readonly and --extra-read-write. Both
+                          refuse a path overlapping dejima's own stores
+  --allow-github-push     open GitHub's push path (port 22)
+  --strict-audit          refuse to start over unacknowledged CRITICAL findings
+  --no-log                ship nothing to the log endpoint this launch
+  --no-conversation       keep this session's transcript out of the log
+  --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
   --print-config          print the resolved configuration and exit
-  --print-briefing        print the session briefing the agent will get, and exit
+  --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
 
---ro and --rw may be given more than once. Both refuse a path that overlaps
-dejima's own approval, audit or epitaph stores.
+Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
+config that says off is a decision, not a default to override in passing.
 
-Configuration lives in ~/.config/dejima/config and [core] harness must be set
-before a launch will start. --print-config shows what is actually in effect,
-including which flag overrode which key.
-
-See docs/configuration.md for every key, docs/security.md for what the
-container can and cannot reach.
+Config lives in ~/.config/dejima/config and [core] harness must be set before
+a launch starts. --print-config prints every key as it resolves.
 DEJIMA_HELP
         exit 0 ;;
 esac
@@ -111,10 +119,14 @@ fi
 FLAG_OVERRIDES=()
 _set_override() {
     local key="$1" value="$2" type entry
+    # $3 is the flag to blame, for the flags whose spelling is not their key's:
+    # --context-window sets context_window, and reporting the key back would
+    # name an option the operator cannot type.
+    local flag="${3:---${1##*.}}"
     local -a kept=()
     type="$(config_type "$key")" || { echo "unknown config key: $key" >&2; exit 1; }
     if ! _config_valid_value "$type" "$value"; then
-        echo "invalid value for --${key##*.}: $value" >&2
+        echo "invalid value for $flag: $value" >&2
         exit 1
     fi
     # A repeated flag takes the last value, same as a repeated key in the
@@ -190,9 +202,26 @@ _mount_label() {
     esac
 }
 
+# A flag naming one of the SELECTED harness's keys, deferred because which
+# harness is selected is not known until every flag has been read - --harness
+# may come after --model. Recorded here, resolved below the loop.
+#
+# Deferred rather than resolved eagerly so the error can name the harness:
+# "claude-code has no model setting" is actionable where "unknown config key"
+# is not.
+HARNESS_KEY_FLAGS=()
+_defer_harness_key() {
+    HARNESS_KEY_FLAGS+=("$1=$2=$3")
+}
+
 PRINT_CONFIG=0
 PRINT_BRIEFING=0
 ALLOW_GITHUB_PUSH_FLAG=0
+# Additive, like --ro and --rw and unlike every other flag here: an optional
+# tool asked for on the command line is one MORE than the config and the
+# project already agreed on, not a replacement for them. Repeatable.
+TOOL_FLAGS=()
+NO_LOG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
@@ -200,8 +229,27 @@ while [ $# -gt 0 ]; do
         --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
         --allow-github-push) ALLOW_GITHUB_PUSH_FLAG=1; shift ;;
+        # Narrowing flags. Each has no counterpart that turns the setting back
+        # on: a config saying off is a decision, and a flag that could undo it
+        # in passing would make the file's answer the weaker one.
+        --strict-audit)      _set_override audit.strict on; shift ;;
+        --no-epitaph)        _set_override epitaph.enabled off; shift ;;
+        --no-conversation)   _set_override logging.conversation off; shift ;;
+        --no-log)            _set_override logging.loki_url ""
+                             _set_override logging.conversation off
+                             NO_LOG=1; shift ;;
+        --model)          _need_value --model "${2:-}"
+                          _defer_harness_key --model model "$2"; shift 2 ;;
+        --base-url)       _need_value --base-url "${2:-}"
+                          _defer_harness_key --base-url base_url "$2"; shift 2 ;;
+        --context-window) _need_value --context-window "${2:-}"
+                          _defer_harness_key --context-window context_window "$2"; shift 2 ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
+        --identity) _need_value --identity "${2:-}"; _set_override core.identity "$2"; shift 2 ;;
+        --include|-i)
+            _need_value --include "${2:-}"
+            TOOL_FLAGS+=("$2"); shift 2 ;;
         --forge)    _need_value --forge "${2:-}";    _set_override core.forge "$2";    shift 2 ;;
         --workflow) _need_value --workflow "${2:-}"; _set_override core.workflow "$2"; shift 2 ;;
         --extra-readonly|--ro)
@@ -219,14 +267,51 @@ done
 # Defined here rather than in the library because an override is a property
 # of one invocation of this launcher, not of the config file.
 config_get() {
-    local key="$1.$2" entry
+    local key="$1.$2" entry value
     for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
         [ "${entry%%=*}" = "$key" ] || continue
         printf '%s' "${entry#*=}"
         return 0
     done
+    # The selected identity, for the handful of keys an identity owns: the
+    # credentials and the ssh key a PERSON brings, which is the half a shared
+    # project file cannot carry. Below a flag, because a flag is this launch
+    # and an identity is this project; above the file, because the file is the
+    # machine's default and naming an identity is how you say "not that one".
+    #
+    # Every consumer goes through config_get, including forge_env_exports in
+    # the library, so this one wrapper is the whole insertion point.
+    if value="$(identity_get "$1" "$2")"; then
+        printf '%s' "$value"
+        return 0
+    fi
     _config_get_from_file "$1" "$2"
 }
+
+# The deferred harness-key flags, now that --harness has been read and
+# config_get honours it. A key the selected harness does not declare is
+# refused by name rather than ignored: a --model that silently did nothing
+# because the harness has no such setting is the failure worth avoiding, and
+# it is the whole reason these are not resolved inside the loop above.
+if [ "${#HARNESS_KEY_FLAGS[@]}" -gt 0 ]; then
+    _flag_harness="$(config_get core harness)"
+    for _entry in "${HARNESS_KEY_FLAGS[@]}"; do
+        _flag="${_entry%%=*}"
+        _rest="${_entry#*=}"
+        _key="${_rest%%=*}"
+        _value="${_rest#*=}"
+        if [ -z "$_flag_harness" ]; then
+            echo "$_flag needs a harness: set [core] harness or pass --harness." >&2
+            exit 1
+        fi
+        if ! config_type "harness.$_flag_harness.$_key" >/dev/null 2>&1; then
+            echo "the $_flag_harness harness has no '$_key' setting, so $_flag does not apply to it." >&2
+            exit 1
+        fi
+        _set_override "harness.$_flag_harness.$_key" "$_value" "$_flag"
+    done
+    unset _flag_harness _entry _flag _rest _key _value
+fi
 
 # Retired environment variables. Named, never honoured: silently ignoring an
 # exported LOKI_URL means logs stop shipping with nothing saying why, and
@@ -356,6 +441,14 @@ fi
 # testable without booting Docker.
 if [ "$PRINT_CONFIG" = 1 ]; then
     config_validate || exit 1
+    # Before printing, not only before launching. Every value below resolves
+    # THROUGH the identity, so printing them under a name that resolves to
+    # nothing would show this machine's own credentials as though they were
+    # the identity's - the exact confusion the refusal exists to prevent, in
+    # the one command an operator runs to check what they configured.
+    # The forge is read here rather than taken from DEJIMA_FORGE_NAME, which
+    # is resolved further down, past this early exit.
+    identity_validate "$(config_get core forge)" || exit 1
     while IFS= read -r _key; do
         _section="${_key%.*}"
         _leaf="${_key##*.}"
@@ -456,6 +549,44 @@ case " $_corpus_approved " in
     *" commit-per-step "*) DEJIMA_CORPUS=on ;;
 esac
 unset _corpus_approved
+
+# The optional tools this launch has: [core] tools, plus whatever the project
+# declared AND the operator approved, plus --include. A union rather than a
+# precedence chain, because each of the three answers a different question -
+# what this machine always wants, what this project needs, what this run is
+# for - and none of them is a correction of another.
+#
+# The project's half comes from the APPROVAL STORE and never from the
+# declaration in the workspace, for the reason the corpus block above gives:
+# that file is session-writable, and a session that could add a tool would be
+# choosing what the next session's image contains. This file may not name that
+# directory at all, and a static test holds it to that - which is why the path
+# is not spelled out here.
+#
+# Every name is checked against a manifest that exists before it reaches the
+# image build. approved_entries already refuses an entry its validator does
+# not accept, so the only unchecked source is the flag - which is the
+# operator's own typing, and gets the same answer.
+DEJIMA_TOOLS=""
+_tools_wanted="$(config_get core tools | tr ':' ' ')"
+_tools_wanted="$_tools_wanted $(approved_entries "$(config_root)" tools | tr '\n' ' ')"
+if [ -n "$PROJECT_STORE" ]; then
+    _tools_wanted="$_tools_wanted $(approved_entries "$PROJECT_STORE" tools | tr '\n' ' ')"
+fi
+_tools_wanted="$_tools_wanted ${TOOL_FLAGS[*]-}"
+for _tool in $_tools_wanted; do
+    [ -n "$_tool" ] || continue
+    case " $DEJIMA_TOOLS " in *" $_tool "*) continue ;; esac
+    if ! valid_tool_name "$_tool"; then
+        echo "no optional tool named '$_tool'." >&2
+        echo "Available: $(provider_list tool | tr '\n' ' ')" >&2
+        echo "See docs/tools.md." >&2
+        exit 1
+    fi
+    tool_validate "$_tool" || exit 1
+    DEJIMA_TOOLS="${DEJIMA_TOOLS:+$DEJIMA_TOOLS }$_tool"
+done
+unset _tools_wanted _tool
 
 
 AUDIT_DIR="$(config_get audit dir)"
@@ -671,6 +802,41 @@ if [ -n "$_disclose_spec" ]; then
     IFS="$_old_ifs"
 fi
 
+# How this forge's CLI can be aimed somewhere other than the repository the
+# session was launched against, and what that repository is (#187).
+#
+# A CLI that resolves the repo from origin and refuses another host cannot be
+# aimed anywhere and declares nothing here. One that takes the repository as
+# an option makes acting on an unrelated repository the same length of command
+# as acting on this one. Which is which is the forge's to declare; core only
+# resolves the repository the declaration is compared against, and
+# docker/forge-guard.sh does the comparing.
+#
+# The last two path components of origin's URL, which is the same
+# "<owner>/<name>" both forges use and covers ssh, scp-style and https
+# remotes without parsing any of them as a URL. No origin, or a workspace
+# that is not a checkout, leaves this empty - and the guard then refuses any
+# --repo or GH_REPO outright rather than waving it through. A workspace with
+# no origin has nothing such a flag could legitimately name, so "cannot
+# confirm" is not a reason to allow it.
+DEJIMA_FORGE_REPO_FLAGS="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_flags)"
+DEJIMA_FORGE_REPO_ENV="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_env)"
+DEJIMA_FORGE_REPO=""
+if [ -n "$DEJIMA_FORGE_REPO_FLAGS" ] || [ -n "$DEJIMA_FORGE_REPO_ENV" ]; then
+    _origin_url="$(git -C "$WORKSPACE_DIR" remote get-url origin 2>/dev/null)" || _origin_url=""
+    if [ -n "$_origin_url" ]; then
+        _origin_url="${_origin_url%/}"
+        _origin_url="${_origin_url%.git}"
+        _origin_name="${_origin_url##*/}"
+        _origin_rest="${_origin_url%/*}"
+        _origin_owner="${_origin_rest##*[:/]}"
+        if [ -n "$_origin_owner" ] && [ -n "$_origin_name" ] &&
+           [ "$_origin_owner" != "$_origin_url" ]; then
+            DEJIMA_FORGE_REPO="$_origin_owner/$_origin_name"
+        fi
+    fi
+fi
+
 # WORKSPACE_DIR is resolved above, ahead of --print-briefing, since
 # briefing_compose needs DEJIMA_RW_MOUNTS (which needs WORKSPACE_DIR for its
 # own overlap guard) before that point.
@@ -876,6 +1042,9 @@ SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
 SANDBOX_CONVERSATION_SHIP_PID=""
+SANDBOX_TTY_SUSPEND_PID=""
+SANDBOX_TTY_MODES=""
+SANDBOX_CLIENT_PID=""
 
 # Names each host-side task in cleanup() as it starts. Between the container
 # exiting and the operator's shell prompt returning, dejima audits every
@@ -922,6 +1091,20 @@ cleanup() {
     # rather than dying with the batch. Reaped for the same reason the proxy
     # is: an unreaped child reparents to PID 1 and stays a zombie wherever
     # PID 1 does not reap.
+    # The terminal first, and its settings before their watcher: the
+    # container run restores what it saved when it attached, but a run that
+    # was killed rather than exited restores nothing, and what that leaves
+    # behind is a terminal with no interrupt character.
+    if [ -n "${SANDBOX_TTY_MODES:-}" ]; then
+        stty "$SANDBOX_TTY_MODES" < /dev/tty 2>/dev/null || true
+        # And the cursor, for the same reason the modes are restored here: a
+        # run that was killed rather than exited put neither back.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
+    fi
+    if [ -n "${SANDBOX_TTY_SUSPEND_PID:-}" ]; then
+        kill "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
+        wait "$SANDBOX_TTY_SUSPEND_PID" 2>/dev/null || true
+    fi
     if [ -n "${SANDBOX_CONVERSATION_SHIP_PID:-}" ]; then
         kill "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
         wait "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
@@ -970,7 +1153,20 @@ cleanup() {
     # Ahead of the audit rather than after it, so the audit keeps the last
     # word (see below): this prints a line of its own whenever it keeps
     # something, and that line was landing under the verdict.
-    "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
+    # Gated here as well as inside the tool, because a flag override lives in
+    # this process and the tool re-reads the config for itself - it is also
+    # run by hand, where an environment this launcher happened to have would
+    # be the wrong authority. Same reason the shipper is gated at its start.
+    #
+    # DEJIMA_EPITAPH_NO_SHIP carries the one part of --no-log that this
+    # process cannot decide for the tool: whether to push what it kept. It
+    # only ever suppresses, so a stale export makes epitaph quieter and never
+    # louder, which is what makes it safe to honour from the environment at
+    # all.
+    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+        DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
+            "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
+    fi
     # Last writer, structurally: the operator reads bottom-up from their
     # shell prompt, so anything printed after the verdict pushes it out of
     # view. The marker-directory warning above is the one line a session can
@@ -1005,6 +1201,23 @@ if [ -f "$HOME/.gitconfig" ]; then
 else
     touch "$SANDBOX_GITCONFIG_DIR/.gitconfig"
 fi
+# The selected identity's git name, appended to the COPY. Appended rather than
+# rewritten because git takes the last value for a key, so this needs no
+# knowledge of what the operator's own file already says - and because the
+# copy is the only thing being edited, the real ~/.gitconfig is untouched
+# whatever happens here.
+#
+# `git config -f` rather than a printf of "[user]\n\tname = ...": the value is
+# the operator's own text, and git quotes and escapes its own file format
+# correctly where a printf would produce something git reads differently the
+# moment a name contains a quote or a backslash.
+for _git_field in name email; do
+    _git_value="$(identity_git_field "user_$_git_field")" || _git_value=""
+    [ -n "$_git_value" ] || continue
+    git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" "user.$_git_field" "$_git_value" \
+        || { echo "could not set user.$_git_field from [identity] - is git installed?" >&2; exit 1; }
+done
+unset _git_field _git_value
 
 export WORKSPACE_DIR
 # The image's user is built to match this uid/gid/username exactly (see
@@ -1048,8 +1261,8 @@ export TZ="${TZ:-$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/#
 
 # core.command permits a leading "-" (it is validated as a generic identifier,
 # shared with other keys that have no such concern) but entrypoint.sh expands
-# it unquoted into `gosu "$SANDBOX_USER" ${SANDBOX_CMD:-claude} "$@"` - a
-# leading dash there would be parsed as an option to gosu, not as the command.
+# it unquoted into `gosu "$SANDBOX_USER" $SANDBOX_CMD "$@"` - a leading dash
+# there would be parsed as an option to gosu, not as the command.
 # Refuse here, at the point this value is wired in, rather than relax the
 # schema type for every other identifier-typed key.
 SANDBOX_CMD="$(config_get core command)"
@@ -1155,8 +1368,26 @@ LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 extra_mounts=()
 
 # The forge's own env vars, generated from its manifest's env_export list
-# rather than hardcoded - see forge_env_exports. -e here: passed straight
-# through to `docker compose run`, which takes -e alongside -v.
+# rather than hardcoded - see forge_env_exports.
+#
+# `-e NAME`, never `-e NAME=value`, for the ones that carry a secret - which
+# is every `@` reference, since those resolve to a credential FILE'S CONTENTS
+# rather than its path. A value in the argument list lands in
+# /proc/<pid>/cmdline, which is world-readable: `ps` prints the token to any
+# process on the host, and from there into whatever captures ps output. That
+# is not a hypothetical - it is how #226 was found, in a paste an operator
+# made while debugging something unrelated.
+#
+# The bare form takes the value from THIS process's environment instead,
+# where it sits in /proc/<pid>/environ - mode 0400, owner only.
+#
+# This repository already made the argument one layer down: a forge's own CLI
+# feeds curl its auth header on stdin rather than as an argument, and says why
+# in almost these words. The reasoning was right and it had not reached here.
+#
+# Docker still shows the resolved value to anyone who can `docker inspect`
+# the container, which the bare form does not change and cannot. What it
+# changes is the audience: daemon access rather than any process at all.
 _forge_env_lines=""
 if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
     # forge_env_exports has already explained why on stderr. It can fail
@@ -1166,8 +1397,15 @@ if ! _forge_env_lines="$(forge_env_exports "$DEJIMA_FORGE_NAME")"; then
 fi
 while IFS= read -r _forge_env; do
     [ -n "$_forge_env" ] || continue
-    extra_mounts+=(-e "$_forge_env")
+    # forge_env_exports emits nothing at all for a value that resolved empty,
+    # deliberately - see its own comment on why an empty -e for a variable
+    # compose already declares is not harmless. So every name reaching here
+    # has a value, and exporting it is what makes the bare -e below carry one.
+    _forge_env_name="${_forge_env%%=*}"
+    export "${_forge_env_name}=${_forge_env#*=}"
+    extra_mounts+=(-e "$_forge_env_name")
 done <<< "$_forge_env_lines"
+unset _forge_env_name
 
 # The resolved combination, for the briefing and the hooks that read it
 # (git-push-guard.sh's host allowlist and no-direct-push branches,
@@ -1181,6 +1419,9 @@ extra_mounts+=(-e "DEJIMA_PUSH_HOSTS=$DEJIMA_PUSH_HOSTS")
 extra_mounts+=(-e "DEJIMA_BLOCKED_BRANCHES=$DEJIMA_BLOCKED_BRANCHES")
 extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
 extra_mounts+=(-e "DEJIMA_DISCLOSE=$DEJIMA_DISCLOSE")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO=$DEJIMA_FORGE_REPO")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO_FLAGS=$DEJIMA_FORGE_REPO_FLAGS")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO_ENV=$DEJIMA_FORGE_REPO_ENV")
 
 # The harness's own configuration, mounted at the mode it declared, and -
 # for the directories it marked scannable - the symlink targets that have to
@@ -1649,6 +1890,12 @@ if ! _unwired="$(harness_guards_wired)"; then
     printf '  Run %s./install.sh%s to register them.\n' "$C_KEY" "$C_RESET" >&2
 fi
 
+# Before the image build, which is the long part: an operator who wants the
+# newer dejima would rather know now than after waiting for a build of the one
+# they have. Advisory and best-effort - see bin/dejima-update-check for why it
+# never reaches the remote through this checkout's own git config.
+"$SCRIPT_DIR/dejima-update-check" || true
+
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
 "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
@@ -1715,6 +1962,7 @@ SANDBOX_HARNESS_IMAGE_FILES="$(manifest_get harness "$DEJIMA_HARNESS_NAME" image
 
 if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
     || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ] \
+    || [ -n "$DEJIMA_TOOLS" ] \
     || [ -s "$(config_root)/dependencies" ] \
     || { [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; }; then
     SANDBOX_DERIVED_DOCKERFILE="$(mktemp "${TMPDIR:-/tmp}/dejima-derived.XXXXXX")"
@@ -1742,6 +1990,34 @@ if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
     fi
     SANDBOX_IMAGE="$tag"
 fi
+
+# One layer per tool, above the harness and below the dependencies. Above the
+# harness because a tool is meant to be on PATH for it; below the operator's
+# own dependencies because those are the last word on what the image holds.
+#
+# Tagged by name and version-of-spec so two projects wanting the same tool
+# share a layer, and a manifest that changes what it installs gets a new one
+# rather than a stale cached hit.
+for _tool in $DEJIMA_TOOLS; do
+    _tool_install="$(manifest_get tool "$_tool" install)"
+    _tool_env="$(manifest_get tool "$_tool" image_env)"
+    _tool_layout="$(manifest_get tool "$_tool" install_layout)"
+    tag="dejima:${SANDBOX_USER}-tool-${_tool}-$(printf '%s' "$_tool_install" | sha256sum | cut -c1-12)"
+    DEJIMA_TARBALL_STRIP="$_tool_layout" \
+        generate_spec_dockerfile "$SANDBOX_IMAGE" "$_tool_install" "" "$_tool_env" "" \
+        > "$SANDBOX_DERIVED_DOCKERFILE"
+    echo "Building $tag ($_tool: $(manifest_get tool "$_tool" description))..."
+    if ! docker build -t "$tag" -f "$SANDBOX_DERIVED_DOCKERFILE" "$SANDBOX_DERIVED_CONTEXT"; then
+        # No fallback, for the reason the harness layer gives: a session told
+        # it has a tool and given an image without one fails inside the
+        # container, where it reads as dejima being broken.
+        echo "Failed to build $tag." >&2
+        echo "$_tool installs from: $_tool_install" >&2
+        exit 1
+    fi
+    SANDBOX_IMAGE="$tag"
+done
+unset _tool _tool_install _tool_env _tool_layout
 
 if [ -s "$(config_root)/dependencies" ]; then
     build_dep_layer "dejima:${SANDBOX_USER}-global" "$(config_root)"
@@ -1840,10 +2116,108 @@ compose_status=0
 #
 # `|| true` and a backgrounded start: shipping is a bonus on top of the
 # session, so a shipper that cannot start must not stop the session running.
-"$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
-SANDBOX_CONVERSATION_SHIP_PID=$!
+#
+# Gated here as well as inside the shipper, which checks the same two keys for
+# itself: --no-conversation and --no-log are overrides held in this process,
+# and the shipper re-reads the config rather than inheriting them.
+if [ "$(config_get_bool logging conversation)" = "1" ] &&
+   [ -n "$(config_get logging loki_url)" ]; then
+    "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
+    SANDBOX_CONVERSATION_SHIP_PID=$!
+fi
 
-docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
+# Ctrl-Z (#179). Two things have to be true at once, and the second is the
+# one that took four rounds of measurement to find.
+#
+# The keystroke has to become a signal at all. Under a container run the
+# terminal is raw, ISIG is off, and Ctrl-Z is the byte 0x1a delivered into the
+# container - where a harness that implements suspend stops itself, with no
+# job-control shell in there to continue it. dejima-tty-suspend takes that one
+# character back for the host.
+#
+# And the container client must never receive SIGTSTP. Measured, holding
+# everything else equal: the client survives SIGSTOP and does not survive
+# SIGTSTP. A catchable stop signal interrupts the read it is blocked in, its
+# input forwarding never recovers, and the session comes back alive but deaf -
+# resumed, with nothing typed reaching the harness. That is what shipped once
+# and had to be taken out again.
+#
+# So the client is started with SIGTSTP ignored, which it inherits and keeps
+# across exec, and the launcher converts the keystroke into an explicit
+# SIGSTOP for it before stopping itself. The job still stops completely, so
+# the prompt comes back; the client is stopped by a signal that interrupts
+# nothing.
+#
+# < /dev/tty because a background command is given /dev/null for stdin, and a
+# container client with no terminal reads EOF and exits at once.
+SANDBOX_TTY_MODES="$(stty -g < /dev/tty 2>/dev/null)" || SANDBOX_TTY_MODES=""
+if [ -n "$SANDBOX_TTY_MODES" ]; then
+    "$SCRIPT_DIR/dejima-tty-suspend" &
+    SANDBOX_TTY_SUSPEND_PID=$!
+
+    trap '' TSTP
+    docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" < /dev/tty &
+    SANDBOX_CLIENT_PID=$!
+    trap - TSTP
+
+    # The pid $! names is the docker CLI; `docker compose run` then runs the
+    # compose plugin as a child of it, and the child is what holds the
+    # terminal. Stopping only the pid leaves that child in raw mode with the
+    # shell also on the terminal - a cursorless prompt that resumes to
+    # nothing, which is what the first version of this fix produced.
+    #
+    # Deepest first, so nothing is left running long enough to fork again;
+    # shallowest first on the way back, so a parent is ready before its child
+    # resumes.
+    _stop_tree() {
+        local p="$1" kid
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _stop_tree "$kid"; done
+        kill -STOP "$p" 2>/dev/null || true
+    }
+    _cont_tree() {
+        local p="$1" kid
+        kill -CONT "$p" 2>/dev/null || true
+        for kid in $(pgrep -P "$p" 2>/dev/null); do _cont_tree "$kid"; done
+    }
+
+    _on_tstp() {
+        _stop_tree "$SANDBOX_CLIENT_PID"
+        # Show the cursor again. A full-screen harness hides it (DECTCEM,
+        # \033[?25l) and puts it back when it exits - but a suspend is not an
+        # exit, so the shell prompt inherits an invisible cursor and the
+        # terminal looks like a connection that died. The harness hides it
+        # again on resume, when the SIGWINCH below makes it repaint.
+        printf '\033[?25h' > /dev/tty 2>/dev/null || true
+        # Default disposition to actually stop, then put the handler back for
+        # the next time. Everything after the re-raise runs on resume.
+        trap - TSTP
+        kill -TSTP $$
+        trap _on_tstp TSTP
+        _cont_tree "$SANDBOX_CLIENT_PID"
+    }
+    trap _on_tstp TSTP
+
+    # Looped because `wait` returns early when a trap runs, which is exactly
+    # what happens on every suspend.
+    while kill -0 "$SANDBOX_CLIENT_PID" 2>/dev/null; do
+        if wait "$SANDBOX_CLIENT_PID"; then
+            compose_status=0
+        else
+            compose_status=$?
+        fi
+        # 128+n means a signal interrupted the wait rather than the client
+        # exiting; anything else is the client's own status.
+        case "$compose_status" in
+            146|148) continue ;;
+        esac
+        break
+    done
+    trap - TSTP
+else
+    # No terminal - a CI job, or output redirected. Nothing to suspend, and
+    # /dev/tty would not open.
+    docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
+fi
 if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2

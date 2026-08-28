@@ -17,6 +17,14 @@ setup() {
 # mentioning one.
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
 
+# Prose greps go through this, never straight at the file. A sentence in a
+# hard-wrapped document contains newlines, and its continuation may be
+# indented, so a phrase spanning a wrap matches nothing - the assertion
+# fails on a reflow that changed no words. Squeeze after flattening or the
+# indent becomes a run of spaces and the same grep still misses. Emphasis
+# markers go too: `**word**` is the same prose as `word`.
+flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
+
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
     [ "$status" -ne 0 ]
@@ -1231,18 +1239,159 @@ _cli_tools() {
     done < <(_cli_tools)
 }
 
+@test "every option a tool accepts appears in its own --help" {
+    # Twice now a flag has been implemented, documented in
+    # docs/configuration.md and covered by tests, and left out of the usage
+    # block: --harness, then --identity. The help page is the discovery
+    # surface, so a flag only the config reference mentions is one most people
+    # never find - and neither omission failed anything.
+    #
+    # Derived from the case arms rather than from a list here, which is what
+    # makes it catch the next one without being updated.
+    local name flag missing=""
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        local help
+        help="$("$REPO_ROOT/bin/$name" --help 2>/dev/null)"
+        while IFS= read -r flag; do
+            [ -n "$flag" ] || continue
+            grep -qF -- "$flag" <<< "$help" || missing="$missing $name:$flag"
+        done < <(grep -oE '^\s+(--[a-z][a-z-]*\|)*--[a-z][a-z-]*\)' "$REPO_ROOT/bin/$name" \
+            | grep -oE -- '--[a-z][a-z-]*' | sort -u)
+    done < <(_cli_tools)
+    [ -z "$missing" ] || { echo "accepted but not in --help:$missing"; return 1; }
+}
+
 @test "no help page scrolls off a reasonable pane" {
     # The budget is the constraint that forces a help page to choose what
     # matters. Asserted rather than aspired to, so a later addition that pushes
     # one past it fails here instead of quietly growing.
-    local name n
+    #
+    # bin/dejima gets a larger one, and only bin/dejima. It is the entry point
+    # and carries eighteen options where the next tool carries five, so one
+    # constant across all of them stops measuring "has this page been allowed
+    # to sprawl" and starts measuring "does this tool have the most flags".
+    # The exception is a named tool, not a licence: every other page is held
+    # to 30, and the way to fit a nineteenth option here is still to earn the
+    # line rather than to raise this again.
+    local name n budget
     while IFS= read -r name; do
         [ -n "$name" ] || continue
+        budget=30
+        [ "$name" = dejima ] && budget=36
         n="$("$REPO_ROOT/bin/$name" --help 2>/dev/null | wc -l)"
-        [ "$n" -le 30 ] || { echo "$name --help is $n lines, budget is 30"; return 1; }
+        [ "$n" -le "$budget" ] || { echo "$name --help is $n lines, budget is $budget"; return 1; }
         # A help page that fits because it says nothing is not the goal either.
         [ "$n" -ge 8 ] || { echo "$name --help is only $n lines"; return 1; }
     done < <(_cli_tools)
+}
+
+@test "every config key the schema knows is in the reference table" {
+    # docs/configuration.md's table is the operator-facing list of what can be
+    # set. A key in the schema and not in the table is settable and
+    # undiscoverable, which is how four of them ended up documented only in
+    # docs/security.md, only in docs/remote-access.md, or nowhere.
+    local doc="$REPO_ROOT/docs/configuration.md" key section leaf missing=""
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        section="${key%.*}"
+        leaf="${key##*.}"
+        grep -qF "\`[$section] $leaf\`" "$doc" || missing="$missing $section.$leaf"
+    done < <(sed -n '/^_config_table()/,/^EOF$/p' "$REPO_ROOT/bin/dejima-config-lib.sh" \
+        | grep -oE '^[a-z-]+\.[a-z_]+')
+    # And the per-provider keys, which live in the manifests rather than the
+    # table above.
+    local conf axis name spec
+    for conf in "$REPO_ROOT"/forges/*/forge.conf "$REPO_ROOT"/harnesses/*/harness.conf; do
+        [ -f "$conf" ] || continue
+        case "$conf" in */forges/*) axis=forge ;; *) axis=harness ;; esac
+        name="$(basename "$(dirname "$conf")")"
+        for spec in $(sed -n 's/^keys[[:space:]]*=[[:space:]]*//p' "$conf"); do
+            leaf="${spec%%:*}"
+            grep -qF "\`[$axis.$name] $leaf\`" "$doc" || missing="$missing $axis.$name.$leaf"
+        done
+    done
+    [ -z "$missing" ] || { echo "not in the reference table:$missing"; return 1; }
+}
+
+@test "an optional tool does not stand between a command and its guard" {
+    # The one thing that would make tools a security change rather than a
+    # convenience. rtk's own Claude Code integration installs a PreToolUse
+    # hook that REWRITES a Bash command - `git push x` becomes `rtk git push
+    # x` - in the same slot deny-dangerous-bash.sh, git-push-guard.sh and
+    # merge-guard.sh occupy. dejima does not install that hook, and this
+    # holds it to that: the tool's manifest may not name one, and nothing
+    # here runs the tool's own init.
+    local conf="$REPO_ROOT/tools/rtk/tool.conf"
+    [ -f "$conf" ] || { echo "the rtk manifest is gone"; return 1; }
+    run grep -nE '^(hook|hooks|install_hook|init)' "$conf"
+    [ "$status" -ne 0 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
+    run grep -rn 'rtk init\|rtk hook' "$REPO_ROOT/bin" "$REPO_ROOT/docker" "$REPO_ROOT/hooks"
+    [ "$status" -ne 0 ] \
+        || { echo "something runs rtk's own installer:"; echo "$output"; return 1; }
+
+    # And the guards are still registered the way they were - a tool layer
+    # sits above the harness in the image and changes nothing about them.
+    grep -q 'deny-dangerous-bash.sh' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        || { echo "the bash guard registration is gone"; return 1; }
+    grep -q 'git-push-guard.sh' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        || { echo "the push guard registration is gone"; return 1; }
+}
+
+@test "the tools doc states the bar rather than describing one tool" {
+    # The bar is what makes a second tool safe to add. Written as a rule for
+    # every tool, because a document that only describes rtk leaves the next
+    # one to be argued from scratch - or not argued at all.
+    local doc="$REPO_ROOT/docs/tools.md" claim
+    [ -f "$doc" ] || { echo "docs/tools.md is gone"; return 1; }
+    grep -qi 'does not mean a bare install' "$doc" \
+        || { echo "the doc no longer says what an optional tool is not"; return 1; }
+    for claim in 'Pinned and checksummed' 'network behaviour' 'Telemetry off' \
+                 'Wired up by dejima' 'guards still hold'; do
+        grep -qF "$claim" "$doc" || { echo "the bar drops: $claim"; return 1; }
+    done
+    # Named as applying to every tool, not to the first one.
+    grep -qF 'not only the first' "$doc" \
+        || { echo "the bar reads as being about rtk rather than about tools"; return 1; }
+}
+
+@test "a tool is never read from the workspace, only from the approval store" {
+    # Same rule as every other .dejima/ declaration: the workspace is
+    # session-writable, so a session that could add a tool would be choosing
+    # what the next session's image contains. The launcher reads approvals.
+    grep -q 'approved_entries "$(config_root)" tools' "$REPO_ROOT/bin/dejima" \
+        || { echo "the launcher no longer reads approved tools"; return 1; }
+    run grep -n 'dejima/tools' "$REPO_ROOT/bin/dejima"
+    [ "$status" -ne 0 ] \
+        || { echo "the launcher reads the declaration directly:"; echo "$output"; return 1; }
+}
+
+@test "a flag that turns something off is enforced where the launcher decides" {
+    # The override lives in bin/dejima's own memory, and both of these tools
+    # re-read the config for themselves - they are run by hand too, where an
+    # environment this launcher happened to have would be the wrong authority.
+    # So --no-epitaph and --no-conversation are enforced by not starting them,
+    # and a resolved config the child never sees is not enforcement.
+    local d="$REPO_ROOT/bin/dejima"
+    grep -q 'config_get_bool epitaph enabled' "$d" \
+        || { echo "the epitaph call is no longer gated on the resolved value"; return 1; }
+    grep -q 'config_get_bool logging conversation' "$d" \
+        || { echo "the shipper start is no longer gated on the resolved value"; return 1; }
+
+    # The one part --no-log cannot decide for the tool is whether to push what
+    # it kept. Honoured from the environment, which is safe only because it
+    # can suppress and never enable: a stale export keeps an epitaph off the
+    # wire and cannot put one on it.
+    grep -q 'DEJIMA_EPITAPH_NO_SHIP' "$d" \
+        || { echo "--no-log no longer reaches the epitaph tool"; return 1; }
+    grep -q 'DEJIMA_EPITAPH_NO_SHIP' "$REPO_ROOT/bin/dejima-epitaph" \
+        || { echo "the epitaph tool no longer honours it"; return 1; }
+    # And it gates the push only - the epitaph is still written, because the
+    # store is the durable copy and shipping is the bonus on top of it.
+    local line
+    line="$(grep -n 'DEJIMA_EPITAPH_NO_SHIP' "$REPO_ROOT/bin/dejima-epitaph" | tail -1 | cut -d: -f1)"
+    [ "$line" -gt "$(grep -n 'wrote .*epitaph(s) to' "$REPO_ROOT/bin/dejima-epitaph" | cut -d: -f1)" ] \
+        || { echo "the no-ship check now runs before the epitaph is written"; return 1; }
 }
 
 @test "--help works when there is no config at all" {
@@ -1453,6 +1602,32 @@ _cli_tools() {
     run tail -n 5 "$SANDBOX_DIR/Dockerfile"
     [[ "$output" == *"ENTRYPOINT"* ]]
     ! grep -qE '^\s*USER\s+node\s*$' <(tail -n 8 "$SANDBOX_DIR/Dockerfile")
+}
+
+@test "a command an operator is told to run does not carry a bin/ prefix" {
+    # install.sh links these into ~/.local/bin, so they are on PATH by name.
+    # An operator reading "bin/dejima-allow ..." is generally not standing in
+    # the dejima checkout, so the prefix does not merely look odd - the
+    # command fails outright, and it fails looking like the tool is broken.
+    #
+    # Checked on the strings that get shown rather than on source comments,
+    # which legitimately name the file.
+    local tools name f hits="" line
+    tools="$(sed -n 's/^link_bin \([a-z-]*\).*/\1/p' "$REPO_ROOT/install.sh")"
+    [ -n "$tools" ] || { echo "install.sh links nothing - has link_bin gone?"; return 1; }
+    for f in "$REPO_ROOT"/bin/dejima-provider-lib.sh "$REPO_ROOT"/bin/harness/*.sh \
+             "$REPO_ROOT"/hooks/*.sh; do
+        [ -f "$f" ] || continue
+        for name in $tools; do
+            # An invocation, not a mention: the name followed by an argument.
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                hits="$hits
+  $(basename "$f"): $line"
+            done < <(grep -nE "bin/$name [-<\$]" "$f" | grep -v '^[0-9]*:#')
+        done
+    done
+    [ -z "$hits" ] || { echo "these tell someone to run a path, not a command:$hits"; return 1; }
 }
 
 @test "bin/dejima and bin/dejima-allow resolve their own location through symlinks" {
@@ -2120,7 +2295,7 @@ _install_forge_bins() {
     [ -x "$script" ]
     local area
     for area in bin/dejima docker/entrypoint forges/ docker/forge-guard \
-                hooks/merge-guard web/ harnesses/ \
+                hooks/merge-guard bin/dejima-tty-suspend web/ harnesses/ \
                 bin/dejima-ttyd '\.dejima/allowed-domains'; do
         grep -q -- "$area" "$script" \
             || { echo "release-pass.sh no longer mentions $area"; return 1; }
@@ -2148,7 +2323,9 @@ _install_forge_bins() {
     # They sit either side of one attach - pick a session, then use it - and a
     # palette that drifts on one side makes them look like different programs.
     # Both files carry the hex, so both can be read.
-    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-attach"
+    # The palette moved to the library the two pickers share; the page's is
+    # still its own, which is the pair this compares.
+    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-tui-lib.sh"
     local hex checked=0
     while IFS= read -r hex; do
         grep -qi -- "$hex" "$attach" \
@@ -2218,6 +2395,120 @@ _install_forge_bins() {
         || { echo "the briefing does not mention the browser"; return 1; }
     [[ "$out" == *"~/shared"* ]] \
         || { echo "it does not say where to leave what it sees"; return 1; }
+}
+
+# --- Ctrl-Z (#179) ----------------------------------------------------------
+#
+# Driven through a real pty with a real interactive shell on it, because the
+# question is not what a signal does - it is whether the terminal turns the
+# keystroke into a signal at all. Under `docker compose run` it does not: raw
+# mode has ISIG off, so Ctrl-Z is the byte 0x1a and it goes to the container.
+#
+# The stand-in for the container run is in test/fixtures. Docker is not
+# available here and is not what is under test; the terminal handling is.
+
+@test "Ctrl-Z suspends the whole launch instead of vanishing into the container" {
+    command -v python3 >/dev/null 2>&1 || skip "needs python3"
+    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttysuspend.XXXXXX")"
+    run env TTY_SUSPEND_WORK="$work" python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
+        "$REPO_ROOT/bin/dejima-tty-suspend" bash
+    [ "$status" -ne 77 ] || skip "no pty available here"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Named rather than counted, so a harness that silently stopped checking
+    # something cannot pass this by reporting fewer results.
+    local name
+    for name in cycle1-suspends-the-job cycle1-nothing-reached-the-container \
+                cycle1-raw-mode-restored cycle1-redraw-poked \
+                cycle2-suspends-the-job cycle2-raw-mode-restored \
+                input-reaches-the-resumed-session ctrl-c-still-reaches-the-session; do
+        [[ "$output" == *"PASS $name"* ]] \
+            || { echo "$name was not checked:"; echo "$output"; return 1; }
+    done
+}
+
+@test "the Ctrl-Z harness sees the bug when the fix is not there" {
+    # The control. A test that cannot fail is not evidence, and this one is
+    # made entirely of timing and terminal state - the two things most likely
+    # to quietly stop testing anything.
+    command -v python3 >/dev/null 2>&1 || skip "needs python3"
+    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttycontrol.XXXXXX")"
+    run env TTY_SUSPEND_WORK="$work" TTY_SUSPEND_NO_HELPER=1 python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
+        "$REPO_ROOT/bin/dejima-tty-suspend" bash
+    [ "$status" -ne 77 ] || skip "no pty available here"
+    [ "$status" -ne 0 ] || { echo "the control passed, so it proves nothing:"; echo "$output"; return 1; }
+    [[ "$output" == *"FAIL cycle1-suspends-the-job"* ]] \
+        || { echo "$output"; return 1; }
+    # The byte itself, which is the whole bug: it reached the container.
+    [[ "$output" == *"FAIL cycle1-nothing-reached-the-container b'\\x1a'"* ]] \
+        || { echo "the container did not receive the keystroke:"; echo "$output"; return 1; }
+}
+
+@test "the resume resize is held long enough for anything to see it" {
+    # Two ioctls back to back are not a resize a program can observe: the
+    # signal arrives, the handler reads the size as it is NOW, and by then it
+    # is back where it started. Measured on a pty, bytes written after the
+    # poke - no hold: 0 from both harnesses; 0.2s: 17810 from Cline, 3328
+    # from Claude Code.
+    #
+    # This is asserted on the source rather than behaviourally, and the reason
+    # is worth writing down: the fixture's stand-in is a trivial program that
+    # handles the signal faster than either real harness, so it observes an
+    # intermediate size that they miss. It passed while both real programs
+    # failed. A test that cannot see the failure cannot guard the fix.
+    local f="$REPO_ROOT/bin/dejima-tty-suspend"
+    local block
+    block="$(sed -n '/stty rows "\$((rows - 1))"/,/stty rows "\$rows"/p' "$f")"
+    [ -n "$block" ] || { echo "the resize is gone"; return 1; }
+    grep -qE '^\s*sleep [0-9.]+' <<< "$block" \
+        || { echo "the resize is back-to-back, which no harness can see"; return 1; }
+    # And enough of one. The floor measured on a direct pty is between 0.1 and
+    # 0.2 seconds, before the hop through the client and the daemon.
+    local held
+    held="$(grep -oE '^\s*sleep [0-9.]+' <<< "$block" | grep -oE '[0-9.]+')"
+    awk -v h="$held" 'BEGIN { exit !(h >= 0.3) }' \
+        || { echo "held $held s, below the measured floor plus headroom"; return 1; }
+}
+
+@test "the launcher never lets the container client see SIGTSTP" {
+    # The whole of #179, in the end. The client survives SIGSTOP and does not
+    # survive SIGTSTP: a catchable stop signal interrupts the read it is
+    # blocked in, its input forwarding never recovers, and the session comes
+    # back alive but deaf. Measured against a real container run, holding
+    # everything else equal.
+    #
+    # So the client is started with the signal ignored - inherited, and kept
+    # across exec - and the keystroke is converted into an explicit SIGSTOP
+    # for it. Losing any one of these three lines puts the wedge back.
+    local d="$REPO_ROOT/bin/dejima"
+    grep -q "trap '' TSTP" "$d" \
+        || { echo "the client no longer inherits SIGTSTP ignored"; return 1; }
+    grep -q '_stop_tree "$SANDBOX_CLIENT_PID"' "$d" \
+        || { echo "the keystroke is no longer converted into a SIGSTOP"; return 1; }
+    # The whole subtree, not one pid: `docker compose run` is the CLI plus the
+    # plugin it runs, and the child is the one holding the terminal.
+    grep -q 'for kid in $(pgrep -P "$p" 2>/dev/null); do _stop_tree "$kid"; done' "$d" \
+        || { echo "only the top pid is stopped, so a child keeps the terminal"; return 1; }
+    grep -q "sandbox \"\$@\" < /dev/tty &" "$d" \
+        || { echo "the client is backgrounded without a terminal, so it reads EOF"; return 1; }
+    # And the launcher itself must still stop, or the job never fully stops
+    # and the prompt never comes back.
+    grep -q 'kill -TSTP \$\$' "$d" \
+        || { echo "the launcher no longer stops itself, so ^Z suspends nothing"; return 1; }
+    # A suspend is not an exit, so the harness never puts the cursor back and
+    # the prompt inherits an invisible one - which reads as a dead connection.
+    [ "$(grep -c '033\[?25h' "$d")" -ge 2 ] \
+        || { echo "the cursor is not restored on suspend and on exit"; return 1; }
+}
+
+@test "a launch with no terminal skips the suspend handling entirely" {
+    # CI, or output redirected: there is nothing to suspend and /dev/tty would
+    # not open. The plain foreground run has to stay reachable.
+    grep -q 'SANDBOX_TTY_MODES="$(stty -g < /dev/tty 2>/dev/null)"' "$REPO_ROOT/bin/dejima" \
+        || { echo "the terminal is no longer probed before any of this"; return 1; }
+    grep -c 'docker compose -f "$COMPOSE_FILE" run --rm' "$REPO_ROOT/bin/dejima" | grep -q '^2$' \
+        || { echo "there is no longer one run for a terminal and one without"; return 1; }
 }
 
 # --- guards that do not need the harness ------------------------------------
@@ -2372,6 +2663,113 @@ _guard_repo() {
     [[ "$output" == real:* ]] || { echo "$output"; return 1; }
 }
 
+# --- the repository the session was launched against ------------------------
+#
+# #187. The gitea CLIs resolve the repo from origin and refuse another host,
+# so they cannot be aimed elsewhere. `gh` takes --repo on nearly every
+# subcommand and reads GH_REPO, which makes filing an issue on an unrelated
+# repository the same length of command as filing one here. A forge declares
+# the spellings; the guard compares them.
+
+_repo_guard_shim() {
+    local d="$1"; shift
+    mkdir -p "$d/real"
+    printf '#!/bin/bash\necho "real: $*"\n' > "$d/real/gh"
+    chmod +x "$d/real/gh"
+    cp "$SANDBOX_DIR/forge-guard.sh" "$d/gh"
+    chmod +x "$d/gh"
+}
+
+@test "the forge guard refuses a command aimed at another repository" {
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repoguard.XXXXXX")"
+    _repo_guard_shim "$d"
+    local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
+                      DEJIMA_FORGE_REPO=own/thing
+                      DEJIMA_FORGE_REPO_FLAGS="--repo -R" DEJIMA_FORGE_REPO_ENV=GH_REPO)
+
+    # Every spelling gh accepts, including the short flag with its value
+    # attached, which two-dash flags do not do.
+    local form
+    for form in "--repo other/thing" "--repo=other/thing" "-R other/thing" "-Rother/thing"; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" $form issue create --title x
+        [[ "$output" == *"Blocked by dejima"* ]] \
+            || { echo "gh $form reached the real CLI: $output"; return 1; }
+    done
+
+    # And the environment variable, which takes no argument at all and would
+    # otherwise be the way around every check above.
+    run env "${env_common[@]}" GH_REPO=other/thing "$d/gh" issue create --title x
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "GH_REPO was ignored: $output"; return 1; }
+
+    # The repository the session IS for goes through, in any capitalisation:
+    # forges preserve case without distinguishing it, and a refusal over that
+    # would be a false one.
+    for form in "--repo own/thing" "--repo Own/Thing" ""; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" $form issue list
+        [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }
+    done
+
+    # A launch that resolved no repository refuses rather than waving it
+    # through: a workspace with no origin has nothing --repo can legitimately
+    # name, and "cannot confirm" is not a reason to allow.
+    run env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" DEJIMA_FORGE_REPO="" \
+        DEJIMA_FORGE_REPO_FLAGS="--repo -R" "$d/gh" --repo any/thing issue create
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+
+    # The merge block still answers first for a merge, whatever repo it names:
+    # the more specific refusal is the more useful one to read.
+    run env "${env_common[@]}" DEJIMA_MERGE_BLOCK="gh pr merge" \
+        "$d/gh" --repo other/thing pr merge 3
+    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a forge that declares no repo flags is left alone by that check" {
+    # The gitea CLIs' own refusal is stricter than this guard's and lives in
+    # the tool. A forge declaring nothing here must not acquire a check it did
+    # not ask for - and must still be a pass-through with nothing else set.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repoguard-off.XXXXXX")"
+    _repo_guard_shim "$d"
+    run env DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" DEJIMA_FORGE_REPO=own/thing \
+        "$d/gh" --repo other/thing issue create
+    [[ "$output" == real:* ]] || { echo "$output"; return 1; }
+}
+
+@test "the github forge declares how its CLI can be aimed elsewhere" {
+    # The guard is generic; what makes it fire is the manifest. A forge whose
+    # CLI takes a --repo and declares nothing here is one the check silently
+    # does not cover, which is the failure this pins.
+    local conf="$REPO_ROOT/forges/github/forge.conf"
+    grep -qE '^repo_flags[[:space:]]*=.*--repo' "$conf" \
+        || { echo "the github manifest no longer declares --repo"; return 1; }
+    grep -qE '^repo_env[[:space:]]*=[[:space:]]*GH_REPO' "$conf" \
+        || { echo "the github manifest no longer declares GH_REPO"; return 1; }
+    # And core passes both through, or the manifest is a declaration nothing
+    # reads.
+    local v
+    for v in DEJIMA_FORGE_REPO DEJIMA_FORGE_REPO_FLAGS DEJIMA_FORGE_REPO_ENV; do
+        grep -q "\-e \"$v=" "$REPO_ROOT/bin/dejima" \
+            || { echo "$v never reaches the container"; return 1; }
+    done
+}
+
+@test "github-pr ships and is declared, and only reads" {
+    # The one thing gh cannot do (#186): thread resolution is GraphQL-only, so
+    # `gh pr view --comments` shows resolved and unresolved alike. A tool that
+    # ships without being declared in `install` is one install-forge-bins.sh
+    # refuses to build, and the declaration is what an operator reads to know
+    # what a forge puts in the image.
+    local tool="$REPO_ROOT/forges/github/bin/github-pr"
+    [ -x "$tool" ] || { echo "github-pr is missing or not executable"; return 1; }
+    grep -qE '^install[[:space:]]*=.*bin/github-pr' "$REPO_ROOT/forges/github/forge.conf" \
+        || { echo "github-pr is not declared in the github manifest's install"; return 1; }
+    # It reads. A write would need the authorship disclosure, and the
+    # disclosure is keyed on gh - so a write here would be undisclosed.
+    run grep -nE '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method' "$tool"
+    [ "$status" -ne 0 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
+}
+
 # --- the authorship disclosure ----------------------------------------------
 #
 # The marker used to live in the two CLIs this repo wrote, which made "does
@@ -2403,6 +2801,92 @@ STUB
     chmod +x "$d/forge-cli"
     DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real" \
         DEJIMA_DISCLOSE="$DISCLOSE" "$d/forge-cli" "$@"
+}
+
+@test "the marker is added once, whatever the body already says" {
+    # Every issue on a project worked on this way opens with the marker, so an
+    # agent reading the existing ones concludes it is the house style and
+    # writes it in - and a second was added. Each doubled artifact taught the
+    # next agent to do the same, so it spread rather than settling.
+    #
+    # The marker is a statement and not a count: a body that already opens by
+    # saying an agent wrote it has disclosed the thing this exists to
+    # disclose.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/twice.XXXXXX")"
+    local DISCLOSE="issue forge-cli create"
+    local marker='**Filed by LLM agent**'
+    local f="$d/body"
+    printf '%s\n\nProse.\n' "$marker" > "$f"
+
+    # All four spellings, because two of them used to prepend the marker at
+    # their own call site rather than through the shared function - so a rule
+    # added in one place was not in force in the other.
+    local out
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body-file doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create "--body-file=$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body-file= doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create --body "$(cat "$f")")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body doubled it: $out"; return 1; }
+    out="$(_disclose_shim "$d" create "--body=$(cat "$f")")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "--body= doubled it: $out"; return 1; }
+
+    # The same words further down are prose ABOUT disclosure, not the
+    # disclosure, and still get one prepended.
+    printf 'Prose first.\n\n%s\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 2 ] \
+        || { echo "a mention in the body was read as the disclosure: $out"; return 1; }
+
+    # Trailing whitespace after it is still just the marker: invisible, and
+    # changing nothing about what the line says.
+    printf '%s   \n\nProse.\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 1 ] \
+        || { echo "trailing space stopped it counting as disclosed: $out"; return 1; }
+}
+
+@test "a marker with the session's own words welded on gets a clean one" {
+    # Skipping on a PREFIX made the marker line agent-authorable: the body
+    # opens with the marker, adds to it on the same line, and the disclosure
+    # dejima writes is the one the session finished. dejima says one thing
+    # about agent authorship, and this is the line it says it on.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/weld.XXXXXX")"
+    local DISCLOSE="issue forge-cli create"
+    local marker='**Filed by LLM agent**'
+    local f="$d/body" out
+    printf '%s - reviewed and confirmed by a person\n\nProse.\n' "$marker" > "$f"
+    out="$(_disclose_shim "$d" create --body-file "$f")"
+    # A clean marker line of its own, above whatever the session wrote.
+    [ "$(head -1 <<< "$out")" = "$marker" ] \
+        || { echo "the first line is the session's: $(head -1 <<< "$out")"; return 1; }
+    [ "$(grep -c 'Filed by LLM agent' <<< "$out")" -eq 2 ] \
+        || { echo "the welded line was accepted as the disclosure: $out"; return 1; }
+}
+
+@test "the session is told the marker is added for it" {
+    # The other half, and the one that stops it being written in the first
+    # place: a session that is not told concludes from the existing issues
+    # that typing it is the house style.
+    local out
+    out="$(DEJIMA_DISCLOSE='issue gitea-issue create' bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$out"; return 1; }
+    grep -q 'Do not write that line' <<< "$out" \
+        || { echo "the briefing does not tell the session"; return 1; }
+
+    # And is not told when nothing would add one, which would be telling it
+    # something false and inviting exactly the behaviour being prevented.
+    out="$(DEJIMA_DISCLOSE= bash -c \
+        'source "$1"; briefing_compose none local-only claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$out"; return 1; }
+    grep -q 'Do not write that line' <<< "$out" \
+        && { echo "told about a marker nothing adds"; return 1; }
+    return 0
 }
 
 @test "an agent-authored body says so, in every spelling the CLIs accept" {
@@ -2807,6 +3291,37 @@ registered_commands() {
     grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
 }
 
+@test "an unusable ip6tables is not read as IPv6 being absent" {
+    # The branch used to print "assuming IPv6 is unavailable at the kernel
+    # level" and continue, which inferred a fact about the world from a fact
+    # about a tool. A container whose kernel lacks ip6_tables, on a host with
+    # IPv6 enabled, took it and ran with IPv6 live and unfiltered - and nothing
+    # failed, because all that had happened was a check that could not tell.
+    #
+    # Raised by the dejima-devbox-hardener review, where the same shape had
+    # just been found twice: an audit reporting PASS from a probe that only
+    # looked at IPv4.
+    local f="$SANDBOX_DIR/init-firewall.sh"
+    run grep -n 'assuming IPv6 is unavailable' "$f"
+    [ "$status" -ne 0 ] || { echo "the inference is back:"; echo "$output"; return 1; }
+
+    # It asks the kernel instead, and loopback does not count - refusing over
+    # ::1 would refuse every container with no IPv6 connectivity at all.
+    grep -q '/proc/net/if_inet6' "$f" \
+        || { echo "nothing checks whether IPv6 is actually up"; return 1; }
+    grep -q 'lo' "$f" || { echo "the check no longer excludes loopback"; return 1; }
+
+    # And it can refuse. A branch that only logs is the thing being replaced,
+    # so the exit has to be reachable from it.
+    local branch
+    branch="$(sed -n '/^elif _ipv6_off_box/,/^else$/p' "$f")"
+    [ -n "$branch" ] || { echo "the live-IPv6 branch is gone"; return 1; }
+    grep -q 'exit 1' <<< "$branch" \
+        || { echo "the branch cannot refuse to start"; return 1; }
+    grep -q 'disable_ipv6' <<< "$branch" \
+        || { echo "it refuses without first trying to turn the family off"; return 1; }
+}
+
 @test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
     # Same persistence-path rationale as the hooks mount: these carry
     # executable skill scripts / injectable command, agent, and output-style
@@ -2894,7 +3409,10 @@ registered_commands() {
 
 @test "bin/dejima's exit-time audit still runs when the container run fails or is interrupted" {
     local run_line trap_line
-    run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    # The EARLIEST run, because there are two now - one for a terminal and
+    # one without - and the trap has to precede both. Taking the last would
+    # let a run creep in above the trap and still pass.
+    run_line=$(grep -n 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     trap_line=$(grep -n '^trap cleanup EXIT' "$REPO_ROOT/bin/dejima" | head -1 | cut -d: -f1)
     [ -n "$run_line" ]
     [ -n "$trap_line" ]
@@ -2905,10 +3423,25 @@ registered_commands() {
     # ran.
     [ "$trap_line" -lt "$run_line" ]
     sed -n "1,${trap_line}p" "$REPO_ROOT/bin/dejima" | grep -q '"\$SCRIPT_DIR/dejima-audit" compare "\$WORKSPACE_DIR"'
-    # The compose invocation must not itself be a bare command under set -e
-    # either - a nonzero/interrupted exit there would otherwise skip the
-    # credential-proxy check and the propagated exit code below it.
-    grep -q '|| compose_status=\$?' <(sed -n "${run_line}p" "$REPO_ROOT/bin/dejima")
+    # No compose invocation may be a bare command under set -e either - a
+    # nonzero or interrupted exit there would skip the credential-proxy check
+    # and the propagated exit code below it.
+    #
+    # Two spellings satisfy that and both are checked, because there are two
+    # runs: the no-terminal one takes `|| compose_status=$?`, and the one that
+    # supports Ctrl-Z is backgrounded, where the status comes from a guarded
+    # `wait` instead (see the SIGTSTP handling above it). What matters is that
+    # neither can abort the script, not which form says so.
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            *"|| compose_status=\$?"*) ;;
+            *"sandbox \"\$@\" < /dev/tty &"*) ;;
+            *) echo "an unguarded compose run: $line"; return 1 ;;
+        esac
+    done < <(grep 'docker compose .* run --rm' "$REPO_ROOT/bin/dejima")
+    grep -q 'if wait "\$SANDBOX_CLIENT_PID"; then' "$REPO_ROOT/bin/dejima" \
+        || { echo "the backgrounded run's status is no longer captured from a guarded wait"; return 1; }
     sed -n "1,${run_line}p" "$REPO_ROOT/bin/dejima" | grep -q 'compose_status=0'
     tail -n "+$run_line" "$REPO_ROOT/bin/dejima" | grep -q 'exit "\$compose_status"'
 }
@@ -3559,6 +4092,73 @@ STUB
     [[ "$output" == 'if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then' ]]
 }
 
+@test "the container declares a capability floor rather than the default set" {
+    # Docker's default carries about fourteen capabilities for the root phase
+    # and the entrypoint uses six. Asserted here as a declaration, and in
+    # runtime.bats as a property of a container that actually came up - this
+    # half is what fails fast in a sandbox where nothing can be booted.
+    local c="$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*cap_drop:' "$c" || { echo "no cap_drop; the default set is back"; return 1; }
+    grep -qE '^\s*- ALL\s*$' "$c" || { echo "cap_drop does not drop ALL"; return 1; }
+    grep -qE '^\s*- no-new-privileges:true\s*$' "$c" \
+        || { echo "no-new-privileges is gone"; return 1; }
+    # The two the firewall needs are still declared, or the container cannot
+    # bring its own egress control up at all.
+    local cap
+    for cap in NET_ADMIN NET_RAW; do
+        grep -qE "^\s*- $cap\s*$" "$c" || { echo "$cap is no longer added"; return 1; }
+    done
+    # And nothing the entrypoint does not use has been added back.
+    for cap in SYS_ADMIN MKNOD SETPCAP SETFCAP SYS_CHROOT SYS_PTRACE; do
+        run grep -nE "^\s*- $cap\s*$" "$c"
+        [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
+    done
+}
+
+@test "the runtime suite's session container reads the capability floor rather than copying it" {
+    # Only the container that stands in for a real session. The suite also
+    # starts ad-hoc containers to exercise the firewall in isolation, and those
+    # legitimately pass NET_ADMIN/NET_RAW by hand - they are testing a
+    # component, not the posture a session runs under.
+    #
+    # The one in setup_file is different: a hand-written list there would drift
+    # from the compose file, and the container under test would stop being the
+    # container a session gets.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    grep -q '^compose_cap_add()' "$rt" \
+        || { echo "runtime.bats no longer derives the capability list"; return 1; }
+    local setup_block
+    setup_block="$(sed -n '/^setup_file()/,/^}/p' "$rt")"
+    [ -n "$setup_block" ] || { echo "no setup_file in runtime.bats"; return 1; }
+    grep -q 'compose_cap_add' <<< "$setup_block" \
+        || { echo "the session container no longer derives its capabilities"; return 1; }
+    grep -q -- '--cap-drop=ALL' <<< "$setup_block" \
+        || { echo "the session container does not start from an empty set"; return 1; }
+    grep -q -- '--security-opt=no-new-privileges:true' <<< "$setup_block" \
+        || { echo "the session container does not run with no-new-privileges"; return 1; }
+    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$setup_block"
+    [ "$status" -ne 0 ] \
+        || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
+}
+
+@test "dejima writes host state under one root, not a new base directory per file" {
+    # The update check put its cache under XDG_STATE_HOME, which is where the
+    # spec says a throwaway timestamp goes - and made ~/.local/state a fifth
+    # place dejima writes, for one file, created by mkdir -p on hosts with no
+    # other use for it. Everything durable dejima keeps is under
+    # ~/.local/share/dejima or ~/.config/dejima; the runtime registry is the
+    # one deliberate exception, and it is not durable.
+    # Code, not comments: _cache_file's own comment says what it moved away
+    # from and why, and a grep that counted that would fail on the fix.
+    local f hit=""
+    for f in "$REPO_ROOT"/bin/*; do
+        [ -f "$f" ] || continue
+        grep -v '^[[:space:]]*#' "$f" \
+            | grep -q 'XDG_STATE_HOME\|\.local/state' && hit="$hit $(basename "$f")"
+    done
+    [ -z "$hit" ] || { echo "a new state root is back in:$hit"; return 1; }
+}
+
 @test "the approval store is never mounted into the container" {
     # The store is the only thing that actually grants anything, and the
     # container runs an agent with no tool-use confirmations - mounting it
@@ -3804,7 +4404,7 @@ EOF
     # Presence-only grep - it confirms the caveat sentence exists in the
     # Security notes teaser, not that the linked docs/security.md
     # explanation it points readers to is itself correct or complete.
-    grep -q 'not a verdict on who caused them' "$REPO_ROOT/README.md"
+    flat_prose "$REPO_ROOT/README.md" | grep -q 'not a verdict on who caused them'
 }
 
 # Was: that the cross-session false-positive case is documented. The finding
@@ -3838,6 +4438,37 @@ EOF
 # else is or isn't mitigated on their runners, so it is pinned in all three
 # places rather than left to survive a future edit on its own. Presence-only
 # greps, same caveat as the two above.
+@test "the port-22 claim names both properties it rests on" {
+    # "GitHub's ranges are allowlisted on port 443 only, so port 22 is
+    # physically unreachable" is an IPv4 statement. The allowlist decides what
+    # is reachable over v4; what makes port 22 unreachable AT ALL is that the
+    # container blocks IPv6 as well, since an allowlist naming one address
+    # family says nothing about the other.
+    #
+    # The claim is true. The risk is that it stays readable if either property
+    # quietly stops holding - which is what a reader cannot check and what a
+    # future change would not trip over.
+    #
+    # Found by the reciprocal of it: dejima-ci-hardener made the same claim,
+    # about dejima's behaviour, naming one half. They found theirs after this
+    # side pointed at the wrong document, and this side had it too.
+    # Flattened and stripped of emphasis before every match, without
+    # exception. Assertions on prose fail on a line break otherwise, which has
+    # cost four separate debugging detours in this suite - including one in
+    # this very test, where the loop flattened and the check after it did not.
+    local f flat readme
+    for f in README.md docs/providers.md; do
+        flat="$(tr '\n' ' ' < "$REPO_ROOT/$f" | tr -d '*`')"
+        grep -q 'port 22' <<< "$flat" || continue
+        grep -qiE 'IPv6' <<< "$flat" \
+            || { echo "$f argues about port 22 without naming the IPv6 half"; return 1; }
+    done
+    # And the half that holds it up is the one that can fail closed.
+    readme="$(tr '\n' ' ' < "$REPO_ROOT/README.md" | tr -d '*`')"
+    grep -q 'refuses to start' <<< "$readme" \
+        || { echo "nothing says what happens when IPv6 cannot be filtered"; return 1; }
+}
+
 @test "README and docs/security.md both disclose that push access is CI code execution" {
     for f in README.md docs/security.md; do
         grep -q 'push access is code execution elsewhere' "$REPO_ROOT/$f"
@@ -3867,6 +4498,147 @@ EOF
         || { echo "the threat model reads as a Claude Code quirk"; return 1; }
 }
 
+@test "remote access says the push has to leave the host" {
+    # dejima-notify-watch runs on the HOST, so the container's allowlist has
+    # nothing to do with whether it can reach an ntfy server. On a machine
+    # behind an egress filter it does not control - a devbox on a hypervisor -
+    # the push is dropped and every symptom points somewhere else: the config
+    # is correct, the unit is healthy, nothing errors, the phone is silent.
+    #
+    # Raised from the dejima-devbox-hardener side, where an operator hit it and
+    # fixed it by hand before either project documented it. Stated in general
+    # terms rather than naming that runbook, since it is true of any host
+    # behind a filter and a sibling's rule would go stale here.
+    local doc="$REPO_ROOT/docs/remote-access.md" flat
+    # Newlines flattened and emphasis stripped: the claims below are sentences,
+    # and one that happens to wrap, or to carry a `**`, would otherwise fail a
+    # grep for reasons that have nothing to do with what it says. Two of these
+    # did exactly that on the first run.
+    flat="$(flat_prose "$doc")"
+    grep -q 'behind a firewall it does not control' <<< "$flat" \
+        || { echo "the outbound requirement is unstated again"; return 1; }
+    grep -q 'runs on the host, not in the container' <<< "$flat" \
+        || { echo "nothing says which side of the boundary the watcher is on"; return 1; }
+    # And in the walk, which is where someone with a silent phone actually is.
+    local walk
+    walk="$(sed -n '/^\*\*When no notification arrives/,/^## /p' "$doc")"
+    grep -q 'reach the ntfy server at all' <<< "$walk" \
+        || { echo "the troubleshooting walk has no step for it"; return 1; }
+    # The walk counts itself, and a step added without the count is a document
+    # arguing with itself in front of the reader.
+    local claimed steps
+    claimed="$(grep -oE '^\*\*When no notification arrives\.\*\* [A-Za-z]+' "$doc" | awk '{print $NF}')"
+    steps="$(grep -cE '^[0-9]+\. \*\*' <<< "$walk")"
+    case "$claimed:$steps" in
+        Five:5|Six:6|Seven:7|Eight:8) ;;
+        *) echo "the walk says '$claimed' and has $steps steps"; return 1 ;;
+    esac
+}
+
+@test "remote access says where the notification guarantee stops" {
+    # The page argues carefully that no sandbox-controlled bytes reach the
+    # phone, and that argument is about the CONTAINER boundary. ntfy_url is a
+    # credential for a channel the phone trusts, in a file on the host, and
+    # anyone with the operator's account can publish to it, drown it, or read
+    # it. None of that goes through the sandbox.
+    #
+    # It matters downstream: a monitoring design for these machines uses a
+    # separate topic whose credential is deliberately not on the box, so a
+    # compromised host cannot forge alerts about itself. That only works if
+    # the reader knows the box's own topic is not privileged.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/remote-access.md")"
+    grep -q 'Where that guarantee stops' <<< "$flat" \
+        || { echo "the guarantee still reads as unbounded"; return 1; }
+    grep -qi 'separate topic' <<< "$flat" \
+        || { echo "nothing tells the reader to scope a second topic"; return 1; }
+    grep -qi 'forge alerts about itself' <<< "$flat" \
+        || { echo "the reason for the second topic is gone"; return 1; }
+}
+
+@test "the negative space is collected where a reader will find it" {
+    # A document organised by control makes a reader assemble what is NOT
+    # covered themselves, and most will not. Every item here is documented
+    # somewhere else too; this holds the collected list, at the top, because
+    # the collection is the part that is easy to lose.
+    local sec="$REPO_ROOT/docs/security.md" claim
+    grep -q '^## What dejima does not sandbox' "$sec" \
+        || { echo "the not-sandboxed list is gone"; return 1; }
+    for claim in 'through a domain that is allowed' 'DNS query names' \
+                 'below the container' 'finer than a session' \
+                 'Resource exhaustion'; do
+        grep -qi "$claim" "$sec" || { echo "the list drops: $claim"; return 1; }
+    done
+    # First, not buried: a list of what is not covered is only useful before
+    # the reader has formed an impression from the list of what is.
+    local not_line blast_line
+    not_line="$(grep -n '^## What dejima does not sandbox' "$sec" | cut -d: -f1)"
+    blast_line="$(grep -n '^## Blast radius by layer' "$sec" | cut -d: -f1)"
+    [ "$not_line" -lt "$blast_line" ] \
+        || { echo "the not-sandboxed list sits below the controls"; return 1; }
+}
+
+@test "the absence of timeouts is a stated decision, not a gap" {
+    # Every published checklist for this lists them. dejima does not have them
+    # and the reason is a judgement about what dejima protects - so it is
+    # written where the absence is, or it reads as something not yet reached.
+    local sec="$REPO_ROOT/docs/security.md"
+    grep -q '^## Why there are no timeouts' "$sec" \
+        || { echo "the reasoning is gone but the absence is not"; return 1; }
+    grep -qi 'does not cross the boundary' "$sec" \
+        || { echo "the reason no longer says what a runaway session does not do"; return 1; }
+    # And the claim stays true: adding a limit without revisiting this would
+    # leave the document arguing against something the code now does.
+    run grep -nE '^\s*(mem_limit|cpus|pids_limit|stop_grace_period):' \
+        "$SANDBOX_DIR/docker-compose.yml"
+    [ "$status" -ne 0 ] \
+        || { echo "a resource limit exists while the doc says none does:"; echo "$output"; return 1; }
+}
+
+@test "the threat model says which deployment it describes" {
+    # The table has rows below the container whose controls belong to another
+    # repository. Run without it - on a laptop, which the README invites - the
+    # row below the container is the operator's own machine. The table cannot
+    # show that, so the prose has to say it.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q '^## Which deployment this describes' "$tm" \
+        || { echo "the deployment the table describes is unstated again"; return 1; }
+    grep -qi 'load-bearing' "$tm" \
+        || { echo "the sister project reads as optional"; return 1; }
+    grep -q 'devbox-hardener' "$tm" || { echo "$tm names no VM layer"; return 1; }
+    # Linked from the not-sandboxed list, which is where a reader hits the
+    # question first.
+    grep -q 'which-deployment-this-describes' "$REPO_ROOT/docs/security.md" \
+        || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
+}
+
+@test "docs/research-review.md exists and carries its standing questions" {
+    # The process is only worth having if the agenda is in it: a review with no
+    # standing questions becomes a reading list, which is the failure mode it
+    # exists to avoid.
+    local doc="$REPO_ROOT/docs/research-review.md"
+    [ -f "$doc" ] || { echo "the review process is gone"; return 1; }
+    grep -q '^## The standing questions' "$doc" \
+        || { echo "the agenda is gone; what is left is a reading list"; return 1; }
+    grep -q '^## The standing test queue' "$doc" \
+        || { echo "the test queue is gone, so findings stay hypotheses"; return 1; }
+    # And it says where a sweep does NOT go. Reviews, specs and plans are
+    # ephemeral and live on the operator's machine; what belongs in the
+    # repository is the action a review produced, not the reasoning behind it.
+    grep -qi 'not committed here' "$doc" \
+        || { echo "the doc no longer says a sweep stays out of the repository"; return 1; }
+    # Held structurally too, so the practice cannot drift into a directory of
+    # reading notes that nobody acts on.
+    local d
+    for d in findings sweeps research reviews docs/findings docs/research; do
+        [ ! -d "$REPO_ROOT/$d" ] \
+            || { echo "$d/ exists; sweeps are being committed after all"; return 1; }
+    done
+    # Quarterly, because the argument for a schedule is capability drift rather
+    # than anything on the current list.
+    grep -qi 'quarterly' "$doc" || { echo "the standing sweep lost its schedule"; return 1; }
+}
+
 @test "docs/threat-model.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/threat-model.md" ]
     grep -q 'docs/threat-model\.md' "$REPO_ROOT/README.md"
@@ -3892,6 +4664,47 @@ EOF
                'CI, confined job' 'CI, confined job escaped' \
                'CI, privileged job'; do
         grep -qF "| $row |" <<< "$b" || { echo "no row for: $row"; return 1; }
+    done
+}
+
+@test "identities are documented as the session's accounts, not the operator's" {
+    # configuration.md described an [identity.<name>] as grouping what belongs
+    # to a person rather than a project, and gave "work" and "oss" as the
+    # example - one human's two accounts. Both README and security.md tell you
+    # the opposite: give the session an account that is not you. An identity
+    # is how a host holds several of those, one per session.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/configuration.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'several accounts on one machine, and none of them yours' <<< "$flat" \
+        || { echo "identities read as an operator's own accounts again"; return 1; }
+    # The reason there is more than one, which is the whole feature.
+    grep -qi 'scope, revoke and read in a log independently' <<< "$flat" \
+        || { echo "the separation is unexplained"; return 1; }
+    # And the claim that sent someone looking for a project-side setting that
+    # does not exist.
+    grep -qi 'there is no .dejima/ kind for an identity' <<< "$flat" \
+        || { echo "the docs no longer say a project cannot select one"; return 1; }
+    run grep -c 'identity.work\|identity.oss' <<< "$flat"
+    [ "$output" -eq 0 ] \
+        || { echo "the person-shaped example is back"; return 1; }
+
+    # Every identity the prose names has to be one the example block defines.
+    # Renaming the examples left `oss` and `wrok` behind as references to
+    # sections that no longer existed, and the greps above passed throughout:
+    # they match the section-header spelling, and the prose says "the oss
+    # identity". The one deliberate exception is the name introduced as having
+    # no section, which is the point of that sentence - so it is allowed only
+    # on the sentence that makes it.
+    local doc="$REPO_ROOT/docs/configuration.md" defined name
+    defined="$(grep -oE '^\[identity\.[a-z0-9-]+\]' "$doc" | sed 's/^\[identity\.//; s/\]$//')"
+    [ -n "$defined" ] || { echo "the identity example block is gone"; return 1; }
+    for name in $(grep -oE '(--identity|\[core\] identity =) *`?[a-z][a-z0-9-]*' "$doc" \
+                      | grep -oE '[a-z][a-z0-9-]*$' | sort -u); do
+        [ "$name" = "identity" ] && continue
+        grep -qx "$name" <<< "$defined" && continue
+        grep -qE "no section is refused.{0,80}$name" \
+            <<< "$(tr '\n' ' ' < "$doc" | tr -s ' ')" \
+            || { echo "the prose names identity '$name', which no section defines"; return 1; }
     done
 }
 
@@ -3942,6 +4755,25 @@ EOF
         || { echo "the refusal names no requirement it failed"; return 1; }
 }
 
+@test "nothing that builds a session runs an epitaph command that reads" {
+    # `save` writes the store; `list`, `search` and `show` read it. A session
+    # can write its own transcript, so it can author what its own epitaph
+    # says - routing one back into a later session's startup would plant
+    # text in its premises as established background, which is the channel
+    # the never-mounted store closes (#104). The launcher may therefore call
+    # `save` and nothing else, and the context hook must not call it at all.
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        grep -q 'dejima-epitaph" save' <<< "$line" \
+            || { echo "bin/dejima runs an epitaph command other than save: $line"; return 1; }
+    done < <(grep -n 'dejima-epitaph' "$REPO_ROOT/bin/dejima" | grep -v '^\s*#')
+    for f in "$REPO_ROOT/hooks/sandbox-context.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"; do
+        run grep -n 'dejima-epitaph' "$f"
+        [ "$status" -ne 0 ] || { echo "$f reaches for epitaph: $output"; return 1; }
+    done
+}
+
 @test "docs/ci.md exists and is linked from the README and docs/security.md" {
     [ -f "$REPO_ROOT/docs/ci.md" ]
     grep -q 'docs/ci\.md' "$REPO_ROOT/README.md"
@@ -3965,6 +4797,101 @@ EOF
 # its maintainer's, and saying so is the difference between disclosure and
 # letting a reader assume. Pinned because it is the kind of line that goes
 # quietly in a tidy-up, and its absence is not visible from anything else.
+@test "the README leads with what is different, not with the premise" {
+    # "Assume the agent is hostile" is the field's default position as of 2026
+    # - a survey of comparable projects found the premise everywhere. Opening
+    # on it claims novelty dejima does not have, and buries the thing it does:
+    # that the blast radius is followed past the container.
+    #
+    # Pinned because it is a positioning claim, and those drift back toward
+    # whatever is easiest to write.
+    # Everything before the first "What bounds it:" heading, with newlines
+    # flattened: the claims below are sentences, and a sentence that happens to
+    # wrap would otherwise fail a grep for reasons that have nothing to do with
+    # what it says.
+    local opening
+    opening="$(sed -n '1,/^\*\*What bounds it:\*\*/p' "$REPO_ROOT/README.md" | tr '\n' ' ')"
+    [ -n "$opening" ] || { echo "no opening section found"; return 1; }
+    grep -qi 'stop at the container' <<< "$opening" \
+        || { echo "the opening no longer says where dejima differs"; return 1; }
+    # Layers, not a list of the tools, so a fourth does not need this rewritten.
+    grep -qi 'every layer' <<< "$opening" \
+        || { echo "the layering is gone from the opening"; return 1; }
+
+    # And the pitch stays a pitch. A reader arriving here has a short attention
+    # budget, and the first draft of this spent it on how the differentiator was
+    # arrived at - a survey, a date, what the field believes - rather than on
+    # the differentiator. That is a history lesson, and it is the failure this
+    # budget exists to catch, because it is the one that reads as thorough.
+    local pitch words
+    pitch="$(sed -n "/^\*\*Agents work best/,/^dejima is a \\*\\*sandboxed/p" \
+        "$REPO_ROOT/README.md" | sed '$d')"
+    words="$(wc -w <<< "$pitch")"
+    [ "$words" -le 100 ] \
+        || { echo "the opening pitch is $words words, budget is 100"; return 1; }
+    [ "$words" -ge 30 ] \
+        || { echo "the opening pitch is only $words words"; return 1; }
+}
+
+@test "the README's provider lists match what is shipped" {
+    # It listed claude-code as the only harness for as long as cline had been
+    # shipping: a hand-maintained list of directories goes stale in the
+    # direction of telling a reader the thing they came for does not exist.
+    # Asserted against the LIST line, not the whole file - a provider name
+    # appears elsewhere in the README, so a whole-file grep passes while the
+    # list itself is wrong. The first version of this did exactly that and
+    # survived deleting cline.
+    local axis dir name line
+    for axis in forges workflows harnesses; do
+        case "$axis" in
+            forges)     line="$(grep -n '^- .*Forges:' "$REPO_ROOT/README.md" | head -1)" ;;
+            workflows)  line="$(grep -n '^- .*Workflows:' "$REPO_ROOT/README.md" | head -1)" ;;
+            harnesses)  line="$(grep -n '^- .*Harnesses:' "$REPO_ROOT/README.md" | head -1)" ;;
+        esac
+        [ -n "$line" ] || { echo "the README has no $axis list at all"; return 1; }
+        for dir in "$REPO_ROOT/$axis"/*/; do
+            [ -d "$dir" ] || continue
+            name="$(basename "$dir")"
+            grep -q "\`$name\`" <<< "$line" \
+                || { echo "$axis/$name ships and the README's list omits it"; return 1; }
+        done
+    done
+}
+
+@test "the README does not state one harness's specifics as universal" {
+    # Claude Code is the primary tenant and not the only one. Claims that read
+    # as universal and were not: that you must sign in on the host, when a
+    # harness pointed at a model you serve yourself needs no credential; that
+    # install.sh writes hooks into ~/.claude, when the selected harness's
+    # plugin does and only for the one selected; and the pitch naming one
+    # harness's no-prompt flag as the mechanism.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/README.md")"
+
+    # The flag belongs to one harness; each declares its own no_confirm_args.
+    run grep -c 'dangerously-skip-permissions' <<< "$flat"
+    [ "$output" -eq 0 ] \
+        || { echo "the README states one harness's no-prompt flag as the mechanism"; return 1; }
+
+    # The sign-in prerequisite is real and conditional, and the conditional
+    # half is what goes missing.
+    grep -qi 'sign in to it there if it needs a credential' <<< "$flat" \
+        || { echo "the sign-in prerequisite reads as unconditional again"; return 1; }
+}
+
+@test "the threat model names the handoff as a route in" {
+    # dejima tells agents to hand host-side work to the operator. That is a
+    # designed, frequent workflow and therefore a delivery mechanism, and it
+    # was the one route in that the ranked list did not name.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q 'operator running something the session asked them to run' "$tm" \
+        || { echo "the handoff is unnamed again"; return 1; }
+    # And is not read as an argument for removing the handoff, which would
+    # produce a session that works around the operator instead.
+    grep -qi 'not an argument for making the handoff harder' "$tm" \
+        || { echo "it reads as a case for removing the workflow"; return 1; }
+}
+
 @test "the README frames dejima as a development environment, not only a sandbox" {
     grep -q 'sandboxed development environment' "$REPO_ROOT/README.md"
     # The half that is not containment has to be visible as such. A reader
@@ -3979,6 +4906,10 @@ EOF
     # Code by default", which is the promise that change exists to not make.
     run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    # The same promise in the Usage section's spelling, which survived the
+    # first fix because it named the binary rather than the harness.
+    run grep -c 'entry point is bare' <<< "$(flat_prose "$REPO_ROOT/README.md")"
+    [ "$output" -eq 0 ] || { echo "the README names a default entry point"; return 1; }
 }
 
 @test "the README says the prose is written by agents" {
@@ -4361,6 +5292,12 @@ EOF
 # tty" path - real interactive [c]ontinue/[q]uit behavior needs a pty, which
 # isn't available here (see the task report).
 startup_warning_launch() {
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
+    printf '[core]\nupdate_check = off\n' >> "$DEJIMA_T/config/config"
     HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
         DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
         SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
@@ -4895,7 +5832,7 @@ _harness_proxied_domain() {
     # meet it.
     grep -q '^## Sign in on the host first' "$REPO_ROOT/README.md"
     sed -n '/^### Core (required)/,/^That is enough to run/p' "$REPO_ROOT/README.md" \
-        | grep -qi 'sign in to it there'
+        | tr '\n' ' ' | tr -d '*`' | tr -s ' ' | grep -qi 'sign in to it there'
     grep -q 'Sign in on the host first' "$REPO_ROOT/docs/security.md"
 }
 
@@ -5436,7 +6373,7 @@ _emit_mount_at() {
     # And the other direction for the shared libraries, which are the entries
     # most easily forgotten because nothing puts them on PATH.
     for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
-             bin/dejima-harness-lib.sh docker/install-forge-bins.sh; do
+             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
 }
@@ -5469,9 +6406,23 @@ _emit_mount_at() {
     run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
     [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
     grep -qE '^  sandbox:' "$y"
-    # And bin/dejima refers to the service by the same name in both places.
-    [ "$(grep -c 'compose -f "$COMPOSE_FILE" \(build\|run\).* sandbox' "$REPO_ROOT/bin/dejima")" -eq 2 ] \
-        || { echo "bin/dejima does not use the service name in both places"; return 1; }
+    # And EVERY compose invocation in bin/dejima names that same service, with
+    # at least one build and one run. Counted by shape rather than pinned to a
+    # number: the count changed the moment a second run appeared for the
+    # no-terminal case, which says nothing about whether the naming is right.
+    local line builds=0 runs=0
+    while IFS= read -r line; do
+        case "$line" in
+            *" sandbox "*|*" sandbox") ;;
+            *) echo "a compose invocation that does not name the service: $line"; return 1 ;;
+        esac
+        case "$line" in
+            *"compose -f \"\$COMPOSE_FILE\" build"*) builds=$((builds + 1)) ;;
+            *"compose -f \"\$COMPOSE_FILE\" run"*) runs=$((runs + 1)) ;;
+        esac
+    done < <(grep 'compose -f "$COMPOSE_FILE" \(build\|run\)' "$REPO_ROOT/bin/dejima")
+    [ "$builds" -ge 1 ] || { echo "no compose build names the service"; return 1; }
+    [ "$runs" -ge 1 ] || { echo "no compose run names the service"; return 1; }
 }
 
 @test "the TLS terminator answers for the harness's declared domain, not a literal" {
@@ -5674,4 +6625,152 @@ _emit_mount_at() {
         echo "the layer build's failure is masked by export:" >&2; echo "$output" >&2; return 1; }
     grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
         || { echo "the layer build's status is not checked"; return 1; }
+}
+
+@test "the update check is wired into a launch, not only shipped" {
+    # A tool nothing calls is a tool that works in its own tests and never
+    # runs. The startup path is the only thing that makes this a check rather
+    # than a command nobody knows about.
+    grep -q 'dejima-update-check' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima never runs the update check"; return 1; }
+    # Advisory: a version check that fails must not take a launch with it.
+    grep -q 'dejima-update-check" || true' "$REPO_ROOT/bin/dejima" \
+        || { echo "a failed update check would stop the launch"; return 1; }
+    grep -q 'link_bin dejima-update-check' "$REPO_ROOT/install.sh" \
+        || { echo "it is not on PATH, so it cannot be run by hand"; return 1; }
+}
+
+@test "the docs disclose that dejima itself reaches the network from the host" {
+    # dejima's whole argument is about what leaves and through which control.
+    # A request it makes on its own account, at every startup, is the one an
+    # operator is least expecting and most entitled to know about.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'the one request dejima itself makes' <<< "$flat" \
+        || { echo "the host-side request is undisclosed"; return 1; }
+    grep -qi 'no other endpoint and no telemetry' <<< "$flat" \
+        || { echo "the scope of the request is unstated"; return 1; }
+    grep -q '\[core\] update_check = off' <<< "$flat" \
+        || { echo "the docs do not say how to turn it off"; return 1; }
+    # And why it is reached by URL. Without the reason, a later tidy-up reads
+    # the indirection as pointless and removes it.
+    grep -qi 'never by remote name' <<< "$flat" \
+        || { echo "the reason for the URL is gone"; return 1; }
+}
+
+@test "the epitaph renderer strips exactly what the shared sanitize() does" {
+    # `list` is a python renderer that parses the header fields itself, so
+    # there is nothing to hand it a string the shell already cleaned - the
+    # rule ends up written twice. This keeps the second copy honest, and it
+    # reads the real definition out of the script rather than restating it,
+    # so a change there is a change here.
+    local py_clean nasty out_sh out_py
+    py_clean="$(sed -n '/^_BAD = re.compile(/,/^    return _BAD.sub/p' \
+        "$REPO_ROOT/bin/dejima-epitaph")"
+    [ -n "$py_clean" ] || { echo "the renderer's clean() is not where this looks"; return 1; }
+    # One of each class the comment in dejima-color-lib.sh names: C0, BEL, a
+    # C1 control, a bidi override, a bidi isolate, DEL. No NUL - it cannot
+    # survive argv, and neither implementation is reached that way.
+    nasty="$(python3 -c 'import sys
+sys.stdout.write("a\u001b[2Jb\u0007c\u009bd\u202ee\u2066f\u007fg")')"
+    out_sh="$(bash -c 'source "$1"; sanitize "$2"' _ \
+        "$REPO_ROOT/bin/dejima-color-lib.sh" "$nasty")"
+    out_py="$(python3 -c "
+import re, sys
+$py_clean
+sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
+    [ "$out_sh" = "$out_py" ] \
+        || { printf 'shell: %q\npython: %q\n' "$out_sh" "$out_py"; return 1; }
+    # And both actually removed something, so agreeing on "no change" cannot
+    # pass this.
+    [ "$out_sh" != "$nasty" ] || { echo "neither stripped anything"; return 1; }
+}
+
+@test "the docs say why only one notification event is registered" {
+    # A dropped notification looks like a bug from the phone, so the reason
+    # has to be readable without going to the plugin - and without it, the
+    # obvious "fix" is to register Notification again and put the second push
+    # back.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/remote-access.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'One push per stop, and not a second one a minute later' <<< "$flat" \
+        || { echo "the single-event choice is unexplained"; return 1; }
+    grep -qi 'runs with permission prompts off' <<< "$flat" \
+        || { echo "why Notification has only a timer left is unstated"; return 1; }
+    # And what it costs, which is the half a reader is owed before deciding
+    # the trade was made for them correctly.
+    grep -qi 'gone idle without having stopped' <<< "$flat" \
+        || { echo "the docs do not say what is given up"; return 1; }
+}
+
+@test "the README's docs index names every doc a reader is meant to find" {
+    # tools.md shipped and the index did not gain a row, so the only new
+    # reader-facing document of that release was reachable only by knowing it
+    # existed. Derived from the directory rather than from a list here, which
+    # is what makes it catch the next one.
+    local f name missing=""
+    for f in "$REPO_ROOT"/docs/*.md; do
+        name="$(basename "$f")"
+        # release.md is the maintainer's process, deliberately not offered to
+        # a reader arriving at the README.
+        [ "$name" = "release.md" ] && continue
+        grep -q "(docs/$name)" "$REPO_ROOT/README.md" \
+            || missing="$missing $name"
+    done
+    [ -z "$missing" ] || { echo "shipped but not in the README index:$missing"; return 1; }
+}
+
+@test "the docs do not count the capabilities the container is granted" {
+    # The count said seven and compose granted eight. A number in prose that
+    # has to match a list in a file is a number that goes wrong quietly, and
+    # the repo's own rule is not to write one - so the doc names the split and
+    # points at the file that holds the list.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qiE 'cap_drop: ALL plus the (two|three|four|five|six|seven|eight|nine|ten) ' <<< "$flat" \
+        && { echo "the capability floor is described by counting again"; return 1; }
+    grep -q 'docker/docker-compose.yml' <<< "$flat" \
+        || { echo "the doc does not say where the real list is"; return 1; }
+    return 0
+}
+
+@test "the README says every shipped workflow blocks merges, because they all do" {
+    # Derived from the manifests: the claim and the thing it describes move
+    # together, so a workflow shipped with block_merge off fails this rather
+    # than leaving the README quietly wrong.
+    local d name off=""
+    for d in "$REPO_ROOT"/workflows/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ "$(lib manifest_get workflow "$name" block_merge)" = "on" ] || off="$off $name"
+    done
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/README.md" | tr -d '*`' | tr -s ' ')"
+    if [ -z "$off" ]; then
+        grep -qi 'every workflow dejima ships turns it on' <<< "$flat" \
+            || { echo "all of them block merges and the README does not say so"; return 1; }
+    else
+        grep -qi 'every workflow dejima ships turns it on' <<< "$flat" \
+            && { echo "the README claims all of them, but these do not:$off"; return 1; }
+    fi
+    return 0
+}
+
+@test "identity_get decides a key is not an identity's before resolving one" {
+    # bin/dejima's config_get wrapper calls identity_get on every read, and
+    # all but a handful of keys are ones no identity can answer for. With the
+    # resolution first, a --print-config went from 2.4s to 41s: it walked
+    # every forge manifest per key to find out the key was core.harness.
+    #
+    # Asserted by order rather than by timing, which would be a flaky test
+    # about the machine it runs on.
+    local body guard resolve
+    body="$(sed -n '/^identity_get() {/,/^}/p' "$REPO_ROOT/bin/dejima-provider-lib.sh")"
+    [ -n "$body" ] || { echo "identity_get is not where this looks"; return 1; }
+    guard="$(grep -n 'core)' <<< "$body" | head -1 | cut -d: -f1)"
+    resolve="$(grep -n 'identity_selected_into' <<< "$body" | head -1 | cut -d: -f1)"
+    [ -n "$guard" ] && [ -n "$resolve" ] \
+        || { echo "the guard or the resolution moved out of identity_get"; return 1; }
+    [ "$guard" -lt "$resolve" ] \
+        || { echo "the identity is resolved before the key is known to need one"; return 1; }
 }

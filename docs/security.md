@@ -4,8 +4,8 @@
 
 **Threat model, honestly stated:** this reduces the blast radius of a
 misbehaving or prompt-injected coding agent - it does not make it safe to
-point at arbitrary untrusted or adversarial input, and it does not turn
-`--dangerously-skip-permissions` into something without real risk. Point it
+point at arbitrary untrusted or adversarial input, and it does not make
+running an agent with its permission prompts off safe. Point it
 at repositories you already trust. Everything below is about how bad a
 compromised session *inside* that trust boundary can get, not a claim that
 one can't happen.
@@ -15,6 +15,61 @@ development: the reasoning here is one person's, the tests assert what that
 person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
+
+## What dejima does not sandbox
+
+Every item here is documented somewhere below, and a document organised by
+control makes a reader assemble the negative space themselves. Most will not.
+So it is collected here, at the top, where it is the first thing read rather
+than the thing inferred from silence.
+
+- **Exfiltration through a domain that is allowed.** The egress allowlist
+  decides *where* a session may connect, not what it may put in the request. A
+  session that can reach a host can encode data into a path or a query it
+  sends there. Allowing a domain at all creates that channel.
+- **Data encoded into DNS query names.** The DNS proxy answers for allowlisted
+  domains; the names asked for are a channel of their own.
+- **Anything below the container, where nothing is arranged there.** dejima's
+  blast-radius table has rows beneath the container, and their controls belong
+  to [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener).
+  Run on a laptop with no VM layer, the row below the container is the
+  operator's own machine, and dejima has nothing to say about it. See
+  [Which deployment this describes](threat-model.md#which-deployment-this-describes).
+- **Anything finer than a session.** The unit of isolation is one container for
+  one session. An MCP server, a hook, or a tool the session runs inherits the
+  session's whole reach - dejima reports that a session *added* an MCP server
+  (see the audit surfaces below) and does not constrain what that server then
+  does. Per-tool granularity would need a second sandbox inside this one.
+- **Resource exhaustion.** No time limit, no memory limit, no CPU limit. A
+  session that loops until someone notices is not prevented, and this is a
+  deliberate omission rather than an oversight - see
+  [Why there are no timeouts](#why-there-are-no-timeouts).
+- **The first layer's controls against an agent that has stopped
+  cooperating.** The briefing and `.dejima.md` are advice. They shape what a
+  cooperating agent does and stop nothing that has decided otherwise. Only the
+  layers below them are enforcement.
+
+## Why there are no timeouts
+
+Every published checklist for sandboxing an agent lists timeouts alongside
+non-root, egress filtering and read-only mounts. dejima has none, and the
+reason is a judgement about what dejima is for rather than an item not yet
+reached.
+
+**A runaway session costs money and does not cross the boundary.** It burns
+tokens and holds a CPU until someone looks. Nothing about it reaches the host,
+widens the allowlist, or writes where a session may not write - the guarantees
+dejima makes are all still held while it happens. A timeout would protect a
+budget, which dejima has never claimed to protect.
+
+**And "unattended" here does not mean "unobserved".** The sessions this is
+built for run for days, and are checked at every issue and every pull request.
+They need less babysitting, not none. A wall clock tuned for that is either so
+long it prevents nothing or short enough to kill work in progress, and killing
+a session mid-commit is a failure mode of its own.
+
+If this changes it will be because a resource limit starts protecting the
+boundary rather than the bill.
 
 ## Blast radius by layer
 
@@ -209,8 +264,8 @@ can make; it is one the audit reports. See
 
 ## The mounted project is fully writable
 
-- `--dangerously-skip-permissions` removes your chance to review tool calls
-  before they run. Only point this at trusted repositories.
+- Running the harness with its permission prompts off removes your chance to
+  review tool calls before they run. Only point this at trusted repositories.
 - The mounted project itself has **no write protection**. `deny-dangerous-
   bash.sh`, `git-push-guard.sh` and `merge-guard.sh` are regex
   pattern-matching on the literal Bash command string - a fast-fail guard
@@ -242,178 +297,180 @@ can make; it is one the audit reports. See
   either, but only after the session ends - it doesn't stop them.
 ## The exit-time audit
 
-- `bin/dejima-audit` snapshots host-persistence surfaces before each
-  run and diffs them after the container exits: `.git/config` (and worktree
-  `config.worktree`) keys that run a command on the next `git` -
-  `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
-  `credential.helper`, `core.pager`, `pager.*`, `core.editor`,
-  `sequence.editor`, `gpg.program`, `diff.external`, `merge.*.driver`,
-  `diff.*.command`, `filter.*.smudge`/`clean`/`process`, `diff.*.textconv`,
-  `include.path`/`includeif.*.path` (config indirection - these can point at
-  a planted file that itself sets an exec key, so the exec key never
-  appears in `.git/config` directly), `!`-shell aliases - plus content
-  changes under the workspace's `.claude/`, `.mcp.json`, `.envrc`,
-  `.vscode/`, and `.git/hooks/` (symlinks included - a repointed symlink is
-  hashed by its target, not just its content). When the mounted workspace is
-  this repo itself, it also hashes the sandbox's own trusted computing base -
-  `bin/`, `hooks/`, `docker/`, `install.sh`, `test/`.
+`bin/dejima-audit` snapshots host-persistence surfaces before each run and
+diffs them after the container exits. It is **advisory**: it fires after the
+session ended, so a planted `core.hooksPath` is something to clean up before
+the next `git` or `claude` in that repo, not something that was blocked. It is
+silent when nothing changed and never affects the session's exit code.
 
-  Worth knowing about that first surface, because the sandbox's own workflow
-  makes it easy to get wrong: **a git worktree isolates the working tree, not
-  `.git/config`.** Config is shared with the parent checkout, so a bare
-  `git config <key> <value>` inside a worktree writes the real repository's
-  config, including any exec key above. The briefing now says so, and gives
-  `git -C <path> config`. A guard against an unaware agent, not a boundary:
-  `.git/config` is in the read-write project mount and cannot be read-only
-  without breaking `git push -u`, which writes `branch.<name>.merge` on every
-  push. Detection covers the rest, and did - this was found by the audit
-  reporting a `.git/config` change.
+**Its diff is time-windowed, not session-attributed:** a finding means a path
+changed while the session ran, not that the session changed it. A concurrent
+session, another host process, or your own editing all land in the same diff,
+reported identically.
 
-  **Advisory only.** It fires after the session ended, so a planted
-  `core.hooksPath` is something to clean up before the next `git` or
-  `claude` in that repo, not something that was blocked. Silent when nothing
-  changed, and never affects the session's exit code. It does not cover
-  `[core] share_dir` (see
-  [Shared scratch space](configuration.md#shared-scratch-space)), and its
-  coverage is a fixed list rather than a general integrity check, so a config
-  surface it has not been taught about goes unreported.
+### What it watches
 
-  **Its diff is time-windowed, not session-attributed:** a finding means a
-  path changed while the session ran, not that the session changed it. A
-  concurrent session, another host process, or your own editing all land in
-  the same diff, reported identically.
-- **Approving and ignoring are different decisions, and the difference is
-  what you are promising about next time.** Approving records the exact
-  content: `safe <id> <sha>`, so this file with these bytes is fine and any
-  other content re-fires. Ignoring records the surface: `spam <id>`, so this
-  path or key is fine whatever it later contains. Approve a hook you have
-  read; ignore a key some tool rewrites on every run and which you have
-  decided you will never care about. The review offers both, and says which
-  is which rather than leaving you to infer it:
+`.git/config` (and worktree `config.worktree`) keys that run a command on the
+next `git` - `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
+`credential.helper`, `core.pager`, `pager.*`, `core.editor`, `sequence.editor`,
+`gpg.program`, `diff.external`, `merge.*.driver`, `diff.*.command`,
+`filter.*.smudge`/`clean`/`process`, `diff.*.textconv`,
+`include.path`/`includeif.*.path` (config indirection - these can point at a
+planted file that itself sets an exec key, so the exec key never appears in
+`.git/config` directly), `!`-shell aliases - plus content changes under the
+workspace's `.claude/`, `.mcp.json`, `.envrc`, `.vscode/`, and `.git/hooks/`
+(symlinks included - a repointed symlink is hashed by its target, not just its
+content). When the mounted workspace is this repo itself, it also hashes the
+sandbox's own trusted computing base: `bin/`, `hooks/`, `docker/`,
+`install.sh`, `test/`.
 
-  ```
-  [a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
-  ```
+Coverage is a fixed list rather than a general integrity check, so a config
+surface it has not been taught about goes unreported. It does not cover
+`[core] share_dir` (see
+[Shared scratch space](configuration.md#shared-scratch-space)).
 
-  A finding whose file has since been deleted is **cleared** rather than
-  approved: there is no content left to pin an approval to, and a surface
-  that does not exist does not run. Nothing is recorded, so if it comes back
-  it comes back as a new finding. Refusing would leave the report
-  unresolvable: `ack` opens CRITICAL reports first, so every other report
-  would hide behind one no decision could clear.
+**A git worktree isolates the working tree, not `.git/config`.** Config is
+shared with the parent checkout, so a bare `git config <key> <value>` inside a
+worktree writes the real repository's config, including any exec key above. The
+briefing says so, and gives `git -C <path> config`. That is a guard against an
+unaware agent, not a boundary: `.git/config` is in the read-write project mount
+and cannot be read-only without breaking `git push -u`, which writes
+`branch.<name>.merge` on every push. Detection covers the rest, and did - this
+was found by the audit reporting a `.git/config` change.
 
-  Skipping asks again next session, the right default when you are unsure.
-  It matters for keys some tools rewrite on every run: with no decision
-  recorded, one re-fires every session and pushes real findings out of the
-  capped list.
+### Approving and ignoring are different decisions
 
-  Severity is not negotiable by either verb. An exec-capable key or shell
-  alias is CRITICAL whatever the baseline says, and an `ignore` entry is
-  refused against a CRITICAL surface when the baseline is read, not only when
-  written - so neither decision can quietly downgrade something that matters.
+The difference is what you are promising about next time. Approving records the
+exact content (`safe <id> <sha>`), so this file with these bytes is fine and any
+other content re-fires. Ignoring records the surface (`spam <id>`), so this path
+or key is fine whatever it later contains. Approve a hook you have read; ignore
+a key some tool rewrites on every run and which you have decided you will never
+care about. The review offers both, and says which is which:
 
-- `dejima-audit ack` shows what it is asking you to approve. For a surface
-  that changed during the session it prints a unified diff of the
-  pre-session content against the current content; for one created during
-  the session it prints the whole current content. To make that possible,
-  `snapshot` stages a copy of each monitored surface's bytes for the
-  duration of the session, and `compare` turns those into **bounded
-  diffs** stored in a `<report>.d/` directory beside the report. What
-  persists after the session is only the diff of a *modified* surface -
-  never a whole file. A created surface stores a marker (its content is
-  live on disk); a removed one stores nothing at all, because a deletion
-  diff *is* the whole former file.
+```
+[a] approve this exact content  [i] ignore this key from now on  [s] skip (ask again next time)  [q] quit
+```
 
-  What it prints is chosen by what changed, which is not always what you
-  need in order to judge it - three changed lines in a hook script are only
-  judgeable by reading the script. `[o]` at the prompt opens the file in
-  `$VISUAL`/`$EDITOR`, read-only where the editor understands how, and
-  returns to the same decision. It opens the file **as it is now**, not the
-  text the report captured, for the same reason an approval pins the content
-  that is on disk at the moment it is recorded: approving something nobody
-  read would be the one outcome worse than not asking.
+Skipping asks again next session, the right default when you are unsure. It
+matters for keys some tools rewrite on every run: with no decision recorded, one
+re-fires every session and pushes real findings out of the capped list.
 
-  Staging and retained diffs live under `$AUDIT_DIR`
-  (`~/.local/share/dejima/audit`), never `/tmp`. That is the boundary the
-  scheme rests on: nothing in `docker-compose.yml` covers it, so the
-  container cannot read earlier runs' retained content, and `static.bats`
-  pins that. A store configured *inside* the workspace is readable and
-  deletable from the sandbox, so nothing is retained in that case - only a
-  note saying why.
+A report walked to the end stops being counted as waiting, but stays on disk as
+the record of what that session did. `[audit] keep` decides how many are
+retained; rotation evicts one, `ack` never does.
 
-  A `SIGKILL`ed session runs no EXIT trap and leaves its staging directory;
-  the next run against that workspace reaps it, identifying dead owners by
-  pid and process start time from an `.owner` file so a concurrent session is
-  never mistaken for dead. A missing or unreadable owner record falls back to
-  a 24-hour age check rather than guessing.
+A finding whose file has since been deleted is **cleared** rather than approved:
+there is no content left to pin an approval to, and a surface that does not
+exist does not run. Nothing is recorded, so if it comes back it comes back as a
+new finding. Refusing would leave the report unresolvable, since `ack` opens
+CRITICAL reports first.
 
-  Content is withheld from the store in several further cases, and in
-  every one `ack` prints the reason in place of the diff - so an absent
-  diff is never mistaken for an absent change - and still shows the live
-  current content on your terminal, because withholding is about the
-  persistent store, not about what you are shown while deciding. Surfaces
-  that hold credentials by convention are never staged in the first
-  place, so their bytes are never even copied transiently: `.envrc`,
-  `.mcp.json` and `.claude/settings.local.json` by exact path, and
-  `.env`/`.env.*` by *basename*, at any depth - so a nested `.claude/.env`
-  is caught too, not just one at the workspace root. A surface that
-  existed before the session but was too large to have been staged (over
-  1 MiB) withholds with "no pre-session copy", not a false claim that it
-  is new. The *current* side is bounded by that same 1 MiB cap, and - like
-  the staged side - checked *before* any copy is taken: a file the session
-  grew past it withholds with "change too large to retain" rather than
-  being copied through `$TMPDIR` first. The ordering is the point, not the
-  cap. `compare` runs from the exit trap on every exit and the size is the
-  session's own choice, so copying first would turn "I filled my own
-  workspace" into that many bytes written to `$TMPDIR` - often a tmpfs, so
-  host RAM - and into a whole copy left there if the exit was a `SIGKILL`.
-  A generated diff is withheld if it is binary, over 200 lines
-  or 64 KiB (and is bounded to that as it is generated, for the same
-  reason), or matches a best-effort credential screen - vendor prefixes
-  including `sk-ant-`, `sk-proj-`, `ghp_`, `gho_`, `github_pat_`,
-  `glpat-`, Slack's `xox[baprs]-`, `AIza`, `AKIA`, `_authToken`,
-  `Authorization: Bearer`, and PEM private-key headers, matched
-  case-insensitively, since `.claude/settings.json`'s `env` block - the one
-  high-value surface this is the only net for - conventionally holds its keys
-  upper-case. The screen is best-effort with real false negatives: the
-  denylist above is the reliable half.
+Severity is not negotiable by either verb. An exec-capable key or shell alias is
+CRITICAL whatever the baseline says, and an `ignore` entry is refused against a
+CRITICAL surface when the baseline is read, not only when written - so neither
+decision can quietly downgrade something that matters.
 
-  A git config key with more than one value on either side is not compared.
-  Git resolves such a key to its last value in FILE order; the audit parses
-  and sorts, so lexicographically-last is not what git runs, and the
-  pre-session side is every value the key had. Comparing anyway produced a
-  diff over values git does not use - two pre-session values read as a
-  deletion that never happened, while the appended value git now executes
-  appeared nowhere. It withholds instead, and must be compared by hand.
-  `include.path` is legitimately multi-valued, so this is an ordinary shape.
+### What `ack` shows you
 
-  A diff can also come out empty when the config file's TEXT changed but the
-  parsed value did not, e.g. a re-quoted value. That withholds too, saying so
-  rather than showing nothing - an empty diff for a reported change reads as
-  a bug.
+For a surface that changed during the session it prints a unified diff of the
+pre-session content against the current content; for one created during the
+session it prints the whole current content. To make that possible, `snapshot`
+stages a copy of each monitored surface's bytes for the duration of the session,
+and `compare` turns those into **bounded diffs** in a `<report>.d/` directory
+beside the report. What persists afterwards is only the diff of a *modified*
+surface, never a whole file. A created surface stores a marker (its content is
+live on disk); a removed one stores nothing, because a deletion diff *is* the
+whole former file.
 
-  A per-report **retention budget** (`RETAIN_BUDGET`, 1 MiB) bounds the total
-  diff bytes one report keeps. Once spent, the rest withhold and both the
-  report and the stderr summary add an alarm line: that many changed
-  host-persistence surfaces in one session is a signal in itself, not a limit
-  worth raising. `diffs = off` in `[audit]` disables retention and staging.
+What it prints is chosen by what changed, which is not always what you need in
+order to judge it: three changed lines in a hook script are only judgeable by
+reading the script. `[o]` at the prompt opens the file in `$VISUAL`/`$EDITOR`,
+read-only where the editor understands how, and returns to the same decision. It
+opens the file **as it is now**, for the same reason an approval pins the content
+on disk at the moment it is recorded: approving something nobody read would be
+the one outcome worse than not asking.
 
-  Two residual limits on top of the screen's false negatives. The prompt
-  truncates at 40 lines, naming the file so you can read the rest - a large
-  planted change is cut exactly where you would want it whole. And the
-  `SIGKILL` case is an exposure window, not just a cleanup mechanic: until
-  the next run reaps it, the staging directory holds whole pre-session file
-  copies of every monitored surface, for as long as the workspace goes
-  unused.
-- Findings name a path or config key the session may have chosen, so they
-  reach your terminal as untrusted text. One containing an ASCII or C1
-  control or a Unicode bidi override - which can scroll, blank or reorder
-  what you read, and split a name across the audit's own records - is written
-  hex-encoded behind a `{hex}` marker and decodes with
-  `printf '%b' "$(sed 's/../\\x&/g' <<< HEX)"`. Ordinary names print as-is,
-  so the marker appearing is itself worth a look. The encoded form is what
-  `ack` records, so what you acknowledge is the file on disk rather than a
-  readable approximation of its name.
+Staging and retained diffs live under `$AUDIT_DIR`
+(`~/.local/share/dejima/audit`), never `/tmp`. That is the boundary the scheme
+rests on: nothing in `docker-compose.yml` covers it, so the container cannot read
+earlier runs' retained content, and `static.bats` pins that. A store configured
+*inside* the workspace is readable and deletable from the sandbox, so nothing is
+retained in that case, only a note saying why.
+
+A `SIGKILL`ed session runs no EXIT trap and leaves its staging directory; the
+next run against that workspace reaps it, identifying dead owners by pid and
+process start time from an `.owner` file so a concurrent session is never
+mistaken for dead. A missing or unreadable owner record falls back to a 24-hour
+age check rather than guessing.
+
+### When content is withheld from the store
+
+In every case below `ack` prints the reason in place of the diff - so an absent
+diff is never mistaken for an absent change - and still shows the live current
+content on your terminal, because withholding is about the persistent store, not
+about what you are shown while deciding.
+
+Surfaces that hold credentials by convention are never staged in the first
+place, so their bytes are never even copied transiently: `.envrc`, `.mcp.json`
+and `.claude/settings.local.json` by exact path, and `.env`/`.env.*` by
+*basename*, at any depth - so a nested `.claude/.env` is caught too.
+
+A surface that existed before the session but was too large to have been staged
+(over 1 MiB) withholds with "no pre-session copy", not a false claim that it is
+new. The *current* side is bounded by that same cap, and checked *before* any
+copy is taken: a file the session grew past it withholds with "change too large
+to retain" rather than being copied through `$TMPDIR` first. The ordering is the
+point, not the cap. `compare` runs from the exit trap on every exit and the size
+is the session's own choice, so copying first would turn "I filled my own
+workspace" into that many bytes written to `$TMPDIR` - often a tmpfs, so host
+RAM - and into a whole copy left there if the exit was a `SIGKILL`.
+
+A generated diff is withheld if it is binary, over 200 lines or 64 KiB (bounded
+as it is generated, for the same reason), or matches a best-effort credential
+screen: vendor prefixes including `sk-ant-`, `sk-proj-`, `ghp_`, `gho_`,
+`github_pat_`, `glpat-`, Slack's `xox[baprs]-`, `AIza`, `AKIA`, `_authToken`,
+`Authorization: Bearer`, and PEM private-key headers, matched case-insensitively
+since `.claude/settings.json`'s `env` block - the one high-value surface this is
+the only net for - conventionally holds its keys upper-case. The screen has real
+false negatives; the denylist is the reliable half.
+
+A git config key with more than one value on either side is not compared. Git
+resolves such a key to its last value in FILE order; the audit parses and sorts,
+so lexicographically-last is not what git runs, and the pre-session side is every
+value the key had. Comparing anyway produced a diff over values git does not use:
+two pre-session values read as a deletion that never happened, while the appended
+value git now executes appeared nowhere. It withholds instead, and must be
+compared by hand. `include.path` is legitimately multi-valued, so this is an
+ordinary shape.
+
+A diff can also come out empty when the config file's TEXT changed but the parsed
+value did not, e.g. a re-quoted value. That withholds too, saying so rather than
+showing nothing, since an empty diff for a reported change reads as a bug.
+
+A per-report **retention budget** (`RETAIN_BUDGET`, 1 MiB) bounds the total diff
+bytes one report keeps. Once spent, the rest withhold and both the report and the
+stderr summary add an alarm line: that many changed host-persistence surfaces in
+one session is a signal in itself, not a limit worth raising. `diffs = off` in
+`[audit]` disables retention and staging.
+
+Two residual limits on top of the screen's false negatives. The prompt truncates
+at 40 lines, naming the file so you can read the rest, so a large planted change
+is cut exactly where you would want it whole. And the `SIGKILL` case is an
+exposure window, not just a cleanup mechanic: until the next run reaps it, the
+staging directory holds whole pre-session file copies of every monitored surface,
+for as long as the workspace goes unused.
+
+### Findings reach your terminal as untrusted text
+
+They name a path or config key the session may have chosen. One containing an
+ASCII or C1 control or a Unicode bidi override - which can scroll, blank or
+reorder what you read, and split a name across the audit's own records - is
+written hex-encoded behind a `{hex}` marker and decodes with
+`printf '%b' "$(sed 's/../\\x&/g' <<< HEX)"`. Ordinary names print as-is, so
+the marker appearing is itself worth a look. The encoded form is what `ack`
+records, so what you acknowledge is the file on disk rather than a readable
+approximation of its name.
+
 ## One project's session cannot reach another's
 
 - `~/.claude/projects` (session transcripts and per-project memory) is
@@ -705,11 +762,29 @@ session, where the credential deliberately never goes.
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
   that user via `gosu` before execing the configured command (`[core] command`,
-  `claude` by default). A compromised session can't
+  or the selected harness's own if that is unset). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
   exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
   cleared from the effective/permitted sets on the `gosu` drop, and that
   user gets a permission error running `iptables` directly.
+- A forge credential reaches the container as `-e NAME`, never
+  `-e NAME=value`. The value comes from the launcher's own environment, so it
+  sits in `/proc/<pid>/environ` (mode 0400, owner only) rather than in
+  `/proc/<pid>/cmdline`, which is world-readable and which `ps` prints to
+  anyone. `docker inspect` still shows the resolved value to whoever can
+  reach the daemon - that is daemon access rather than any process at all,
+  and it is not something the launcher can change.
+- The container runs with `no-new-privileges` and an explicit capability
+  floor - `cap_drop: ALL` plus the ones it actually uses: what the
+  entrypoint's root phase needs, and `KILL`. `KILL` is there for
+  `dejima-allow --container`, not for the entrypoint - adding a domain to a
+  running session signals dnsmasq, and dnsmasq runs as its own user. The list
+  itself is in `docker/docker-compose.yml`, which is where it stays correct. The first means a setuid binary or a file capability cannot raise
+  privileges on exec, which is the shape any escalation from the session user
+  would have to take; the second means the capabilities nothing here uses were
+  never in the bounding set to be regained. Both are asserted against a running
+  container rather than against the compose file, and the capability list the
+  test uses is read out of that file so the two cannot drift.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see
   [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)
@@ -855,6 +930,14 @@ strips AAAA answers): there's no IPv6 equivalent of the allowlist above, so
 leaving it open would bypass the whole firewall on any host with IPv6
 egress.
 
+Where `ip6tables` cannot be used at all, the firewall does not conclude that
+IPv6 is therefore absent - it asks the kernel, and treats an address on any
+interface other than loopback as the family being live. It then turns IPv6
+off in the container's own network namespace, and **refuses to start** if it
+cannot. A tool that will not run and a family that is not there are different
+conditions, and reporting the second on evidence of the first is how a
+boundary comes to be described rather than held.
+
 If your Gitea host only resolves via a LAN-local DNS server, make sure the
 Docker host itself can resolve it: containers inherit the host's resolver.
 
@@ -901,12 +984,15 @@ is precisely when nothing is running to probe in the first place. Pass
 `dejima-allow --global --container <id> crates.io` records the approval and
 patches that session immediately, in that order, so the approval is never
 lost to a live-session failure. If more than one dejima container is
-running, the bare form above refuses and asks you to disambiguate with
-`--container <name>` - `docker ps` finds it, or use the
-container's own ID, which `sandbox-context.sh` already hands the agent in
-its startup context (and which is always available inside the sandbox as
-`cat /etc/hostname`), so there's no need for it to guess one and risk
-"successfully" updating someone else's session instead.
+running, the bare form above refuses rather than guessing. On a terminal it
+offers the running sessions to pick from, by project; anywhere else - a
+script, a pipe, a session asking its operator to run this - it prints the same
+rows and stops, because a prompt nobody can answer is worse than a refusal.
+Either way the answer is in front of you instead of in a separate `docker ps`.
+A session has its own ID regardless: `sandbox-context.sh` hands it to the
+agent in its startup context, and `cat /etc/hostname` has it inside the
+sandbox, so there is no need for it to guess one and risk "successfully"
+updating someone else's session instead.
 
 A domain allowed this way stays allowed for the rest of the session even
 if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
@@ -986,6 +1072,33 @@ to be established by running them, not inferred from the tool having a similar
 name. It belongs in that harness's worked example in
 [development.md](development.md#adding-a-new-harness) alongside the rest of
 what it can and cannot do.
+
+## The one request dejima itself makes
+
+Everything above bounds what a *session* reaches. dejima's own host side
+reaches one place, once an hour at most: `bin/dejima-update-check` asks the
+remote your checkout already tracks for the tip of the branch it already
+follows, so that a launch can say when the checkout is behind. It is
+`ls-remote`, so no objects are downloaded, and `[core] update_check = off`
+stops it entirely. There is no other endpoint and no telemetry - a domain
+you have not already configured dejima to push to is never contacted.
+
+It reaches that remote by URL, from outside the repository, and never by
+remote name. `git ls-remote origin` reads the checkout's own config for how
+to get there, and `core.sshCommand`, `credential.helper` and
+`url.<base>.insteadOf` each name a command git then runs on the host. dejima
+mounts its own checkout writable when that checkout is the workspace, so a
+session that wrote `.git/config` there would otherwise get host execution out
+of the next launch. That is the same class as the `core.hooksPath` route
+above, with one difference worth stating: `hooksPath` waits for the operator
+to run a git command, and a check that runs at every startup does not wait
+for anything. Handing the URL to a git started outside the repository leaves
+none of that config in the path, and `protocol.allow` holds the transports to
+ones that cannot name a command.
+
+What still crosses is the URL itself, which a session with that same write can
+point at a host of its choosing. That costs one outbound request and no
+execution, and the audit reports the config change it took.
 
 ## Network request logging
 

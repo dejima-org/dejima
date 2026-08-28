@@ -93,7 +93,13 @@ launch() {
     conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
     mkdir -p "$(dirname "$conf")"
     # No default, so a config that launches must select one.
-    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
+    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n' \
+        "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
@@ -110,6 +116,35 @@ docker_log() { cat "$LAUNCH_DIR/docker-log" 2>/dev/null; }
 dockerfile_for() {
     awk -v want="=== $1 ===" '$0 == want { on=1; next } /^=== / { on=0 } on' \
         "$LAUNCH_DIR/dockerfile-log" 2>/dev/null
+}
+
+@test "valid_domain refuses the hostname shapes a resolver would read differently" {
+    # The matcher is a trust boundary: what it accepts becomes a dnsmasq
+    # `server=` line and an ipset entry. The published bypass in this space
+    # came from an egress control accepting a string its resolver then read as
+    # a different host, so the shapes below are the ones worth asserting on
+    # rather than only "does it reject evil.com".
+    #
+    # Run against this matcher during the 2026-08 prior-art sweep: every case
+    # here was already refused except the empty label, which was not.
+    local bad
+    for bad in 'a..b.com' 'github.com.' '.github.com' '-bad.com' 'bad-.com' \
+               'a.-b.com' 'evil.com%00.github.com' 'a_b.com' '' \
+               'evil.com
+github.com'; do
+        run bash -c 'source "$1"; valid_domain "$2"' _ "$LIB" "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted: $(printf %q "$bad")"; return 1; }
+    done
+
+    # And the shapes that must keep working, including the ones the tightening
+    # could plausibly have broken: an IDNA label starts with a letter and
+    # contains hyphens, and a single label with no dot is a real internal name.
+    local good
+    for good in 'crates.io' 'static.crates.io' 'xn--e1afmkfd.com' 'GitHub.com' \
+                'localhost' 'a' 'llm-backend.example.com'; do
+        run bash -c 'source "$1"; valid_domain "$2"' _ "$LIB" "$good"
+        [ "$status" -eq 0 ] || { echo "refused: $good"; return 1; }
+    done
 }
 
 @test "valid_domain accepts real domains and rejects shell-active input" {
@@ -504,6 +539,85 @@ EOF
     run "$REPO_ROOT/bin/dejima-dep" add --global 'apt:a;b'
     [ "$status" -ne 0 ]
     [ ! -f "$CONFIG_DIR/dependencies" ]
+}
+
+# Two running sandboxes, each with a working directory, plus a dejima-attach
+# that lists them in the order its picker numbers them.
+stub_two_containers() {
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+if [ "$1" = ps ]; then
+    printf 'dejima-run-aaaa\taaaaaaaaaaaa\n'
+    printf 'dejima-run-bbbb\tbbbbbbbbbbbb\n'
+    exit 0
+fi
+if [ "$1" = inspect ]; then
+    case "$*" in
+        *aaaaaaaaaaaa*) echo /home/someone/workspace/alpha ;;
+        *bbbbbbbbbbbb*) echo /home/someone/workspace/beta ;;
+    esac
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    cat > "$STUB_DIR/dejima-attach" <<'EOF'
+#!/bin/bash
+[ "$1" = --list ] || exit 1
+printf 'run1\tlabel-b\tbeta\t3m\tattachable\tbbbbbbbbbbbb\n'
+printf 'run2\tlabel-a\talpha\t9m\tattachable\taaaaaaaaaaaa\n'
+EOF
+    chmod +x "$STUB_DIR/dejima-attach"
+    PATH="$STUB_DIR:$PATH"
+}
+
+@test "several running sandboxes are listed by project, not by run id alone" {
+    # The name is a run id, which is exactly what someone with three sessions
+    # open does not know. What they do know is which project each is working
+    # on. Taken from the container's own working directory, so it is there
+    # whether or not remote access is on.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Multiple running dejima containers"* ]] || { echo "$output"; return 1; }
+    grep -qE 'alpha +dejima-run-aaaa' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE 'beta +dejima-run-bbbb' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the listing carries the number the dejima-attach picker gives each one" {
+    # The picker numbers its rows 1..N in the order --list prints them, so a
+    # position there is the number an operator would type. Deliberately not
+    # this tool's own ordering: two lists that number the same sessions
+    # differently is worse than one list without numbers.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    # beta is first in the attach listing, so beta is 1 - not alpha, which
+    # docker happens to report first.
+    grep -qE '^ *beta .*\(dejima-attach 1\)' <<< "$output" || { echo "$output"; return 1; }
+    grep -qE '^ *alpha .*\(dejima-attach 2\)' <<< "$output" || { echo "$output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the listing drops the picker number rather than failing without one" {
+    # dejima-attach refuses outright when remote access is off. That is a
+    # column missing, not an error: the project name is the part that makes
+    # this usable and it does not depend on the feature.
+    stub_two_containers
+    cat > "$STUB_DIR/dejima-attach" <<'EOF'
+#!/bin/bash
+echo "Remote access is not configured." >&2
+exit 1
+EOF
+    chmod +x "$STUB_DIR/dejima-attach"
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ]
+    grep -qE 'alpha +dejima-run-aaaa' <<< "$output" || { echo "$output"; return 1; }
+    [[ "$output" != *"dejima-attach 1"* ]] || { echo "invented a number: $output"; return 1; }
+    [[ "$output" != *"Remote access is not configured"* ]] \
+        || { echo "leaked the attach refusal: $output"; return 1; }
+    rm -rf "$STUB_DIR"
 }
 
 @test "dejima-allow --project persists without needing a container" {
@@ -1677,28 +1791,87 @@ EOF
 # The assertion is one-sided on purpose: the victim must never be written. The
 # refusal count is only there to prove the swap window was real, so a run where
 # the swapper never landed cannot pass vacuously.
+#
+# Each half restores state before swapping again, and that is what keeps the
+# window open rather than tidiness. declare_entry calls os.makedirs the moment
+# the directory is missing, so the writer puts a real directory back at the
+# path while the symlink is meant to be there. A swapper that only tried
+# unlink() then hit "Is a directory", left `held` stranded, and every later
+# rename failed with "Directory not empty" - it went through the motions for
+# the rest of the run without ever planting another symlink. The window closed
+# in the first few milliseconds, the refusal count stopped rising, and a run
+# where it closed before the writer's first attempt scored zero and failed a
+# test whose guarantee had held perfectly. Discarding what the writer put there
+# is also what a hostile session does: it owns that directory.
 swap_loop() {
-    python3 - "$1" "$2" <<'PY' &
-import os, sys, time
+    SWAP_HEALTH="$(mktemp)"
+    python3 - "$1" "$2" "$SWAP_HEALTH" <<'PY' &
+import errno, os, shutil, stat, sys, time
 
-path, target = sys.argv[1], sys.argv[2]
+path, target, health_at = sys.argv[1], sys.argv[2], sys.argv[3]
 held = path + ".held"
+
+def clear(p):
+    # Whatever is at the path, gone - a symlink this loop planted, or the
+    # directory the writer recreated underneath it.
+    try:
+        if stat.S_ISDIR(os.lstat(p).st_mode):
+            shutil.rmtree(p)
+        else:
+            os.unlink(p)
+    except OSError as e:
+        if e.errno != errno.ENOENT:
+            raise
+
+# The longest run of cycles that planted nothing, which is what the test
+# asserts on. A count of successful plants does not separate the two cases:
+# the wedge took about a second to happen, so a broken swapper still plants
+# a hundred times and then never again. Losing a single cycle to the writer
+# recreating the directory at the wrong moment is normal and self-correcting;
+# never recovering is the bug.
+plants = streak = worst = 0
 end = time.time() + 60
 while time.time() < end:
     try:
-        os.rename(path, held)
+        if not os.path.lexists(held):
+            os.rename(path, held)
+        clear(path)
         os.symlink(target, path)
+        plants += 1
+        streak = 0
     except OSError:
-        pass
+        streak += 1
+        worst = max(worst, streak)
+    # Written as it goes: this process is killed, not allowed to finish.
+    # Through a rename, because the reader is a shell that may look at any
+    # moment - truncate-then-write hands it an empty file often enough to
+    # matter, which reads as "the swapper never planted anything".
+    with open(health_at + ".tmp", "w") as fh:
+        fh.write("%d %d\n" % (plants, worst))
+    os.replace(health_at + ".tmp", health_at)
     time.sleep(0.004)
     try:
-        os.unlink(path)
+        clear(path)
         os.rename(held, path)
     except OSError:
         pass
     time.sleep(0.004)
 PY
     SWAPPER=$!
+}
+
+# Plants, and the longest run of cycles that planted nothing.
+assert_swap_window_stayed_open() {
+    local plants=0 worst=0
+    # || true and the defaults: the file does not exist until the swapper's
+    # first cycle, and an empty read there is "nothing yet", not a value.
+    read -r plants worst < "$SWAP_HEALTH" || true
+    plants="${plants:-0}"; worst="${worst:-0}"
+    rm -f "$SWAP_HEALTH"
+    [ "$plants" -gt 20 ] \
+        || { echo "the swapper planted only $plants time(s)"; return 1; }
+    [ "$worst" -lt 10 ] \
+        || { echo "the swapper stalled for $worst consecutive cycles"; return 1; }
 }
 
 declare_repeatedly() {
@@ -1723,6 +1896,10 @@ declare_repeatedly() {
     kill "$SWAPPER" 2>/dev/null || true
     [ "$(cat "$victim")" = "original" ]
     [ "$refused" -gt 0 ]
+    # The window stayed open for the whole run rather than closing after the
+    # first collision - the failure that made this test flaky while the guard
+    # it covers was working.
+    assert_swap_window_stayed_open
     rm -rf "$(dirname "$victim")"
 }
 
@@ -1738,6 +1915,10 @@ declare_repeatedly() {
     kill "$SWAPPER" 2>/dev/null || true
     [ "$(cat "$elsewhere/allowed-domains")" = "original" ]
     [ "$refused" -gt 0 ]
+    # The window stayed open for the whole run rather than closing after the
+    # first collision - the failure that made this test flaky while the guard
+    # it covers was working.
+    assert_swap_window_stayed_open
     rm -rf "$elsewhere"
 }
 
@@ -1751,4 +1932,71 @@ declare_repeatedly() {
     [ "$status" -ne 124 ]
     [ "$status" -eq 0 ]
     [[ "$output" == *"Removed apt:ripgrep"* ]]
+}
+
+@test "with no terminal the multi-container case stays a list and an exit" {
+    # The picker must never be what a script meets. `run` gives no tty, which
+    # is the same shape as cron, a pipe, or an agent running this: a prompt
+    # there is a hang nobody can answer.
+    stub_two_containers
+    run "$REPO_ROOT/bin/dejima-allow" crates.io
+    [ "$status" -ne 0 ] || { echo "a script got no error: $output"; return 1; }
+    [[ "$output" == *"specify one with --container"* ]] \
+        || { echo "the flag is not offered: $output"; return 1; }
+    [[ "$output" != *"q to quit"* ]] || { echo "prompted with no tty: $output"; return 1; }
+    # And the line an agent is pointed at stays, since this is the path an
+    # agent's operator reads.
+    [[ "$output" == *"don't let it guess one"* ]] \
+        || { echo "the guess-one warning is gone: $output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the picker acts on the row that was picked" {
+    # The number typed indexes the rows as printed. Worth its own test because
+    # the failure is silent: the wrong session is patched, the domain is
+    # allowed, and everything reports success.
+    stub_two_containers
+    local out
+    # beta is docker's second row, so 2 is beta - and 1 must not be.
+    # || true: the stub's reachability probe decides the exit status, and this
+    # is a test about which container was acted on, not about that.
+    out="$(printf '2\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" == *dejima-run-bbbb* ]] \
+        || { echo "picking 2 did not act on the second row: $out"; return 1; }
+    [[ "$out" != *"inside dejima-run-aaaa"* ]] \
+        || { echo "picking 2 acted on the first row: $out"; return 1; }
+    out="$(printf '1\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" == *dejima-run-aaaa* ]] \
+        || { echo "picking 1 did not act on the first row: $out"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "quitting the picker allows nothing" {
+    stub_two_containers
+    local out
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null)"
+    [[ "$out" != *Resolving* ]] || { echo "q went ahead anyway: $out"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "the picker's columns are padded to what is in them" {
+    # "dejima-sandbox-run-" plus twelve hex digits is 31 characters, and the
+    # column was a fixed 28 - so every real name overran it and the project
+    # beside it started one space later than the row above. That is the whole
+    # complaint: there is no telling where the name stops.
+    stub_two_containers
+    local out proj_cols
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null \
+        | sed 's/\x1b\[[0-9;]*m//g; s/\r$//')"
+    # The container name starts at the same column on every row, header
+    # included, which is what padding to the widest value buys.
+    proj_cols="$(grep -oE '^ +[0-9]+ +[a-z]+ +dejima-run' <<< "$out" \
+        | awk '{ print index($0, "dejima-run") }' | sort -u | wc -l)"
+    [ "$proj_cols" -eq 1 ] \
+        || { echo "rows start the name at different columns:"; echo "$out"; return 1; }
+    rm -rf "$STUB_DIR"
 }

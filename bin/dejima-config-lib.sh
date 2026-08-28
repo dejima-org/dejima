@@ -42,7 +42,10 @@ core.harness	provider:harness
 core.forge	provider:forge	none
 core.workflow	provider:workflow	local-only
 core.command	?identifier
+core.identity	?identifier
+core.tools	?list:identifier
 core.firewall	bool	on
+core.update_check	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
 core.known_hosts	path	~/.ssh/known_hosts
@@ -249,8 +252,23 @@ valid_tarball_spec() {
 # A declared domain has to survive being written into a dnsmasq
 # server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
 # there is one definition and no pair of them to drift apart.
+# A hostname, label by label. The matcher is a trust boundary: what it accepts
+# becomes a dnsmasq `server=` line and an ipset entry, so it should accept only
+# what it means to rather than only what it can see a use for.
+#
+# The previous form allowed an EMPTY label - `a..b.com` matched - because its
+# repeated group could consume a dot having matched no characters before it.
+# Harmless in practice, since nothing that shape resolves, and fixed on the
+# principle rather than on a known abuse: the published bypass in this space
+# came from a matcher accepting a string the resolver read differently.
+#
+# Per label: 1-63 characters, starting and ending alphanumeric, hyphens in
+# between. That also newly refuses a label with a leading or trailing hyphen,
+# which is not a hostname either. A single label with no dot stays legal - an
+# internal name resolved by the host's own resolver is a real case.
 valid_domain() {
-    [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]
+    local label='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+    [[ "$1" =~ ^$label(\.$label)*$ ]]
 }
 
 # Extension point for types this layer cannot judge on its own. A stub here,
@@ -351,6 +369,20 @@ _config_valid_value() {
             ;;
         identifier)
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+            ;;
+        text)
+            # A sentence rather than a token - a person's name, an email
+            # address, a one-line description. An identifier has no room for a
+            # space and a path refuses a colon, and all of those are legal
+            # here. Refuses only what cannot survive the trip: a newline splits
+            # the value where every consumer expects one line, and a control
+            # character reaching a terminal is the escape-sequence hazard
+            # docs/security.md names. Everything else is the operator's
+            # business, the same reading `path` takes of a space.
+            case "$value" in
+                *[$'\n\r\t']*) return 1 ;;
+            esac
+            [[ ! "$value" =~ [[:cntrl:]] ]]
             ;;
         chord)
             # A tmux control chord, as the remote terminal page's PREFIX,

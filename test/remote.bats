@@ -178,7 +178,13 @@ launch() {
     conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
     mkdir -p "$(dirname "$conf")"
     # No default, so a config that launches must select one.
-    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$conf"
+    # A launch runs dejima-update-check, which would ls-remote this checkout's
+    # own origin. Off here rather than in each fixture's config, because the
+    # launch is what triggers it. Its cache needs nothing further: it lands
+    # under $HOME, which every launch fixture already points somewhere of its
+    # own.
+    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n' \
+        "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_SETTINGS_COPY="$LAUNCH_DIR/settings-copy.json" \
@@ -775,8 +781,9 @@ start_tmux() {
         [ "$(printf '%02x%02x%02x' "$r" "$g" "$b")" = "$hex" ]
     done < <(sed -n \
         "s/.*38;2;\([0-9]*\);\([0-9]*\);\([0-9]*\)m'.*# \([a-z_0-9]*\) *#\([0-9a-f]*\).*/\1 \2 \3 \4 \5/p" \
-        "$REPO_ROOT/bin/dejima-attach")
-    [ "$seen" -eq "${#gruvbox[@]}" ]
+        "$REPO_ROOT/bin/dejima-tui-lib.sh")
+    [ "$seen" -eq "${#gruvbox[@]}" ] \
+        || { echo "found $seen of ${#gruvbox[@]} palette entries"; return 1; }
 }
 
 @test "attaching creates a grouped session on the requested window and disposes of it on detach" {
@@ -1314,7 +1321,6 @@ EOF
     stub_launch
     write_remote_config
     launch "$PROJ"
-    grep -q 'dejima-notify.sh waiting' "$LAUNCH_DIR/settings-copy.json"
     grep -q 'dejima-notify.sh done' "$LAUNCH_DIR/settings-copy.json"
     # The layer is a throwaway, so the operator's real settings.json - which
     # nothing registers this hook into - is left byte-for-byte alone.
@@ -1329,8 +1335,8 @@ EOF
     # Copying them would run each of them twice. Verified against Claude Code
     # 2.1.220: a SessionStart hook in a --settings file and one in
     # ~/.claude/settings.json both fire.
-    [ "$(jq '.hooks.Notification | length' "$LAUNCH_DIR/settings-copy.json")" = "1" ]
     [ "$(jq '.hooks.Stop | length' "$LAUNCH_DIR/settings-copy.json")" = "1" ]
+    [ "$(jq '.hooks.Notification // [] | length' "$LAUNCH_DIR/settings-copy.json")" = "0" ]
     run jq -r '[.hooks[][].hooks[].command] | join(" ")' "$LAUNCH_DIR/settings-copy.json"
     [[ "$output" != *operator-desktop-notify.sh* ]]
     [[ "$output" != *operator-tts.sh* ]]
@@ -2698,7 +2704,7 @@ nginx_blocks() {
 
     # bin/dejima registers $HOME/.claude/hooks/dejima-notify.sh per session,
     # and ~/.claude/hooks is what gets mounted read-only into the container.
-    # Without this link every Notification and Stop is an exit-127.
+    # Without this link every notification hook is an exit-127.
     [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
     [ "$(readlink -f "$FAKE_HOME/.claude/hooks/dejima-notify.sh")" \
       = "$(readlink -f "$REPO_ROOT/hooks/dejima-notify.sh")" ]
@@ -3045,4 +3051,41 @@ remote_doc() {
         _ "$section"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
+}
+
+@test "one session-finished push per stop, not a second one a minute later" {
+    # Claude Code raises Notification when it needs permission and when the
+    # prompt has sat idle. A dejima session runs with permission prompts off,
+    # so only the timer is left, and it expires shortly after the Stop it
+    # follows - two pushes on a phone for one event, the second carrying
+    # nothing the first had not. Debouncing cannot merge them: the watcher
+    # keys on run id AND event, deliberately, so waiting and done are separate
+    # signals whenever a harness can actually tell them apart.
+    stub_launch
+    write_remote_config
+    launch "$PROJ"
+    run jq -r '[.hooks[][].hooks[].command] | join(" ")' "$LAUNCH_DIR/settings-copy.json"
+    [[ "$output" == *'dejima-notify.sh done'* ]] \
+        || { echo "the stop notification is gone entirely: $output"; return 1; }
+    [[ "$output" != *'dejima-notify.sh waiting'* ]] \
+        || { echo "the idle timer is registered again: $output"; return 1; }
+    rm -rf "$PROJ"
+}
+
+@test "the watcher still consumes a waiting marker no hook registers" {
+    # Nothing writes one by default now, and that changes nothing here: the
+    # marker directory is bind-mounted read-write, so a session creates
+    # whatever names it likes. The enum is the boundary, not the registration,
+    # and dropping `waiting` from it would leave a marker that accumulates
+    # rather than one that is refused.
+    conf_with_ntfy
+    stub_curl
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ]
+    [ ! -e "$RUNTIME_DIR/dejima/notify/0123456789abcdef/waiting" ] \
+        || { echo "the marker was left to accumulate"; return 1; }
+    assert_argv 'myproject needs input' 'Session is waiting for you.' \
+        'https://dejima.example.invalid/?arg=0123456789abcdef'
 }

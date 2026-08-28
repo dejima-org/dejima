@@ -2,15 +2,15 @@
 
 [← dejima README](../README.md)
 
+What dejima defends, what it does not, and where its boundary passes out of
+its hands. [security.md](security.md) is the control-by-control account; this
+is the shape of the thing those controls are arranged against.
+
 **And none of it has been reviewed by anyone else.** This is early
 development: the reasoning here is one person's, the tests assert what that
 person thought to check, and no outside audit or adversarial testing has
 happened. Read what follows as claims awaiting scrutiny rather than claims
 that have survived it. See [SECURITY.md](../SECURITY.md).
-
-What dejima defends, what it does not, and where its boundary passes out of
-its hands. [security.md](security.md) is the control-by-control account; this
-is the shape of the thing those controls are arranged against.
 
 ## What this tool assumes
 
@@ -62,11 +62,25 @@ to instructions, because it arrives as instructions.
 4. **Cross-project context poisoning.** A session writes another project's
    agent memory or transcripts, and a later session there reads planted text
    as established background.
-5. **Container escape.** Real, and it recurs, but it needs an unpatched host
+5. **The operator running something the session asked them to run.** dejima
+   tells agents to hand host-side work over rather than attempt it - a domain
+   to allow, a dependency to approve, a command only the host can run. That is
+   a designed, legitimate, frequent workflow, which is exactly what makes it a
+   delivery mechanism: a script that does what it says and one thing more is
+   indistinguishable at the moment of running it. Nothing here inspects what
+   crosses that boundary, and nothing can - the whole point of the handoff is
+   that a person decides.
+6. **Container escape.** Real, and it recurs, but it needs an unpatched host
    or a working zero-day, and the two rows it moves between are both already
    in the table below.
 
 The ordering is the point. Nothing above the last item requires an exploit.
+
+Item 5 is not an argument for making the handoff harder; a session that cannot
+ask is a session that works around you instead. It is an argument for being
+able to answer, afterwards, what that actually did to the machine - which is
+the layer below this repository's, and the reason the sister project is
+looking at detection rather than at more enforcement.
 
 ## Blast radius by layer
 
@@ -126,6 +140,58 @@ has the two tiers and where each one's boundary sits.
 
 Neither is required to run dejima, and the container row holds without them.
 What they change is what the row below it costs.
+
+**A survey of comparable projects found none with rows below the container at
+all** - their boundary is between the agent and the host, and what is under
+the host is outside their threat models. The same survey found nothing
+treating a forge or a CI runner as part of an agent's blast radius, which is
+what the second sister project exists for: a session that can open a pull
+request can execute code on a machine dejima never touches.
+
+Recorded as an observation from one day of secondary sources rather than as a
+claim to have surveyed the field exhaustively. The reason it is here at all is
+that it changes what to defend: if the layers below and beside the container
+are ones nobody else is examining, they are also ones where nobody else's
+mistakes are available to learn from.
+
+## Which deployment this describes
+
+The table above describes dejima **as deployed on a devbox VM with the two
+sister projects arranged around it**. Say that plainly, because the README
+also invites running dejima on a laptop, and there the table is shorter than
+it looks: the container row holds exactly as described, and the row below it
+is the operator's own machine with nothing arranged against it.
+
+That matters more than it used to. The field's own ordering for isolating an
+agent whose contents are assumed hostile puts a hardened container below
+gVisor and below a per-workload VM kernel, on the grounds that a container
+shares the host kernel and that container *runtime* vulnerabilities bypass
+syscall filtering rather than being caught by it. dejima's answer to that
+ordering is not to dispute it. It is that escape moves a layer instead of
+ending the argument - which is a better answer where the next layer exists,
+and no answer at all where it does not.
+
+So `dejima-devbox-hardener` is load-bearing rather than optional-and-nice.
+On a laptop, dejima is a hardened container and the honest description of what
+is under it is "your home directory, and dejima has nothing to say about it".
+
+**Load-bearing for what, exactly**, because the field's tiering invites a
+reading that project does not accept and has never claimed. A per-workload VM
+kernel is reached for elsewhere as a *containment* boundary. That is not what
+the row below the container buys here. `dejima-devbox-hardener`'s own threat
+model states in three places that its firewall bounds where a compromise can
+**spread**, not whether it can phone home: an escape reopens internet egress,
+deliberately, because deny-by-default earns its keep where the protected set
+is enumerable and the internet is not.
+
+Read the row as written, then: it cuts LAN reach to what is declared, and it
+is enforced from outside the guest so root in the VM cannot flush it. It does
+not restore the egress control the container layer provides. Anyone writing
+this sentence more confidently than that is making a promise on another
+repository's behalf.
+
+**What this repository can do about that is say so**, which is the whole of
+this section. Nothing in dejima can bound its own host.
 
 ## What this repository does not claim
 

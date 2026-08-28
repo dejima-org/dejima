@@ -1,7 +1,7 @@
 #!/bin/bash
-# Shadows a forge CLI on PATH, so that two rules hold whatever ran it: the one
-# subcommand a workflow blocks is refused, and a body the session authored says
-# so.
+# Shadows a forge CLI on PATH, so that three rules hold whatever ran it: the
+# one subcommand a workflow blocks is refused, a command aimed at another
+# repository is refused, and a body the session authored says so.
 #
 # The first rule is the one hooks/merge-guard.sh applies - a merge is the
 # operator's decision, so the sandbox opens a PR and stops - moved off the
@@ -26,6 +26,10 @@
 #                        "pr gitea-pr create". Both are resolved host-side by
 #                        bin/dejima from the forge's manifest, never hardcoded
 #                        to a forge here.
+#   DEJIMA_FORGE_REPO    the "<owner>/<name>" of the repository the session
+#                        was launched against, and DEJIMA_FORGE_REPO_FLAGS /
+#                        DEJIMA_FORGE_REPO_ENV the spellings this forge's CLI
+#                        accepts for naming a different one.
 #   DEJIMA_FORGE_REAL_DIR  where the real CLIs live, behind the shadow.
 set -u
 
@@ -39,7 +43,8 @@ fi
 
 # Outside a dejima container, or with nothing to do, this is a pass-through.
 if [ -z "${DEJIMA:-}" ] ||
-   { [ -z "${DEJIMA_MERGE_BLOCK:-}" ] && [ -z "${DEJIMA_DISCLOSE:-}" ]; }; then
+   { [ -z "${DEJIMA_MERGE_BLOCK:-}" ] && [ -z "${DEJIMA_DISCLOSE:-}" ] &&
+     [ -z "${DEJIMA_FORGE_REPO_FLAGS:-}" ] && [ -z "${DEJIMA_FORGE_REPO_ENV:-}" ]; }; then
     exec "$real" "$@"
 fi
 
@@ -97,6 +102,73 @@ if [ -n "${DEJIMA_MERGE_BLOCK:-}" ]; then
             echo "Blocked by dejima's forge guard: merging is a human decision in the sandbox - open a PR/MR, then the operator merges. Report its URL and stop." >&2
             exit 1
         fi
+    fi
+fi
+
+# --- the repository the session was launched against ------------------------
+#
+# A forge whose CLI can be aimed elsewhere declares how (repo_flags,
+# repo_env). The gitea CLIs declare neither, because they resolve the repo
+# from origin and refuse another host; `gh` declares both, so on that path the
+# most ordinary way to name a PR from outside its checkout is also the way to
+# file an issue on a repository the session has nothing to do with (#187).
+#
+# Fast-fail, not a boundary, for the same reason the merge block is not one:
+# the session holds the token and could call the API directly. What bounds
+# this is the scope of push_token_file.
+#
+# Refused rather than skipped when the launch resolved no repository at all: a
+# workspace with no origin has nothing for --repo to legitimately name, and
+# "cannot confirm" is not a reason to let it through.
+if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ] || [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ]; then
+    refuse_repo() {
+        echo "Blocked by dejima's forge guard: this session was launched against ${DEJIMA_FORGE_REPO:-no repository}, and $1 names '$2'. Act on the repository the sandbox mounts." >&2
+        exit 1
+    }
+    # Case-insensitively: forges treat an owner and a repository name as
+    # case-preserving but not case-sensitive, and a refusal over capitalisation
+    # would be a false one.
+    same_repo() {
+        [ -n "${DEJIMA_FORGE_REPO:-}" ] && [ "${1,,}" = "${DEJIMA_FORGE_REPO,,}" ]
+    }
+    if [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ]; then
+        env_value="${!DEJIMA_FORGE_REPO_ENV:-}"
+        if [ -n "$env_value" ] && ! same_repo "$env_value"; then
+            refuse_repo "$DEJIMA_FORGE_REPO_ENV" "$env_value"
+        fi
+    fi
+    if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ]; then
+        read -ra repo_flags <<< "$DEJIMA_FORGE_REPO_FLAGS"
+        args_left=("$@")
+        while [ "${#args_left[@]}" -gt 0 ]; do
+            arg="${args_left[0]}"
+            args_left=("${args_left[@]:1}")
+            for flag in "${repo_flags[@]}"; do
+                value=""
+                case "$arg" in
+                    "$flag")
+                        # The value is the next argument, and its absence is
+                        # the CLI's error to report rather than this one's.
+                        [ "${#args_left[@]}" -gt 0 ] || continue
+                        value="${args_left[0]}"
+                        ;;
+                    "$flag"=*) value="${arg#*=}" ;;
+                    *)
+                        # A one-dash flag may carry its value with no
+                        # separator - `-Rowner/name` - which two-dash flags do
+                        # not do.
+                        case "$flag" in
+                            --*) continue ;;
+                            -?) ;;
+                            *) continue ;;
+                        esac
+                        case "$arg" in "$flag"?*) value="${arg#"$flag"}" ;; *) continue ;; esac
+                        ;;
+                esac
+                [ -n "$value" ] || continue
+                same_repo "$value" || refuse_repo "$flag" "$value"
+            done
+        done
     fi
 fi
 
@@ -163,12 +235,49 @@ read_body_or_die() {
     body="$(cat -- "$1")" || exit 1
 }
 
-# The path to a temp file holding the marker and the body. Set outside the
-# command substitution as well, so the caller can delete it afterwards.
+# The body with the marker on it, whichever way the body arrived.
+#
+# One function for all four spellings, because there were two: --body-file
+# went through here and --body prepended the marker inline at its own call
+# site, so a rule added in one place was not in force in the other. That is
+# the whole reason this exists as a function rather than as a printf repeated
+# four times.
+#
+# Idempotent, which is the rule that was missing. An agent that has read the
+# project's existing issues has seen every one of them open with this line,
+# and writes it into the body itself - at which point a second was added and
+# the artifact said it twice. Each doubled issue then taught the next agent to
+# do the same, so it spread rather than settling.
+#
+# Skipping is safe because the marker is a statement, not a count: a body that
+# already opens by saying an agent wrote it has disclosed exactly what this
+# exists to disclose. Anchored at the start, after leading whitespace - the
+# same words further down are prose ABOUT disclosure rather than the
+# disclosure, and still get one prepended.
+#
+# The whole first LINE has to be the marker, not just begin with it. A prefix
+# test let a body open `**Filed by LLM agent** - reviewed and confirmed by a
+# person` and skip, which makes the marker line itself agent-authorable: the
+# one line here exists to write is the one the session gets to finish. Trailing
+# whitespace is allowed because it is invisible and changes nothing.
+with_marker() {
+    local head first
+    head="${1#"${1%%[![:space:]]*}"}"
+    first="${head%%$'\n'*}"
+    first="${first%"${first##*[![:space:]]}"}"
+    if [ "$first" = "$marker" ]; then
+        printf '%s' "$1"
+        return 0
+    fi
+    printf '%s\n\n%s' "$marker" "$1"
+}
+
+# The path to a temp file holding the disclosed body. Set outside the command
+# substitution as well, so the caller can delete it afterwards.
 tmp=""
 disclosed() {
     tmp="$(mktemp)" || exit 1
-    printf '%s\n\n%s' "$marker" "$1" > "$tmp" || exit 1
+    with_marker "$1" > "$tmp" || exit 1
 }
 
 # Only the first body argument is rewritten. A second would mean the CLI is
@@ -200,18 +309,14 @@ while [ "$#" -gt 0 ]; do
                 ;;
             --body)
                 if [ "$#" -ge 2 ]; then
-                    args+=(--body "$marker
-
-$2")
+                    args+=(--body "$(with_marker "$2")")
                     rewrote=1
                     shift 2
                     continue
                 fi
                 ;;
             --body=*)
-                args+=("--body=$marker
-
-${1#--body=}")
+                args+=("--body=$(with_marker "${1#--body=}")")
                 rewrote=1
                 shift
                 continue

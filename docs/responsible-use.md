@@ -2,9 +2,8 @@
 
 [← dejima README](../README.md)
 
-The README states each of these ten rules in a sentence or two. This is the
-part that didn't fit: why each one matters, what goes wrong without it, and
-the detail behind the three the README could only gesture at.
+The README states each of these rules in a sentence or two. This is the part
+that didn't fit: why each one matters, and what goes wrong without it.
 
 ## Check whether they want it first.
 
@@ -33,45 +32,37 @@ The concrete workflow, step by step:
 6. Open the upstream pull request by hand from there, once you would have
    been glad to have written it yourself.
 
-The reason for the extra hop is what happens without it. An auto-push
-workflow aimed straight at someone else's repository puts a session's raw
-output directly into that project's pull request queue, unreviewed by
+An auto-push workflow aimed straight at someone else's repository puts a
+session's raw output into that project's pull request queue, unreviewed by
 anyone, the moment it opens. Maintainers already spend real time triaging a
-flood of low-effort AI-generated pull requests; a Godot maintainer's account
-of what that actually costs is worth reading in full:
-<https://bsky.app/profile/akien.bsky.social/post/3meyerixvhs2p>. Forking and
-reviewing first doesn't change what the session is capable of writing. It
-changes who reads the output before anyone else has to: you, not a stranger
-who owns the project.
+flood of low-effort AI-generated pull requests; a Godot maintainer's account of
+what that costs is worth reading in full:
+<https://bsky.app/profile/akien.bsky.social/post/3meyerixvhs2p>. Forking first
+doesn't change what the session is capable of writing. It changes who reads the
+output before anyone else has to: you, not a stranger who owns the project.
 
 ## Don't point it at proprietary code.
 
-dejima narrows the paths code has to leave through; it doesn't close them,
-and "point it only at code you could survive losing" is the practical test
-for that gap. Ask it plainly before you start a session, not after: if this
-checkout's contents ended up somewhere they shouldn't, would that be a bad
-week or the end of the business? Code you could survive losing may be worth
-the convenience of unattended agentic work. Code you couldn't shouldn't go in
-at all.
+dejima narrows the paths code has to leave through; it doesn't close them.
+Ask it plainly before you start a session, not after: if this checkout's
+contents ended up somewhere they shouldn't, would that be a bad week or the end
+of the business? Code you could survive losing may be worth the convenience of
+unattended agentic work. Code you couldn't shouldn't go in at all.
 
-That second one is not a judgement about how good the containment is, and it
-does not get better with a version bump. There is no containment that fully
-prevents exfiltration: a determined attacker with code execution and any
-outbound path will find a way. So the question is not whether you trust
-dejima enough, but whether you can accept the risk of the contents leaving.
-If you cannot, do not hand them to an agent that could send them.
+That is not a judgement about how good the containment is, and it does not get
+better with a version bump. No containment fully prevents exfiltration: a
+determined attacker with code execution and any outbound path will find a way.
+The question is not whether you trust dejima enough, but whether you can accept
+the risk of the contents leaving.
 
 ## Look at what else is in the directory.
 
-The bind mount doesn't know which files you meant to hand over. It exposes
-the whole checkout, and everything a working tree accumulates over its life
-sits there with the same reachability as the source files you actually care
-about: a `.env` a teammate left uncommitted, a database dump pulled down for
-local debugging and never deleted, a credential baked into a fixture file,
-an old key still sitting in the history of a branch that got checked out.
-None of that is code in any sense that matters to the agent; all of it is
-just bytes in a directory the session can read and any tool call it makes
-can touch.
+The bind mount doesn't know which files you meant to hand over. Everything a
+working tree accumulates sits there with the same reachability as the source
+you actually care about: a `.env` a teammate left uncommitted, a database dump
+pulled down for local debugging and never deleted, a credential baked into a
+fixture, an old key on a branch that got checked out. All of it is bytes in a
+directory the session can read and any tool call it makes can touch.
 
 Auditing a working tree by eye is not a minute's work, and it is the kind of
 check that succeeds every time until the once it matters. **Point dejima at a
@@ -82,25 +73,22 @@ directory not to hand over.
 
 ## An allowlist entry is a grant, not a convenience.
 
-For every allowlist entry you give a dejima agent, consider what an attacker
-could do with it. The answer varies enormously between entries that look
-similar, and what it turns on is what happens if the call is wrong, whether
-wrong means a prompt-injected instruction or an ordinary agent mistake.
+For every allowlist entry, consider what an attacker could do with it. The
+answer varies enormously between entries that look similar, and what it turns
+on is what happens if the call is wrong, whether wrong means a prompt-injected
+instruction or an ordinary agent mistake.
 
 A package registry or a docs site can be wrong without being expensive. A
-session that fetches the wrong package version, or scrapes a stale or
-misleading page, produces bad input to more code, code that still has to
-pass through your own review before any of it ships. The mistake is
-contained by the same diff you were always going to read.
+session that fetches the wrong package version, or scrapes a misleading page,
+produces bad input to more code that still has to pass your own review. The
+mistake is contained by the same diff you were always going to read.
 
-A deploy webhook, a production database API, and a payment provider are a
-different shape entirely. A single call against any of them is the action,
-not a step toward one you'll review later: the deployment already ran, the
-row is already written or gone, the charge already happened. There is no
-diff downstream that catches it, because nothing about it passes through
-your repository at all. Allowlisting one of these gives an unattended process
-standing authority to act on the world, the same authority you would think
-twice about handing a person.
+A deploy webhook, a production database API and a payment provider are a
+different shape entirely. A single call against any of them *is* the action,
+not a step toward one you'll review later: the deployment already ran, the row
+is already gone, the charge already happened. Nothing about it passes through
+your repository, so no diff downstream catches it. Allowlisting one gives an
+unattended process standing authority to act on the world.
 
 Ask, before adding an entry: if this call happened by mistake, is the result
 something I fix in the next commit, or something I have to explain to
@@ -114,21 +102,14 @@ contained perfectly and still produce something that should not be merged,
 and the sandbox has no opinion either way.
 
 This point is about the merge, not about code quality in general. What makes
-`main` (or `master`, or whatever your default branch is called) different
-from any other branch is that other things read it and believe it. It is
-worth being precise about why, rather than saying "the released version" in
-some vaguer sense. In this repository, dejima-ci-hardener resolves the
-CI-side egress
-allowlist by reading `.dejima/allowed-domains` from `origin/main`, never
-from a branch or a local checkout, and treats whatever it finds there as
-already reviewed. That trust is load-bearing: the only way content lands on
-`main` is through a pull request you merged, so reading from `main` is how
-the tool avoids asking a branch what it's allowed to do. So merging onto
-`main` ships it to users and feeds a trust anchor that other tooling, this
-one and potentially future ones, is entitled to rely on without re-checking.
-Keeping insecure or broken code off `main` is what makes that reliance
-justified, and that job is yours; nothing about running the agent in a
-sandbox does it for you.
+your default branch different from any other is that other things read it and
+believe it. Concretely: dejima-ci-hardener resolves the CI-side egress
+allowlist by reading `.dejima/allowed-domains` from `origin/main`, never from a
+branch or a local checkout, and treats whatever it finds there as already
+reviewed. That trust is load-bearing, and it is only justified because the one
+way content lands on `main` is through a pull request you merged. Keeping
+insecure or broken code off it is your job; nothing about running the agent in
+a sandbox does it for you.
 
 ## Give it its own identity, then own what you merge.
 
@@ -152,32 +133,27 @@ it accordingly.
 
 ## Understand what you ship.
 
-The risk here is habituation, not a single lapse. dejima makes iterating
-cheap enough that reading every diff starts to feel like the slow part of
-the loop, and skipping it works fine, repeatedly, until the one time it
-doesn't. A reviewer who reads every change catches most of what's wrong with
-it. A reviewer who only reads the ones that felt risky catches none of the
-ones that didn't feel risky, which is the shape a subtle bug, or a
-prompt-injected change dressed up as something ordinary, takes. Nothing
-about a faster loop changes what engineering judgment is for.
+The risk here is habituation, not a single lapse. dejima makes iterating cheap
+enough that reading every diff starts to feel like the slow part of the loop,
+and skipping it works fine, repeatedly, until the one time it doesn't. A
+reviewer who only reads the changes that felt risky catches none of the ones
+that didn't feel risky, which is the shape a subtle bug, or a prompt-injected
+change dressed up as something ordinary, takes. Nothing about a faster loop
+changes what engineering judgement is for.
 
 ## This is not a blastproof box.
 
-Read this rule as a statement about what kind of failure to plan for.
-dejima's containment is Linux namespaces and a small capability set around
-the session, the same kind of isolation a container gives any process, not a
-virtual machine boundary; it shares the host kernel with everything else on
-the machine.
-That buys real things (see [docs/security.md](security.md) for the specific
-list: no working `sudo`, a deny-by-default firewall, read-only mounts over
-the surfaces that matter most), and every one of them assumes the container
-itself stays intact. A determined attacker, or a single container-escape
-vulnerability, doesn't erode that protection gradually; it removes every
-layer described in that document at once, because they all sit on the same
-kernel. So the assumption to hold is not that the walls will probably hold.
-It is that if this container is ever compromised at the kernel level,
-everything reachable from this host account should be treated as compromised
-with it, which is a very different thing to plan around than an ordinary bug.
+This is a statement about what kind of failure to plan for. dejima's
+containment is Linux namespaces and a small capability set around the session,
+not a virtual machine boundary; it shares the host kernel with everything else
+on the machine. That buys real things (see [docs/security.md](security.md): no
+working `sudo`, a deny-by-default firewall, read-only mounts over the surfaces
+that matter most), and every one of them assumes the container stays intact. A
+container-escape vulnerability doesn't erode that protection gradually, it
+removes every layer at once, because they all sit on the same kernel. So the
+assumption to hold is not that the walls will probably hold: it is that if this
+container is ever compromised at the kernel level, everything reachable from
+this host account should be treated as compromised with it.
 
 What "everything reachable from this host account" amounts to is not fixed,
 and it is the one part of this that can be narrowed from outside. Bounding
@@ -190,34 +166,24 @@ would have to be bounded.
 ## dejima's security says nothing about your software's.
 
 These are different axes, not different degrees of the same thing. dejima's
-threat model is about the session: what a process running inside the
-sandbox can reach, exfiltrate, or execute while it runs. None of that has
-anything to say about the software that session writes once it's on disk.
-dejima can contain a session perfectly and that session can still write a
-SQL injection, hand-roll a broken authentication check, hardcode a secret,
-or pull in a compromised dependency, because those are properties of the
-code itself, decided at the moment it's written, not something a sandbox
-sitting around the process that wrote it can retrofit afterward. If what got
-built inside dejima turns out to be insecure, containment was never the
-control that was supposed to catch it.
+threat model is about the session: what a process running inside the sandbox
+can reach, exfiltrate, or execute while it runs. It can contain a session
+perfectly and that session can still write a SQL injection, hand-roll a broken
+authentication check, hardcode a secret, or pull in a compromised dependency.
+Those are properties of the code, decided when it is written.
 
-**It is not something a future agent can retrofit either.** "We will do a
-security pass later" was already a weak plan before agents made it cheap to
-say. Early architectural decisions
-close off the fixes for whole classes of problem: where trust boundaries sit,
-what is authenticated and where, what data crosses which process, what a
-single compromised component reaches. A later pass can find a missing bounds
-check. It cannot move a boundary you built a system on top of. And insecure
-implementation decisions sit in software for years without announcing
-themselves, which is exactly why they are not found by a pass that goes
-looking once.
+**It is not something a future agent can retrofit either.** Early
+architectural decisions close off the fixes for whole classes of problem: where
+trust boundaries sit, what is authenticated and where, what data crosses which
+process, what a single compromised component reaches. A later pass can find a
+missing bounds check. It cannot move a boundary you built a system on top of.
+And insecure implementation decisions sit in software for years without
+announcing themselves, which is exactly why a pass that goes looking once does
+not find them.
 
-So security has to be considered at every point in the work, not scheduled
-as a phase, and dejima will not help you do that. It makes writing a lot of
-code fast, which makes writing a lot of insecure code fast if nobody is
-holding that concern. That responsibility is yours at every step, and it is
-the one thing here no tooling in this repository is aiming at.
-
-The same practices you'd apply to code from any other source, review,
-linting, dependency scanning, tests aimed at the failure modes you care
-about, still have to happen here. dejima does not stand in for any of them.
+So security has to be considered at every point in the work rather than
+scheduled as a phase, and dejima will not help you do that. It makes writing a
+lot of code fast, which makes writing a lot of insecure code fast if nobody is
+holding that concern. Review, linting, dependency scanning and tests aimed at
+the failure modes you care about all still have to happen; dejima stands in for
+none of them.

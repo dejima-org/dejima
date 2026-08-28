@@ -218,7 +218,7 @@ harness_prepare_config() {
         echo "yourself, which needs no key. That means a loopback or RFC 1918" >&2
         echo "address, or a host you have allowlisted:" >&2
         echo "" >&2
-        echo "  bin/dejima-allow --project <path> <host>" >&2
+        echo "  dejima-allow --project <path> <host>" >&2
         echo "" >&2
         echo "The allowlist is what decides whether the container can reach it" >&2
         echo "at all, so an endpoint that fails this check is one the session" >&2

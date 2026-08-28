@@ -37,6 +37,18 @@ bats_require_minimum_version 1.5.0
 # The `dejima-test-` prefix is this suite's own namespace. Nothing else may use
 # it, which is what makes the reclaim in setup_file safe.
 
+# The cap_add list from the compose file, one per line. A minimal reader for
+# one known block rather than a YAML parser: the alternative is this suite
+# hardcoding a second copy of the capability floor and the two disagreeing
+# silently, which is exactly the failure the floor exists to prevent.
+compose_cap_add() {
+    awk '
+        /^    cap_add:/      { in_block = 1; next }
+        in_block && /^      - / { sub(/^      - /, ""); print; next }
+        in_block && !/^      / { in_block = 0 }
+    ' "$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
+}
+
 IMAGE=dejima:latest
 
 # What a session actually runs: the base image plus the selected harness's own
@@ -330,8 +342,18 @@ setup_file() {
     # container started without these gets none of them. Read from the
     # manifest rather than written here, so this fixture cannot drift from
     # what a real launch supplies.
+    # The capability posture from docker-compose.yml rather than a copy of it.
+    # This container is started with `docker run`, so a hand-written --cap-add
+    # list here would drift from the compose file the moment either changed -
+    # and the whole point of the floor is that the container a session actually
+    # gets is the one under test.
+    local -a caps=()
+    while IFS= read -r cap; do caps+=(--cap-add="$cap"); done < <(compose_cap_add)
+    [ "${#caps[@]}" -gt 0 ] || { echo "no cap_add found in docker-compose.yml" >&2; return 1; }
+
     docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --cap-drop=ALL "${caps[@]}" \
+        --security-opt=no-new-privileges:true \
         --network "$network" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
@@ -523,6 +545,25 @@ dexec_node() {
 @test "IPv6 is fully blocked" {
     run dexec ip6tables -L OUTPUT -n
     [[ "$output" == *"policy DROP"* ]]
+}
+
+@test "the IPv6 block is a filtered family, not an absent one" {
+    # The DROP policy above is the good path. This asserts the container is
+    # actually ON that path rather than on the fallback, because the two are
+    # indistinguishable from the outside: a container with no IPv6 at all also
+    # reaches nothing over IPv6.
+    #
+    # If ip6tables ever stops working as root here, the test above fails and
+    # this one says why - and on a host that takes the fallback branch,
+    # init-firewall.sh now either turns the family off or refuses to start,
+    # rather than logging a conclusion it had not checked.
+    run dexec sh -c 'ip6tables -L >/dev/null 2>&1 && echo usable'
+    [[ "$output" == *usable* ]] \
+        || { echo "ip6tables is not usable as root; the fallback branch is live"; return 1; }
+    # And the fallback's own condition is readable, so a failure here can be
+    # diagnosed without a second run: what does the kernel say is up?
+    run dexec sh -c 'cat /proc/net/if_inet6 2>/dev/null || echo "(no /proc/net/if_inet6)"'
+    [ "$status" -eq 0 ]
 }
 
 @test "a non-allowlisted domain is refused by the DNS proxy, not just left to fail later" {
@@ -1032,6 +1073,69 @@ dexec_node() {
     # nonzero code - both are "no working sudo," and pinning to one exact
     # code would make the test brittle to which specific way that stays true.
     run ! dexec_node sudo -n true
+}
+
+@test "the container runs with no path back up to more privilege" {
+    # no-new-privileges in docker-compose.yml. gosu drops privilege rather
+    # than gaining it, so this does not interfere with the session starting -
+    # what it forbids is a setuid binary or a file capability raising
+    # privileges on exec, which is the shape any escalation from the session
+    # user would have to take.
+    #
+    # Asserted on PID 1 and on the session user, because the flag is a property
+    # of the process tree and both halves of it matter.
+    run dexec cat /proc/1/status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'NoNewPrivs:\t1'* ]] \
+        || { echo "PID 1 can still gain privileges on exec"; return 1; }
+    run dexec_node sh -c 'grep NoNewPrivs /proc/self/status'
+    [[ "$output" == *"1"* ]] || { echo "the session user's shell can: $output"; return 1; }
+}
+
+@test "the capability bounding set is the declared floor and nothing more" {
+    # cap_drop: ALL plus an explicit list, rather than Docker's default set
+    # plus two. The entrypoint uses six capabilities during its root phase and
+    # the default carries about fourteen; this asserts the difference is real
+    # in the running container rather than only present in the compose file.
+    #
+    # CapBnd, not CapEff: the effective set is zero for the session user
+    # already (the test below), and the bounding set is what says the rest was
+    # never available to regain.
+    run dexec cat /proc/1/status
+    [ "$status" -eq 0 ]
+    local bnd; bnd=$(echo "$output" | awk '/^CapBnd:/ {print $2}')
+    [ -n "$bnd" ] || { echo "no CapBnd in /proc/1/status"; return 1; }
+
+    # Decoded by name so a failure says which capability, not which bit.
+    local have; have="$(dexec capsh --decode="$bnd" 2>/dev/null)" || have=""
+    [ -n "$have" ] || skip "capsh not available in the image to decode $bnd"
+    local cap
+    for cap in $(compose_cap_add); do
+        [[ "$have" == *"cap_$(echo "$cap" | tr '[:upper:]' '[:lower:]')"* ]] \
+            || { echo "declared $cap is missing from the bounding set: $have"; return 1; }
+    done
+    # Not KILL: `dejima-allow --container` signals dnsmasq, which runs as its
+    # own user, so root here needs it. That absence is what failed the first
+    # privileged run of this change.
+    for cap in mknod setfcap setpcap sys_chroot audit_write net_bind_service sys_admin fsetid; do
+        [[ "$have" != *"cap_$cap"* ]] \
+            || { echo "cap_$cap is in the bounding set and nothing declares it: $have"; return 1; }
+    done
+}
+
+@test "root can still signal dnsmasq, which is what adding a domain mid-session needs" {
+    # Named for the thing rather than left to be caught by the ipset tests,
+    # which is how it WAS caught: the first version of the capability floor
+    # dropped KILL, and `dejima-allow --container` failed with "Operation not
+    # permitted" because dnsmasq runs as its own user (`user=dnsmasq`) and root
+    # cannot signal another user's process without CAP_KILL.
+    #
+    # Adding a domain to a running session is a documented feature that every
+    # session briefing tells the agent to ask for, so this asserts the
+    # capability by exercising what needs it.
+    run dexec sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    [ "$status" -eq 0 ] \
+        || { echo "root cannot signal dnsmasq - is KILL in the floor? $output"; return 1; }
 }
 
 @test "the real running node process has NET_ADMIN/NET_RAW stripped, not just the bounding set" {

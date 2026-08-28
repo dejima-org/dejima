@@ -57,55 +57,17 @@ SESSIONS_DIR="$STATE_DIR/sessions"
 
 # gruvbox dark, every value upstream's and tagged with its color.table row:
 # https://github.com/gruvbox-community/gruvbox-contrib/blob/master/color.table
-# The names are carried so a wrong hex is catchable by reading.
-#
-# Truecolor only: a terminal without it, or tmux without `Tc`, approximates
-# 38;2 to its nearest colour rather than printing the escape, so the fallback
-# already exists one layer down.
-#
-# Empty unless stdout is a colour-capable terminal, which keeps --list a
-# machine interface (ttyd feeds run ids back in) and is also how the bats
-# suite reads this script.
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-    C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
-    C_BADGE=$'\033[38;2;254;128;25m'    # bright_orange #fe8019, the wordmark
-    C_TEXT=$'\033[38;2;235;219;178m'    # light1        #ebdbb2
-    C_MUTED=$'\033[38;2;146;131;116m'   # gray_245      #928374
-    C_SUBTLE=$'\033[38;2;124;111;100m'  # dark4         #7c6f64
-    C_RULE=$'\033[38;2;80;73;69m'       # dark2         #504945, separator
-    C_OK=$'\033[38;2;184;187;38m'       # bright_green  #b8bb26, success
-    C_WARN=$'\033[38;2;250;189;47m'     # bright_yellow #fabd2f, warning
-    C_ERR=$'\033[38;2;251;73;52m'       # bright_red    #fb4934, error
-    C_LINK=$'\033[38;2;131;165;152m'    # bright_blue   #83a598
-    GLYPH_BAR='▏'; GLYPH_DOT='●'
-    # A literal rather than a repeat of GLYPH_RULE: `tr` is byte-oriented and
-    # would shred a 3-byte box-drawing character, and every alternative costs
-    # a loop or a subshell to draw a fixed line. Both are the width of the
-    # heading they sit under ("dejima | live sessions"), and are next to it so
-    # they stay that way.
-    RULE_LINE='──────────────────────'
-else
-    C_OFF=""; C_BOLD=""; C_BADGE=""; C_TEXT=""; C_MUTED=""; C_SUBTLE=""
-    C_RULE=""; C_OK=""; C_WARN=""; C_ERR=""; C_LINK=""
-    # Glyphs ride the same switch rather than a separate UTF-8 probe. Not
-    # because no-colour implies no-UTF-8, but because the two terminals this
-    # has to stay readable on - a $TERM the host has no entry for, and a pipe -
-    # are exactly the ones that mangle box drawing, and one flag is easier to
-    # reason about than two.
-    GLYPH_BAR='|'; GLYPH_DOT='*'
-    RULE_LINE='----------------------'
-fi
+# The palette, the heading and the prompt come from the shared library: this
+# and dejima-allow both ask an operator to pick a session, and two copies of
+# that would drift apart on the terminal an operator is actually holding.
+# shellcheck source=dejima-tui-lib.sh
+source "$SCRIPT_DIR/dejima-tui-lib.sh"
 
 # Narrow deliberately. The phone is this script's main front door, and the
 # rule underlines the heading instead of spanning the table because the
 # table's width follows the longest project name - a rule that chased it would
 # wrap on a phone exactly when the rows did.
-banner() {
-    printf '\n  %s%sdejima%s %s%s%s %slive sessions%s\n' \
-        "$C_BOLD" "$C_BADGE" "$C_OFF" "$C_SUBTLE" "$GLYPH_BAR" "$C_OFF" \
-        "$C_MUTED" "$C_OFF"
-    printf '  %s%s%s\n\n' "$C_RULE" "$RULE_LINE" "$C_OFF"
-}
+banner() { tui_banner 'live sessions'; }
 
 # Coloured by meaning, not by name: attachable is the one an operator wants to
 # find, and stale/no-tmux are the two that will refuse if picked.
@@ -263,7 +225,7 @@ list_sessions() {
             # ever race it. Removing it under a live session is not a leak
             # being tidied but a session being broken - Docker recreates the
             # bind source root-owned, hooks/dejima-notify.sh then fails on
-            # every Notification and Stop for the rest of the run, and nothing
+            # every notification for the rest of the run, and nothing
             # rewrites the registry entry to make the session visible again.
             continue
         elif [ "$rc" -ne 0 ]; then
@@ -438,37 +400,8 @@ picker() {
             "$sc" "$w_state" "${states[$i]}" "$C_OFF" \
             "$C_SUBTLE" "${containers[$i]}" "$C_OFF"
     done
-    # Numbered rather than arrow-driven: phone soft keyboards handle digits
-    # far better than arrow keys, and this is the phone's entry point.
-    printf '\n  %sattach to%s %s[1-%d, q to quit]%s: ' \
-        "$C_MUTED" "$C_OFF" "$C_TEXT" "${#ids[@]}" "$C_OFF"
-    # `|| exit 0`, because a read that cannot happen is not a refusal: with no
-    # controlling terminal (`ssh -T`, or an SSH app that requests no pty) this
-    # returns nonzero immediately, and exiting 1 with nothing printed reads as
-    # a broken front door. attach() reasons about the same case explicitly.
-    read -r choice || exit 0
-    case "$choice" in
-        q|Q|'') exit 0 ;;
-        *[!0-9]*) echo "Not a number." >&2; exit 1 ;;
-    esac
-    # Normalized to base 10 once, here, because the range check and the
-    # subscript below do not read a number the same way: `[` is POSIX test and
-    # decimal-only, while $(( )) reads a leading zero as OCTAL. Without this,
-    # "010" - which a phone keypad makes easy to type - passes the check as 10
-    # and indexes as 8, and the caller is attached to a DIFFERENT session than
-    # the one they picked, with nothing printed to say so.
-    #
-    # It fixes the two ugly shapes as well. "09" is a value here rather than
-    # the "invalid octal constant" arithmetic error it is to $(( )); and a
-    # number past int64 wraps to one the range check can answer for, where
-    # `[ 99999999999999999999999 -gt 11 ]` instead exits 2 with "integer
-    # expression expected" - which makes the `if` false, so "Out of range."
-    # is never printed and the subscript below dies on an unbound element.
-    choice="$((10#$choice))"
-    if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#ids[@]}" ]; then
-        echo "Out of range." >&2
-        exit 1
-    fi
+    tui_pick "${#ids[@]}" 'attach to'
+    choice="$TUI_CHOICE"
     attach "${ids[$((choice - 1))]}"
 }
 
