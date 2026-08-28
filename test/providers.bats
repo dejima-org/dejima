@@ -1263,3 +1263,21 @@ assert_remedy_forges_exist() {
         [ -n "$spec" ] || { echo "$name declares no install and is not in the base image"; return 1; }
     done
 }
+
+@test "a workflow that omits block_merge blocks merges anyway" {
+    # The default decides what happens to a workflow that forgets the key -
+    # a third-party one, or a fourth shipped one added in a hurry. `off` means
+    # a missing key silently permits merging from inside a session, which is
+    # the direction a guard should never fail in. Every shipped workflow sets
+    # it explicitly, so the invariant test covering those would pass either
+    # way; this is about the ones nobody has written yet.
+    FAKE_ROOT="$(mktemp -d)"
+    mkdir -p "$FAKE_ROOT/workflows/forgetful"
+    printf 'requires =\npush = off\n' > "$FAKE_ROOT/workflows/forgetful/workflow.conf"
+    run env DEJIMA_PROVIDER_ROOT="$FAKE_ROOT" DEJIMA_CONFIG_DIR="$CONFIG_DIR" \
+        bash -c 'source "$1"; manifest_get workflow forgetful block_merge' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "on" ] \
+        || { echo "a workflow that names no block_merge got '$output'"; return 1; }
+    rm -rf "$FAKE_ROOT"
+}

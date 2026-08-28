@@ -183,7 +183,7 @@ EOF
 requires	?list:identifier
 push	bool	on
 blocked_branches	?list:identifier
-block_merge	bool	off
+block_merge	bool	on
 requires_worktree	bool	off
 autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath

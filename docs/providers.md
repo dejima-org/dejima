@@ -172,7 +172,7 @@ as environment variables.
 | `requires` | `?list:identifier` | (empty) | Forge capabilities this workflow needs (checked against the selected forge's `capabilities` at launch). |
 | `push` | `bool` | `on` | Whether this workflow pushes at all. When `off`, `DEJIMA_PUSH_HOSTS` is empty regardless of the forge, so `git-push-guard.sh` refuses every push. |
 | `blocked_branches` | `?list:identifier` | (empty) | Branch names `git-push-guard.sh` refuses a direct push to, even on an allowed host. |
-| `block_merge` | `bool` | `off` | When `on`, resolves the selected forge's `merge_block` command into `DEJIMA_MERGE_BLOCK` for `hooks/merge-guard.sh`. |
+| `block_merge` | `bool` | `on` | When `on`, resolves the selected forge's `merge_block` command into `DEJIMA_MERGE_BLOCK` for `hooks/merge-guard.sh`. Defaults on so a workflow that omits it refuses a merge rather than permitting one; every shipped workflow sets it anyway. |
 | `requires_worktree` | `bool` | `off` | When `on`, this workflow's briefing fragment must contain a `<!-- core: worktree -->` marker, which the core worktree-containment paragraph is spliced into - see below. |
 | `autonomy` | `enum:commit\|push-branch\|open-pr` | `commit` | Gates `<!-- requires: autonomy=VALUE -->` spans in this workflow's own briefing fragment (see below); also read by the forge/harness resolvers where autonomy-conditioned prose applies. |
 | `briefing` | `?relpath` | (empty) | This workflow's briefing fragment file, relative to its own directory. |

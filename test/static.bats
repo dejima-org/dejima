@@ -6774,3 +6774,76 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     [ "$guard" -lt "$resolve" ] \
         || { echo "the identity is resolved before the key is known to need one"; return 1; }
 }
+
+@test "the docs say a suspended job is not a paused session" {
+    # Ctrl-Z stops bin/dejima on the host; the container keeps running with
+    # its grants. A stopped job reads as a paused agent, and the person most
+    # likely to be misled is the one who suspended it because they were uneasy
+    # about what it was doing.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'Ctrl-Z stops the observer, not the session' <<< "$flat" \
+        || { echo "the suspend caveat is not in the negative-space list"; return 1; }
+    grep -qi 'keeps making requests' <<< "$flat" \
+        || { echo "it does not say the session keeps running"; return 1; }
+}
+
+@test "the self-hosting caveat names every manifest a session can aim at the next launch" {
+    # forge.conf was named and tool.conf was not, though the host reads both
+    # and the image build installs what tool.conf points at, as root.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    # tool.conf, not tools/*/tool.conf: the normalisation strips the emphasis
+    # markers and takes the glob's asterisk with them.
+    grep -q 'tool.conf' <<< "$flat" \
+        || { echo "tool.conf is not named as session-writable input"; return 1; }
+    grep -qi 'downloads and installs as root' <<< "$flat" \
+        || { echo "what a tool.conf edit buys is unstated"; return 1; }
+}
+
+@test "the audit watches every directory whose contents decide the next launch" {
+    # docs/security.md says the provider directories are in the TCB list
+    # "for that reason", and tools/ was added to that claim without being
+    # added to the list - a tool.conf names a tarball and the sha256 checked
+    # against it, and the host's image build installs what it points at as
+    # root. Derived from what is on disk rather than from a list here, so the
+    # next axis is covered the day it lands.
+    local line dir missing=""
+    line="$(grep -n 'for dir in bin hooks' "$REPO_ROOT/bin/dejima-audit" | head -1)"
+    [ -n "$line" ] || { echo "the audit's TCB directory list is not where this looks"; return 1; }
+    for dir in "$REPO_ROOT"/*/; do
+        dir="$(basename "$dir")"
+        # The directories that hold provider or tool manifests, which is what
+        # this claim is about. Others are covered by their own entries.
+        case "$dir" in forges|workflows|harnesses|tools) ;; *) continue ;; esac
+        [ -n "$(find "$REPO_ROOT/$dir" -name '*.conf' -print -quit 2>/dev/null)" ] || continue
+        grep -qE "(^| )$dir( |;)" <<< "$line" || missing="$missing $dir"
+    done
+    [ -z "$missing" ] \
+        || { echo "ships manifests the exit audit does not watch:$missing"; return 1; }
+}
+
+@test "the self-hosting caveat says it needs dejima's own checkout to be the workspace" {
+    # Nothing mounts the provider directories into a container, so for every
+    # launch pointed at another project a session cannot reach these paths at
+    # all. Without that stated, the section reads as an exposure every user
+    # has, when it belongs to the one configuration almost nobody runs.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/security.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi "requires dejima's own checkout to be the workspace" <<< "$flat" \
+        || { echo "the precondition is not stated where the consequences are"; return 1; }
+    grep -qi 'the resolved values go in, the files do not' <<< "$flat" \
+        || { echo "it does not say why another project's session cannot reach them"; return 1; }
+}
+
+@test "the self-hosting warning names what the audit actually watches" {
+    # The warning listed bin/, hooks/, docker/ and install.sh; the audit
+    # watches those plus test/ and every manifest directory. A warning that
+    # under-names the writable surface is one an operator reads as complete.
+    local warn
+    warn="$(sed -n '/own repo is the mounted workspace/,/^fi$/p' "$REPO_ROOT/bin/dejima")"
+    [ -n "$warn" ] || { echo "the self-hosting warning has moved"; return 1; }
+    grep -q 'test/' <<< "$warn" || { echo "the warning omits test/"; return 1; }
+    grep -qi 'manifest' <<< "$warn" \
+        || { echo "the warning omits the provider and tool manifests"; return 1; }
+}
