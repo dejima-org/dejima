@@ -506,7 +506,10 @@ PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
   without closing the tab. It reloads the page without the run-id, which is
   what makes `dejima-attach` show the list again. The session you leave is
   unaffected: each client gets its own tmux session grouped onto the real one,
-  and only that view is reaped when you detach.
+  and only that view is reaped when you detach. The picker arrives on a
+  cleared screen, scrollback included - it is a page load rather than a
+  scroll, so otherwise it draws over the tail of the session you just left and
+  a swipe up lands in the middle of it.
 - `ZOOM` is prefix + `z`, toggling tmux's pane zoom - the fastest way to make
   one pane usable on a small screen.
 - `PASTE` reads the phone's clipboard and sends it, wrapped in bracketed-paste
