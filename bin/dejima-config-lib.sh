@@ -45,6 +45,7 @@ core.command	?identifier
 core.identity	?identifier
 core.tools	?list:identifier
 core.firewall	bool	on
+ui.banner	bool	on
 core.update_check	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
 core.ssh_key	?path
@@ -418,7 +419,7 @@ _config_extra_section_known() { return 1; }
 
 _config_section_known() {
     case "$1" in
-        core|github|mounts|credentials|logging|audit|remote-access|epitaph) return 0 ;;
+        core|github|mounts|credentials|logging|audit|remote-access|epitaph|ui) return 0 ;;
         *) _config_extra_section_known "$1" ;;
     esac
 }

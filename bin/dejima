@@ -1866,6 +1866,56 @@ fi
 # or one after a Dockerfile change, builds the image and takes minutes rather
 # than seconds - the line names that, since it is the case where someone is
 # most likely to give up and interrupt.
+# What this launch is, before the long silent part. The startup output is
+# otherwise a list of checks with no point at which it says what it is, and
+# the facts below are the ones that differ between one launch and the next -
+# the ones an operator otherwise has to remember or go and read (#211).
+#
+# Deliberately not a config dump. The value is seeing at a glance that this
+# launch is not configured like the last one, so what is here is the selection
+# plus the switches whose state changes what a session can do.
+#
+# In bin/dejima's own palette rather than the pickers': dejima-color-lib.sh
+# and dejima-tui-lib.sh both define C_OK and C_WARN, with different values, so
+# sourcing the second here would silently recolour every warning this script
+# already prints. Unifying the two palettes is worth doing and is not this.
+startup_banner() {
+    [ "$(config_get_bool ui banner)" = "1" ] || return 0
+    # Nothing at all when stderr is not a terminal: a redirected launch is a
+    # log, and this is decoration in it.
+    [ -t 2 ] || return 0
+
+    local branch model domains firewall remote epitaph
+    branch="$(git -C "$WORKSPACE_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch=""
+    model="$(harness_config_get model 2>/dev/null)" || model=""
+    # The count, not the list: the list is long and the number is what changes.
+    domains="$(printf '%s' "${ALLOWED_DOMAINS:-}" | wc -w)"
+    if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
+        firewall="${C_OK}on${C_RESET} ($domains domains)"
+    else
+        # The one switch worth a colour of its own: everything else here is a
+        # choice, and this one is a boundary that is not in force.
+        firewall="${C_WARN}off${C_RESET}"
+    fi
+    remote="$(remote_enabled && echo on || echo off)"
+    epitaph="$([ "$(config_get_bool epitaph enabled)" = 1 ] && echo on || echo off)"
+
+    # Labels dim, values not. The labels are how you find the value you came
+    # for; the values are what differs between one launch and the next.
+    printf '\n  %s%sdejima%s  %s%s%s' \
+        "$C_KEY" "$C_INFO" "$C_RESET" "$C_KEY" "$(basename -- "$WORKSPACE_DIR")" "$C_RESET" >&2
+    [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
+    printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
+        "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \
+        "$C_DIM" "$C_RESET" "$DEJIMA_FORGE_NAME" \
+        "$C_DIM" "$C_RESET" "$DEJIMA_WORKFLOW_NAME" >&2
+    printf '  %sfirewall%s %s   %sremote%s %s   %sepitaph%s %s\n\n' \
+        "$C_DIM" "$C_RESET" "$firewall" \
+        "$C_DIM" "$C_RESET" "$remote" \
+        "$C_DIM" "$C_RESET" "$epitaph" >&2
+}
+startup_banner
+
 printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
     "$C_DIM" "$C_RESET" >&2

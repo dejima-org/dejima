@@ -6892,3 +6892,71 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     grep -q 'LC_ALL="C"' "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
         || { echo "the child shell's locale is inherited again"; return 1; }
 }
+
+# $output with SGR removed. The banner colours its labels, so a reset escape
+# sits between "harness" and its value - and an assertion on the two as one
+# string then matches nothing whether the banner drew or not. That is how the
+# first version of the off-switch test passed against a build with the switch
+# removed.
+_plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
+
+@test "the startup banner says what this launch is" {
+    # The startup output was a list of checks with no point at which it said
+    # what it is, and the facts that differ between one launch and the next
+    # were ones an operator had to remember or go and read (#211).
+    startup_warning_setup
+    run startup_warning_launch_tty ''
+    [[ "$output" == *dejima* ]] || { echo "$output"; return 1; }
+    # The selection, each labelled, because "gitea" on its own does not say
+    # which of the three axes it is.
+    local field
+    for field in harness forge workflow firewall remote epitaph; do
+        [[ "$output" == *"$field"* ]] \
+            || { echo "the banner does not name $field: $output"; return 1; }
+    done
+    # And the values, not just the labels.
+    [[ "$(_plain_output)" == *"harness claude-code"* ]] \
+        && [[ "$(_plain_output)" == *"workflow local-only"* ]] \
+        || { echo "the banner names no values: $output"; return 1; }
+    rm -rf "$DEJIMA_T"
+}
+
+@test "the startup banner is off when the config says so" {
+    # A banner is exactly the thing that gets in the way when you launch
+    # dejima forty times in an afternoon, so it has a switch.
+    startup_warning_setup
+    printf '[ui]\nbanner = off\n' >> "$DEJIMA_T/config/config"
+    run startup_warning_launch_tty ''
+    [[ "$(_plain_output)" != *"harness claude-code"* ]] \
+        || { echo "banner = off still drew it: $output"; return 1; }
+    # The rest of the startup output is untouched - this suppresses the
+    # banner, not the checks.
+    [[ "$output" == *"is starting"* ]] \
+        || { echo "it suppressed more than the banner: $output"; return 1; }
+    rm -rf "$DEJIMA_T"
+}
+
+@test "the startup banner draws nothing into a redirected launch" {
+    # A launch with output redirected is a log, and this is decoration in it.
+    # `run` gives no terminal, which is the same shape as a pipe or cron.
+    startup_warning_setup
+    run env HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+        DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
+        SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
+        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        "$REPO_ROOT/bin/dejima" "$DEJIMA_T/ws"
+    [[ "$(_plain_output)" != *"harness claude-code"* ]] \
+        || { echo "a redirected launch got a banner: $output"; return 1; }
+    rm -rf "$DEJIMA_T"
+}
+
+@test "the banner says so when the firewall is off" {
+    # The one switch here that is a boundary rather than a choice, so it is
+    # the one that gets a colour of its own.
+    startup_warning_setup
+    printf '[core]\nfirewall = off\n' >> "$DEJIMA_T/config/config"
+    run startup_warning_launch_tty ''
+    [[ "$(_plain_output)" == *"firewall off"* ]] \
+        || { echo "the banner does not report the firewall being off: $output"; return 1; }
+    rm -rf "$DEJIMA_T"
+}

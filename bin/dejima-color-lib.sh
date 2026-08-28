@@ -48,6 +48,10 @@ color_init() {
     local fd="${1:-1}"
     C_RESET=""; C_CRIT=""; C_WARN=""; C_INFO=""; C_PATH=""
     C_KEY=""; C_DIM=""; C_ADD=""; C_DEL=""; C_OK=""
+    # Rides the same switch as the colour, for the reason dejima-tui-lib.sh
+    # states about its own: the terminals that mangle box drawing are the ones
+    # that get no colour either, and one flag is easier to reason about.
+    GLYPH_SEP='|'
     [ -t "$fd" ] || return 0
     [ -z "${NO_COLOR+x}" ] || return 0
     case "${TERM:-}" in ''|dumb) return 0 ;; esac
@@ -61,6 +65,7 @@ color_init() {
     C_ADD=$'\033[32m'       # green - a diff's added lines
     C_DEL=$'\033[31m'       # red - a diff's removed lines
     C_OK=$'\033[32m'        # green
+    GLYPH_SEP='▏'
 }
 
 # The colour for a tier name, so the mapping lives in one place rather than
