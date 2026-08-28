@@ -40,6 +40,7 @@ run them.
 | `bin/dejima-project` | Review and approve project domains and dependencies from the host |
 | `bin/dejima-project-lib.sh` | Shared library sourced by `bin/dejima-dep`, `bin/dejima-project`, `bin/dejima` and the remote-access scripts; not on PATH |
 | `bin/dejima-conversation-ship` | Host-side: ships session transcripts to Loki when `[logging] conversation` is on. Reads them where they already are, so the session is not in the path of its own oversight log |
+| `bin/dejima-color-lib.sh` | The one terminal palette, and the glyphs that ride the same switch. Indexed colour, not 24-bit: gruvbox is the brand and an ANSI slot **is** gruvbox on a gruvbox terminal, but hardcoding the hexes assumes a background dejima does not own. `web/src/page.css` is the exception, since the page sets its own. Not on PATH |
 | `bin/dejima-tui-lib.sh` | The palette, heading and numbered prompt `dejima-attach` and `dejima-allow` share. Rows stay with each tool, which lists a different thing from a different source. Not on PATH |
 | `bin/dejima-update-check` | Host-side: says at startup when this checkout is behind the branch it tracks. Reaches the remote by URL from outside the repository, so the checkout's own git config never names a command it runs |
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. `save` runs from `bin/dejima`'s exit trap; `list`/`search`/`show` are the operator's, and only ever read |

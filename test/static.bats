@@ -2319,24 +2319,27 @@ _install_forge_bins() {
         || { echo "the release doc does not warn about the queued privileged job"; return 1; }
 }
 
-@test "the terminal page and the session picker use the same gruvbox values" {
-    # They sit either side of one attach - pick a session, then use it - and a
-    # palette that drifts on one side makes them look like different programs.
-    # Both files carry the hex, so both can be read.
-    # The palette moved to the library the two pickers share; the page's is
-    # still its own, which is the pair this compares.
-    local css="$REPO_ROOT/web/src/page.css" attach="$REPO_ROOT/bin/dejima-tui-lib.sh"
-    local hex checked=0
-    while IFS= read -r hex; do
-        grep -qi -- "$hex" "$attach" \
-            || { echo "$hex is in the page's palette but not the picker's"; return 1; }
-        checked=$((checked + 1))
-    done < <(sed -n 's/^  --gb-[a-z0-9-]*: *\(#[0-9a-fA-F]\{6\}\).*/\1/p' "$css" \
-             | grep -viE '#1d2021|#282828|#3c3836|#504945')
-    # The accents and the light text, which is what both actually share. The
-    # backgrounds are excluded above because the picker paints none.
-    [ "$checked" -ge 5 ] \
-        || { echo "only $checked palette values were compared"; return 1; }
+@test "the web page keeps gruvbox exactly, because it owns its own background" {
+    # The page sets its own background in CSS, so both sides of the contrast
+    # are dejima's and the exact brand values are safe there. The terminal is
+    # the opposite case and deliberately uses indexed colour instead - the two
+    # are not expected to match any more, and a test comparing them would be
+    # asking the terminal to break on backgrounds dejima does not control.
+    local css="$REPO_ROOT/web/src/page.css"
+    local -A gruvbox=(
+        [--gb-fg]=ebdbb2  [--gb-green]=b8bb26  [--gb-yellow]=fabd2f
+        [--gb-red]=fb4934 [--gb-blue]=83a598
+    )
+    local name hex found=0
+    for name in "${!gruvbox[@]}"; do
+        hex="$(sed -n "s/^  $name: *#\([0-9a-fA-F]\{6\}\).*/\1/p" "$css" | head -1)"
+        [ -n "$hex" ] || continue
+        found=$((found + 1))
+        [ "${hex,,}" = "${gruvbox[$name]}" ] \
+            || { echo "$name is #$hex, upstream gruvbox is #${gruvbox[$name]}"; return 1; }
+    done
+    [ "$found" -ge 3 ] \
+        || { echo "only $found of the page's palette entries were checked"; return 1; }
 }
 
 @test "turning the toolbar's colours off restores every one of them" {
@@ -6959,4 +6962,21 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     [[ "$(_plain_output)" == *"firewall off"* ]] \
         || { echo "the banner does not report the firewall being off: $output"; return 1; }
     rm -rf "$DEJIMA_T"
+}
+
+@test "the wordmark is one colour, wherever dejima writes it" {
+    # The launch banner and the two pickers all print "dejima". They used to
+    # reach for whatever was nearest - bold cyan in one, the badge colour in
+    # the others - which is the drift a shared palette exists to stop.
+    # Code, not comments. The first version of this grepped the whole file
+    # and passed against a build where the banner had been changed back,
+    # because the comment above the line still said "C_BADGE".
+    local f
+    for f in bin/dejima bin/dejima-tui-lib.sh; do
+        grep -v '^[[:space:]]*#' "$REPO_ROOT/$f" | grep -q 'C_BADGE' \
+            || { echo "$f writes the wordmark in some other colour"; return 1; }
+    done
+    # And it is defined once.
+    run grep -c '^\s*C_BADGE=' "$REPO_ROOT/bin/dejima-color-lib.sh"
+    [ "$output" -eq 1 ] || { echo "C_BADGE is defined $output times"; return 1; }
 }

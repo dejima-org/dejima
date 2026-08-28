@@ -13,37 +13,16 @@
 #
 # Sourced, never run.
 
-# The names are carried so a wrong hex is catchable by reading.
+# The palette is dejima-color-lib.sh's, and there is only one of it. This file
+# used to carry a second, in hardcoded gruvbox truecolor, which collided with
+# that one on C_OK and C_WARN and broke on any background dejima does not own -
+# see the comment there for the contrast measurements that decided it.
 #
-# Truecolor only: a terminal without it, or tmux without `Tc`, approximates
-# 38;2 to its nearest colour rather than printing the escape, so the fallback
-# already exists one layer down.
-#
-# Empty unless stdout is a colour-capable terminal, which keeps --list a
-# machine interface (ttyd feeds run ids back in) and is also how the bats
-# suite reads this script.
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-    C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
-    C_BADGE=$'\033[38;2;254;128;25m'    # bright_orange #fe8019, the wordmark
-    C_TEXT=$'\033[38;2;235;219;178m'    # light1        #ebdbb2
-    C_MUTED=$'\033[38;2;146;131;116m'   # gray_245      #928374
-    C_SUBTLE=$'\033[38;2;124;111;100m'  # dark4         #7c6f64
-    C_RULE=$'\033[38;2;80;73;69m'       # dark2         #504945, separator
-    C_OK=$'\033[38;2;184;187;38m'       # bright_green  #b8bb26, success
-    C_WARN=$'\033[38;2;250;189;47m'     # bright_yellow #fabd2f, warning
-    C_ERR=$'\033[38;2;251;73;52m'       # bright_red    #fb4934, error
-    C_LINK=$'\033[38;2;131;165;152m'    # bright_blue   #83a598
-    GLYPH_BAR='▏'; GLYPH_DOT='●'; GLYPH_RULE='─'
-else
-    C_OFF=""; C_BOLD=""; C_BADGE=""; C_TEXT=""; C_MUTED=""; C_SUBTLE=""
-    C_RULE=""; C_OK=""; C_WARN=""; C_ERR=""; C_LINK=""
-    # Glyphs ride the same switch rather than a separate UTF-8 probe. Not
-    # because no-colour implies no-UTF-8, but because the two terminals this
-    # has to stay readable on - a $TERM the host has no entry for, and a pipe -
-    # are exactly the ones that mangle box drawing, and one flag is easier to
-    # reason about than two.
-    GLYPH_BAR='|'; GLYPH_DOT='*'; GLYPH_RULE='-'
-fi
+# Sourced and initialised here rather than left to the caller, because both
+# callers draw to stdout and this file's functions assume the names exist.
+# shellcheck source=dejima-color-lib.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/dejima-color-lib.sh"
+color_init 1
 
 # The rule under the heading, the width of the heading itself. Built rather
 # than written out because the heading is now the caller's: two literals kept
