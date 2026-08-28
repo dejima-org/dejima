@@ -27,7 +27,15 @@ import time
 
 HELPER = os.path.abspath(sys.argv[1])
 SHELL = sys.argv[2] if len(sys.argv) > 2 else "bash"
-WORK = os.environ.get("TTY_SUSPEND_WORK") or "/tmp"
+# Required, not defaulted. The fallback was "/tmp", and the three paths below
+# are then fixed names in a world-writable directory that this fixture goes on
+# to WRITE and EXECUTE. Every bats caller passes a directory, so nothing
+# shipped ever took that branch - but this runs on CI hosts, and a predictable
+# executed path is not a thing to leave lying around for the one caller that
+# forgets (#249).
+WORK = os.environ.get("TTY_SUSPEND_WORK")
+if not WORK:
+    sys.exit("tty-suspend-harness: set TTY_SUSPEND_WORK to a directory of its own")
 RECEIVED = os.path.join(WORK, "received")
 LAUNCHER = os.path.join(WORK, "launcher.sh")
 CONTAINER = os.path.join(WORK, "container.py")
@@ -159,7 +167,11 @@ if pid == 0:
     if slave > 2:
         os.close(slave)
     os.close(master)
-    env = dict(os.environ, PS1="PROMPT> ")
+    # LC_ALL=C so the shell's job-control notice is the "Stopped" this expects.
+    # Left to the environment it is whatever locale the runner happens to have,
+    # and the assertion then fails on a translated message with nothing about
+    # the terminal handling having changed (#249).
+    env = dict(os.environ, PS1="PROMPT> ", LC_ALL="C", LANG="C")
     args = [SHELL, "--norc", "-i"] if "bash" in SHELL else [SHELL, "-f", "-i"]
     os.execvpe(SHELL, args, env)
 os.close(slave)

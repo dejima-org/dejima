@@ -1281,3 +1281,44 @@ assert_remedy_forges_exist() {
         || { echo "a workflow that names no block_merge got '$output'"; return 1; }
     rm -rf "$FAKE_ROOT"
 }
+
+@test "a forge that aims its CLI also gets that CLI shadowed" {
+    # entrypoint.sh installs the PATH shadow from merge_block and disclose
+    # only (_shadow_clis). repo_flags and repo_env are exported to the
+    # container regardless - so a forge declaring repo_flags without either of
+    # the other two hands the guard its configuration with no guard on PATH to
+    # read it, and the aiming check silently does not exist.
+    #
+    # Both shipped forges declare disclose, so nothing is broken today. This
+    # is the manifest contract stated as an invariant, for the third forge
+    # someone writes (#244).
+    local forge named shadowed cli entry
+    for dir in "$REPO_ROOT"/forges/*/; do
+        [ -d "$dir" ] || continue
+        forge="$(basename "$dir")"
+        [ -n "$(lib manifest_get forge "$forge" repo_flags)$(lib manifest_get forge "$forge" repo_env)" ] \
+            || continue
+
+        # The CLI is the first word of each command the forge names.
+        named=""
+        for entry in pr_command issue_command; do
+            cli="$(lib manifest_get forge "$forge" "$entry")"
+            [ -n "$cli" ] && named="$named ${cli%% *}"
+        done
+
+        # What entrypoint.sh would actually shadow: merge_block's first word,
+        # and the CLI in each disclose record ("<kind>:<cli> <subcommand>").
+        shadowed=" $(lib manifest_get forge "$forge" merge_block | cut -d' ' -f1) "
+        while IFS= read -r entry; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"
+            [ -n "$entry" ] || continue
+            cli="${entry#*:}"
+            shadowed="$shadowed ${cli%% *} "
+        done < <(lib manifest_get forge "$forge" disclose | tr ',' '\n')
+
+        for cli in $named; do
+            [[ "$shadowed" == *" $cli "* ]] \
+                || { echo "forge $forge aims '$cli' but nothing shadows it: declare it in merge_block or disclose"; return 1; }
+        done
+    done
+}
