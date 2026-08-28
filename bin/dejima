@@ -1905,8 +1905,9 @@ fi
 # below will report any change to it.
 if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "Warning: sandbox's own repo is the mounted workspace - its trusted" >&2
-    echo "computing base (bin/, hooks/, docker/, install.sh) is writable this" >&2
-    echo "session; the exit audit will report any changes to review." >&2
+    echo "computing base (bin/, hooks/, docker/, test/, install.sh, and the" >&2
+    echo "provider and tool manifests) is writable this session; the exit audit" >&2
+    echo "will report any changes to review." >&2
 fi
 
 # Compose builds the shared base image under its own tag, explicitly - with

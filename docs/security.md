@@ -258,12 +258,21 @@ checkout itself and needs no symlink to edit, so a session with write access
 to this repo's own checkout can change what the next launch composes and
 hands to whichever session starts against it.
 
-The provider directories are in the exit-time audit's TCB list for that
-reason, alongside `bin/`, `hooks/`, `docker/` and `test/`. They hold no code
-and nothing executes them, but what they hold decides what the next launch
-permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`, which
-`entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so a
-line added to a manifest widens the egress boundary on the next run.
+**Which requires dejima's own checkout to be the workspace, and almost never
+is.** Nothing mounts `forges/`, `workflows/`, `harnesses/`, `tools/` or the
+rest of the checkout into a container - the resolved values go in, the files
+do not - so for every launch pointed at some other project, a session cannot
+read these paths, let alone write them. The rest of this section is about the
+one configuration where it can: dejima sandboxing the repository it is itself
+installed from, which is how dejima is developed. `bin/dejima` says so at
+launch when it notices.
+
+In that configuration the provider directories are in the exit-time audit's
+TCB list, alongside `bin/`, `hooks/`, `docker/`, `test/` and `tools/`. They
+hold no code and nothing executes them, but what they hold decides what the
+next launch permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`,
+which `entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so
+a line added to a manifest widens the egress boundary on the next run.
 `tools/*/tool.conf` is the same class, and is read by the host rather than the
 container: it names a tarball URL, the sha256 checked against it and the
 layout it is unpacked with, all consumed by the image build - so a session
