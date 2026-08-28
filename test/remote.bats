@@ -763,27 +763,28 @@ start_tmux() {
 }
 
 # Provenance, pinned offline. Upstream's color.table is the authority, but a
-# test cannot go and fetch it, so the name->hex half is transcribed from it
-# here. The half that catches a typo is checked rather than transcribed: every
-# escape is decoded back to a hex and compared against the one written beside
-# it, so a value edited in one place and not the other fails here instead of
-# shipping under the name "gruvbox".
-@test "the picker's palette is gruvbox, by upstream's own values" {
-    local -A gruvbox=(
-        [bright_orange]=fe8019  [light1]=ebdbb2        [gray_245]=928374
-        [dark4]=7c6f64          [dark2]=504945         [bright_green]=b8bb26
-        [bright_yellow]=fabd2f  [bright_red]=fb4934    [bright_blue]=83a598
-    )
-    local seen=0 r g b name hex
-    while read -r r g b name hex; do
-        seen=$((seen + 1))
-        [ "${gruvbox[$name]:-unknown}" = "$hex" ]
-        [ "$(printf '%02x%02x%02x' "$r" "$g" "$b")" = "$hex" ]
-    done < <(sed -n \
-        "s/.*38;2;\([0-9]*\);\([0-9]*\);\([0-9]*\)m'.*# \([a-z_0-9]*\) *#\([0-9a-f]*\).*/\1 \2 \3 \4 \5/p" \
-        "$REPO_ROOT/bin/dejima-tui-lib.sh")
-    [ "$seen" -eq "${#gruvbox[@]}" ] \
-        || { echo "found $seen of ${#gruvbox[@]} palette entries"; return 1; }
+# The terminal palette carries no hexes at all any more, and that is the
+# property worth pinning. It used to hardcode gruvbox in 24-bit, which is the
+# brand but assumes a background dejima does not own: measured against a light
+# one, light1 came out at 1.21:1 and bright yellow at 1.49:1. Indexed colours
+# cannot have that problem, because the theme's author picked them against
+# their own background - and on a gruvbox terminal they ARE those hexes.
+@test "the terminal palette is the terminal's own, not hardcoded" {
+    local lib="$REPO_ROOT/bin/dejima-color-lib.sh"
+    run grep -n '38;2;' "$lib" "$REPO_ROOT/bin/dejima-tui-lib.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "24-bit colour is back in a terminal palette:"; echo "$output"; return 1; }
+    # And it is one palette: a second definition is how C_OK and C_WARN came
+    # to mean two different things depending on which file a caller sourced.
+    run grep -c '^\s*C_OK=' "$REPO_ROOT/bin/dejima-tui-lib.sh"
+    [ "$output" -eq 0 ] \
+        || { echo "dejima-tui-lib.sh defines its own palette again"; return 1; }
+    # The colours it does use are the semantic slots, so a gruvbox terminal
+    # fills them with gruvbox.
+    local slot
+    for slot in '92m' '93m' '91m' '94m' '90m'; do
+        grep -q "$slot" "$lib" || { echo "the palette lost slot $slot"; return 1; }
+    done
 }
 
 @test "attaching creates a grouped session on the requested window and disposes of it on detach" {
