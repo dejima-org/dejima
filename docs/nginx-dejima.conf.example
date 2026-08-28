@@ -25,9 +25,15 @@
 #   2. Authentication. ttyd is started with no credential of its own (see
 #      bin/dejima-ttyd), because it is bound to 127.0.0.1 where only this
 #      host can reach it - this proxy is the only gate in front of it. A
-#      vhost without auth_basic (or something stronger in its place) is an
-#      unauthenticated host shell on your LAN. Put every listen behind it:
-#      a second server block without auth is the same open door.
+#      vhost that authenticates nothing is an unauthenticated host shell on
+#      your LAN. Put every listen behind it: a second server block without
+#      auth is the same open door.
+#
+#      This file uses HTTP Basic because it is the shortest thing to show.
+#      One shared credential, no per-operator identity, no second factor,
+#      revocation by editing htpasswd. docs/remote-access.md, under
+#      "Authenticating the front door", is what that costs and what else
+#      meets the requirement.
 #
 #      Authentication alone does not stop a page in your browser from
 #      opening a WebSocket to this vhost and having the browser attach your

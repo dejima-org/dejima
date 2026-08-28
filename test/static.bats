@@ -7027,3 +7027,33 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     [ "$checked" -ge 4 ] \
         || { echo "only $checked shared values were compared"; return 1; }
 }
+
+@test "the front door's auth requirement is stated as a requirement, not as one product" {
+    # docs/remote-access.md documented HTTP Basic and nothing else, so anyone
+    # whose threat model pointed elsewhere read a document that appeared to
+    # have no answer. What the doc owes is the requirement; the software that
+    # meets it is the reader's (#212). Pinned as the requirement rather than
+    # by naming any of the options, so replacing one does not fail this.
+    local flat
+    flat="$(tr '\n' ' ' < "$REPO_ROOT/docs/remote-access.md" | tr -d '*`' | tr -s ' ')"
+    grep -qi 'every request to every server block, the default one included' <<< "$flat" \
+        || { echo "the requirement is not stated"; return 1; }
+    grep -qi 'not that it is any particular software' <<< "$flat" \
+        || { echo "it still reads as one product being the answer"; return 1; }
+
+    # The bind address survives as the thing none of the options replaces -
+    # the strongest part of the document, and the one a list of auth options
+    # invites a reader to think they have dealt with.
+    grep -qi 'does not replace' <<< "$flat" \
+        || { echo "an option is allowed to stand in for the bind address"; return 1; }
+
+    # And the property that holds whichever is chosen, which used to sit
+    # attached to Basic alone.
+    grep -qi 'stops a browser that has already authenticated' <<< "$flat" \
+        || { echo "the already-authenticated browser is undisclosed"; return 1; }
+
+    # Costed rather than recommended by silence: a solo operator reading this
+    # should be told Basic is a trade, not that it is the answer.
+    grep -qi 'no per-operator identity' <<< "$flat" \
+        || { echo "what Basic costs is unstated"; return 1; }
+}
