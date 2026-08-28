@@ -2606,6 +2606,21 @@ _guard_repo() {
     done
 }
 
+# A refusal is three things, and the tests asserted one: the message. A guard
+# that printed it and then ran the command anyway passed them, which is the
+# shape of failure a guard test exists to catch. $1 is the phrase the refusal
+# is known by; the stub CLIs all print "real: $*", so its absence is what
+# proves nothing reached them (#245).
+assert_forge_refused() {
+    local phrase="$1" what="${2:-the command}"
+    [[ "$output" == *"$phrase"* ]] \
+        || { echo "$what was not refused: $output"; return 1; }
+    [[ "$output" != *real:* ]] \
+        || { echo "$what was refused AND ran: $output"; return 1; }
+    [ "$status" -ne 0 ] \
+        || { echo "$what was refused but exited 0"; return 1; }
+}
+
 @test "the forge guard refuses only the subcommand a workflow blocks" {
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgeguard.XXXXXX")"
     mkdir -p "$d/real"
@@ -2617,12 +2632,12 @@ _guard_repo() {
 
     run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
         "$d/gitea-pr" "$blocked" 7
-    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+    assert_forge_refused "human decision in the sandbox" "the blocked subcommand" || return 1
 
     # Flags before the subcommand do not smuggle it past.
     run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gitea-pr $blocked" DEJIMA_FORGE_REAL_DIR="$d/real" \
         "$d/gitea-pr" --verbose "$blocked" 7
-    [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+    assert_forge_refused "human decision in the sandbox" "a flag before the subcommand" || return 1
 
     # Nor does a flag that takes a SEPARATE value, which is the form that got
     # past this and is the ordinary way to name a PR from outside its checkout:
@@ -2638,8 +2653,7 @@ _guard_repo() {
         # shellcheck disable=SC2086
         run env DEJIMA=1 DEJIMA_MERGE_BLOCK="gh pr merge" DEJIMA_FORGE_REAL_DIR="$d/real" \
             "$d/gh" $form
-        [[ "$output" == *"human decision in the sandbox"* ]] \
-            || { echo "gh $form reached the real CLI: $output"; return 1; }
+        assert_forge_refused "human decision in the sandbox" "gh $form" || return 1
     done
 
     # And a command that merely mentions the blocked words out of order still
@@ -2693,14 +2707,13 @@ _repo_guard_shim() {
     for form in "--repo other/thing" "--repo=other/thing" "-R other/thing" "-Rother/thing"; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" $form issue create --title x
-        [[ "$output" == *"Blocked by dejima"* ]] \
-            || { echo "gh $form reached the real CLI: $output"; return 1; }
+        assert_forge_refused "Blocked by dejima" "gh $form" || return 1
     done
 
     # And the environment variable, which takes no argument at all and would
     # otherwise be the way around every check above.
     run env "${env_common[@]}" GH_REPO=other/thing "$d/gh" issue create --title x
-    [[ "$output" == *"Blocked by dejima"* ]] || { echo "GH_REPO was ignored: $output"; return 1; }
+    assert_forge_refused "Blocked by dejima" "GH_REPO" || return 1
 
     # The repository the session IS for goes through, in any capitalisation:
     # forges preserve case without distinguishing it, and a refusal over that
@@ -2766,7 +2779,12 @@ _repo_guard_shim() {
         || { echo "github-pr is not declared in the github manifest's install"; return 1; }
     # It reads. A write would need the authorship disclosure, and the
     # disclosure is keyed on gh - so a write here would be undisclosed.
-    run grep -nE '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method' "$tool"
+    #
+    # `mutation` is in the pattern because this tool exists to reach GraphQL,
+    # which is the one route the rest of the pattern cannot see: a GraphQL
+    # write is a POST to one endpoint with the verb in the query body, so it
+    # matches no subcommand and needs no --method (#245).
+    run grep -nEi '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method|\bmutation\b' "$tool"
     [ "$status" -ne 0 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
 }
 
@@ -6846,4 +6864,31 @@ sys.stdout.write(clean(sys.argv[1]))" "$nasty")"
     grep -q 'test/' <<< "$warn" || { echo "the warning omits test/"; return 1; }
     grep -qi 'manifest' <<< "$warn" \
         || { echo "the warning omits the provider and tool manifests"; return 1; }
+}
+
+@test "the tty-suspend fixture refuses to run without a work directory of its own" {
+    # It used to fall back to /tmp, and then wrote and executed three fixed
+    # names there. Every caller passes a directory, so nothing shipped took
+    # that branch - but this fixture runs on CI hosts, and a predictable
+    # executed path is worth not leaving for the caller that forgets (#249).
+    run env -u TTY_SUSPEND_WORK python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" /bin/true
+    [ "$status" -ne 0 ] || { echo "it ran with no work directory: $output"; return 1; }
+    [[ "$output" == *TTY_SUSPEND_WORK* ]] || { echo "$output"; return 1; }
+    # Deliberately no assertion about /tmp itself. The first version checked
+    # that /tmp/launcher.sh and /tmp/container.py did not exist, and failed -
+    # because the mutation-check for this very test had run the old fixture
+    # without the variable minutes earlier and left them there. An assertion
+    # about a shared directory reads whatever else has touched it. The refusal
+    # happens where WORK is assigned, before any path is built from it, which
+    # is what the status and the message above establish.
+}
+
+@test "the tty-suspend fixture pins the locale its job-control check reads" {
+    # `expect("Stopped")` reads the shell's own job-control notice, which is
+    # translated. Inherited, the assertion fails on a non-English runner with
+    # nothing about the terminal handling having changed - the environment-
+    # reading pattern .dejima.md records as having shipped twice already.
+    grep -q 'LC_ALL="C"' "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" \
+        || { echo "the child shell's locale is inherited again"; return 1; }
 }
