@@ -3089,3 +3089,44 @@ remote_doc() {
     assert_argv 'myproject needs input' 'Session is waiting for you.' \
         'https://dejima.example.invalid/?arg=0123456789abcdef'
 }
+
+@test "the session picker starts on a clean screen, scrollback included" {
+    # Reopening it from the web toolbar is a full page load, and it drew on
+    # top of whatever the previous session had left on screen - rows
+    # interleaved with the tail of the session just left, which reads as a
+    # rendering fault rather than a new screen (#213). Invisible over SSH,
+    # where a fresh connection to the forced command starts on a blank one.
+    write_remote_config
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    run script -qec "echo q | '$REPO_ROOT/bin/dejima-attach'" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[2J'* ]] || { echo "the screen is not cleared"; return 1; }
+    # And the scrollback with it: without 3J a swipe up on a phone lands in
+    # the middle of the previous session's output.
+    [[ "$output" == *$'\033[3J'* ]] || { echo "the scrollback is left behind"; return 1; }
+
+    # Not on the machine interface. ttyd feeds run ids back in from --list,
+    # and these bytes in a log are the failure this is gated to avoid.
+    run script -qec "'$REPO_ROOT/bin/dejima-attach' --list" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" != *$'\033[2J'* ]] || { echo "--list cleared the screen"; return 1; }
+}
+
+@test "no terminal, no clear" {
+    # A pipe or a dumb terminal gets none of it. NO_COLOR does not suppress it
+    # though: that asks for no decoration, not for a front door drawn over the
+    # last session.
+    local out
+    out="$(bash -c 'source "$1"; tui_clear; echo AFTER' _ "$REPO_ROOT/bin/dejima-tui-lib.sh")"
+    [ "$out" = AFTER ] || { echo "a pipe got escape bytes: $(printf '%q' "$out")"; return 1; }
+    run script -qec "TERM=dumb bash -c 'source $REPO_ROOT/bin/dejima-tui-lib.sh; tui_clear; echo AFTER'" /dev/null
+    [[ "$output" != *$'\033['* ]] || { echo "a dumb terminal got escape bytes"; return 1; }
+    # NO_COLOR too, on a real terminal. It rides the same switch as the colour
+    # and the glyphs, which is the reading this file already committed to -
+    # the alternative is a picker answering to two ideas of "plain".
+    run script -qec "NO_COLOR=1 TERM=xterm bash -c 'source $REPO_ROOT/bin/dejima-tui-lib.sh; tui_clear; echo AFTER'" /dev/null
+    [[ "$output" != *$'\033['* ]] || { echo "NO_COLOR still got a screen clear"; return 1; }
+}

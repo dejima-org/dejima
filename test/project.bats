@@ -2000,3 +2000,19 @@ declare_repeatedly() {
         || { echo "rows start the name at different columns:"; echo "$out"; return 1; }
     rm -rf "$STUB_DIR"
 }
+
+@test "dejima-allow's picker does not wipe the terminal it was run in" {
+    # It shares the banner with dejima-attach and deliberately not the clear.
+    # dejima-attach is a front door, navigated to; this is a prompt inside a
+    # shell the operator is already using, and wiping their scrollback to ask
+    # one question is worse than the interleaving the clear exists to fix.
+    stub_two_containers
+    local out
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" != *$'\033[2J'* ]] \
+        || { echo "dejima-allow cleared the operator's screen"; return 1; }
+    # It still drew the picker, so this is not passing because nothing ran.
+    [[ "$out" == *"q to quit"* ]] || { echo "no picker at all: $out"; return 1; }
+    rm -rf "$STUB_DIR"
+}

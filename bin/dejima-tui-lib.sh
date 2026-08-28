@@ -58,6 +58,33 @@ tui_rule() {
 }
 
 # "dejima | <subtitle>", underlined to its own width.
+# A blank screen to draw a front door on, scrollback included.
+#
+# The picker is reached by navigating to it - the web toolbar's SESS button is
+# a full page load - and it drew on top of whatever the previous session had
+# left on screen, so the rows arrived interleaved with the tail of the session
+# just left. Over SSH it was invisible, because a fresh connection to the
+# forced command usually starts on an empty screen (#213).
+#
+# 3J as well as 2J: without it a swipe up on a phone lands in the middle of
+# the previous session's output, which is the same confusion one gesture away.
+#
+# Its own function rather than part of tui_banner, because dejima-allow's
+# picker must NOT do this: that one is a prompt inside a shell the operator is
+# already using, and wiping their scrollback to ask one question is worse than
+# the interleaving this fixes.
+#
+# Rides the same switch as the colour and the glyphs, for the reason stated
+# above them: one flag is easier to reason about than two, and the terminals
+# that mangle box drawing are the ones these bytes should not reach either. So
+# NO_COLOR turns this off as well - a reading of it this file has already
+# committed to, and the alternative is a picker that answers to two different
+# ideas of "plain".
+tui_clear() {
+    [ -n "$C_OFF" ] || return 0
+    printf '\033[H\033[2J\033[3J'
+}
+
 tui_banner() {
     local subtitle="$1"
     printf '\n  %s%sdejima%s %s%s%s %s%s%s\n' \
