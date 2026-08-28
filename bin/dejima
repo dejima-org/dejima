@@ -1902,8 +1902,11 @@ startup_banner() {
 
     # Labels dim, values not. The labels are how you find the value you came
     # for; the values are what differs between one launch and the next.
-    printf '\n  %s%sdejima%s  %s%s%s' \
-        "$C_KEY" "$C_INFO" "$C_RESET" "$C_KEY" "$(basename -- "$WORKSPACE_DIR")" "$C_RESET" >&2
+    # C_BADGE, the same name the pickers set the mark in. Two surfaces
+    # spelling the wordmark two different colours is the drift a shared
+    # palette exists to stop.
+    printf '\n  %sdejima%s  %s%s%s' \
+        "$C_BADGE" "$C_RESET" "$C_KEY" "$(basename -- "$WORKSPACE_DIR")" "$C_RESET" >&2
     [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
     printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
         "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \

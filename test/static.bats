@@ -6963,3 +6963,20 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
         || { echo "the banner does not report the firewall being off: $output"; return 1; }
     rm -rf "$DEJIMA_T"
 }
+
+@test "the wordmark is one colour, wherever dejima writes it" {
+    # The launch banner and the two pickers all print "dejima". They used to
+    # reach for whatever was nearest - bold cyan in one, the badge colour in
+    # the others - which is the drift a shared palette exists to stop.
+    # Code, not comments. The first version of this grepped the whole file
+    # and passed against a build where the banner had been changed back,
+    # because the comment above the line still said "C_BADGE".
+    local f
+    for f in bin/dejima bin/dejima-tui-lib.sh; do
+        grep -v '^[[:space:]]*#' "$REPO_ROOT/$f" | grep -q 'C_BADGE' \
+            || { echo "$f writes the wordmark in some other colour"; return 1; }
+    done
+    # And it is defined once.
+    run grep -c '^\s*C_BADGE=' "$REPO_ROOT/bin/dejima-color-lib.sh"
+    [ "$output" -eq 1 ] || { echo "C_BADGE is defined $output times"; return 1; }
+}
