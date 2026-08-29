@@ -1005,3 +1005,176 @@ from shrinking the desktop's view, and the option's only scopes are the
 window - which a grouped session *shares* with yours, so setting it there
 would permanently overwrite your choice with nothing to restore afterwards -
 and global. An operator who deliberately set `smallest` keeps it.
+
+## Mounting the box's files
+
+The front doors above get you a terminal. The other half of working from
+another machine is the files - the screenshots, specs and scratch output a
+session leaves behind - and `sshfs` puts those directories in your own file
+manager and editor over the SSH access you already have.
+
+Read the next section before setting it up. What it costs is not obvious from
+the fact that it is only a filesystem mount, and it is not a cost dejima can
+carry for you: nothing dejima runs is in the path.
+
+### What mounting it costs you
+
+**Every byte and every name in those directories was written by a sandboxed
+session.** That is what they are for - a handoff directory a session cannot
+write to is not a handoff directory - so this is not a defect to fix but the
+surface to know about. dejima sanitises session-authored bytes before
+printing them to your terminal, in `dejima-audit` and `dejima-epitaph`,
+because that is the one surface it controls. A file manager on another
+machine is not that surface, and nothing carries the sanitising there.
+
+**Mounting removes the deciding.** Copying a file off the box when you want
+it is a decision per file. A mount, and especially one a login unit brings up
+for you, means the directory is simply present whenever you are logged in -
+and a desktop does not wait to be asked. A file indexer walks new directories and
+opens what it finds to extract text from PDFs, archives and office documents.
+A thumbnailer decodes images and video frames. A previewer parses on
+selection. Those are image and document parsers, running as you, unsandboxed,
+reached with no click. dejima's whole premise is that the session may be
+hostile; none of that software was written with that assumption about a
+directory on your own disk. This is the [threat
+model](threat-model.md#ranked-by-what-is-actually-likely)'s fifth-ranked item
+with its one bound removed - it is still the operator's side of the handoff,
+but no person decides per file any more.
+
+**Names are session-chosen too, and a desktop renders names.** Control
+characters, bidi overrides, and a long name whose visible tail is not its real
+extension all survive into a file listing. The rule for a terminal applies
+unchanged to a file manager: what is displayed is not evidence of what it is.
+
+**Opening the directory as a project is code execution.** Editors act on
+configuration they find beside the files - `.envrc` for direnv, a `.vscode`
+directory, a project-local `exrc`, a `.git/config` that any later `git`
+command run in that directory honours. A session that can write the directory
+chooses those files as freely as it chooses the screenshots. Pull files out of
+the mount; do not point a project-opening tool at it.
+
+**The mount is read-write, and your desktop uses that.** Thumbnail caches,
+trash directories, editor swap and undo files land in the share, where every
+later session reads them. An editor swap file can hold buffer content from
+the file you had open, and deleting something in a file manager usually moves
+it to a trash directory inside the same mount rather than removing it.
+
+**Symlinks resolve on your machine.** `sshfs` passes a symlink through as a
+symlink, so one a session planted resolves against *your* filesystem: a
+backup job, an indexer, `cp -r` or `rsync -L` pointed at the mount can be led
+out of it and into your own files. `-o follow_symlinks` inverts that by
+resolving them on the box instead, which hands you the box's files rather
+than yours. Neither is what you want, so do not add that option and do not
+point recursive tools at the mount.
+
+**What it does not add is a route inward.** A session cannot see the mount,
+cannot cause one, and gains nothing from the fact that one exists. The ssh
+credential involved already gets you a shell on that box, so it is not a new
+grant either. Everything above is about where session-authored bytes end up,
+which is a machine that appears nowhere in dejima's blast-radius table.
+
+**Keeping it small** is most of the answer, and unmounting is the biggest
+lever: none of the above happens to a directory that is not currently there.
+Then mount the handoff directories rather than the box's home, add `-o ro` for
+one you only ever pull from, exclude the mount point from your indexer's and
+your backup tool's scope, and [clear `share_dir` out
+periodically](configuration.md#shared-scratch-space) - which now means stale
+files on two machines rather than one.
+
+### Setting it up
+
+**Use your ordinary key, not the front-door one.** A `command=` in
+`authorized_keys` replaces whatever the client asked to run, and a
+`subsystem sftp` request is not an exception, so a client offering the phone
+key gets `dejima-attach` where it expected the SFTP protocol and fails
+without explaining itself. Do not relax that key to make this work: the
+forced command is the whole of what makes it safe to leave on a phone. The
+key that already gets you a normal shell on the box is the right one, and it
+grants nothing new here - you had the shell.
+
+**Find the host path first.** `~/shared` is where the *container* sees it; on
+the host it is `[core] share_dir`, which defaults to
+`~/.local/share/dejima/shared` and is not named `shared` at all.
+`dejima --print-config | grep share_dir` on the box prints the resolved path.
+Anything in `[mounts] read_write` needs no lookup, because those mount at the
+host path they name: `~/specs` in the container is `~/specs` on the box.
+
+```sh
+sshfs box:.local/share/dejima/shared ~/mnt/dejima-shared \
+    -o IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+    -o Compression=no
+```
+
+`IdentitiesOnly=yes` stops ssh offering every key your agent holds ahead of
+the one you named, which can exhaust the server's `MaxAuthTries` and fail as
+though the key were wrong. `PasswordAuthentication=no` makes an unattended
+mount fail immediately rather than block on a prompt nobody is there to
+answer. The keepalives are what make `reconnect` worth having: they give up
+after about 45 seconds, where a laptop that slept or changed network
+otherwise leaves every `ls` hanging on the kernel's TCP timeout.
+`Compression=no` because screenshots and PDFs are already compressed.
+
+Two additions worth knowing rather than copying. `-o
+Ciphers=aes128-gcm@openssh.com` is faster when both ends have AES-NI, and
+slower when they do not - ssh's default puts `chacha20-poly1305` first
+precisely because it wins on hardware without it. And `-o idmap=user` if your
+account has a different UID on the two machines, or every file arrives owned
+by whoever holds that number locally.
+
+A `Host box` block in `~/.ssh/config` carrying the identity and keepalive
+options keeps all of this to `sshfs box:... ~/mnt/...`, which is worth doing
+once rather than pasting the long form wherever you need it.
+
+**Mount it when you want it, and `fusermount3 -u` when you are done.** Two
+commands is not much friction, and it buys back the thing the section above
+says a mount costs: while it is unmounted there is no directory for an
+indexer to walk or a previewer to open, so the window in which your machine
+acts on session output is one you opened on purpose. Every automatic form
+below trades that away. There is deliberately no `/etc/fstab` line here -
+those run as root, which means a key root can read, root's `~/.ssh/config`
+instead of yours, and `allow_other` before your own account can see inside
+the mount, at which point every account on the machine can too. That is a
+worse deal in every direction than typing `sshfs`.
+
+### On login
+
+**Prefer mounting on demand.** This is here because a mount you have to
+remember is a mount you stop using, not because it is the better answer: an
+always-present directory is exactly the case the cost section is about. Worth
+it for a directory you genuinely work out of, like `~/specs`; not worth it
+for one you look at twice a week.
+
+A **user** service runs as you, so the key in your home directory works
+without being made readable by anyone else. In
+`~/.config/systemd/user/dejima-shared.service`:
+
+```ini
+[Unit]
+Description=dejima shared directory
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/sshfs -f box:.local/share/dejima/shared %h/mnt/dejima-shared \
+    -o IdentityFile=%h/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
+ExecStop=/bin/fusermount3 -u %h/mnt/dejima-shared
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+`-f` is the load-bearing flag: without it `sshfs` daemonises, systemd watches
+the parent exit and calls the mount a failure. `fusermount3` is the libfuse3
+name, `fusermount` the libfuse2 one. Then
+`systemctl --user enable --now dejima-shared`, and one unit per directory -
+`%h` expands to your home, so the same file with two paths changed covers
+`~/specs`.
+
+`systemctl --user` needs `loginctl enable-linger <you>` if you want the mount
+to survive you logging out, the same requirement `dejima-notify-watch` has.

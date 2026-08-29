@@ -4577,6 +4577,100 @@ EOF
         || { echo "the reason for the second topic is gone"; return 1; }
 }
 
+@test "the sshfs recipe sends the reader to the right key and the right path" {
+    # Two things a reader gets wrong on their own, one of them dangerously.
+    #
+    # The dangerous one: sshfs against the front-door key fails, because
+    # command= replaces a subsystem request too, and the obvious fix is to
+    # relax the forced command - which turns a key that is safe to leave on a
+    # phone into a general shell key. The doc has to say use the ordinary key
+    # BEFORE a reader reaches for the other repair.
+    #
+    # The merely wasteful one: ~/shared is the container's view. On the host
+    # it is share_dir, which is not named shared, so `sshfs box:shared` mounts
+    # nothing and looks like a permissions problem.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/remote-access.md")"
+    grep -qi 'subsystem sftp request is not an exception' <<< "$flat" \
+        || { echo "nothing says why the front-door key fails here"; return 1; }
+    grep -qi 'Do not relax that key' <<< "$flat" \
+        || { echo "the doc no longer heads off loosening the forced command"; return 1; }
+    grep -q 'print-config | grep share_dir' <<< "$flat" \
+        || { echo "the reader is not told how to find the host path"; return 1; }
+
+    grep -q '^### On login' "$REPO_ROOT/docs/remote-access.md" \
+        || { echo "the automatic route is undocumented"; return 1; }
+}
+
+@test "the sshfs section hands out no fstab line" {
+    # Deliberately omitted, and the omission is stated rather than left as a
+    # gap someone helpfully fills. An fstab mount runs as root: a key root can
+    # read, root's ssh config rather than yours, and allow_other before your
+    # own account can see inside - which then lets every account on the machine
+    # in. Worse in every direction than typing sshfs, on a mount whose whole
+    # cost is that it is present when you did not ask.
+    local doc="$REPO_ROOT/docs/remote-access.md" sec
+    sec="$(sed -n "/^## Mounting the box's files/,\$p" "$doc")"
+    grep -qE 'fuse\.sshfs|x-systemd\.automount|allow_other,' <<< "$sec" \
+        && { echo "an fstab line is back in the section"; return 1; }
+    grep -q 'deliberately no /etc/fstab line' <<< "$(flat_prose "$doc")" \
+        || { echo "nothing says the omission is a decision"; return 1; }
+}
+
+@test "what an sshfs mount costs is disclosed before the recipe, not after it" {
+    # A mount looks like plumbing, so the cost has to arrive before the reader
+    # has already pasted the command. Ordering is the assertion: this started
+    # as a closing note, which is precisely where nobody reads it.
+    local doc="$REPO_ROOT/docs/remote-access.md" cost setup
+    cost="$(grep -n '^### What mounting it costs you' "$doc" | cut -d: -f1)"
+    setup="$(grep -n '^### Setting it up' "$doc" | cut -d: -f1)"
+    [ -n "$cost" ] && [ -n "$setup" ] \
+        || { echo "the cost and setup sections are not both there"; return 1; }
+    [ "$cost" -lt "$setup" ] \
+        || { echo "the cost section sits after the recipe again"; return 1; }
+
+    # The surface itself. Each of these is a distinct way session-authored
+    # bytes act on the operator's machine, and each was arrived at separately;
+    # a rewrite that keeps the heading and drops one of them keeps the shape
+    # of the disclosure without its content.
+    local claim
+    for claim in \
+        'nothing carries the sanitising there' \
+        'Mounting removes the deciding' \
+        'a desktop renders names' \
+        'as a project is code execution' \
+        'read-write, and your desktop uses that' \
+        'Symlinks resolve on your machine' \
+        'does not add is a route inward' \
+        'unmounting is the biggest lever'
+    do
+        grep -qi -- "$claim" < <(flat_prose "$doc") \
+            || { echo "the disclosure no longer says: $claim"; return 1; }
+    done
+}
+
+@test "the threat model owns the handoff-directory surface as a case of item 5" {
+    # share_dir and [mounts] read_write carry session-authored bytes and names
+    # out of the container by design, and the threat model said nothing about
+    # them. It belongs under item 5 - the operator's own side of the handoff -
+    # rather than as a new row, because the session initiates none of it.
+    #
+    # What makes it worth stating is the delta from item 5, whose closing
+    # sentence is that a person decides: a mounted directory is opened by an
+    # indexer or a previewer with no decision per file at all.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    grep -qi 'handoff directories are item 5 with the person taken out' <<< "$flat" \
+        || { echo "the mount case is not tied to item 5"; return 1; }
+    grep -qi 'here nobody does' <<< "$flat" \
+        || { echo "the delta from item 5 - that no person decides - is gone"; return 1; }
+    grep -qi 'the session initiates none of it' <<< "$flat" \
+        || { echo "nothing bounds this as not being a route inward"; return 1; }
+    # And in the list a reader checks for what they are on their own for.
+    grep -qi 'safe for another machine to open' <<< "$flat" \
+        || { echo "the not-claimed list does not carry it"; return 1; }
+}
+
 @test "the negative space is collected where a reader will find it" {
     # A document organised by control makes a reader assemble what is NOT
     # covered themselves, and most will not. Every item here is documented
