@@ -3989,6 +3989,33 @@ STUB
         || { echo "REAP_AFTER is $((reap))s, short enough to hit a live run"; return 1; }
 }
 
+@test "runtime.bats reaps its own abandoned images, not just its containers" {
+    # Networks and containers were reaped across runs; images were not (#26).
+    # The per-test teardown removes only the current run's suffix, so a run
+    # that never reaches teardown leaves harness, override and derived images
+    # with nothing that will ever collect them - and each is built FROM the
+    # session image, so they are the largest thing this suite leaves behind.
+    #
+    # Asserted on the source: this file cannot run Docker, and the alternative
+    # is that the only check on the reap is a suite that never runs here.
+    local rt="$REPO_ROOT/test/runtime.bats"
+    local reap create
+    reap=$(grep -n 'docker rmi -f "\$_img"' "$rt" | head -1 | cut -d: -f1)
+    [ -n "$reap" ] || { echo "no image reap in runtime.bats"; return 1; }
+    # In setup_file, before the run makes anything - a sweep after the build
+    # is a sweep of this run's own work.
+    create=$(grep -n 'docker network create' "$rt" | head -1 | cut -d: -f1)
+    [ "$reap" -lt "$create" ] \
+        || { echo "the image reap at $reap runs after the create at $create"; return 1; }
+    # Scoped to this suite's namespace, checked on the name rather than left
+    # to the CLI filter.
+    sed -n "$((reap - 12)),${reap}p" "$rt" | grep -q 'dejima-test-\*)' \
+        || { echo "the image reap is not anchored to the dejima-test- prefix"; return 1; }
+    # And age-guarded, or a concurrent run loses the image it is booting.
+    sed -n "$((reap - 12)),${reap}p" "$rt" | grep -q 'REAP_AFTER' \
+        || { echo "images are reaped with no age guard"; return 1; }
+}
+
 @test "every container runtime.bats starts is attached to a user-defined network" {
     # On the default bridge there's no 127.0.0.11, so dns-proxy.sh aborts and
     # the container dies mid-startup - which used to surface as flaky,

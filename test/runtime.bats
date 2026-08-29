@@ -321,6 +321,29 @@ setup_file() {
     done < <(docker ps -a --filter name=^dejima-test- --filter status=exited \
                  --filter status=created --format '{{.Names}}' 2>/dev/null)
 
+    # And the images this suite builds - harness, override, derived - which
+    # nothing reaps across runs (#26). The per-test teardown removes only the
+    # CURRENT run's suffix, so an abandoned run's images have no reaper at all.
+    # They hold no subnet, so this is disk rather than the network's kind of
+    # harm; it is also the largest thing here by disk, since each is built
+    # FROM the session image.
+    #
+    # Same age guard as above, for the same reason: a concurrent run's images
+    # are minutes old. The prefix is checked again on the name rather than
+    # trusted to the CLI filter, so the reap can only ever reach this suite's
+    # own namespace.
+    local _img _born _suffix
+    _suffix="$(basename "$BATS_RUN_TMPDIR")"
+    while IFS= read -r _img; do
+        [ -n "$_img" ] || continue
+        case "$_img" in dejima-test-*) ;; *) continue ;; esac
+        case "$_img" in *":$_suffix") continue ;; esac
+        _born="$(docker image inspect -f '{{.Created}}' "$_img" 2>/dev/null)" || continue
+        _born="$(date -d "$_born" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _born ))" -gt "$REAP_AFTER" ] || continue
+        docker rmi -f "$_img" >/dev/null 2>&1 || true
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 'dejima-test-*' 2>/dev/null)
+
     docker network create "$network" >/dev/null
 
     # No DEJIMA_FORGE_HOSTS/LOKI_URL: this suite only asserts the default
