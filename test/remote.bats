@@ -1353,15 +1353,29 @@ EOF
 # the whitelist below is what makes the log sufficient.
 stub_curl() {
     STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    # stdin as well as argv, because the request URL now arrives that way and
+    # a stub that only saw argv would report the push as carrying no
+    # destination at all - which reads like the value being dropped.
+    #
+    # Drained only when `--config -` asked for it, exactly as the real curl
+    # does. A stub that reads stdin unconditionally HANGS when the caller
+    # sends none, so a change that stopped redirecting would fail this suite
+    # by timing out rather than by failing an assertion.
     cat > "$STUB_DIR/curl" <<EOF
 #!/bin/bash
 printf '%s\n' "\$@" >> "$STUB_DIR/curl-argv"
+_want_stdin=
+for _a in "\$@"; do
+    [ "\$_a" = --config ] && _want_stdin=1
+done
+[ -z "\$_want_stdin" ] || cat >> "$STUB_DIR/curl-stdin"
 exit 0
 EOF
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
 }
 curl_log() { cat "$STUB_DIR/curl-argv" 2>/dev/null; }
+curl_stdin() { cat "$STUB_DIR/curl-stdin" 2>/dev/null; }
 
 # The EXACT argument vector of one push, one argument per line - a whitelist,
 # not a search. Absence assertions cannot do this job: an argument that leaks
@@ -1375,7 +1389,7 @@ expect_argv() {
         -H "Title: dejima: $1" \
         -H "Priority: default"
     [ -z "${3:-}" ] || printf '%s\n' -H "Click: $3"
-    printf '%s\n' -d "$2" -- https://ntfy.example.invalid/dejima
+    printf '%s\n' -d "$2" --config -
 }
 # Compared as a whole file, so a SECOND push would fail this too. The
 # sentinel is what makes "whole" true: both sides are command substitutions,
@@ -1566,6 +1580,49 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"not configured"* ]]
     [ ! -d "$RUNTIME_DIR/dejima" ]
+    [ -z "$(curl_log)" ]
+}
+
+@test "the ntfy URL never reaches curl's argv, because it can carry a token" {
+    # An ntfy server that wants credentials takes them in the URL, and
+    # docs/remote-access.md documents that form. Every argument of every
+    # process on this host is readable by any local account through
+    # /proc/<pid>/cmdline, so a URL in argv is a token published to the
+    # machine for as long as the request runs - `ps` is enough.
+    #
+    # Both halves are asserted. Absent from argv is the fix; present on stdin
+    # is what stops the fix from being "the push lost its destination", which
+    # would pass an absence check just as well.
+    stub_curl
+    conf_with_ntfy
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [[ "$(curl_log)" != *ntfy.example.invalid* ]] \
+        || { echo "the URL is in argv:"; curl_log; return 1; }
+    [[ "$(curl_stdin)" == *'url = "https://ntfy.example.invalid/dejima"'* ]] \
+        || { echo "the URL did not reach curl at all:"; curl_stdin; return 1; }
+
+    # The click URL is not secret and stays where it is: it is composed from
+    # base_url, which is the address of the operator's own front door.
+    [[ "$(curl_log)" == *"Click: https://dejima.example.invalid/?arg=0123456789abcdef"* ]] \
+        || { echo "the click target moved:"; curl_log; return 1; }
+}
+
+@test "a misconfigured ntfy URL is not echoed back with its credentials" {
+    # The refusal path prints the offending value, and the journal is where
+    # that lands under a systemd user unit. A token that survives a
+    # misconfiguration by being written to the journal is a token that
+    # outlives the mistake.
+    stub_curl
+    write_remote_config 'ntfy_url = https://someone:hunter2@ntfy.example.invalid/t{}'
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ] || { echo "a bad URL was accepted: $output"; return 1; }
+    [[ "$output" != *hunter2* ]] \
+        || { echo "the credential was echoed back: $output"; return 1; }
+    [[ "$output" == *"ntfy_url"* ]] || { echo "$output"; return 1; }
     [ -z "$(curl_log)" ]
 }
 

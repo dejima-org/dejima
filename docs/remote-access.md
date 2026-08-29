@@ -934,7 +934,12 @@ the next one is worth checking.
    with a 404 usually means `ntfy_url` names the server but no topic; a 401
    or 403 means the instance wants credentials, which the URL can carry as
    `https://<user>:<token>@<host>/<topic>` - nothing here sends an auth
-   header of its own.
+   header of its own. That URL is handed to `curl` on stdin rather than as an
+   argument, because every argument of every process on a host is readable by
+   any local account through `/proc/<pid>/cmdline`, and a token in a URL is a
+   token in `ps` output for as long as the request runs. Worth knowing if you
+   reach for `curl -sv "$ntfy_url"` yourself in the next step: that one does
+   put it there, briefly, on a machine you are already logged into.
 5. **Can this host reach the ntfy server at all?** `curl -sv "$ntfy_url"`
    from the host, not from a session. A host-level egress filter this machine
    does not control drops the push with nothing in any log here, and every
