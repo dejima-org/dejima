@@ -980,9 +980,9 @@ because that is the one surface it controls. A file manager on another
 machine is not that surface, and nothing carries the sanitising there.
 
 **Mounting removes the deciding.** Copying a file off the box when you want
-it is a decision per file. A mount, especially behind an automount or a login
-unit, means the directory is simply present whenever you are logged in - and a
-desktop does not wait to be asked. A file indexer walks new directories and
+it is a decision per file. A mount, and especially one a login unit brings up
+for you, means the directory is simply present whenever you are logged in -
+and a desktop does not wait to be asked. A file indexer walks new directories and
 opens what it finds to extract text from PDFs, archives and office documents.
 A thumbnailer decodes images and video frames. A previewer parses on
 selection. Those are image and document parsers, running as you, unsandboxed,
@@ -1025,10 +1025,11 @@ credential involved already gets you a shell on that box, so it is not a new
 grant either. Everything above is about where session-authored bytes end up,
 which is a machine that appears nowhere in dejima's blast-radius table.
 
-**Keeping it small** is most of the answer: mount the handoff directories
-rather than the box's home, add `-o ro` for one you only ever pull from,
-exclude the mount point from your indexer's and your backup tool's scope, and
-[clear `share_dir` out
+**Keeping it small** is most of the answer, and unmounting is the biggest
+lever: none of the above happens to a directory that is not currently there.
+Then mount the handoff directories rather than the box's home, add `-o ro` for
+one you only ever pull from, exclude the mount point from your indexer's and
+your backup tool's scope, and [clear `share_dir` out
 periodically](configuration.md#shared-scratch-space) - which now means stale
 files on two machines rather than one.
 
@@ -1076,9 +1077,26 @@ by whoever holds that number locally.
 
 A `Host box` block in `~/.ssh/config` carrying the identity and keepalive
 options keeps all of this to `sshfs box:... ~/mnt/...`, which is worth doing
-before you paste the long form into two more places below.
+once rather than pasting the long form wherever you need it.
+
+**Mount it when you want it, and `fusermount3 -u` when you are done.** Two
+commands is not much friction, and it buys back the thing the section above
+says a mount costs: while it is unmounted there is no directory for an
+indexer to walk or a previewer to open, so the window in which your machine
+acts on session output is one you opened on purpose. Every automatic form
+below trades that away. There is deliberately no `/etc/fstab` line here -
+those run as root, which means a key root can read, root's `~/.ssh/config`
+instead of yours, and `allow_other` before your own account can see inside
+the mount, at which point every account on the machine can too. That is a
+worse deal in every direction than typing `sshfs`.
 
 ### On login
+
+**Prefer mounting on demand.** This is here because a mount you have to
+remember is a mount you stop using, not because it is the better answer: an
+always-present directory is exactly the case the cost section is about. Worth
+it for a directory you genuinely work out of, like `~/specs`; not worth it
+for one you look at twice a week.
 
 A **user** service runs as you, so the key in your home directory works
 without being made readable by anyone else. In
@@ -1112,27 +1130,3 @@ name, `fusermount` the libfuse2 one. Then
 
 `systemctl --user` needs `loginctl enable-linger <you>` if you want the mount
 to survive you logging out, the same requirement `dejima-notify-watch` has.
-
-### /etc/fstab
-
-fstab mounts run as **root**, and everything awkward about this route follows
-from that. The `IdentityFile` must be an absolute path to a key root can
-read; ssh reads root's `~/.ssh/config` rather than yours, so a `Host` alias
-you set up above is not in scope; and your own account cannot see inside the
-mount without `allow_other`, which needs `user_allow_other` in
-`/etc/fuse.conf` and then lets *every* account on the machine in.
-
-```
-<you>@box:/home/<you>/.local/share/dejima/shared /home/<you>/mnt/dejima-shared fuse.sshfs noauto,x-systemd.automount,_netdev,allow_other,IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 0 0
-```
-
-`noauto,x-systemd.automount` is the part to keep whatever else you change: it
-mounts on first access instead of at boot, so a laptop that is not on that
-network starts normally rather than waiting on a box it cannot reach.
-`_netdev` says the same thing to the ordering, and the trailing `0 0` because
-there is nothing here for `dump` or `fsck` to do.
-
-Prefer the user service unless something other than you needs the mount. The
-`allow_other` this route needs is also the widest thing in the section: it
-puts session-authored files in reach of every account on the machine, not
-just yours.

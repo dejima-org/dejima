@@ -4598,14 +4598,23 @@ EOF
     grep -q 'print-config | grep share_dir' <<< "$flat" \
         || { echo "the reader is not told how to find the host path"; return 1; }
 
-    # Both routes, because they differ in who mounts: a user unit uses your
-    # own key, an fstab line runs as root and needs allow_other before you can
-    # read your own files. Losing either loses that contrast.
-    local h
-    for h in '^### On login' '^### /etc/fstab'; do
-        grep -q "$h" "$REPO_ROOT/docs/remote-access.md" \
-            || { echo "no section matching $h"; return 1; }
-    done
+    grep -q '^### On login' "$REPO_ROOT/docs/remote-access.md" \
+        || { echo "the automatic route is undocumented"; return 1; }
+}
+
+@test "the sshfs section hands out no fstab line" {
+    # Deliberately omitted, and the omission is stated rather than left as a
+    # gap someone helpfully fills. An fstab mount runs as root: a key root can
+    # read, root's ssh config rather than yours, and allow_other before your
+    # own account can see inside - which then lets every account on the machine
+    # in. Worse in every direction than typing sshfs, on a mount whose whole
+    # cost is that it is present when you did not ask.
+    local doc="$REPO_ROOT/docs/remote-access.md" sec
+    sec="$(sed -n "/^## Mounting the box's files/,\$p" "$doc")"
+    grep -qE 'fuse\.sshfs|x-systemd\.automount|allow_other,' <<< "$sec" \
+        && { echo "an fstab line is back in the section"; return 1; }
+    grep -q 'deliberately no /etc/fstab line' <<< "$(flat_prose "$doc")" \
+        || { echo "nothing says the omission is a decision"; return 1; }
 }
 
 @test "what an sshfs mount costs is disclosed before the recipe, not after it" {
@@ -4632,7 +4641,8 @@ EOF
         'as a project is code execution' \
         'read-write, and your desktop uses that' \
         'Symlinks resolve on your machine' \
-        'does not add is a route inward'
+        'does not add is a route inward' \
+        'unmounting is the biggest lever'
     do
         grep -qi -- "$claim" < <(flat_prose "$doc") \
             || { echo "the disclosure no longer says: $claim"; return 1; }
