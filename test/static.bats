@@ -4606,11 +4606,59 @@ EOF
         grep -q "$h" "$REPO_ROOT/docs/remote-access.md" \
             || { echo "no section matching $h"; return 1; }
     done
+}
 
-    # And that the mount carries session-authored bytes past everything dejima
-    # sanitises, since it is the one property here that is not just ergonomics.
-    grep -qi 'does not reach across an sshfs mount' <<< "$flat" \
-        || { echo "the mount reads as if dejima's sanitising still applies"; return 1; }
+@test "what an sshfs mount costs is disclosed before the recipe, not after it" {
+    # A mount looks like plumbing, so the cost has to arrive before the reader
+    # has already pasted the command. Ordering is the assertion: this started
+    # as a closing note, which is precisely where nobody reads it.
+    local doc="$REPO_ROOT/docs/remote-access.md" cost setup
+    cost="$(grep -n '^### What mounting it costs you' "$doc" | cut -d: -f1)"
+    setup="$(grep -n '^### Setting it up' "$doc" | cut -d: -f1)"
+    [ -n "$cost" ] && [ -n "$setup" ] \
+        || { echo "the cost and setup sections are not both there"; return 1; }
+    [ "$cost" -lt "$setup" ] \
+        || { echo "the cost section sits after the recipe again"; return 1; }
+
+    # The surface itself. Each of these is a distinct way session-authored
+    # bytes act on the operator's machine, and each was arrived at separately;
+    # a rewrite that keeps the heading and drops one of them keeps the shape
+    # of the disclosure without its content.
+    local claim
+    for claim in \
+        'nothing carries the sanitising there' \
+        'Mounting removes the deciding' \
+        'a desktop renders names' \
+        'as a project is code execution' \
+        'read-write, and your desktop uses that' \
+        'Symlinks resolve on your machine' \
+        'does not add is a route inward'
+    do
+        grep -qi -- "$claim" < <(flat_prose "$doc") \
+            || { echo "the disclosure no longer says: $claim"; return 1; }
+    done
+}
+
+@test "the threat model owns the handoff-directory surface as a case of item 5" {
+    # share_dir and [mounts] read_write carry session-authored bytes and names
+    # out of the container by design, and the threat model said nothing about
+    # them. It belongs under item 5 - the operator's own side of the handoff -
+    # rather than as a new row, because the session initiates none of it.
+    #
+    # What makes it worth stating is the delta from item 5, whose closing
+    # sentence is that a person decides: a mounted directory is opened by an
+    # indexer or a previewer with no decision per file at all.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    grep -qi 'handoff directories are item 5 with the person taken out' <<< "$flat" \
+        || { echo "the mount case is not tied to item 5"; return 1; }
+    grep -qi 'here nobody does' <<< "$flat" \
+        || { echo "the delta from item 5 - that no person decides - is gone"; return 1; }
+    grep -qi 'the session initiates none of it' <<< "$flat" \
+        || { echo "nothing bounds this as not being a route inward"; return 1; }
+    # And in the list a reader checks for what they are on their own for.
+    grep -qi 'safe for another machine to open' <<< "$flat" \
+        || { echo "the not-claimed list does not carry it"; return 1; }
 }
 
 @test "the negative space is collected where a reader will find it" {

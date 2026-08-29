@@ -82,6 +82,27 @@ able to answer, afterwards, what that actually did to the machine - which is
 the layer below this repository's, and the reason the sister project is
 looking at detection rather than at more enforcement.
 
+**The handoff directories are item 5 with the person taken out.** `[core]
+share_dir` and everything in `[mounts] read_write` exist so that session
+output survives the container, so every byte and every filename in them is
+session-authored by design. On the box that is bounded by how rarely anyone
+looks. Mount one on a workstation - over sshfs, or by any sync that runs on
+its own - and the directory is simply present, at which point a desktop opens
+what appears in it without being asked: an indexer parsing documents and
+archives to extract text, a thumbnailer decoding images, a previewer, an
+editor honouring project configuration it finds beside the files. Each is a
+parser running as the operator, outside the container, reached with no
+decision per file. Item 5's last sentence is that a person decides; here
+nobody does.
+
+It stays item 5 rather than becoming a row of its own, because the shape is
+the same: the session initiates none of it. It cannot see the mount, cannot
+cause one, and the ssh credential involved already gave that operator a shell
+on the box. What changes is where session-authored bytes get opened, and the
+machine they get opened on is not a row in the table below.
+[remote-access.md](remote-access.md#what-mounting-it-costs-you) has the
+specifics and what shrinks them.
+
 ## Blast radius by layer
 
 Read the last two columns together: the middle one is what the layer reaches
@@ -212,6 +233,10 @@ this section. Nothing in dejima can bound its own host.
 - **That a finding from the exit-time audit was caused by the session.** It
   reports that a surface changed while the session ran. A concurrent session
   or the operator's own editing lands in the same diff.
+- **That what a session leaves in a handoff directory is safe for another
+  machine to open.** `share_dir` and `[mounts] read_write` carry
+  session-authored bytes and session-chosen filenames out of the container on
+  purpose. Sanitising happens where dejima does the printing, and stops there.
 - **That the allowlist bounds exfiltration once a session has push access.**
   A commit is an outbound channel to a host that is on the list by definition.
   See [ci.md](ci.md).

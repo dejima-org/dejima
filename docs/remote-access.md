@@ -965,6 +965,75 @@ another machine is the files - the screenshots, specs and scratch output a
 session leaves behind - and `sshfs` puts those directories in your own file
 manager and editor over the SSH access you already have.
 
+Read the next section before setting it up. What it costs is not obvious from
+the fact that it is only a filesystem mount, and it is not a cost dejima can
+carry for you: nothing dejima runs is in the path.
+
+### What mounting it costs you
+
+**Every byte and every name in those directories was written by a sandboxed
+session.** That is what they are for - a handoff directory a session cannot
+write to is not a handoff directory - so this is not a defect to fix but the
+surface to know about. dejima sanitises session-authored bytes before
+printing them to your terminal, in `dejima-audit` and `dejima-epitaph`,
+because that is the one surface it controls. A file manager on another
+machine is not that surface, and nothing carries the sanitising there.
+
+**Mounting removes the deciding.** Copying a file off the box when you want
+it is a decision per file. A mount, especially behind an automount or a login
+unit, means the directory is simply present whenever you are logged in - and a
+desktop does not wait to be asked. A file indexer walks new directories and
+opens what it finds to extract text from PDFs, archives and office documents.
+A thumbnailer decodes images and video frames. A previewer parses on
+selection. Those are image and document parsers, running as you, unsandboxed,
+reached with no click. dejima's whole premise is that the session may be
+hostile; none of that software was written with that assumption about a
+directory on your own disk. This is the [threat
+model](threat-model.md#ranked-by-what-is-actually-likely)'s fifth-ranked item
+with its one bound removed - it is still the operator's side of the handoff,
+but no person decides per file any more.
+
+**Names are session-chosen too, and a desktop renders names.** Control
+characters, bidi overrides, and a long name whose visible tail is not its real
+extension all survive into a file listing. The rule for a terminal applies
+unchanged to a file manager: what is displayed is not evidence of what it is.
+
+**Opening the directory as a project is code execution.** Editors act on
+configuration they find beside the files - `.envrc` for direnv, a `.vscode`
+directory, a project-local `exrc`, a `.git/config` that any later `git`
+command run in that directory honours. A session that can write the directory
+chooses those files as freely as it chooses the screenshots. Pull files out of
+the mount; do not point a project-opening tool at it.
+
+**The mount is read-write, and your desktop uses that.** Thumbnail caches,
+trash directories, editor swap and undo files land in the share, where every
+later session reads them. An editor swap file can hold buffer content from
+the file you had open, and deleting something in a file manager usually moves
+it to a trash directory inside the same mount rather than removing it.
+
+**Symlinks resolve on your machine.** `sshfs` passes a symlink through as a
+symlink, so one a session planted resolves against *your* filesystem: a
+backup job, an indexer, `cp -r` or `rsync -L` pointed at the mount can be led
+out of it and into your own files. `-o follow_symlinks` inverts that by
+resolving them on the box instead, which hands you the box's files rather
+than yours. Neither is what you want, so do not add that option and do not
+point recursive tools at the mount.
+
+**What it does not add is a route inward.** A session cannot see the mount,
+cannot cause one, and gains nothing from the fact that one exists. The ssh
+credential involved already gets you a shell on that box, so it is not a new
+grant either. Everything above is about where session-authored bytes end up,
+which is a machine that appears nowhere in dejima's blast-radius table.
+
+**Keeping it small** is most of the answer: mount the handoff directories
+rather than the box's home, add `-o ro` for one you only ever pull from,
+exclude the mount point from your indexer's and your backup tool's scope, and
+[clear `share_dir` out
+periodically](configuration.md#shared-scratch-space) - which now means stale
+files on two machines rather than one.
+
+### Setting it up
+
 **Use your ordinary key, not the front-door one.** A `command=` in
 `authorized_keys` replaces whatever the client asked to run, and a
 `subsystem sftp` request is not an exception, so a client offering the phone
@@ -1063,21 +1132,7 @@ network starts normally rather than waiting on a box it cannot reach.
 `_netdev` says the same thing to the ordering, and the trailing `0 0` because
 there is nothing here for `dump` or `fsck` to do.
 
-Prefer the user service unless something other than you needs the mount.
-
-### What you are mounting
-
-These are directories sandboxed sessions write to, so this moves their output
-onto a machine you are probably less careful with than the box. Both the
-contents and the **names** are session-chosen, and a desktop acts on names: an
-indexer reads them, a file manager renders them, a previewer opens what it
-decides the extension means. The sanitising `dejima-audit` and
-`dejima-epitaph` do before printing session-authored bytes to your terminal
-does not reach across an sshfs mount, because nothing dejima runs is in the
-path at all.
-
-That is an argument for pointing the mount at the handoff directories rather
-than at the box's home, not an argument against mounting it. It is also the
-second reason to [clear `share_dir` out
-periodically](configuration.md#shared-scratch-space): stale files are now
-stale files on two machines.
+Prefer the user service unless something other than you needs the mount. The
+`allow_other` this route needs is also the widest thing in the section: it
+puts session-authored files in reach of every account on the machine, not
+just yours.
