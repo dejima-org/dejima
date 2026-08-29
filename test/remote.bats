@@ -1951,6 +1951,12 @@ expect_ttyd_argv() {
     [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
     [ -z "${4:-}" ] || printf '%s\n' -t "focusOnTap=$4"
     [ -z "${5:-}" ] || printf '%s\n' -t "buttonColors=$5"
+    # Always sent, unlike the four above: a browser has no theme to inherit,
+    # so this is not an option an operator turns on. Read out of the script
+    # rather than transcribed - this file asserts that ttyd is given a theme
+    # and that its values match the page (static.bats), not what they are.
+    printf '%s\n' -t "$(sed -n "/^theme_opt=(-t '/,/^}')$/p" \
+        "$REPO_ROOT/bin/dejima-ttyd" | sed "1s/^theme_opt=(-t '//; \$s/')$//")"
     printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -2176,7 +2182,10 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
-    run grep -cx -- '-t' "$STUB_DIR/ttyd-argv"
+    # No fontSize reaches ttyd, rather than no -t at all: the theme is sent on
+    # every launch (a browser has no palette to inherit), so counting -t stopped
+    # measuring what this is about, which is that an unset option sends nothing.
+    run grep -c 'fontSize' "$STUB_DIR/ttyd-argv"
     [ "$output" = "0" ]
 
     # Set. Checked through the exact vector, not a substring: "fontSize=20
