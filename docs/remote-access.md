@@ -957,3 +957,127 @@ from shrinking the desktop's view, and the option's only scopes are the
 window - which a grouped session *shares* with yours, so setting it there
 would permanently overwrite your choice with nothing to restore afterwards -
 and global. An operator who deliberately set `smallest` keeps it.
+
+## Mounting the box's files
+
+The front doors above get you a terminal. The other half of working from
+another machine is the files - the screenshots, specs and scratch output a
+session leaves behind - and `sshfs` puts those directories in your own file
+manager and editor over the SSH access you already have.
+
+**Use your ordinary key, not the front-door one.** A `command=` in
+`authorized_keys` replaces whatever the client asked to run, and a
+`subsystem sftp` request is not an exception, so a client offering the phone
+key gets `dejima-attach` where it expected the SFTP protocol and fails
+without explaining itself. Do not relax that key to make this work: the
+forced command is the whole of what makes it safe to leave on a phone. The
+key that already gets you a normal shell on the box is the right one, and it
+grants nothing new here - you had the shell.
+
+**Find the host path first.** `~/shared` is where the *container* sees it; on
+the host it is `[core] share_dir`, which defaults to
+`~/.local/share/dejima/shared` and is not named `shared` at all.
+`dejima --print-config | grep share_dir` on the box prints the resolved path.
+Anything in `[mounts] read_write` needs no lookup, because those mount at the
+host path they name: `~/specs` in the container is `~/specs` on the box.
+
+```sh
+sshfs box:.local/share/dejima/shared ~/mnt/dejima-shared \
+    -o IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+    -o Compression=no
+```
+
+`IdentitiesOnly=yes` stops ssh offering every key your agent holds ahead of
+the one you named, which can exhaust the server's `MaxAuthTries` and fail as
+though the key were wrong. `PasswordAuthentication=no` makes an unattended
+mount fail immediately rather than block on a prompt nobody is there to
+answer. The keepalives are what make `reconnect` worth having: they give up
+after about 45 seconds, where a laptop that slept or changed network
+otherwise leaves every `ls` hanging on the kernel's TCP timeout.
+`Compression=no` because screenshots and PDFs are already compressed.
+
+Two additions worth knowing rather than copying. `-o
+Ciphers=aes128-gcm@openssh.com` is faster when both ends have AES-NI, and
+slower when they do not - ssh's default puts `chacha20-poly1305` first
+precisely because it wins on hardware without it. And `-o idmap=user` if your
+account has a different UID on the two machines, or every file arrives owned
+by whoever holds that number locally.
+
+A `Host box` block in `~/.ssh/config` carrying the identity and keepalive
+options keeps all of this to `sshfs box:... ~/mnt/...`, which is worth doing
+before you paste the long form into two more places below.
+
+### On login
+
+A **user** service runs as you, so the key in your home directory works
+without being made readable by anyone else. In
+`~/.config/systemd/user/dejima-shared.service`:
+
+```ini
+[Unit]
+Description=dejima shared directory
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/sshfs -f box:.local/share/dejima/shared %h/mnt/dejima-shared \
+    -o IdentityFile=%h/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
+ExecStop=/bin/fusermount3 -u %h/mnt/dejima-shared
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+`-f` is the load-bearing flag: without it `sshfs` daemonises, systemd watches
+the parent exit and calls the mount a failure. `fusermount3` is the libfuse3
+name, `fusermount` the libfuse2 one. Then
+`systemctl --user enable --now dejima-shared`, and one unit per directory -
+`%h` expands to your home, so the same file with two paths changed covers
+`~/specs`.
+
+`systemctl --user` needs `loginctl enable-linger <you>` if you want the mount
+to survive you logging out, the same requirement `dejima-notify-watch` has.
+
+### /etc/fstab
+
+fstab mounts run as **root**, and everything awkward about this route follows
+from that. The `IdentityFile` must be an absolute path to a key root can
+read; ssh reads root's `~/.ssh/config` rather than yours, so a `Host` alias
+you set up above is not in scope; and your own account cannot see inside the
+mount without `allow_other`, which needs `user_allow_other` in
+`/etc/fuse.conf` and then lets *every* account on the machine in.
+
+```
+<you>@box:/home/<you>/.local/share/dejima/shared /home/<you>/mnt/dejima-shared fuse.sshfs noauto,x-systemd.automount,_netdev,allow_other,IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 0 0
+```
+
+`noauto,x-systemd.automount` is the part to keep whatever else you change: it
+mounts on first access instead of at boot, so a laptop that is not on that
+network starts normally rather than waiting on a box it cannot reach.
+`_netdev` says the same thing to the ordering, and the trailing `0 0` because
+there is nothing here for `dump` or `fsck` to do.
+
+Prefer the user service unless something other than you needs the mount.
+
+### What you are mounting
+
+These are directories sandboxed sessions write to, so this moves their output
+onto a machine you are probably less careful with than the box. Both the
+contents and the **names** are session-chosen, and a desktop acts on names: an
+indexer reads them, a file manager renders them, a previewer opens what it
+decides the extension means. The sanitising `dejima-audit` and
+`dejima-epitaph` do before printing session-authored bytes to your terminal
+does not reach across an sshfs mount, because nothing dejima runs is in the
+path at all.
+
+That is an argument for pointing the mount at the handoff directories rather
+than at the box's home, not an argument against mounting it. It is also the
+second reason to [clear `share_dir` out
+periodically](configuration.md#shared-scratch-space): stale files are now
+stale files on two machines.

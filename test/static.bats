@@ -4577,6 +4577,42 @@ EOF
         || { echo "the reason for the second topic is gone"; return 1; }
 }
 
+@test "the sshfs recipe sends the reader to the right key and the right path" {
+    # Two things a reader gets wrong on their own, one of them dangerously.
+    #
+    # The dangerous one: sshfs against the front-door key fails, because
+    # command= replaces a subsystem request too, and the obvious fix is to
+    # relax the forced command - which turns a key that is safe to leave on a
+    # phone into a general shell key. The doc has to say use the ordinary key
+    # BEFORE a reader reaches for the other repair.
+    #
+    # The merely wasteful one: ~/shared is the container's view. On the host
+    # it is share_dir, which is not named shared, so `sshfs box:shared` mounts
+    # nothing and looks like a permissions problem.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/remote-access.md")"
+    grep -qi 'subsystem sftp request is not an exception' <<< "$flat" \
+        || { echo "nothing says why the front-door key fails here"; return 1; }
+    grep -qi 'Do not relax that key' <<< "$flat" \
+        || { echo "the doc no longer heads off loosening the forced command"; return 1; }
+    grep -q 'print-config | grep share_dir' <<< "$flat" \
+        || { echo "the reader is not told how to find the host path"; return 1; }
+
+    # Both routes, because they differ in who mounts: a user unit uses your
+    # own key, an fstab line runs as root and needs allow_other before you can
+    # read your own files. Losing either loses that contrast.
+    local h
+    for h in '^### On login' '^### /etc/fstab'; do
+        grep -q "$h" "$REPO_ROOT/docs/remote-access.md" \
+            || { echo "no section matching $h"; return 1; }
+    done
+
+    # And that the mount carries session-authored bytes past everything dejima
+    # sanitises, since it is the one property here that is not just ergonomics.
+    grep -qi 'does not reach across an sshfs mount' <<< "$flat" \
+        || { echo "the mount reads as if dejima's sanitising still applies"; return 1; }
+}
+
 @test "the negative space is collected where a reader will find it" {
     # A document organised by control makes a reader assemble what is NOT
     # covered themselves, and most will not. Every item here is documented
