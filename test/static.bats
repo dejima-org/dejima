@@ -4873,32 +4873,38 @@ EOF
         || { echo "nothing says why the uptime monitor is not optional in practice"; return 1; }
 }
 
-@test "dejima-guard is listed with its gaps rather than as a peer" {
-    # It holds a key to the machine it watches and is weaker than the thing it
-    # watches, which its own SECURITY.md states so nobody has to discover it.
-    # Listing it beside the hardeners without that reads as a fourth layer of
-    # protection rather than as detection with a real attack surface.
+@test "dejima-guard is characterised by what it adds, not by how it differs from dejima" {
+    # An earlier draft described it by the three gaps its own SECURITY.md
+    # lists - no egress bound, key in the container, no request logging. Those
+    # are accurate and they are all comparisons WITH DEJIMA rather than an
+    # account of the guard's own exposure, so they put the two things a reader
+    # needs below three that matter less. Corrected on the advice of the
+    # project itself, which moved the same three below the same two.
+    #
+    # What actually characterises it: it enforces nothing, it is the only
+    # component that ADDS a credential-holding machine instead of taking
+    # capability away, and root on the watched box can lie to its collector.
     local flat
     flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
-    # Named in the sentence, not left to the reader to carry over from the
-    # paragraph above: every other project here gets exactly one paragraph
-    # opening with its own name, so a second one starting "Listed with its
-    # gaps" read as a new item rather than as more about the guard.
-    grep -qi 'dejima-guard is listed with its gaps attached rather than as a peer' <<< "$flat" \
-        || { echo "the guard's gaps are not attached to its name"; return 1; }
-    # And linked, like the other two. It is public as of this release.
-    grep -q '(https://gitbox.branderson.io/dejima/dejima-guard)' "$REPO_ROOT/docs/threat-model.md" \
-        || { echo "dejima-guard is named but not linked"; return 1; }
-    local gap
-    for gap in 'no egress bound' 'private key is in the container' \
-               'does not log requests'; do
-        grep -qi -- "$gap" <<< "$flat" \
-            || { echo "the guard's stated gap is missing: $gap"; return 1; }
+    local claim
+    for claim in \
+        'It enforces nothing' \
+        'only piece here that adds a machine holding credentials rather than taking capability away' \
+        'exposure is bounded by the hardening of a machine this stack does not describe' \
+        'detection ceiling is root on the watched box' \
+        'heartbeat proves the guard ran, not that it saw the truth' \
+        'one bounds where a compromise spreads, the other notices that one happened'
+    do
+        grep -qi -- "$claim" <<< "$flat" \
+            || { echo "the guard's account no longer says: $claim"; return 1; }
     done
-    # And that it detects rather than enforces, which is the distinction that
-    # keeps it from reading as a substitute for devbox-hardener.
-    grep -qi 'one bounds where a compromise spreads, the other notices that one happened' <<< "$flat" \
-        || { echo "detection and enforcement are conflated"; return 1; }
+    # Linked, like the other two, and pointed at its own SECURITY.md for the
+    # comparisons this doc deliberately does not lead with.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q '(https://gitbox.branderson.io/dejima/dejima-guard)' "$tm" \
+        || { echo "dejima-guard is named but not linked"; return 1; }
+    grep -q 'dejima-guard/src/branch/main/SECURITY.md' "$tm" \
+        || { echo "nothing points at the guard's own security policy"; return 1; }
 }
 
 @test "docs/research-review.md exists and carries its standing questions" {
