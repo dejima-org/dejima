@@ -1966,13 +1966,24 @@ if [ "$(readlink -f "$WORKSPACE_DIR")" = "$(readlink -f "$REPO_ROOT")" ]; then
     echo "will report any changes to review." >&2
 fi
 
+# Every image this builds is named under localhost/, which Docker reads as a
+# registry host rather than as the first path component of a Docker Hub name
+# (#53). A bare `dejima:node` resolves to `docker.io/library/dejima:node` the
+# moment anyone pushes it, and none of these images is meant to leave the host
+# that built them. Pulling the base still goes to Hub, deliberately: that is
+# where `node:22` is.
+#
+# One prefix, used by every tag below and by the compose file's default, so
+# there is no second place for a bare name to reappear.
+SANDBOX_IMAGE_REPO="localhost/dejima"
+
 # Compose builds the shared base image under its own tag, explicitly - with
 # image: now honoring $SANDBOX_IMAGE, letting the derived tag leak into this
 # build would rebuild the base Dockerfile under the derived name.
-SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \
+SANDBOX_IMAGE="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}" \
     docker compose -f "$COMPOSE_FILE" build sandbox
 
-SANDBOX_IMAGE="dejima:${SANDBOX_USER}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}"
 
 # Each layer builds FROM whatever the previous one left in $SANDBOX_IMAGE, so
 # global packages are shared by every project instead of being rebuilt into
@@ -2031,7 +2042,7 @@ fi
 
 if [ -n "$SANDBOX_HARNESS_INSTALL" ] || [ -n "$SANDBOX_HARNESS_IMAGE_DIRS" ] \
     || [ -n "$SANDBOX_HARNESS_IMAGE_ENV" ] || [ -n "$SANDBOX_HARNESS_IMAGE_FILES" ]; then
-    tag="dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}"
+    tag="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}"
     generate_spec_dockerfile "$SANDBOX_IMAGE" "$SANDBOX_HARNESS_INSTALL" \
         "$SANDBOX_HARNESS_IMAGE_DIRS" "$SANDBOX_HARNESS_IMAGE_ENV" \
         "$SANDBOX_HARNESS_IMAGE_FILES" \
@@ -2059,7 +2070,7 @@ for _tool in $DEJIMA_TOOLS; do
     _tool_install="$(manifest_get tool "$_tool" install)"
     _tool_env="$(manifest_get tool "$_tool" image_env)"
     _tool_layout="$(manifest_get tool "$_tool" install_layout)"
-    tag="dejima:${SANDBOX_USER}-tool-${_tool}-$(printf '%s' "$_tool_install" | sha256sum | cut -c1-12)"
+    tag="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-tool-${_tool}-$(printf '%s' "$_tool_install" | sha256sum | cut -c1-12)"
     DEJIMA_TARBALL_STRIP="$_tool_layout" \
         generate_spec_dockerfile "$SANDBOX_IMAGE" "$_tool_install" "" "$_tool_env" "" \
         > "$SANDBOX_DERIVED_DOCKERFILE"
@@ -2077,10 +2088,10 @@ done
 unset _tool _tool_install _tool_env _tool_layout
 
 if [ -s "$(config_root)/dependencies" ]; then
-    build_dep_layer "dejima:${SANDBOX_USER}-global" "$(config_root)"
+    build_dep_layer "${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-global" "$(config_root)"
 fi
 if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then
-    build_dep_layer "dejima:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
+    build_dep_layer "${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-$(project_slug "$WORKSPACE_DIR")" "$PROJECT_STORE"
 fi
 export SANDBOX_IMAGE
 

@@ -2518,12 +2518,12 @@ STUB
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"harness-claude-code"* ]] \
         || { echo "no harness layer was built:"; echo "$output"; return 1; }
-    grep -qxF "dejima:$(id -un)-harness-claude-code" "$docker_log" \
+    grep -qxF "localhost/dejima:$(id -un)-harness-claude-code" "$docker_log" \
         || { echo "the harness layer was not tagged as expected:"; cat "$docker_log"; return 1; }
     # The LAST compose invocation is the run; the first builds the base.
     local ran
     ran="$(tail -1 "$image_log")"
-    [ "$ran" = "dejima:$(id -un)-harness-claude-code" ] \
+    [ "$ran" = "localhost/dejima:$(id -un)-harness-claude-code" ] \
         || { echo "the session ran on '$ran', not the harness layer"; cat "$image_log"; return 1; }
     rm -rf "$workspace" "$RW_HOME" "$docker_log" "$image_log"
 }

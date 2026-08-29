@@ -807,7 +807,7 @@ _declared_config_dirs() {
 }
 
 @test "docker-compose.yml builds with a per-user image tag and passes the host identity as build args" {
-    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-dejima:\$\{SANDBOX_USER:-node\}\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-localhost/dejima:\$\{SANDBOX_USER:-node\}\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_USER:\s*\$\{SANDBOX_USER:-node\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_UID:\s*\$\{SANDBOX_UID:-1000\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*SANDBOX_GID:\s*\$\{SANDBOX_GID:-1000\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
@@ -4175,8 +4175,47 @@ STUB
 }
 
 @test "docker-compose.yml image honors SANDBOX_IMAGE with today's default" {
-    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-dejima:\$\{SANDBOX_USER:-node\}\}\s*$' \
+    grep -qE '^\s*image:\s*\$\{SANDBOX_IMAGE:-localhost/dejima:\$\{SANDBOX_USER:-node\}\}\s*$' \
         "$SANDBOX_DIR/docker-compose.yml"
+}
+
+@test "every image dejima builds is named under a registry that is not Docker Hub" {
+    # A bare `dejima:node` is `docker.io/library/dejima:node` to anything that
+    # pushes it, and none of these images is meant to leave the host that built
+    # them (#53). Docker reads a first component of exactly `localhost`, or one
+    # containing a dot or a colon, as a registry host - so the prefix is what
+    # makes a stray `docker push` fail locally instead of reaching Hub.
+    #
+    # Pulling is untouched and deliberate: the base image is on Hub, which is
+    # where `node:22` lives, and mirroring that needs a registry the operator
+    # runs. This is about what dejima names, not what it fetches.
+    local repo
+    repo=$(sed -n 's/^SANDBOX_IMAGE_REPO="\(.*\)"$/\1/p' "$REPO_ROOT/bin/dejima")
+    [ -n "$repo" ] || { echo "bin/dejima has no SANDBOX_IMAGE_REPO"; return 1; }
+    case "$repo" in
+        localhost/?*|*.*/?*|*:*/?*) ;;
+        *) echo "SANDBOX_IMAGE_REPO='$repo' would resolve to Docker Hub"; return 1 ;;
+    esac
+
+    # And nothing names an image around it. One prefix is only worth having if
+    # it is the only way a tag gets made, so this looks for the shape of a tag
+    # rather than for the names that exist today.
+    local hit
+    # Searched across the repo rather than against a list of files. The first
+    # version of this named bin/dejima, docker-compose.yml and runtime.bats,
+    # and the workflow's own `docker build -t dejima:latest` was not among
+    # them - so the invariant passed here and the privileged job failed on a
+    # tag that did not exist. A list of files is a list of the places someone
+    # already thought of.
+    hit=$(grep -rnE '(-t |tag=|image: |IMAGE=)[^ ]*\bdejima[a-z-]*:' \
+              --include='*.sh' --include='*.yml' --include='*.bats' \
+              --include='Dockerfile*' --include='dejima*' \
+              --exclude-dir=.git --exclude-dir=.worktrees --exclude-dir=node_modules \
+              "$REPO_ROOT" \
+          | grep -v 'localhost/' \
+          | grep -v 'SANDBOX_IMAGE_REPO' \
+          | grep -v '/test/static.bats:' || true)
+    [ -z "$hit" ] || { echo "these name an image that resolves to Hub:"; echo "$hit"; return 1; }
 }
 
 @test "bin/dejima explicitly builds the base image, pinned to the base tag on that exact line" {
@@ -4186,7 +4225,7 @@ STUB
     # derived tag left over from a previous project session - and rebuild
     # the base Dockerfile under that name instead of the base tag. Anchored
     # to the line immediately before the build invocation itself: the
-    # fallback `SANDBOX_IMAGE="dejima:${SANDBOX_USER}"` assignment a
+    # fallback `SANDBOX_IMAGE="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}"` assignment a
     # couple of lines later would satisfy a looser "does the pin appear
     # anywhere in the file" check just as well, without actually applying to
     # this build.
@@ -4194,7 +4233,7 @@ STUB
     build_line=$(grep -n 'docker compose -f "\$COMPOSE_FILE" build sandbox' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
     [ -n "$build_line" ]
     run sed -n "$((build_line - 1))p" "$REPO_ROOT/bin/dejima"
-    [[ "$output" == 'SANDBOX_IMAGE="dejima:${SANDBOX_USER}" \' ]]
+    [[ "$output" == 'SANDBOX_IMAGE="${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}" \' ]]
 }
 
 @test "the derived image build never uses the workspace as its build context" {
@@ -4209,7 +4248,7 @@ STUB
     # Anchored to the line immediately before the call: a file-wide grep for
     # the guard or the tag alone would pass even if they'd drifted apart.
     local call_line
-    call_line=$(grep -n 'build_dep_layer "dejima:\${SANDBOX_USER}-global"' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    call_line=$(grep -n 'build_dep_layer "\${SANDBOX_IMAGE_REPO}:\${SANDBOX_USER}-global"' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
     [ -n "$call_line" ]
     run sed -n "$((call_line - 1))p" "$REPO_ROOT/bin/dejima"
     [[ "$output" == 'if [ -s "$(config_root)/dependencies" ]; then' ]]
@@ -4223,7 +4262,7 @@ STUB
 
 @test "the project dependency layer is still guarded by a non-empty PROJECT_STORE" {
     local call_line
-    call_line=$(grep -n 'build_dep_layer "dejima:\${SANDBOX_USER}-\$(project_slug' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
+    call_line=$(grep -n 'build_dep_layer "\${SANDBOX_IMAGE_REPO}:\${SANDBOX_USER}-\$(project_slug' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
     [ -n "$call_line" ]
     run sed -n "$((call_line - 1))p" "$REPO_ROOT/bin/dejima"
     [[ "$output" == 'if [ -n "$PROJECT_STORE" ] && [ -s "$PROJECT_STORE/dependencies" ]; then' ]]
@@ -6635,13 +6674,13 @@ _emit_mount_at() {
     local f="$REPO_ROOT/bin/dejima"
     # Keyed on the name: switching [core] harness has to switch images, not
     # add to one.
-    grep -q 'dejima:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}' "$f" \
+    grep -q '${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-harness-${DEJIMA_HARNESS_NAME}' "$f" \
         || { echo "the harness layer's tag does not name the harness"; return 1; }
     # Below the dependency layers, so a project's own packages sit on top of
     # the harness rather than being invalidated whenever it changes.
     local harness_at global_at
     harness_at=$(grep -n 'SANDBOX_USER}-harness-' "$f" | head -1 | cut -d: -f1)
-    global_at=$(grep -n 'build_dep_layer "dejima:${SANDBOX_USER}-global"' "$f" | head -1 | cut -d: -f1)
+    global_at=$(grep -n 'build_dep_layer "${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}-global"' "$f" | head -1 | cut -d: -f1)
     [ -n "$harness_at" ] && [ -n "$global_at" ] || { echo "could not locate both layers"; return 1; }
     [ "$harness_at" -lt "$global_at" ] \
         || { echo "the harness layer is built after the dependency layers"; return 1; }
