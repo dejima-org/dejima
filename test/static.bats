@@ -4880,8 +4880,15 @@ EOF
     # protection rather than as detection with a real attack surface.
     local flat
     flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
-    grep -qi 'Listed with its gaps attached rather than as a peer' <<< "$flat" \
-        || { echo "the guard is presented as a peer of the hardeners"; return 1; }
+    # Named in the sentence, not left to the reader to carry over from the
+    # paragraph above: every other project here gets exactly one paragraph
+    # opening with its own name, so a second one starting "Listed with its
+    # gaps" read as a new item rather than as more about the guard.
+    grep -qi 'dejima-guard is listed with its gaps attached rather than as a peer' <<< "$flat" \
+        || { echo "the guard's gaps are not attached to its name"; return 1; }
+    # And linked, like the other two. It is public as of this release.
+    grep -q '(https://gitbox.branderson.io/dejima/dejima-guard)' "$REPO_ROOT/docs/threat-model.md" \
+        || { echo "dejima-guard is named but not linked"; return 1; }
     local gap
     for gap in 'no egress bound' 'private key is in the container' \
                'does not log requests'; do

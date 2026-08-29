@@ -182,18 +182,19 @@ Nothing there tries to stop the code running. Its
 [threat model](https://gitbox.branderson.io/dejima/dejima-ci-hardener/src/branch/main/docs/threat-model.md#blast-radius-by-layer)
 has the two tiers and where each one's boundary sits.
 
-**dejima-guard** is the newest and the only one that is not an enforcement
-layer at all. It collects the devbox's state over SSH from a machine that is
-not the devbox, diffs it against a baseline held on that machine, and alerts.
-That placement is the point: a baseline stored on the box being watched is a
-baseline the thing you are watching for can edit. It complements
-devbox-hardener rather than overlapping it - one bounds where a compromise
-spreads, the other notices that one happened.
+**[dejima-guard](https://gitbox.branderson.io/dejima/dejima-guard)**
+is the newest, and the only one that is not an enforcement layer at all. It
+collects the devbox's state over SSH from a machine that is not the devbox,
+diffs it against a baseline held on that machine, and alerts. That placement
+is the point: a baseline stored on the box being watched is a baseline the
+thing you are watching for can edit. It complements devbox-hardener rather
+than overlapping it - one bounds where a compromise spreads, the other notices
+that one happened.
 
-**Listed with its gaps attached rather than as a peer**, which its own
-`SECURITY.md` states so nobody has to discover them. It has no egress bound,
-where dejima's is deny-by-default: its needs are three destinations, but doing
-it inside the container would mean granting `NET_ADMIN` to something that
+**dejima-guard is listed with its gaps attached rather than as a peer**, which
+its own `SECURITY.md` states so nobody has to discover them. It has no egress
+bound, where dejima's is deny-by-default: its needs are three destinations, but
+doing it inside the container would mean granting `NET_ADMIN` to something that
 currently drops every capability, so it is left to the host. Its private key
 is *in* the container, where dejima keeps its model credential out entirely
 behind a proxy. And it does not log requests, where dejima logs egress
