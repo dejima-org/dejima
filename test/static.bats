@@ -2457,11 +2457,24 @@ EOF
     run env TTY_SUSPEND_WORK="$work" python3 \
         "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" "$slow" bash
     [ "$status" -ne 77 ] || skip "no pty available here"
-    [ "$status" -eq 0 ] || { echo "a late helper still fails the suite:"; echo "$output"; return 1; }
-    # Named specifically, because the failure this guards against is the
-    # security assertion going red for a scheduling reason.
-    [[ "$output" == *"PASS cycle1-nothing-reached-the-container"* ]] \
-        || { echo "$output"; return 1; }
+    # By name, and NOT by exit status. A clean run of the whole harness is
+    # more than this test is about: `redraw-poked` waits on a half-second
+    # resize hold and `suspends-the-job` on the shell's job-control notice,
+    # and either can lose a race on a busy machine without saying anything
+    # about whether the keystroke was typed too early. Requiring status 0
+    # made this fail for the reasons #262 was filed about, in the one test
+    # whose entire subject is not racing the helper - observed once during a
+    # static run with another suite alongside it.
+    #
+    # These two are the property. The first is the precondition the fix
+    # added; the second is the security assertion that used to lose the race.
+    # Against the pre-fix harness the first does not exist and the second
+    # fails, so nothing is given up by not reading the exit status.
+    local name
+    for name in cycle1-suspend-char-reclaimed cycle1-nothing-reached-the-container; do
+        [[ "$output" == *"PASS $name"* ]] \
+            || { echo "$name did not pass with a late helper:"; echo "$output"; return 1; }
+    done
 }
 
 @test "the Ctrl-Z harness sees the bug when the fix is not there" {
