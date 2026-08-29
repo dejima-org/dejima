@@ -4098,10 +4098,15 @@ STUB
         || { echo "the image reap at $reap runs after the create at $create"; return 1; }
     # Scoped to this suite's namespace, checked on the name rather than left
     # to the CLI filter.
-    sed -n "$((reap - 12)),${reap}p" "$rt" | grep -q 'dejima-test-\*)' \
-        || { echo "the image reap is not anchored to the dejima-test- prefix"; return 1; }
+    # Anchored on the name in the shell rather than left to the CLI filter,
+    # and matching both spellings so the reap does not depend on landing
+    # before or after the rename to localhost/ (#53).
+    local window
+    window="$(sed -n "$((reap - 16)),${reap}p" "$rt")"
+    grep -q 'dejima-test-\*|localhost/dejima-test-\*)' <<< "$window" \
+        || { echo "the image reap is not anchored to both dejima-test- spellings"; return 1; }
     # And age-guarded, or a concurrent run loses the image it is booting.
-    sed -n "$((reap - 12)),${reap}p" "$rt" | grep -q 'REAP_AFTER' \
+    grep -q 'REAP_AFTER' <<< "$window" \
         || { echo "images are reaped with no age guard"; return 1; }
 }
 

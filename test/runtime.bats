@@ -339,13 +339,21 @@ setup_file() {
     _suffix="$(basename "$BATS_RUN_TMPDIR")"
     while IFS= read -r _img; do
         [ -n "$_img" ] || continue
-        case "$_img" in dejima-test-*) ;; *) continue ;; esac
+        # Both spellings, because the images this suite builds were renamed to
+        # localhost/ (#53) after this reap was written against the bare form,
+        # and for two releases it therefore matched nothing. A reap whose
+        # pattern stops matching is not a reap that fails - it is one that
+        # silently does nothing, which is indistinguishable from having
+        # nothing to do, so nothing anywhere reported it.
+        #
+        # Matching both is also what stops the next rename doing it again.
+        case "$_img" in dejima-test-*|localhost/dejima-test-*) ;; *) continue ;; esac
         case "$_img" in *":$_suffix") continue ;; esac
         _born="$(docker image inspect -f '{{.Created}}' "$_img" 2>/dev/null)" || continue
         _born="$(date -d "$_born" +%s 2>/dev/null)" || continue
         [ "$(( $(date +%s) - _born ))" -gt "$REAP_AFTER" ] || continue
         docker rmi -f "$_img" >/dev/null 2>&1 || true
-    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 'dejima-test-*' 2>/dev/null)
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)
 
     docker network create "$network" >/dev/null
 
