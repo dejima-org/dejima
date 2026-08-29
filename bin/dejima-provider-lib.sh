@@ -151,6 +151,7 @@ issue_command	?command
 merge_block	?command
 repo_flags	?list:flag
 repo_env	?identifier
+repo_paths	?list:repopath
 identity_keys	?list:identifier
 disclose	?disclosures
 keys	?list:keyspec
@@ -302,6 +303,22 @@ _provider_valid_value() {
             # the guard would be comparing a word that could just as well be a
             # subcommand or a value.
             [[ "$value" =~ ^--?[A-Za-z0-9][A-Za-z0-9-]*$ ]]
+            ;;
+        repopath)
+            # A repository named in a path rather than in a flag:
+            # `<subcommand>:<first path segment>`, as in `api:repos` for
+            # `gh api repos/<owner>/<name>/...`.
+            #
+            # Scoped to a subcommand because the alternative is comparing every
+            # positional argument that happens to contain two slashes, and a
+            # false refusal on an issue title is worse than the miss - this is
+            # a fast-fail, so a wrong yes costs an honest agent a working
+            # command. The guard applies it only when the subcommand is argv's
+            # first word.
+            case "$value" in *:*) ;; *) return 1 ;; esac
+            local sub="${value%%:*}" seg="${value#*:}"
+            [[ "$sub" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1
+            [[ "$seg" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no

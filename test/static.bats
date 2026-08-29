@@ -2751,10 +2751,14 @@ _repo_guard_shim() {
                       DEJIMA_FORGE_REPO=own/thing
                       DEJIMA_FORGE_REPO_FLAGS="--repo -R" DEJIMA_FORGE_REPO_ENV=GH_REPO)
 
-    # Every spelling gh accepts, including the short flag with its value
-    # attached, which two-dash flags do not do.
+    # Every spelling gh accepts. The short flag carries its value attached,
+    # which two-dash flags do not do - and short flags cluster, so the letter
+    # can arrive with other flags in front of it (#243). `-wR other/thing` is
+    # what an agent writes when it wanted `--web` too, and it is not `-R` as
+    # its own argument.
     local form
-    for form in "--repo other/thing" "--repo=other/thing" "-R other/thing" "-Rother/thing"; do
+    for form in "--repo other/thing" "--repo=other/thing" "-R other/thing" "-Rother/thing" \
+                "-wR other/thing" "-wRother/thing"; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" $form issue create --title x
         assert_forge_refused "Blocked by dejima" "gh $form" || return 1
@@ -2768,7 +2772,7 @@ _repo_guard_shim() {
     # The repository the session IS for goes through, in any capitalisation:
     # forges preserve case without distinguishing it, and a refusal over that
     # would be a false one.
-    for form in "--repo own/thing" "--repo Own/Thing" ""; do
+    for form in "--repo own/thing" "--repo Own/Thing" "-wR own/thing" "-L 5" ""; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" $form issue list
         [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }
@@ -2786,6 +2790,41 @@ _repo_guard_shim() {
     run env "${env_common[@]}" DEJIMA_MERGE_BLOCK="gh pr merge" \
         "$d/gh" --repo other/thing pr merge 3
     [[ "$output" == *"human decision in the sandbox"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the forge guard sees a repository named in a gh api path" {
+    # `gh api repos/<owner>/<name>/issues` reaches any repository the token
+    # does with no --repo anywhere in it, so every flag spelling above is
+    # beside the point (#243). Declared by the manifest as `api:repos`, so
+    # core stays forge-neutral.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repopath.XXXXXX")"
+    _repo_guard_shim "$d"
+    local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
+                      DEJIMA_FORGE_REPO=own/thing
+                      DEJIMA_FORGE_REPO_PATHS="api:repos")
+    local form
+    for form in "repos/other/thing/issues" "/repos/other/thing/issues" \
+                "repos/other/thing"; do
+        run env "${env_common[@]}" "$d/gh" api "$form"
+        assert_forge_refused "Blocked by dejima" "gh api $form" || return 1
+    done
+
+    # The launched-against repository goes through, and so do the two shapes
+    # a false refusal would land on. Both matter more than the catches do: a
+    # fast-fail that blocks an honest command costs an agent a working tool,
+    # and it will reach for a way around rather than stop.
+    #
+    #   - gh substitutes {owner}/{repo} from the checkout, so a path carrying
+    #     them names THIS repository by construction.
+    #   - the check is scoped to the declared subcommand, so a title or body
+    #     that happens to look like an API path is not argv to compare.
+    for form in "api repos/own/thing/issues" "api repos/{owner}/{repo}/issues" \
+                "issue create --title repos/other/thing" \
+                "api user/repos" "api graphql"; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" $form
+        [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }
+    done
 }
 
 @test "a forge that declares no repo flags is left alone by that check" {
@@ -2808,10 +2847,13 @@ _repo_guard_shim() {
         || { echo "the github manifest no longer declares --repo"; return 1; }
     grep -qE '^repo_env[[:space:]]*=[[:space:]]*GH_REPO' "$conf" \
         || { echo "the github manifest no longer declares GH_REPO"; return 1; }
-    # And core passes both through, or the manifest is a declaration nothing
-    # reads.
+    # And core passes all of them through, or the manifest is a declaration
+    # nothing reads.
+    grep -qE '^repo_paths[[:space:]]*=[[:space:]]*api:repos' "$conf" \
+        || { echo "the github manifest no longer declares the api path form"; return 1; }
     local v
-    for v in DEJIMA_FORGE_REPO DEJIMA_FORGE_REPO_FLAGS DEJIMA_FORGE_REPO_ENV; do
+    for v in DEJIMA_FORGE_REPO DEJIMA_FORGE_REPO_FLAGS DEJIMA_FORGE_REPO_ENV \
+             DEJIMA_FORGE_REPO_PATHS; do
         grep -q "\-e \"$v=" "$REPO_ROOT/bin/dejima" \
             || { echo "$v never reaches the container"; return 1; }
     done

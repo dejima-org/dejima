@@ -76,6 +76,7 @@ value never does:
 | `export` | `NAME=key` or `NAME=@key` for the `env_export` forge key - see [Forge](#forge) below. |
 | `template` | Prose that may contain `{{placeholder}}` markers; the placeholder names are checked against the briefing whitelist at composition time, not here. |
 | `keyspec` | One element of a `keys` list - see [The `keys` field](#the-keys-field-a-providers-own-config-schema) below. |
+| `repopath` | `<subcommand>:<first path segment>` for the `repo_paths` forge key - where a repository appears in a path rather than behind a flag. |
 | `list:TYPE` | Space-separated (not colon-separated, unlike a config-file list) elements, each checked against `TYPE`. |
 
 A leading `?` on any type (`?hostname`, `?list:identifier`, ...) makes the
@@ -123,9 +124,10 @@ operator can set, resolved the same way as any other config key
 | `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
 | `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a command string, for the harnesses that can. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
-| `repo_flags` | `?list:flag` | (empty) | The option names this forge's CLI accepts for naming a repository other than the one the session was launched against - `--repo -R` for `gh`. `docker/forge-guard.sh` refuses a value that is not that repository, in every spelling (`--repo x`, `--repo=x`, and a one-dash flag with its value attached). Fast-fail, not a boundary, for the same reason `merge_block` is not one: the session holds the token. Leave it empty for a CLI that resolves the repo itself and refuses another host, as the gitea ones do - a forge is not required to be aimable. |
+| `repo_flags` | `?list:flag` | (empty) | The option names this forge's CLI accepts for naming a repository other than the one the session was launched against - `--repo -R` for `gh`. `docker/forge-guard.sh` refuses a value that is not that repository, in every spelling of the flag itself: `--repo x`, `--repo=x`, `-R x`, `-Rx`, and the letter inside a short-flag cluster (`-wR x`, `-wRx`). Fast-fail, not a boundary, for the same reason `merge_block` is not one: the session holds the token. Leave it empty for a CLI that resolves the repo itself and refuses another host, as the gitea ones do - a forge is not required to be aimable. |
 | `identity_keys` | `?list:identifier` | (empty) | Which of this forge's own `keys` name an **account** rather than the forge itself - the credential paths, which differ per session, where an API URL does not. One declaration, two rules: a key named here is one an `[identity.<name>]` section may set, and one a project may not declare in its own `.dejima/`. Core keeps no list of its own, so a forge whose credential is spelled differently needs no change here. The identity inherits the type from this forge's `keys` entry, not a second copy of it. |
 | `repo_env` | `?identifier` | (empty) | The environment variable this forge's CLI reads for the same thing - `GH_REPO`. Declared separately because it takes no argument and would otherwise be the way around every flag above. |
+| `repo_paths` | `?list:repopath` | (empty) | A repository this forge's CLI names in a path rather than in a flag, as `<subcommand>:<first segment>` - `api:repos` for `gh api repos/<owner>/<name>/...`. Scoped to a subcommand on purpose: comparing every positional argument that contains two slashes would refuse an issue title that happens to look like one, and a false refusal costs an honest agent a working command. Paths carrying `gh`'s own `{owner}`/`{repo}` placeholders are left alone, since those resolve to this repository by construction. |
 | `disclose` | `?disclosures` | (empty) | Which of this forge's commands send a body the session authored, as comma-separated `kind:command prefix` entries - `pr:gh pr create, issue:gh issue create, ...`. `docker/forge-guard.sh` prepends a marker to the body of a matching command, so a PR, issue or comment an agent wrote says so. The three kinds are `pr`, `issue` and `comment`; the wording of each marker is core's, not the manifest's, so that dejima says one thing about agent authorship whichever forge is selected. Unlike `merge_block` this does not depend on the workflow: what a workflow permits is a policy, who wrote the text is a fact. |
 | `keys` | `?list:keyspec` | (empty) | This forge's own `[forge.<name>]` config schema - see above. |
 | `requires` | `?list:identifier` | (empty) | Which of this forge's own config keys an operator is expected to set for it to actually work - checked at launch by two refusal rules (partly-configured, and none-configured-with-a-fixed-host) when the workflow pushes; see [Validation](#validation). A key with a non-empty schema default never counts as missing for either check. |
@@ -509,12 +511,32 @@ knowing about because they are what a second forge costs:
 - **`gh` can be aimed past the sandboxed repository, and is stopped.** The
   gitea CLIs refuse an origin that is not on the configured host, so they can
   only act on the repo the sandbox was launched against. `gh` takes `--repo`
-  on nearly every subcommand and reads `GH_REPO`, so this forge declares both
-  (`repo_flags`, `repo_env`) and `docker/forge-guard.sh` refuses a value that
-  is not the launched-against repository. Fast-fail, not a boundary, exactly
-  as `merge_block` is: the session holds the token and could call the API
+  on nearly every subcommand, reads `GH_REPO`, and names repositories in `gh
+  api` paths, so this forge declares all three (`repo_flags`, `repo_env`,
+  `repo_paths`) and `docker/forge-guard.sh` refuses a value that is not the
+  launched-against repository. Fast-fail, not a boundary, exactly as
+  `merge_block` is: the session holds the token and could call the API
   directly. What actually bounds it is the token's scope, so a per-repository
   fine-grained PAT is the expected shape of `push_token_file`.
+
+  **What it sees, and what it does not.** Worth stating both, because a guard
+  described only by what it catches reads like a boundary. It compares, case
+  -insensitively: `--repo x` and `--repo=x`; `-R x` and `-Rx`; the same letter
+  inside a short-flag cluster, `-wR x` and `-wRx`; `GH_REPO`; and
+  `gh api repos/<owner>/<name>/...`, with or without a leading slash. A launch
+  that resolved no repository at all refuses every one of those rather than
+  waving them through.
+
+  It does not see a GraphQL `mutation` sent through `gh api graphql`, a
+  repository named in an `--jq` expression or a `-F`/`-f` field, an API path
+  under a segment other than `repos/`, or `gh` invoked through something else
+  that passes the repository along. Nor can it know that the workspace's
+  `origin` is the repository you meant: it compares against whatever origin
+  the checkout has, so a workspace pointing somewhere unexpected shifts what
+  counts as "this repository" rather than being caught by this. That list is
+  not exhaustive either, and it is not meant to be - widening it further would
+  mean parsing each subcommand's flags, which is the coupling this guard
+  exists to avoid. The token's scope is what bounds the ones it misses.
 
 So: if you have a choice, `gitea` is the better-worn path. Choose `github`
 because that is where your repositories are, which is a good reason - and
