@@ -79,8 +79,8 @@ The ordering is the point. Nothing above the last item requires an exploit.
 Item 5 is not an argument for making the handoff harder; a session that cannot
 ask is a session that works around you instead. It is an argument for being
 able to answer, afterwards, what that actually did to the machine - which is
-the layer below this repository's, and the reason the sister project is
-looking at detection rather than at more enforcement.
+the layer below this repository's, and the reason `dejima-guard` exists and
+looks at detection rather than at more enforcement.
 
 **The handoff directories are item 5 with the person taken out.** `[core]
 share_dir` and everything in `[mounts] read_write` exist so that session
@@ -143,8 +143,31 @@ can see.
 ## Where dejima's boundary ends
 
 dejima runs inside the machine it is protecting the rest of, which is the
-whole reason there are two other repositories. It cannot bound its own host's
-network position, and it cannot bound a runner it never touches.
+whole reason there are three other repositories. It cannot bound its own host's
+network position, it cannot bound a runner it never touches, and it cannot tell
+anyone that something changed after the session ended.
+
+### The stack, and what each piece buys
+
+**Only the first row is required.** Everything under it is what the layer
+below the container costs, and every one of them can be substituted or left
+out - the last two are categories rather than products.
+
+| Piece | Runs on | What it buys | Without it |
+| --- | --- | --- | --- |
+| **dejima** | the devbox | The container boundary: what a session reaches on disk, and deny-by-default egress. | An agent with your home directory and the open internet. |
+| **dejima-devbox-hardener** | the same devbox, enforced from outside the guest | Bounds where an escape *spreads*: LAN reach cut to what is declared, and root in the VM cannot flush the rule set. | An escape reaches the LAN, and the row below the container is unbounded. |
+| **dejima-guard** | a different machine | Notices the devbox changed: file hashes, enabled units and listening ports, diffed against a baseline held off the box. Detection, not enforcement. | Anything a session leaves behind survives unremarked, because nobody is looking at the devbox between sessions. |
+| **self-hosted CI + dejima-ci-hardener** | a runner VM | A runner that executes a session's pull request without that being LAN access, and a rollback that expires what an escape gained. | CI runs attacker-controlled code with the network position of whatever host it sits on. |
+| **or third-party hosted CI** | someone else's machine | The same isolation, bought rather than run - and on their network rather than yours. | - |
+| **ntfy, or any push service** | anywhere both can reach | The channel dejima's "session needs input" and the guard's alerts both arrive on. | A session that stopped to ask, and an alert that fired, both wait for someone to think to look. |
+| **Uptime Kuma, or any uptime monitor** | off the devbox | The dead man's switch: it is what notices the *guard* has stopped reporting. | Silence is indistinguishable from health, which is the failure mode every watcher has. |
+
+The last row is the one most easily skipped and the one that decides whether
+the rest is real. A watcher that has died looks exactly like a watcher with
+nothing to report.
+
+### Each project's own boundary
 
 **[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)**
 covers the two VM rows: what an escape spreads to, rather than whether it can
@@ -159,14 +182,33 @@ Nothing there tries to stop the code running. Its
 [threat model](https://gitbox.branderson.io/dejima/dejima-ci-hardener/src/branch/main/docs/threat-model.md#blast-radius-by-layer)
 has the two tiers and where each one's boundary sits.
 
-Neither is required to run dejima, and the container row holds without them.
-What they change is what the row below it costs.
+**dejima-guard** is the newest and the only one that is not an enforcement
+layer at all. It collects the devbox's state over SSH from a machine that is
+not the devbox, diffs it against a baseline held on that machine, and alerts.
+That placement is the point: a baseline stored on the box being watched is a
+baseline the thing you are watching for can edit. It complements
+devbox-hardener rather than overlapping it - one bounds where a compromise
+spreads, the other notices that one happened.
+
+**Listed with its gaps attached rather than as a peer**, which its own
+`SECURITY.md` states so nobody has to discover them. It has no egress bound,
+where dejima's is deny-by-default: its needs are three destinations, but doing
+it inside the container would mean granting `NET_ADMIN` to something that
+currently drops every capability, so it is left to the host. Its private key
+is *in* the container, where dejima keeps its model credential out entirely
+behind a proxy. And it does not log requests, where dejima logs egress
+verdicts. A watcher holding a key to the machine it watches is a real piece of
+the attack surface, and it is weaker than the thing it is watching.
+
+None of the three is required to run dejima, and the container row holds
+without them. What they change is what the row below it costs, and whether
+anyone finds out.
 
 **A survey of comparable projects found none with rows below the container at
 all** - their boundary is between the agent and the host, and what is under
 the host is outside their threat models. The same survey found nothing
 treating a forge or a CI runner as part of an agent's blast radius, which is
-what the second sister project exists for: a session that can open a pull
+what dejima-ci-hardener exists for: a session that can open a pull
 request can execute code on a machine dejima never touches.
 
 Recorded as an observation from one day of secondary sources rather than as a

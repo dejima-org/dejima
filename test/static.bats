@@ -4843,6 +4843,57 @@ EOF
         || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
 }
 
+@test "the threat model lays out the whole stack and says what each piece buys" {
+    # Three sister projects now, plus two categories that are not projects at
+    # all. A reader deciding what to stand up needs the arrangement in one
+    # place, and needs the "without it" column more than the "what it buys"
+    # one - the reason to run a piece is what goes wrong when you do not.
+    local tm="$REPO_ROOT/docs/threat-model.md" flat
+    flat="$(flat_prose "$tm")"
+    grep -q '^| Piece | Runs on | What it buys | Without it |' "$tm" \
+        || { echo "the stack table is gone or lost a column"; return 1; }
+    # Scoped to the table's own rows, not to the file. Every one of these
+    # names appears in the prose below it as well, so a whole-file grep passes
+    # against a table that lost the row - which is how the first version of
+    # this test passed its own mutation.
+    local rows piece
+    rows="$(sed -n '/^| Piece | Runs on |/,/^$/p' "$tm")"
+    for piece in 'dejima**' 'dejima-devbox-hardener' 'dejima-guard' 'dejima-ci-hardener' \
+                 'third-party hosted CI' 'any push service' 'any uptime monitor'; do
+        grep -qF "$piece" <<< "$rows" \
+            || { echo "the stack table has no row for $piece"; return 1; }
+    done
+    # Only the first is required. A table of components reads as a shopping
+    # list without that.
+    grep -qi 'Only the first row is required' <<< "$flat" \
+        || { echo "the optional pieces read as required"; return 1; }
+    # The dead man's switch, which is the row most easily skipped and the one
+    # that decides whether any of the watching is real.
+    grep -qi 'watcher that has died looks exactly like a watcher with nothing to report' <<< "$flat" \
+        || { echo "nothing says why the uptime monitor is not optional in practice"; return 1; }
+}
+
+@test "dejima-guard is listed with its gaps rather than as a peer" {
+    # It holds a key to the machine it watches and is weaker than the thing it
+    # watches, which its own SECURITY.md states so nobody has to discover it.
+    # Listing it beside the hardeners without that reads as a fourth layer of
+    # protection rather than as detection with a real attack surface.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    grep -qi 'Listed with its gaps attached rather than as a peer' <<< "$flat" \
+        || { echo "the guard is presented as a peer of the hardeners"; return 1; }
+    local gap
+    for gap in 'no egress bound' 'private key is in the container' \
+               'does not log requests'; do
+        grep -qi -- "$gap" <<< "$flat" \
+            || { echo "the guard's stated gap is missing: $gap"; return 1; }
+    done
+    # And that it detects rather than enforces, which is the distinction that
+    # keeps it from reading as a substitute for devbox-hardener.
+    grep -qi 'one bounds where a compromise spreads, the other notices that one happened' <<< "$flat" \
+        || { echo "detection and enforcement are conflated"; return 1; }
+}
+
 @test "docs/research-review.md exists and carries its standing questions" {
     # The process is only worth having if the agenda is in it: a review with no
     # standing questions becomes a reading list, which is the failure mode it
