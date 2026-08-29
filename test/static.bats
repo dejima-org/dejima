@@ -4201,12 +4201,20 @@ STUB
     # it is the only way a tag gets made, so this looks for the shape of a tag
     # rather than for the names that exist today.
     local hit
-    hit=$(grep -nE '(-t |tag=|image: |IMAGE=)[^ ]*\bdejima[a-z-]*:' \
-              "$REPO_ROOT/bin/dejima" \
-              "$REPO_ROOT/docker/docker-compose.yml" \
-              "$REPO_ROOT/test/runtime.bats" \
+    # Searched across the repo rather than against a list of files. The first
+    # version of this named bin/dejima, docker-compose.yml and runtime.bats,
+    # and the workflow's own `docker build -t dejima:latest` was not among
+    # them - so the invariant passed here and the privileged job failed on a
+    # tag that did not exist. A list of files is a list of the places someone
+    # already thought of.
+    hit=$(grep -rnE '(-t |tag=|image: |IMAGE=)[^ ]*\bdejima[a-z-]*:' \
+              --include='*.sh' --include='*.yml' --include='*.bats' \
+              --include='Dockerfile*' --include='dejima*' \
+              --exclude-dir=.git --exclude-dir=.worktrees --exclude-dir=node_modules \
+              "$REPO_ROOT" \
           | grep -v 'localhost/' \
-          | grep -v 'SANDBOX_IMAGE_REPO' || true)
+          | grep -v 'SANDBOX_IMAGE_REPO' \
+          | grep -v '/test/static.bats:' || true)
     [ -z "$hit" ] || { echo "these name an image that resolves to Hub:"; echo "$hit"; return 1; }
 }
 
