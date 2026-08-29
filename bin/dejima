@@ -821,8 +821,10 @@ fi
 # confirm" is not a reason to allow it.
 DEJIMA_FORGE_REPO_FLAGS="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_flags)"
 DEJIMA_FORGE_REPO_ENV="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_env)"
+DEJIMA_FORGE_REPO_PATHS="$(manifest_get forge "$DEJIMA_FORGE_NAME" repo_paths)"
 DEJIMA_FORGE_REPO=""
-if [ -n "$DEJIMA_FORGE_REPO_FLAGS" ] || [ -n "$DEJIMA_FORGE_REPO_ENV" ]; then
+if [ -n "$DEJIMA_FORGE_REPO_FLAGS" ] || [ -n "$DEJIMA_FORGE_REPO_ENV" ] ||
+   [ -n "$DEJIMA_FORGE_REPO_PATHS" ]; then
     _origin_url="$(git -C "$WORKSPACE_DIR" remote get-url origin 2>/dev/null)" || _origin_url=""
     if [ -n "$_origin_url" ]; then
         _origin_url="${_origin_url%/}"
@@ -1421,6 +1423,7 @@ extra_mounts+=(-e "DEJIMA_MERGE_BLOCK=$DEJIMA_MERGE_BLOCK")
 extra_mounts+=(-e "DEJIMA_DISCLOSE=$DEJIMA_DISCLOSE")
 extra_mounts+=(-e "DEJIMA_FORGE_REPO=$DEJIMA_FORGE_REPO")
 extra_mounts+=(-e "DEJIMA_FORGE_REPO_FLAGS=$DEJIMA_FORGE_REPO_FLAGS")
+extra_mounts+=(-e "DEJIMA_FORGE_REPO_PATHS=$DEJIMA_FORGE_REPO_PATHS")
 extra_mounts+=(-e "DEJIMA_FORGE_REPO_ENV=$DEJIMA_FORGE_REPO_ENV")
 
 # The harness's own configuration, mounted at the mode it declared, and -

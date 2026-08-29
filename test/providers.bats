@@ -1045,11 +1045,34 @@ assert_remedy_forges_exist() {
     # with (#187). The guard is generic; the manifest is what makes it fire.
     [ "$(lib manifest_get forge github repo_flags)" = "--repo -R" ]
     [ "$(lib manifest_get forge github repo_env)" = "GH_REPO" ]
+    # And in a path rather than a flag: `gh api repos/<owner>/<name>/...`
+    # names a repository with no --repo in it at all (#243).
+    [ "$(lib manifest_get forge github repo_paths)" = "api:repos" ]
     # The gitea CLIs resolve the repo from origin and refuse another host, so
     # there is nothing to declare and nothing for the guard to compare. A
     # forge is not required to be aimable.
     [ -z "$(lib manifest_get forge gitea repo_flags)" ]
     [ -z "$(lib manifest_get forge gitea repo_env)" ]
+    [ -z "$(lib manifest_get forge gitea repo_paths)" ]
+}
+
+@test "a repo path has to name a subcommand and a segment" {
+    # `<subcommand>:<first segment>`. The subcommand half is what keeps the
+    # guard from comparing every positional argument that contains two
+    # slashes, so a spelling that omits it is not a narrower declaration - it
+    # is one that would refuse an issue title.
+    local d bad; d="$(mktemp -d "$BATS_TEST_TMPDIR/pathtype.XXXXXX")"
+    mkdir -p "$d/forges/probe"
+    for bad in "repos" "api:" ":repos" "api:repos/more" "api:/repos" "-api:repos"; do
+        printf 'repo_paths = %s\n' "$bad" > "$d/forges/probe/forge.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+        [ "$status" -ne 0 ] || { echo "accepted repo_paths = $bad"; return 1; }
+    done
+    printf 'repo_paths = api:repos\n' > "$d/forges/probe/forge.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; manifest_validate forge probe' _ "$LIB"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "a repo flag has to look like a flag" {
