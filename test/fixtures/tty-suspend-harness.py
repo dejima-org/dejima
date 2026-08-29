@@ -118,8 +118,8 @@ finally:
 # TTY_SUSPEND_NO_HELPER leaves the helper out, which is dejima before this
 # existed. It is the control: a harness that cannot see the bug cannot be
 # trusted to see the fix either.
-start_helper = "" if os.environ.get("TTY_SUSPEND_NO_HELPER") else \
-    '"%s" &\nhelper=$!' % HELPER
+HELPER_EXPECTED = not os.environ.get("TTY_SUSPEND_NO_HELPER")
+start_helper = '"%s" &\nhelper=$!' % HELPER if HELPER_EXPECTED else ""
 # bin/dejima's shape: the client inherits SIGTSTP ignored and is started with
 # the terminal, and the keystroke is converted into an explicit SIGSTOP for it
 # before the launcher stops itself. Without the conversion the client is the
@@ -221,6 +221,31 @@ def lflag():
     return termios.tcgetattr(master)[3]
 
 
+def reclaimed():
+    """True once dejima-tty-suspend has taken ^Z back from the container's raw mode.
+
+    Read off the pty rather than inferred from output, and specific enough to
+    mean only the helper. Raw mode has ISIG off; a plain shell has ISIG on with
+    intr at ^C. Only the helper leaves ISIG on, susp at ^Z, and intr undefined
+    - which is the whole of what it does, so this is the feature's precondition
+    stated exactly.
+    """
+    attrs = termios.tcgetattr(master)
+    cc = attrs[6]
+    return bool(attrs[3] & termios.ISIG) \
+        and cc[termios.VSUSP] == b"\x1a" \
+        and cc[termios.VINTR] == b"\x00"
+
+
+def await_reclaim(timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if reclaimed():
+            return True
+        pump(0.05)
+    return reclaimed()
+
+
 def received():
     try:
         with open(RECEIVED, "rb") as fh:
@@ -242,6 +267,27 @@ try:
     check("the container run attached", expect("CONTAINER-ATTACHED"))
 
     for cycle in (1, 2):
+        # Wait for the helper to hold the terminal before typing at it (#262).
+        #
+        # CONTAINER-ATTACHED is printed by the stand-in immediately after it
+        # sets raw mode, so it marks the START of the window this feature
+        # exists to close, not the end. The helper only acts once it has POLLED
+        # the terminal and seen -isig, so between those two moments ^Z is still
+        # the byte 0x1a. Sending into that window put the byte in the container
+        # and failed `nothing-reached-the-container` - the security assertion -
+        # on a machine where nothing was wrong but the scheduling.
+        #
+        # Waiting for the precondition rather than lengthening the deadline
+        # after it: with the terminal provably converting ^Z to a signal before
+        # anything is typed, that check can no longer fail for timing reasons
+        # at all, which is the point. A longer timeout would only have narrowed
+        # the window.
+        #
+        # Skipped without the helper, where the byte reaching the container is
+        # the expected result and this would never come true.
+        if HELPER_EXPECTED:
+            check("cycle%d-suspend-char-reclaimed" % cycle, await_reclaim(),
+                  "dejima-tty-suspend never took ^Z back from raw mode")
         before = received()
         forget()
         send("\x1a")
