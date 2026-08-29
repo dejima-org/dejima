@@ -6980,3 +6980,50 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     run grep -c '^\s*C_BADGE=' "$REPO_ROOT/bin/dejima-color-lib.sh"
     [ "$output" -eq 1 ] || { echo "C_BADGE is defined $output times"; return 1; }
 }
+
+@test "the web terminal is given a palette, since the browser has none to inherit" {
+    # dejima's output reaches a terminal in indexed colour so the terminal's
+    # own theme fills the slots. On the web front door dejima IS the terminal:
+    # xterm.js has no gruvbox to inherit, so without a theme the front door
+    # showed its stock palette - white on black, bright red, magenta - while
+    # the same session over SSH showed the operator's.
+    local ttyd="$REPO_ROOT/bin/dejima-ttyd"
+    grep -q "theme=" "$ttyd" || { echo "ttyd is given no theme"; return 1; }
+    # Every ANSI slot, not just the accents: a missing one falls back to
+    # xterm.js's default for that slot alone, which is harder to notice than
+    # no theme at all.
+    local slot
+    for slot in black red green yellow blue magenta cyan white \
+                brightBlack brightRed brightGreen brightYellow \
+                brightBlue brightMagenta brightCyan brightWhite \
+                background foreground cursor; do
+        grep -q "\"$slot\":" "$ttyd" \
+            || { echo "the web terminal theme has no $slot"; return 1; }
+    done
+}
+
+@test "the two surfaces dejima owns agree on the gruvbox values they share" {
+    # page.css and the ttyd theme are the two places dejima sets both sides of
+    # the contrast, so both carry exact hexes - and two copies of a palette is
+    # how one drifts. Only the values they actually share are compared; the
+    # page carries chrome colours the terminal has no slot for, and the
+    # terminal carries eleven slots the page never draws.
+    local css="$REPO_ROOT/web/src/page.css" ttyd="$REPO_ROOT/bin/dejima-ttyd"
+    local -A shared=(
+        [--gb-dark0]=background  [--gb-light1]=foreground
+        [--gb-yellow]=brightYellow [--gb-green]=brightGreen
+        [--gb-blue]=brightBlue   [--gb-dark2]=selectionBackground
+    )
+    local var slot hex_css hex_ttyd checked=0
+    for var in "${!shared[@]}"; do
+        slot="${shared[$var]}"
+        hex_css="$(sed -n "s/^  $var: *\(#[0-9a-fA-F]\{6\}\).*/\1/p" "$css" | head -1)"
+        hex_ttyd="$(sed -n "s/.*\"$slot\":\"\(#[0-9a-fA-F]\{6\}\)\".*/\1/p" "$ttyd" | head -1)"
+        [ -n "$hex_css" ] && [ -n "$hex_ttyd" ] || continue
+        checked=$((checked + 1))
+        [ "${hex_css,,}" = "${hex_ttyd,,}" ] \
+            || { echo "$var is $hex_css in the page and $slot is $hex_ttyd in the terminal"; return 1; }
+    done
+    [ "$checked" -ge 4 ] \
+        || { echo "only $checked shared values were compared"; return 1; }
+}

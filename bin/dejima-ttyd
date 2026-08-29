@@ -178,10 +178,35 @@ focus_opt=()
 colors_opt=()
 [ -z "$button_colors" ] || colors_opt=(-t "buttonColors=$button_colors")
 
+# The sixteen ANSI slots xterm.js draws with, which without this are its own
+# defaults - white on black, a bright red, a magenta. dejima's own output
+# reaches a terminal in indexed colour precisely so the terminal's theme fills
+# those slots (see dejima-color-lib.sh), and here dejima IS the terminal: the
+# browser has no gruvbox to inherit, so the front door showed the stock
+# palette while the same session over SSH showed the operator's.
+#
+# So the exact hexes belong here, by the same rule as web/src/page.css: they
+# are the two surfaces where dejima owns the background. A static test keeps
+# the values they share in step.
+#
+# Upstream gruvbox dark, by its own names. `background` and `foreground` are
+# bg0/light1, which is what a gruvbox terminal is set to.
+theme_opt=(-t 'theme={
+  "background":"#282828","foreground":"#ebdbb2",
+  "cursor":"#ebdbb2","cursorAccent":"#282828",
+  "selectionBackground":"#504945",
+  "black":"#282828","red":"#cc241d","green":"#98971a","yellow":"#d79921",
+  "blue":"#458588","magenta":"#b16286","cyan":"#689d6a","white":"#a89984",
+  "brightBlack":"#928374","brightRed":"#fb4934","brightGreen":"#b8bb26",
+  "brightYellow":"#fabd2f","brightBlue":"#83a598","brightMagenta":"#d3869b",
+  "brightCyan":"#8ec07c","brightWhite":"#ebdbb2"
+}')
+
 exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writable \
     --index "$index_html" \
     ${font_opt[@]+"${font_opt[@]}"} \
     ${prefix_opt[@]+"${prefix_opt[@]}"} \
     ${focus_opt[@]+"${focus_opt[@]}"} \
     ${colors_opt[@]+"${colors_opt[@]}"} \
+    "${theme_opt[@]}" \
     "$SCRIPT_DIR/dejima-attach"

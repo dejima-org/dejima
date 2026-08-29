@@ -345,6 +345,14 @@ and forgotten. What matters in it:
 - **A long `proxy_read_timeout`.** An attached terminal sits idle for hours;
   nginx's default is 60 seconds.
 
+**The page carries its own colours.** dejima's terminal output uses indexed
+colour so your terminal's theme fills the slots - but a browser has no theme
+to inherit, so the front door is handed gruvbox explicitly: all sixteen ANSI
+slots plus background, foreground and cursor. Without it xterm.js draws with
+its own defaults, and the same session looks one way over SSH and another in
+the browser. `bin/dejima-ttyd` sets it, and `web/src/page.css` carries the
+same values for the chrome around it.
+
 ## How it works
 
 Almost none of this is in the sandbox. The container writes one empty file
