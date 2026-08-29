@@ -527,7 +527,19 @@ _config_parse() {
             return 1
         fi
         if ! _config_valid_value "$type" "$value"; then
-            echo "invalid value for [$section] $key in $conf: $value" >&2
+            # The value is echoed so the operator can see what was wrong with
+            # it, except for the userinfo of a URL. A url-typed value is the
+            # one kind here that carries a credential - ntfy takes its
+            # authentication as https://<user>:<token>@<host>/<topic> - and a
+            # value only reaches this line by being malformed, so the mistake
+            # would be what wrote the token into a terminal or a journal.
+            # Everything after the @ is kept: the host and path are what make
+            # the message useful.
+            local shown="$value"
+            case "$type:$value" in
+                *url:*://*@*) shown="${value%%://*}://<redacted>@${value#*@}" ;;
+            esac
+            echo "invalid value for [$section] $key in $conf: $shown" >&2
             return 1
         fi
         # Last assignment wins, which is why this overwrites rather than
