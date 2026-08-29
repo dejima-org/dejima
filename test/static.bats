@@ -2421,13 +2421,47 @@ _install_forge_bins() {
     # Named rather than counted, so a harness that silently stopped checking
     # something cannot pass this by reporting fewer results.
     local name
-    for name in cycle1-suspends-the-job cycle1-nothing-reached-the-container \
+    for name in cycle1-suspend-char-reclaimed \
+                cycle1-suspends-the-job cycle1-nothing-reached-the-container \
                 cycle1-raw-mode-restored cycle1-redraw-poked \
                 cycle2-suspends-the-job cycle2-raw-mode-restored \
                 input-reaches-the-resumed-session ctrl-c-still-reaches-the-session; do
         [[ "$output" == *"PASS $name"* ]] \
             || { echo "$name was not checked:"; echo "$output"; return 1; }
     done
+}
+
+@test "the Ctrl-Z harness waits for the helper rather than racing it" {
+    # #262: the harness typed ^Z as soon as the stand-in printed
+    # CONTAINER-ATTACHED, which the stand-in prints immediately after setting
+    # raw mode - so that marks the START of the window the helper exists to
+    # close, not the end. dejima-tty-suspend only acts once it has polled the
+    # terminal and seen -isig, and in between ^Z is still the byte 0x1a. The
+    # loser of that race was `nothing-reached-the-container`: the security
+    # assertion, failing on a busy machine with nothing wrong.
+    #
+    # Reproduced by delaying the helper rather than by loading the machine,
+    # which makes this a deterministic regression test instead of a coin flip.
+    # 0.6s is comfortably past the helper's own 0.05s poll interval and is
+    # spent waiting, not spinning. Against the pre-fix harness this fails with
+    # exactly the reported signature, byte included.
+    command -v python3 >/dev/null 2>&1 || skip "needs python3"
+    local work; work="$(mktemp -d "$BATS_TEST_TMPDIR/ttyslow.XXXXXX")"
+    local slow="$work/slow-helper.sh"
+    cat > "$slow" <<EOF
+#!/bin/bash
+sleep 0.6
+exec "$REPO_ROOT/bin/dejima-tty-suspend"
+EOF
+    chmod +x "$slow"
+    run env TTY_SUSPEND_WORK="$work" python3 \
+        "$REPO_ROOT/test/fixtures/tty-suspend-harness.py" "$slow" bash
+    [ "$status" -ne 77 ] || skip "no pty available here"
+    [ "$status" -eq 0 ] || { echo "a late helper still fails the suite:"; echo "$output"; return 1; }
+    # Named specifically, because the failure this guards against is the
+    # security assertion going red for a scheduling reason.
+    [[ "$output" == *"PASS cycle1-nothing-reached-the-container"* ]] \
+        || { echo "$output"; return 1; }
 }
 
 @test "the Ctrl-Z harness sees the bug when the fix is not there" {
