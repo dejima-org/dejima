@@ -36,9 +36,9 @@ attached. The two things holding that line are:
 - **[The bind address](#the-bind-address-is-the-one-thing-to-get-right).**
   `ttyd` binds `127.0.0.1` and your proxy must bind one specific LAN
   address - never the wildcard, never a Docker bridge.
-- **Authentication on the proxy.** `ttyd` carries no credential of its own,
-  so a `server` block without `auth_basic` is an unauthenticated host shell
-  for everyone on that network.
+- **[Authentication on the proxy](#authenticating-the-front-door).** `ttyd`
+  carries no credential of its own, so a `server` block that authenticates
+  nothing is an unauthenticated host shell for everyone on that network.
 
 What it does **not** add is a way *out* of a sandbox. Configured as
 described below, a compromised session cannot reach `ttyd`, cannot reach
@@ -321,8 +321,10 @@ and forgotten. What matters in it:
 
 - **Authentication on every server block.** `ttyd` is started with no
   credential of its own, because the loopback bind means only this host can
-  reach it - the proxy is the entire gate. A block without `auth_basic` is
-  an unauthenticated host shell on your network.
+  reach it - the proxy is the entire gate. A block that authenticates nothing
+  is an unauthenticated host shell on your network. The example uses HTTP
+  Basic; [Authenticating the front door](#authenticating-the-front-door) is
+  what that costs and what else meets the requirement.
 - **A `default_server` that refuses.** nginx picks a server block by
   SNI/`Host`, and when nothing matches it serves the **default** for that
   listen address - which, if the front door is the only block on it, is the
@@ -352,6 +354,52 @@ slots plus background, foreground and cursor. Without it xterm.js draws with
 its own defaults, and the same session looks one way over SSH and another in
 the browser. `bin/dejima-ttyd` sets it, and `web/src/page.css` carries the
 same values for the chrome around it.
+
+## Authenticating the front door
+
+`ttyd` binds loopback and carries no credential, so whatever sits in front of
+it is the entire gate. The requirement is that it authenticates **every
+request to every server block, the default one included** - not that it is any
+particular software. These are the shapes that meet it, roughly in order of
+how much they change.
+
+**A network the public internet cannot reach.** Tailscale, WireGuard, or any
+VPN that puts the listener on an interface nothing outside can route to.
+First because it removes the exposure rather than authenticating it, because
+it composes with everything below, and because for a lot of readers it is both
+the simplest answer and the strongest. It does not replace [the bind
+address](#the-bind-address-is-the-one-thing-to-get-right): a VPN interface is
+still one specific address to bind, and the wildcard is still wrong.
+
+**HTTP Basic**, which is what the example config shows. One shared credential,
+no per-operator identity, no second factor, revocation that means editing
+`htpasswd`, and an access log that cannot tell two people apart. For a solo
+operator that is a reasonable trade, and worth saying that it is one; for
+anyone else it is the first thing to replace. It also sends the password on
+every request, which is why TLS is not optional here.
+
+**Client certificates.** `ssl_client_certificate` and `ssl_verify_client on`
+in the same block. Per-device identity, revocable through a CRL, and nothing
+worth stealing sent on every request. The cost is distribution and renewal,
+and a phone that has to have the certificate installed - the part that will
+bite, and the part that differs per platform.
+
+**A forward-auth proxy.** oauth2-proxy or Authelia via nginx `auth_request`:
+OIDC, per-user identity, and a session cookie rather than a credential on
+every request. Also where passkeys realistically arrive, since the proxy
+handles WebAuthn and `ttyd` never learns about it. The cost is another moving
+piece in the path to a host shell, which is worth naming given what is on the
+other side of it.
+
+**Something you already run.** An identity-aware gateway, or an
+authenticating proxy already in the path. The requirement above is the whole
+of what this document asks of it.
+
+**None of these stops a browser that has already authenticated.** Whatever is
+in front, a page loaded in a session that has passed it can act - which is the
+same property that makes the front door usable from a phone you unlocked an
+hour ago. Authentication decides who gets a shell, not what an already-open
+tab does with one.
 
 ## How it works
 
@@ -405,7 +453,7 @@ guarantee actually lives.
  ════════╪══════════════════ your LAN ══════════════════╪══════════════
  ┌─ your machine, as your user ───────────────────────────────────────┐
  │  nginx, listening on ONE LAN address        sshd                   │
- │   TLS + auth_basic, plus a default_server    authorized_keys with  │
+ │   TLS + auth, plus a default_server          authorized_keys with  │
  │   that refuses every other name              a forced command      │
  │       │                                              │             │
  │       │  proxy_pass http://127.0.0.1:7681            │             │
@@ -697,8 +745,8 @@ cost of losing the correction everywhere else.
 Terminating TLS somewhere else and forwarding here is a supported shape, but
 read this first: it moves the front door out of the LAN threat model
 everything above is written against. If the outer proxy is internet-facing,
-`auth_basic` over TLS is now the only thing between the public internet and
-a host shell. Put something stronger in front of it, and take the
+whatever authenticates it is now the only thing between the public internet
+and a host shell, and HTTP Basic is a thin thing for that to be. Put something stronger in front of it, and take the
 [security notes](security.md) as the floor rather than the ceiling.
 
 The mechanical part has four requirements at the outer hop, and each one
