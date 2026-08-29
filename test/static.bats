@@ -4843,6 +4843,111 @@ EOF
         || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
 }
 
+@test "the README lists the whole stack, so it is not a threat-model discovery" {
+    # Someone deciding what to stand up reads the README and may never open
+    # docs/threat-model.md at all. The detail belongs there and the list
+    # belongs here, before Setup, so the question "what else would I run?" is
+    # answered at first contact rather than found later.
+    local rd="$REPO_ROOT/README.md" flat
+    flat="$(flat_prose "$rd")"
+    grep -q '^## The dejima stack' "$rd" \
+        || { echo "the README no longer lists the stack"; return 1; }
+    # Before Setup: a list of components after the install steps is a list
+    # read by someone who has already decided.
+    local stack setup
+    stack=$(grep -n '^## The dejima stack' "$rd" | cut -d: -f1)
+    setup=$(grep -n '^## Setup' "$rd" | cut -d: -f1)
+    [ "$stack" -lt "$setup" ] \
+        || { echo "the stack section sits after Setup"; return 1; }
+
+    # Every piece, each linked where it is a project of its own.
+    local rows piece
+    rows="$(sed -n '/^| Piece | Runs on | What it adds |/,/^$/p' "$rd")"
+    [ -n "$rows" ] || { echo "the README stack table is gone or lost a column"; return 1; }
+    for piece in 'dejima-devbox-hardener' 'dejima-guard' 'dejima-ci-hardener' \
+                 'any push service' 'any uptime monitor'; do
+        grep -qF "$piece" <<< "$rows" \
+            || { echo "the README stack table has no row for $piece"; return 1; }
+    done
+    for piece in dejima-devbox-hardener dejima-guard dejima-ci-hardener; do
+        grep -qF "https://gitbox.branderson.io/dejima/$piece" <<< "$rows" \
+            || { echo "$piece is named in the README but not linked"; return 1; }
+    done
+
+    # Only dejima is required, or the table reads as a shopping list.
+    grep -qi 'Only the first row is required' <<< "$flat" \
+        || { echo "the README makes the optional pieces read as required"; return 1; }
+
+    # And out to the detail, at the section that holds it rather than at the
+    # top of a long document.
+    grep -q 'docs/threat-model.md#the-stack-and-what-each-piece-buys' "$rd" \
+        || { echo "the README does not link the stack section of the threat model"; return 1; }
+}
+
+@test "the threat model lays out the whole stack and says what each piece buys" {
+    # Three sister projects now, plus two categories that are not projects at
+    # all. A reader deciding what to stand up needs the arrangement in one
+    # place, and needs the "without it" column more than the "what it buys"
+    # one - the reason to run a piece is what goes wrong when you do not.
+    local tm="$REPO_ROOT/docs/threat-model.md" flat
+    flat="$(flat_prose "$tm")"
+    grep -q '^| Piece | Runs on | What it buys | Without it |' "$tm" \
+        || { echo "the stack table is gone or lost a column"; return 1; }
+    # Scoped to the table's own rows, not to the file. Every one of these
+    # names appears in the prose below it as well, so a whole-file grep passes
+    # against a table that lost the row - which is how the first version of
+    # this test passed its own mutation.
+    local rows piece
+    rows="$(sed -n '/^| Piece | Runs on |/,/^$/p' "$tm")"
+    for piece in 'dejima**' 'dejima-devbox-hardener' 'dejima-guard' 'dejima-ci-hardener' \
+                 'third-party hosted CI' 'any push service' 'any uptime monitor'; do
+        grep -qF "$piece" <<< "$rows" \
+            || { echo "the stack table has no row for $piece"; return 1; }
+    done
+    # Only the first is required. A table of components reads as a shopping
+    # list without that.
+    grep -qi 'Only the first row is required' <<< "$flat" \
+        || { echo "the optional pieces read as required"; return 1; }
+    # The dead man's switch, which is the row most easily skipped and the one
+    # that decides whether any of the watching is real.
+    grep -qi 'watcher that has died looks exactly like a watcher with nothing to report' <<< "$flat" \
+        || { echo "nothing says why the uptime monitor is not optional in practice"; return 1; }
+}
+
+@test "dejima-guard is characterised by what it adds, not by how it differs from dejima" {
+    # An earlier draft described it by the three gaps its own SECURITY.md
+    # lists - no egress bound, key in the container, no request logging. Those
+    # are accurate and they are all comparisons WITH DEJIMA rather than an
+    # account of the guard's own exposure, so they put the two things a reader
+    # needs below three that matter less. Corrected on the advice of the
+    # project itself, which moved the same three below the same two.
+    #
+    # What actually characterises it: it enforces nothing, it is the only
+    # component that ADDS a credential-holding machine instead of taking
+    # capability away, and root on the watched box can lie to its collector.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    local claim
+    for claim in \
+        'It enforces nothing' \
+        'only piece here that adds a machine holding credentials rather than taking capability away' \
+        'exposure is bounded by the hardening of a machine this stack does not describe' \
+        'detection ceiling is root on the watched box' \
+        'heartbeat proves the guard ran, not that it saw the truth' \
+        'one bounds where a compromise spreads, the other notices that one happened'
+    do
+        grep -qi -- "$claim" <<< "$flat" \
+            || { echo "the guard's account no longer says: $claim"; return 1; }
+    done
+    # Linked, like the other two, and pointed at its own SECURITY.md for the
+    # comparisons this doc deliberately does not lead with.
+    local tm="$REPO_ROOT/docs/threat-model.md"
+    grep -q '(https://gitbox.branderson.io/dejima/dejima-guard)' "$tm" \
+        || { echo "dejima-guard is named but not linked"; return 1; }
+    grep -q 'dejima-guard/src/branch/main/SECURITY.md' "$tm" \
+        || { echo "nothing points at the guard's own security policy"; return 1; }
+}
+
 @test "docs/research-review.md exists and carries its standing questions" {
     # The process is only worth having if the agenda is in it: a review with no
     # standing questions becomes a reading list, which is the failure mode it
