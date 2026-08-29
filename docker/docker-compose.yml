@@ -34,7 +34,13 @@ services:
     # $SANDBOX_IMAGE lets bin/dejima point a run at a derived,
     # per-project image instead, without this build ever producing one
     # under that name itself - see bin/dejima.
-    image: ${SANDBOX_IMAGE:-dejima:${SANDBOX_USER:-node}}
+    # localhost/ so this can never resolve to Docker Hub: Docker reads a first
+    # component containing a dot or colon, or exactly "localhost", as a
+    # registry host, and a bare `dejima:node` is `docker.io/library/dejima:node`
+    # to anything that pushes (#53). bin/dejima holds the same prefix in
+    # SANDBOX_IMAGE_REPO and passes it in; this default is for a compose
+    # invocation by hand.
+    image: ${SANDBOX_IMAGE:-localhost/dejima:${SANDBOX_USER:-node}}
     # Run tini as PID 1 so orphaned processes get reaped. Without it PID 1 is
     # the session's own command (claude, or nvim under SANDBOX_NVIM_CONFIG),
     # which never reaps: every process-substitution child the test suite and

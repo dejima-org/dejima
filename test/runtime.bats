@@ -49,7 +49,10 @@ compose_cap_add() {
     ' "$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
 }
 
-IMAGE=dejima:latest
+# localhost/ for the same reason bin/dejima uses it: a bare name is a Docker
+# Hub name to anything that pushes, and nothing built here is meant to leave
+# the host (#53).
+IMAGE=localhost/dejima:latest
 
 # What a session actually runs: the base image plus the selected harness's own
 # layer, built in setup_file. Exported there because bats re-runs this file's
@@ -169,7 +172,7 @@ harness_manifest_value() {
 # teardown_file's sweep finds it. Prints the new tag.
 build_harness_layer() {
     local base="$1" tag df ctx
-    tag="dejima-test-harness:$(basename "$BATS_RUN_TMPDIR")"
+    tag="localhost/dejima-test-harness:$(basename "$BATS_RUN_TMPDIR")"
     df="$(mktemp)"
     # An empty build context, for the reason bin/dejima uses one: a build
     # whose context is a directory anything else can write is a way into the
@@ -430,7 +433,7 @@ teardown() {
         docker rm -f "$c" >/dev/null 2>&1 || true
     done < <(docker ps -a --filter "name=^dejima-test-.*$suffix\$" \
                  --format '{{.Names}}' 2>/dev/null)
-    docker images -q "dejima-test-*:$suffix" 2>/dev/null \
+    docker images -q "localhost/dejima-test-*:$suffix" 2>/dev/null \
         | xargs -r docker rmi -f >/dev/null 2>&1 || true
 }
 
@@ -443,7 +446,7 @@ dexec_node() {
 }
 
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
-    local test_image="dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
+    local test_image="localhost/dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
     local test_container="$(test_container_name override)"
     local sandbox_dir="$BATS_TEST_DIRNAME/../docker"
     local repo_root="$BATS_TEST_DIRNAME/.."
@@ -1501,7 +1504,7 @@ EOF
 }
 
 @test "a derived project image gets the package and keeps the base privilege posture" {
-    local derived="dejima-test-derived:$(basename "$BATS_RUN_TMPDIR")"
+    local derived="localhost/dejima-test-derived:$(basename "$BATS_RUN_TMPDIR")"
     local test_container="$(test_container_name derived)"
     local ctx; ctx="$(mktemp -d)"
     local store; store="$(mktemp -d)"

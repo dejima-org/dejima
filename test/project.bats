@@ -1066,13 +1066,13 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-harness-claude-code" ]
 
     "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ]
 }
 
 # nvim's data/state/cache are Docker volumes, not host paths, so nothing a
@@ -1116,8 +1116,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    grep -q -- "-t dejima:$(id -un)-global -f" <(docker_log)
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-global" ]
+    grep -q -- "-t localhost/dejima:$(id -un)-global -f" <(docker_log)
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-global" ]
 }
 
 @test "the launcher builds the global layer then the project layer on top of it" {
@@ -1127,12 +1127,12 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    global_line=$(grep -n -- "-t dejima:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
-    project_line=$(grep -n -- "-t dejima:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
+    global_line=$(grep -n -- "-t localhost/dejima:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
+    project_line=$(grep -n -- "-t localhost/dejima:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
     [ -n "$global_line" ]
     [ -n "$project_line" ]
     [ "$global_line" -lt "$project_line" ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ]
 }
 
 @test "the project layer's Dockerfile is generated FROM the global layer, not the base image" {
@@ -1148,11 +1148,11 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     # base -> harness -> global -> project, each FROM the one before it.
-    dockerfile_for "dejima:$(id -un)-harness-claude-code" \
-        | grep -qxF "FROM dejima:$(id -un)"
-    dockerfile_for "dejima:$(id -un)-global" \
-        | grep -qxF "FROM dejima:$(id -un)-harness-claude-code"
-    dockerfile_for "dejima:$(id -un)-$slug" | grep -qxF "FROM dejima:$(id -un)-global"
+    dockerfile_for "localhost/dejima:$(id -un)-harness-claude-code" \
+        | grep -qxF "FROM localhost/dejima:$(id -un)"
+    dockerfile_for "localhost/dejima:$(id -un)-global" \
+        | grep -qxF "FROM localhost/dejima:$(id -un)-harness-claude-code"
+    dockerfile_for "localhost/dejima:$(id -un)-$slug" | grep -qxF "FROM localhost/dejima:$(id -un)-global"
 }
 
 @test "the launcher builds no dependency layer when neither global nor project deps are approved" {
@@ -1163,10 +1163,10 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # harness in the image - so this is about the DEPENDENCY layers, which is
     # what "no approved dependencies" is a statement about.
     local tagged
-    tagged="$(grep -oE -- '-t dejima:[^ ]+' <(docker_log) | sed 's/^-t //' | sort -u)"
-    [ "$tagged" = "dejima:$(id -un)-harness-claude-code" ] \
+    tagged="$(grep -oE -- '-t localhost/dejima:[^ ]+' <(docker_log) | sed 's/^-t //' | sort -u)"
+    [ "$tagged" = "localhost/dejima:$(id -un)-harness-claude-code" ] \
         || { echo "expected only the harness layer to be built, got:"; echo "$tagged"; return 1; }
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-harness-claude-code" ]
 }
 
 @test "the launcher warns when the approval store sits inside the mounted workspace" {
