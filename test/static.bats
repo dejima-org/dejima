@@ -4843,6 +4843,47 @@ EOF
         || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
 }
 
+@test "the README lists the whole stack, so it is not a threat-model discovery" {
+    # Someone deciding what to stand up reads the README and may never open
+    # docs/threat-model.md at all. The detail belongs there and the list
+    # belongs here, before Setup, so the question "what else would I run?" is
+    # answered at first contact rather than found later.
+    local rd="$REPO_ROOT/README.md" flat
+    flat="$(flat_prose "$rd")"
+    grep -q '^## The dejima stack' "$rd" \
+        || { echo "the README no longer lists the stack"; return 1; }
+    # Before Setup: a list of components after the install steps is a list
+    # read by someone who has already decided.
+    local stack setup
+    stack=$(grep -n '^## The dejima stack' "$rd" | cut -d: -f1)
+    setup=$(grep -n '^## Setup' "$rd" | cut -d: -f1)
+    [ "$stack" -lt "$setup" ] \
+        || { echo "the stack section sits after Setup"; return 1; }
+
+    # Every piece, each linked where it is a project of its own.
+    local rows piece
+    rows="$(sed -n '/^| Piece | Runs on | What it adds |/,/^$/p' "$rd")"
+    [ -n "$rows" ] || { echo "the README stack table is gone or lost a column"; return 1; }
+    for piece in 'dejima-devbox-hardener' 'dejima-guard' 'dejima-ci-hardener' \
+                 'any push service' 'any uptime monitor'; do
+        grep -qF "$piece" <<< "$rows" \
+            || { echo "the README stack table has no row for $piece"; return 1; }
+    done
+    for piece in dejima-devbox-hardener dejima-guard dejima-ci-hardener; do
+        grep -qF "https://gitbox.branderson.io/dejima/$piece" <<< "$rows" \
+            || { echo "$piece is named in the README but not linked"; return 1; }
+    done
+
+    # Only dejima is required, or the table reads as a shopping list.
+    grep -qi 'Only the first row is required' <<< "$flat" \
+        || { echo "the README makes the optional pieces read as required"; return 1; }
+
+    # And out to the detail, at the section that holds it rather than at the
+    # top of a long document.
+    grep -q 'docs/threat-model.md#the-stack-and-what-each-piece-buys' "$rd" \
+        || { echo "the README does not link the stack section of the threat model"; return 1; }
+}
+
 @test "the threat model lays out the whole stack and says what each piece buys" {
     # Three sister projects now, plus two categories that are not projects at
     # all. A reader deciding what to stand up needs the arrangement in one

@@ -123,6 +123,28 @@ A note from the developer about the voice in this repository:
 
 [![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
+## The dejima stack
+
+dejima runs inside the machine it is protecting the rest of, so it cannot bound
+its own host, a runner it never touches, or notice anything after a session
+ends. These are what cover the rest. **Only the first row is required.** The
+last two are categories rather than products; the named ones are what this
+deployment happens to use.
+
+| Piece | Runs on | What it adds |
+| --- | --- | --- |
+| **dejima** | a devbox | The container boundary: what a session reaches on disk, and deny-by-default egress. |
+| **[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)** | the same devbox | Cuts LAN reach to what is declared, enforced from outside the guest so root in the VM cannot flush it. |
+| **[dejima-guard](https://gitbox.branderson.io/dejima/dejima-guard)** | a different machine | Notices the devbox changed, against a baseline held off the box. Detection, not enforcement. |
+| **[dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)** | your CI runner | A runner that executes a session's pull request without that being LAN access. Hosted CI is the alternative, on someone else's network rather than yours. |
+| **ntfy**, or any push service | anywhere both can reach | Where "session needs input" and the guard's alerts arrive. |
+| **Uptime Kuma**, or any uptime monitor | off the devbox | The dead man's switch: what notices the guard itself stopped reporting. |
+
+**→ [docs/threat-model.md](docs/threat-model.md#the-stack-and-what-each-piece-buys)** -
+what each one buys, what goes wrong without it, and where each one's boundary
+ends. None of them is required to run dejima; what they change is what the
+layer below the container costs, and whether anyone finds out.
+
 ## Setup
 
 This repo only holds the tooling; no project lives here. Point it at a project
