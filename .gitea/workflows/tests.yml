@@ -425,8 +425,20 @@ jobs:
       # SKIP_BUILD below then reuses this image rather than skipping a build.
       # The image is still built fresh from this commit, so the property the
       # test file defaults to - never assert against a stale image - holds.
+      # Two tags for one image, because this file comes from the BASE branch
+      # (see the pull_request_target note at the top) while the checkout above
+      # is the branch under test. A branch that renames the image it expects
+      # can therefore never go green: the build here would still produce the
+      # old name, runtime.bats would look for the new one, and setup_file
+      # would fail on an image that does not exist.
+      #
+      # Tagging both is what lets such a rename land at all. The bare name is
+      # the transitional half and goes once nothing on development looks for
+      # it - see #53.
       - name: Build the sandbox image
-        run: docker build -t dejima:latest -f docker/Dockerfile .
+        run: |
+          docker build -t localhost/dejima:latest -f docker/Dockerfile .
+          docker tag localhost/dejima:latest dejima:latest
 
       - run: bats test/runtime.bats
         env:
