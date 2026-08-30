@@ -5488,34 +5488,67 @@ EOF
 # docs/*.md reference actually present in these scripts and checks the target
 # exists, rather than hardcoding the two names here too and letting a rename
 # desync the test from the code.
-@test "bin/dejima states the whole Anthropic arrangement to the credential proxy" {
-    # The proxy defaults nothing about a provider any more (#171). That is the
-    # point - a default is one provider's arrangement wearing every provider's
-    # name - but it moves the burden onto the caller, and a caller that forgets
-    # a flag does not fail here. It fails at launch, or worse, sends a request
-    # without the header the provider needs and reports the API's rejection.
+@test "the Anthropic arrangement is declared in its manifest, not written in core" {
+    # #171's whole point. Before the axis these values were flags on
+    # bin/dejima's launch line; now they are a file, and adding a provider is
+    # adding a directory rather than editing core.
     #
-    # Every flag the Anthropic path needs, asserted on the launch itself rather
-    # than anywhere in the file: the arguments have to be on this invocation.
-    local launch
-    launch="$(sed -n '/dejima-credential-proxy" \\/,/^    SANDBOX_ANTHROPIC_PROXY_PID=/p' "$REPO_ROOT/bin/dejima")"
-    [ -n "$launch" ] || { echo "bin/dejima no longer launches the credential proxy"; return 1; }
-    local flag
-    for flag in --socket --credentials --upstream --credential-kind \
-                --oauth-endpoint --oauth-client-id --auth-header \
-                --auth-format --strip-header --ensure-header; do
-        grep -q -- "$flag" <<< "$launch" \
-            || { echo "the launch passes no $flag"; return 1; }
+    # The three that carry the security property rather than the shape:
+    # x-api-key must not travel beside the injected Authorization, the OAuth
+    # beta must be present or the API rejects the token, and the kind has to
+    # be the refreshing one or a rotated token is never written back.
+    local m="$REPO_ROOT/providers/anthropic/provider.conf"
+    [ -f "$m" ] || { echo "the anthropic provider manifest is gone"; return 1; }
+    local want
+    for want in 'upstream *= *https://api\.anthropic\.com' \
+                'proxied_domain *= *api\.anthropic\.com' \
+                'credential *= *anthropic-oauth' \
+                'oauth_endpoint *= *https://platform\.claude\.com' \
+                'auth_header *= *Authorization' \
+                'auth_format *= *Bearer \{token\}' \
+                'strip_headers *=.*x-api-key' \
+                'ensure_headers *=.*anthropic-beta=oauth-2025-04-20'; do
+        grep -qE "^$want" "$m" \
+            || { echo "the manifest no longer declares: $want"; return 1; }
     done
-    # And the values that carry the security property rather than just the
-    # shape: x-api-key must not travel beside the injected Authorization, and
-    # the OAuth beta must be present or the API rejects the token.
-    grep -q -- '--strip-header x-api-key' <<< "$launch" \
-        || { echo "x-api-key is no longer stripped"; return 1; }
-    grep -q -- 'anthropic-beta=oauth-2025-04-20' <<< "$launch" \
-        || { echo "the OAuth beta is no longer ensured"; return 1; }
-    grep -q -- '--credential-kind anthropic-oauth' <<< "$launch" \
-        || { echo "the launch no longer asks for the refreshing credential kind"; return 1; }
+    # And core writes none of it. A constant here would be the arrangement
+    # living in two places, which is how they drift.
+    local d="$REPO_ROOT/bin/dejima" body
+    body="$(grep -v '^[[:space:]]*#' "$d")"
+    for want in 'api\.anthropic\.com' 'platform\.claude\.com' \
+                'oauth-2025-04-20' '9d1c250a'; do
+        grep -qE -- "$want" <<< "$body" \
+            && { echo "core still writes a provider constant: $want"; return 1; }
+    done
+    return 0
+}
+
+@test "every field the provider manifest declares reaches the proxy's argv" {
+    # A manifest key nothing passes through is a declaration that does
+    # nothing, and the failure is silent: the proxy falls back to its own
+    # default, or to none, and the session runs with an arrangement the
+    # operator did not configure. Pinned on the launch block itself rather
+    # than anywhere in the file.
+    local launch
+    launch="$(sed -n '/_proxy_args=(/,/dejima-credential-proxy" "\${_proxy_args\[@\]}"/p' "$REPO_ROOT/bin/dejima")"
+    [ -n "$launch" ] || { echo "bin/dejima no longer builds the proxy argument list"; return 1; }
+    local pair
+    for pair in 'upstream:--upstream' 'auth_header:--auth-header' \
+                'auth_format:--auth-format' 'strip_headers:--strip-header' \
+                'ensure_headers:--ensure-header' \
+                'oauth_endpoint:--oauth-endpoint' \
+                'oauth_client_id:--oauth-client-id'; do
+        grep -q -- "${pair##*:}" <<< "$launch" \
+            || { echo "no ${pair##*:} on the launch"; return 1; }
+        grep -q -- "${pair%%:*}" <<< "$launch" \
+            || { echo "${pair%%:*} is never read from the manifest"; return 1; }
+    done
+    # The credential kind and file come from the provider too, not from a
+    # hardcoded path to one harness's credential store.
+    grep -q -- '--credential-kind "\$DEJIMA_PROVIDER_CREDENTIAL_KIND"' <<< "$launch" \
+        || { echo "the credential kind is not the provider's"; return 1; }
+    grep -q -- '--credentials "\$DEJIMA_PROVIDER_CREDENTIAL_FILE"' <<< "$launch" \
+        || { echo "the credential file is not the provider's"; return 1; }
 }
 
 @test "the credential proxy names no provider constant anywhere in its code" {
@@ -6027,8 +6060,11 @@ q
 _harness_api_domains() {
     sed -n 's/^api_domains *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
 }
-_harness_proxied_domain() {
-    sed -n 's/^proxied_api_domain *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
+# The endpoint the terminator stands in front of. On the PROVIDER manifest
+# since #171: a harness reaches whichever endpoint it is configured for, so
+# the name belongs to the endpoint rather than to the program talking to it.
+_provider_proxied_domain() {
+    sed -n 's/^proxied_domain *= *//p' "$REPO_ROOT/providers/anthropic/provider.conf"
 }
 
 @test "the selected harness's own domains are in the fixed list, not built into the image" {
@@ -6058,20 +6094,20 @@ _harness_proxied_domain() {
     # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
     # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
     # non-fatal when it fails to resolve.
-    local pd; pd="$(_harness_proxied_domain)"
+    local pd; pd="$(_provider_proxied_domain)"
     [ -n "$pd" ] || { echo "the harness declares no proxied_api_domain"; return 1; }
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_PROVIDER_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'api.anthropic.com' <<< "$output"
 
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_PROVIDER_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
     # Under `set -u`, as both consumers run, so that dropping the `:-` default
     # fails here rather than at container start.
-    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_PROVIDER_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
@@ -6930,17 +6966,17 @@ _emit_mount_at() {
     [ "$runs" -ge 1 ] || { echo "no compose run names the service"; return 1; }
 }
 
-@test "the TLS terminator answers for the harness's declared domain, not a literal" {
-    # The manifest declares proxied_api_domain; the entrypoint used the name
-    # of one harness's API in the cert, the SAN and the /etc/hosts pin.
+@test "the TLS terminator answers for the provider's declared domain, not a literal" {
+    # The provider manifest declares proxied_domain; the entrypoint used the
+    # name of one API in the cert, the SAN and the /etc/hosts pin.
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
     [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
-    grep -q 'SANDBOX_HARNESS_PROXIED_DOMAIN' "$e" \
+    grep -q 'SANDBOX_PROVIDER_PROXIED_DOMAIN' "$e" \
         || { echo "the entrypoint does not read the declared domain"; return 1; }
-    # And a harness that declares a proxy but no domain is refused, rather
+    # And a proxy socket with no domain declared for it is refused, rather
     # than bringing up a terminator that intercepts nothing.
-    grep -q 'declares no proxied_api_domain' "$e" \
+    grep -q 'declares no proxied_domain' "$e" \
         || { echo "an empty proxied domain is not refused"; return 1; }
 }
 
@@ -7073,7 +7109,7 @@ _emit_mount_at() {
     # how two of these failed.
     local rt="$REPO_ROOT/test/runtime.bats" sock dom
     sock=$(grep -c 'SANDBOX_ANTHROPIC_PROXY_SOCKET=.*proxy\.sock' "$rt")
-    dom=$(grep -c 'SANDBOX_HARNESS_PROXIED_DOMAIN=' "$rt")
+    dom=$(grep -c 'SANDBOX_PROVIDER_PROXIED_DOMAIN=' "$rt")
     [ "$sock" -gt 0 ] || { echo "no proxy fixtures found - has this moved?"; return 1; }
     # One of the domain lines is the file-wide fixture, which mounts no
     # socket, so the domains must outnumber the sockets that go through a

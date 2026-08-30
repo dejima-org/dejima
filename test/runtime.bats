@@ -191,6 +191,14 @@ harness_manifest_value() {
     sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../harnesses/claude-code/harness.conf"
 }
 
+# The same, for the selected model provider. proxied_domain moved off the
+# harness manifest onto this one (#171): a harness reaches whichever endpoint
+# it is configured for, so the name the terminator answers for belongs to the
+# endpoint rather than to the program talking to it.
+provider_manifest_value() {
+    sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../providers/anthropic/provider.conf"
+}
+
 # The selected harness's image layer, on top of $1, tagged for this run so
 # teardown_file's sweep finds it. Prints the new tag.
 build_harness_layer() {
@@ -417,7 +425,7 @@ setup_file() {
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_PROVIDER_PROXIED_DOMAIN="$(provider_manifest_value proxied_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null
 
@@ -1334,7 +1342,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_PROVIDER_PROXIED_DOMAIN="$(provider_manifest_value proxied_domain)" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
@@ -1701,7 +1709,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_PROVIDER_PROXIED_DOMAIN="$(provider_manifest_value proxied_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null

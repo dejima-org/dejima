@@ -51,11 +51,11 @@ fi
 # SaaS name: dns-proxy.sh exempts the extra list from stop-dns-rebind, and
 # init-firewall.sh downgrades a failed lookup there to a warning.
 #
-# Which name this is comes from the harness (proxied_api_domain); the rule
+# Which name this is comes from the provider (proxied_domain); the rule
 # about when to allowlist it is dejima's, and stays here.
 if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ] \
-    && [ -n "${SANDBOX_HARNESS_PROXIED_DOMAIN:-}" ]; then
-    FIXED_DOMAINS+=("$SANDBOX_HARNESS_PROXIED_DOMAIN")
+    && [ -n "${SANDBOX_PROVIDER_PROXIED_DOMAIN:-}" ]; then
+    FIXED_DOMAINS+=("$SANDBOX_PROVIDER_PROXIED_DOMAIN")
 fi
 
 # GitHub itself is allowlisted by IP range (see github-domains ipset,

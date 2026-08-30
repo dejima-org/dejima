@@ -1345,3 +1345,75 @@ assert_remedy_forges_exist() {
         done
     done
 }
+
+# --- the model provider axis (#171) ------------------------------------------
+
+@test "the anthropic provider manifest validates and answers for every field" {
+    lib manifest_validate provider anthropic
+    [ "$(lib manifest_get provider anthropic upstream)" = "https://api.anthropic.com" ]
+    [ "$(lib manifest_get provider anthropic proxied_domain)" = "api.anthropic.com" ]
+    [ "$(lib manifest_get provider anthropic credential)" = "anthropic-oauth" ]
+    [ "$(lib manifest_get provider anthropic auth_format)" = "Bearer {token}" ]
+    [ "$(lib manifest_get provider anthropic strip_headers)" = "x-api-key" ]
+    [ "$(lib manifest_get provider anthropic ensure_headers)" = "anthropic-beta=oauth-2025-04-20" ]
+}
+
+@test "a provider's own keys become [provider.<name>] config keys" {
+    # The same machinery a forge's keys go through, so a provider declaring
+    # where its credential lives needs no row hardcoded in core's schema.
+    [ "$(lib config_type provider.anthropic.credential_file)" = "path" ]
+    run lib config_type provider.anthropic.not_a_key
+    [ "$status" -ne 0 ]
+}
+
+@test "an auth_format with no token placeholder is refused by the schema" {
+    # The proxy refuses it too. Refusing it here as well is the difference
+    # between finding out at launch and finding out from a provider's 401:
+    # a format without {token} produces a proxy that starts, answers, and
+    # sends every request unauthenticated.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/authfmt.XXXXXX")"
+    mkdir -p "$d/providers/probe"
+    _probe() {
+        printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\nauth_format = %s\n' "$1" \
+            > "$d/providers/probe/provider.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+    }
+    _probe 'Bearer'
+    [ "$status" -ne 0 ] || { echo "a format with no {token} was accepted"; return 1; }
+    _probe 'Bearer {token}'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    _probe '{token}'
+    [ "$status" -eq 0 ] || { echo "a bare-key format was refused: $output"; return 1; }
+}
+
+@test "an ensure_headers entry has to be NAME=VALUE with a header-shaped name" {
+    # envpair would refuse anthropic-beta outright: it wants an upper-case
+    # environment variable, and a header name is lower case with dashes.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/ensure.XXXXXX")"
+    mkdir -p "$d/providers/probe"
+    _ensure() {
+        printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\nensure_headers = %s\n' "$1" \
+            > "$d/providers/probe/provider.conf"
+        run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+    }
+    local bad
+    for bad in 'anthropic-beta' '=value' 'name=' 'has space=v'; do
+        _ensure "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted ensure_headers = $bad"; return 1; }
+    done
+    _ensure 'anthropic-beta=oauth-2025-04-20'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a provider name that is not a directory is refused by the config type" {
+    # The same provider:<axis> check core.forge and core.harness go through,
+    # so a typo names nothing rather than resolving somewhere.
+    run lib _config_valid_value provider:provider anthropic
+    [ "$status" -eq 0 ] || { echo "the shipped provider was refused: $output"; return 1; }
+    run lib _config_valid_value provider:provider no-such-provider
+    [ "$status" -ne 0 ] || { echo "a provider with no directory was accepted"; return 1; }
+    run lib _config_valid_value provider:provider ../etc
+    [ "$status" -ne 0 ] || { echo "a traversal was accepted"; return 1; }
+}

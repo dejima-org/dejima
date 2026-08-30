@@ -2264,7 +2264,8 @@ _epitaph_three() {
     # the repository it is testing leaves litter when it aborts and collides
     # with a concurrent run.
     proot="$(mktemp -d)"
-    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+       "$REPO_ROOT/providers" "$proot/"
     mkdir -p "$proot/harnesses/test-no-plugin"
     printf 'command = true\n' > "$proot/harnesses/test-no-plugin/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
@@ -2300,7 +2301,8 @@ _epitaph_three() {
     _rw_setup
     workspace="$(mktemp -d)"
     proot="$(mktemp -d)"
-    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+       "$REPO_ROOT/providers" "$proot/"
     # Same harness, minus two guards, so the message is the only difference.
     sed -i 's/^guards .*/guards          = bash-deny notify/' \
         "$proot/harnesses/claude-code/harness.conf"
@@ -2341,7 +2343,8 @@ _epitaph_three() {
     _rw_setup
     workspace="$(mktemp -d)"
     proot="$(mktemp -d)"
-    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+       "$REPO_ROOT/providers" "$proot/"
     sed -i 's/^guards .*/guards          = bash-deny push-gaurd/' \
         "$proot/harnesses/claude-code/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
@@ -2356,7 +2359,8 @@ _epitaph_three() {
     # harness declaring fewer gets fewer - and dejima does not write a
     # config belonging to a harness the operator did not choose.
     local proot; proot="$(mktemp -d)"
-    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" "$proot/"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+       "$REPO_ROOT/providers" "$proot/"
     sed -i 's/^guards .*/guards          = bash-deny/' \
         "$proot/harnesses/claude-code/harness.conf"
     run_install DEJIMA_PROVIDER_ROOT="$proot"
@@ -2537,9 +2541,10 @@ STUB
     workspace="$(mktemp -d)"
     local root
     root="$(mktemp -d)"
-    mkdir -p "$root/harnesses/evil" "$root/forges" "$root/workflows"
+    mkdir -p "$root/harnesses/evil" "$root/forges" "$root/workflows" "$root/providers"
     cp -r "$REPO_ROOT/forges/." "$root/forges/"
     cp -r "$REPO_ROOT/workflows/." "$root/workflows/"
+    cp -r "$REPO_ROOT/providers/." "$root/providers/"
     printf 'command = evil\ninstall = npm:x$(id>/tmp/pwned)\nno_confirm_args = -y\n' \
         > "$root/harnesses/evil/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'harness = evil' 'forge = none' 'workflow = local-only'
@@ -2674,7 +2679,8 @@ _upd_fixture() {
     _upd_commit "$UPD_ORIGIN" first
     git clone -q "$UPD_ORIGIN" "$UPD_CHECKOUT"
     cp -r "$REPO_ROOT/bin" "$REPO_ROOT/forges" "$REPO_ROOT/harnesses" \
-          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$UPD_CHECKOUT/"
+          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$REPO_ROOT/providers" \
+          "$UPD_CHECKOUT/"
     printf '[core]\nharness = claude-code\n' > "$CONFIG_DIR/config"
 }
 

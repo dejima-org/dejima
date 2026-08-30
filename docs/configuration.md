@@ -49,6 +49,7 @@ config file behind them.
 | `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
 | `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
 | `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
+| `[credentials] provider` | `anthropic` | which model API the session talks to, and how the credential proxy presents its credential. A directory under `providers/`; each ships its own `[provider.<name>]` keys, of which `credential_file` names the host file the credential is read from (never mounted). See [providers.md](providers.md#model-provider) |
 | `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
 | `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](security.md)) |
 | `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |

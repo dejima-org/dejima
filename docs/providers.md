@@ -262,6 +262,38 @@ resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.
 
+## Model provider
+
+`providers/<name>/provider.conf`. Which model API a session talks to, and how
+the credential proxy presents the credential to it. Selected by
+`[credentials] provider` rather than `[core]`, because what it configures is
+the proxy rather than the shape of the work.
+
+**The word is overloaded here, deliberately.** This document calls forge,
+workflow and harness "provider axes", and the industry calls a model API a
+"provider" - a harness's own config file is literally `providers.json` with a
+`lastUsedProvider` key. Renaming either would read worse than the overlap.
+Where it matters below, "model provider" means this axis.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `upstream` | `url` | (required) | Where the proxy forwards to. |
+| `proxied_domain` | `hostname` | (required) | The name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. On this axis rather than the harness's since [#171](https://gitbox.branderson.io/dejima/dejima/issues/171): a harness reaches whichever endpoint it is configured for, so the name belongs to the endpoint. Declared on the harness, the terminator would answer for one API while the session talked to another, and the credential the proxy exists to withhold would be the one in use. |
+| `credential` | `enum:static\|anthropic-oauth` | (required) | Whether the credential expires. `static` is read and sent; `anthropic-oauth` is refreshed against `oauth_endpoint` and the rotated token written back to the host file, which is what keeps a host-side login working rather than being signed out by a sandbox run. |
+| `auth_header` | `identifier` | `Authorization` | Which header carries it. |
+| `auth_format` | `authformat` | `Bearer {token}` | How it is written. Must contain `{token}`, so a provider wanting a bare key or a prefix of its own needs no code; a format without it produces a proxy that starts, answers, and sends every request unauthenticated. |
+| `strip_headers` | `?list:identifier` | (empty) | Headers that must not travel beside the injected one. `x-api-key` next to an `Authorization` is two answers to the same question, and which one an API prefers is not dejima's to guess. The auth header is never stripped from under itself. |
+| `ensure_headers` | `?list:headerpair` | (empty) | `NAME=VALUE` that has to appear in a comma-list header, merged into whatever the client sent and left alone when already present. Anthropic's OAuth beta is the one shipped example. |
+| `oauth_endpoint` | `?url` | (empty) | Required by the `anthropic-oauth` kind, meaningless to `static`. |
+| `oauth_client_id` | `?identifier` | (empty) | Same. |
+| `keys` | `?list:keyspec` | (empty) | This provider's own `[provider.<name>]` config schema, exactly as a forge's works. Every provider is expected to declare `credential_file`. |
+| `requires` | `?list:identifier` | (empty) | Which of those must be set for a launch to proceed. |
+
+**Nothing here is a secret.** A provider declares *where* its credential is
+read from - `credential_file` is a path - never what it is. The file it names
+is read host-side per request and is never mounted into the container, which
+is the property the whole arrangement exists for.
+
 ## Tool
 
 Not an axis: a launch selects one forge, one workflow and one harness, and

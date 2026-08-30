@@ -1360,7 +1360,19 @@ fi
 # fixed_hosts already has, and since #142 the provider directories are in
 # the audit's TCB list, so widening this unseen is a CRITICAL finding.
 SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domains)"
-SANDBOX_HARNESS_PROXIED_DOMAIN="$(manifest_get harness "$DEJIMA_HARNESS_NAME" proxied_api_domain)"
+# The selected model provider, and the name the in-container terminator has to
+# answer for.
+#
+# On the PROVIDER, not the harness, and that is the whole point of the move
+# (#171). A harness reaches whichever endpoint it is configured for, so the
+# same harness needs a different name in front of it when a different provider
+# is selected. Declared on the harness, the terminator would answer for
+# Anthropic while the session talked to somewhere else, and the credential the
+# proxy exists to withhold would be the one in use.
+DEJIMA_PROVIDER_NAME="$(config_get credentials provider)"
+SANDBOX_PROVIDER_PROXIED_DOMAIN="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" proxied_domain)"
+DEJIMA_PROVIDER_CREDENTIAL_KIND="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" credential)"
+DEJIMA_PROVIDER_CREDENTIAL_FILE="$(config_get "provider.$DEJIMA_PROVIDER_NAME" credential_file)"
 # The two ways a briefing reaches a harness that is not handed it by a
 # session-start hook. A hook cannot carry a large one: Claude Code persists a
 # big payload to a file and injects a short preview in its place - measured in
@@ -1375,7 +1387,7 @@ SANDBOX_HARNESS_BRIEFING_ARGS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" bri
 SANDBOX_HARNESS_BRIEFING_PATH="$(manifest_get harness "$DEJIMA_HARNESS_NAME" briefing_path)"
 export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
     SANDBOX_HARNESS_SETTINGS SANDBOX_HARNESS_DOMAINS \
-    SANDBOX_HARNESS_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS \
+    SANDBOX_PROVIDER_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS \
     SANDBOX_HARNESS_BRIEFING_PATH
 
 # [core] command defaults to the selected harness's own command rather than
@@ -1676,25 +1688,55 @@ SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
+# Whether this provider's credential is in a state the proxy can use.
+#
+# Not the same question as "does the file exist", and the answer is the
+# provider's kind rather than a fixed check: an OAuth file that holds an API
+# key instead of a claudeAiOauth block is a setup the proxy cannot serve, and
+# has always been the case that skips it and mounts the real credential
+# instead. A static key is usable when it is a non-empty file.
+#
+# Only a skippable answer here. Whether the credential is WELL FORMED is the
+# proxy's own startup check, which fails the launch loudly rather than
+# silently falling back - a fallback for a malformed key would be a session
+# running with the operator's real credential mounted in.
+_credential_usable() {  # <kind> <path>
+    case "$1" in
+        anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
+        static)          [ -s "$2" ] ;;
+        *)               return 1 ;;
+    esac
+}
+
 if [ "$(config_get_bool credentials proxy)" != "0" ] \
-    && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
+    && _credential_usable "$DEJIMA_PROVIDER_CREDENTIAL_KIND" "$DEJIMA_PROVIDER_CREDENTIAL_FILE"; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
-    # Every Anthropic-shaped value is stated here rather than defaulted in the
-    # proxy, which now knows no provider's name (#171). When the provider layer
-    # lands these come from a manifest instead; until then this is the one
-    # caller and this is where the arrangement lives.
-    "$SCRIPT_DIR/dejima-credential-proxy" \
-        --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET" \
-        --credentials "$HOME/.claude/.credentials.json" \
-        --upstream "https://api.anthropic.com" \
-        --credential-kind anthropic-oauth \
-        --oauth-endpoint "https://platform.claude.com/v1/oauth/token" \
-        --oauth-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
-        --auth-header Authorization \
-        --auth-format "Bearer {token}" \
-        --strip-header x-api-key \
-        --ensure-header "anthropic-beta=oauth-2025-04-20" &
+    # Every value comes from providers/<name>/provider.conf. Nothing about a
+    # provider is written here any more (#171), which is what makes adding one
+    # a directory rather than an edit to this file.
+    _proxy_args=(
+        --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET"
+        --credentials "$DEJIMA_PROVIDER_CREDENTIAL_FILE"
+        --upstream "$(manifest_get provider "$DEJIMA_PROVIDER_NAME" upstream)"
+        --credential-kind "$DEJIMA_PROVIDER_CREDENTIAL_KIND"
+        --auth-header "$(manifest_get provider "$DEJIMA_PROVIDER_NAME" auth_header)"
+        --auth-format "$(manifest_get provider "$DEJIMA_PROVIDER_NAME" auth_format)"
+    )
+    # Word-split on purpose: a manifest list is space-separated and every
+    # element is type-checked, so neither of these can carry a space.
+    for _h in $(manifest_get provider "$DEJIMA_PROVIDER_NAME" strip_headers); do
+        _proxy_args+=(--strip-header "$_h")
+    done
+    for _h in $(manifest_get provider "$DEJIMA_PROVIDER_NAME" ensure_headers); do
+        _proxy_args+=(--ensure-header "$_h")
+    done
+    _oauth_endpoint="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" oauth_endpoint)"
+    _oauth_client_id="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" oauth_client_id)"
+    [ -z "$_oauth_endpoint" ] || _proxy_args+=(--oauth-endpoint "$_oauth_endpoint")
+    [ -z "$_oauth_client_id" ] || _proxy_args+=(--oauth-client-id "$_oauth_client_id")
+    unset _h _oauth_endpoint _oauth_client_id
+    "$SCRIPT_DIR/dejima-credential-proxy" "${_proxy_args[@]}" &
     SANDBOX_ANTHROPIC_PROXY_PID=$!
     for _ in $(seq 1 50); do
         [ -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ] && break

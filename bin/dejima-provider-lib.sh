@@ -55,6 +55,17 @@ _provider_axis_dir_into() {
         forge)    printf -v "$1" 'forges' ;;
         workflow) printf -v "$1" 'workflows' ;;
         harness)  printf -v "$1" 'harnesses' ;;
+        # The model API a session talks to, and how its credential is
+        # presented. Selected per harness rather than in [core], because what
+        # it configures is the credential proxy rather than the shape of the
+        # work (#171).
+        #
+        # The word is overloaded here and deliberately so: "provider" is what
+        # this repo calls the forge/workflow/harness axes AND what the whole
+        # industry calls a model API endpoint. Renaming either would be worse
+        # than the overlap - a harness's own config file is literally
+        # providers.json with a lastUsedProvider key.
+        provider) printf -v "$1" 'providers' ;;
         # Not an axis in the select-one sense the other three are: a launch
         # enables zero or more tools, and none is the default. It is here
         # because everything else about it is the same - a manifest that is
@@ -75,6 +86,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
+        provider) printf 'provider.conf' ;;
         tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
@@ -230,6 +242,28 @@ autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # A model API and how its credential is presented. Every field here
+        # is an argument bin/dejima-credential-proxy already takes (#171):
+        # this axis is what turns "the caller states the arrangement" into
+        # "a file states it", so adding a provider is adding a directory.
+        #
+        # Nothing here is a secret. A provider declares WHERE its credential
+        # is read from, never what it is - credential_file is a path, and the
+        # file it names is read host-side per request and never mounted.
+        provider) cat <<'EOF'
+upstream	url
+proxied_domain	hostname
+credential	enum:static|anthropic-oauth
+auth_header	identifier	Authorization
+auth_format	authformat	Bearer {token}
+strip_headers	?list:identifier
+ensure_headers	?list:headerpair
+oauth_endpoint	?url
+oauth_client_id	?identifier
+keys	?list:keyspec
+requires	?list:identifier
+EOF
+            ;;
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
@@ -238,7 +272,6 @@ image_env	?list:envpair
 command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
-proxied_api_domain	?hostname
 guards	?list:identifier
 briefing_args	?args
 briefing_path	?homepath
@@ -359,6 +392,26 @@ _provider_valid_value() {
             local sub="${value%%:*}" seg="${value#*:}"
             [[ "$sub" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1
             [[ "$seg" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+            ;;
+        authformat)
+            # How the credential is written into its header. "{token}" rather
+            # than a scheme name, so a provider wanting a bare key or a prefix
+            # of its own needs no code - and required, because a format
+            # without it produces a proxy that starts, answers, and sends
+            # every request unauthenticated. The proxy checks this too; a
+            # manifest that cannot be loaded is the better place to find out.
+            case "$value" in *"{token}"*) ;; *) return 1 ;; esac
+            _provider_valid_value text "$value"
+            ;;
+        headerpair)
+            # NAME=VALUE for ensure_headers, where NAME is a header rather
+            # than an environment variable - lower case and dashes are the
+            # norm (anthropic-beta), which is exactly what envpair refuses.
+            case "$value" in *=*) ;; *) return 1 ;; esac
+            local hname="${value%%=*}" hvalue="${value#*=}"
+            [ -n "$hname" ] && [ -n "$hvalue" ] || return 1
+            _provider_valid_value identifier "$hname" || return 1
+            _provider_valid_value identifier "$hvalue"
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no
@@ -752,6 +805,7 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
+        provider.*) axis=provider; name="${section#provider.}" ;;
         # An identity is the operator's own name for a set of credentials, so
         # there is no directory to check it against - only that it is a name
         # at all. Unlike a provider, an unused one is not a misconfiguration:
@@ -807,6 +861,7 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
+        provider.*) axis=provider ;;
         identity.*)
             rest="${want#identity.}"
             key="${rest#*.}"
