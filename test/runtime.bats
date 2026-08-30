@@ -78,6 +78,29 @@ network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 # long-lived runner, until someone clears it by hand.
 test_container_name() { echo "dejima-test-$1-$(basename "$BATS_RUN_TMPDIR")"; }
 
+# The Anthropic arrangement, in one place.
+#
+# dejima-credential-proxy defaults none of this any more (#171): which upstream,
+# which credential kind, which header and what shape are all the caller's to
+# state, because a default is one provider's arrangement wearing every
+# provider's name. Three copies of the same eight flags in this file would be
+# three places for them to drift from what bin/dejima actually launches, so
+# there is one - and static.bats pins that bin/dejima still passes the same set.
+#
+# Sets PROXY_PID, which every caller's teardown already kills.
+start_credential_proxy() {  # <socket> <credentials> <upstream> <oauth-endpoint>
+    "$BATS_TEST_DIRNAME/../bin/dejima-credential-proxy" \
+        --socket "$1" --credentials "$2" --upstream "$3" \
+        --credential-kind anthropic-oauth \
+        --oauth-endpoint "$4" \
+        --oauth-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+        --auth-header Authorization \
+        --auth-format "Bearer {token}" \
+        --strip-header x-api-key \
+        --ensure-header "anthropic-beta=oauth-2025-04-20" &
+    PROXY_PID=$!
+}
+
 # Every container here must go on network_name(), never the default bridge:
 # dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
 # only exists on a user-defined network. On the default bridge dnsmasq has
@@ -1290,17 +1313,16 @@ EOF'
     cat > "$TD/credentials.json" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
-        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$TD/credentials.json" \
+        "http://127.0.0.1:$(cat "$TD/port")" \
+        "http://127.0.0.1:$(cat "$TD/port")/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     # UnixStreamServer binds at umask default, so the socket lands 755, and
     # connecting to a unix socket needs *write* permission on it. In the real
     # flow the connecting uid is the one that bound it, so that is fine;
     # under CI it is root binding and node connecting, and the whole chain
     # this test follows fails at its first hop. Widened rather than left to
-    # dejima-anthropic-proxy, which has no such problem in production.
+    # dejima-credential-proxy, which has no such problem in production.
     # Unconditional: if the loop above timed out, "No such file" here says so
     # more clearly than a test that fails on a bare false condition.
     chmod 666 "$TD/proxy.sock"
@@ -1569,13 +1591,13 @@ EOF
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$HOME/.claude/.credentials.json" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$HOME/.claude/.credentials.json" \
+        "https://api.anthropic.com" \
+        "https://platform.claude.com/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
         SANDBOX_ANTHROPIC_TRANSPORT=loopback \
-        node "$BATS_TEST_DIRNAME/../docker/anthropic-proxy-forwarder.js" &
+        node "$BATS_TEST_DIRNAME/../docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     sleep 0.5
     run env ANTHROPIC_BASE_URL=http://127.0.0.1:18399 \
@@ -1664,10 +1686,9 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     cat > "$TD/credentials.json" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
-        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$TD/credentials.json" \
+        "http://127.0.0.1:$(cat "$TD/port")" \
+        "http://127.0.0.1:$(cat "$TD/port")/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     # See the loopback test above for why this chmod is here.
     chmod 666 "$TD/proxy.sock"

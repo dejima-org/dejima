@@ -1616,7 +1616,7 @@ done
 export SANDBOX_HARNESS_SEED
 
 # The real Anthropic OAuth credential never enters the container: a host-side
-# proxy injects it per request (bin/dejima-anthropic-proxy, docs/security.md).
+# proxy injects it per request (bin/dejima-credential-proxy, docs/security.md).
 # ~/.claude is not mounted whole, so the credential has no path into the
 # container and nothing needs masking (#50, docs/security.md).
 #
@@ -1643,11 +1643,23 @@ SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 if [ "$(config_get_bool credentials proxy)" != "0" ] \
     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
-    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-anthropic-proxy.XXXXXX")"
+    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
-    "$SCRIPT_DIR/dejima-anthropic-proxy" \
+    # Every Anthropic-shaped value is stated here rather than defaulted in the
+    # proxy, which now knows no provider's name (#171). When the provider layer
+    # lands these come from a manifest instead; until then this is the one
+    # caller and this is where the arrangement lives.
+    "$SCRIPT_DIR/dejima-credential-proxy" \
         --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET" \
-        --credentials "$HOME/.claude/.credentials.json" &
+        --credentials "$HOME/.claude/.credentials.json" \
+        --upstream "https://api.anthropic.com" \
+        --credential-kind anthropic-oauth \
+        --oauth-endpoint "https://platform.claude.com/v1/oauth/token" \
+        --oauth-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+        --auth-header Authorization \
+        --auth-format "Bearer {token}" \
+        --strip-header x-api-key \
+        --ensure-header "anthropic-beta=oauth-2025-04-20" &
     SANDBOX_ANTHROPIC_PROXY_PID=$!
     for _ in $(seq 1 50); do
         [ -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ] && break

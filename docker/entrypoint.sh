@@ -348,8 +348,8 @@ if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ]; then
 fi
 
 # TCP front door for the host-side credential proxy (see bin/dejima and
-# bin/dejima-anthropic-proxy): the proxy listens on a bind-mounted unix
-# socket, and anthropic-proxy-forwarder.js pipes bytes into it. Only started
+# bin/dejima-credential-proxy): the proxy listens on a bind-mounted unix
+# socket, and credential-proxy-forwarder.js pipes bytes into it. Only started
 # when this session actually has a proxy socket.
 #
 # In the default tls transport the harness's proxied_api_domain is pointed at
@@ -438,7 +438,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         # the single most ordinary variable a corporate environment sets.
         export NODE_EXTRA_CA_CERTS="$tls_dir/cert.pem"
     fi
-    gosu "$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js &
+    gosu "$SANDBOX_USER" node /usr/local/bin/credential-proxy-forwarder.js &
     # Node's own startup (V8 init, module load, then finally binding the
     # listen socket) isn't instant - without this wait, a request that
     # arrives right after this script proceeds (an automated test's

@@ -3507,9 +3507,9 @@ registered_commands() {
 }
 
 @test "the forwarder is baked into the image and started by the entrypoint when a socket is set" {
-    grep -q 'COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js' "$SANDBOX_DIR/Dockerfile"
+    grep -q 'COPY docker/credential-proxy-forwarder.js /usr/local/bin/credential-proxy-forwarder.js' "$SANDBOX_DIR/Dockerfile"
     grep -q 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
-    grep -q 'gosu "\$SANDBOX_USER" node /usr/local/bin/anthropic-proxy-forwarder.js' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'gosu "\$SANDBOX_USER" node /usr/local/bin/credential-proxy-forwarder.js' "$SANDBOX_DIR/entrypoint.sh"
 }
 
 @test "entrypoint unsets empty ANTHROPIC_* vars so a disabled proxy changes nothing" {
@@ -4599,10 +4599,10 @@ EOF
     # for how the model credential is kept out of the container.
     local sec
     sec="$(sed -n '/^## The model API credential/,/^## /p' "$REPO_ROOT/docs/security.md")"
-    grep -q 'dejima-anthropic-proxy' <<< "$sec" \
+    grep -q 'dejima-credential-proxy' <<< "$sec" \
         || { echo "the proxy is not documented under its own heading"; return 1; }
     sec="$(sed -n '/^## The exit-time audit/,/^## /p' "$REPO_ROOT/docs/security.md")"
-    run grep -c 'dejima-anthropic-proxy' <<< "$sec"
+    run grep -c 'dejima-credential-proxy' <<< "$sec"
     [ "$output" -eq 0 ] || { echo "the audit section has absorbed the proxy again"; return 1; }
 }
 
@@ -5408,7 +5408,7 @@ EOF
 }
 
 # bin/dejima names docs/configuration.md in user-facing diagnostics and
-# comments; bin/dejima, bin/dejima-anthropic-proxy and bin/dejima-audit all
+# comments; bin/dejima, bin/dejima-credential-proxy and bin/dejima-audit all
 # name docs/security.md the same way. Before the docs restructure these named
 # the README, which cannot be renamed. Now they name files that can be. None
 # of these are grep'd out of one canonical string the way docs/remote-access.md
@@ -5416,9 +5416,62 @@ EOF
 # docs/*.md reference actually present in these scripts and checks the target
 # exists, rather than hardcoding the two names here too and letting a rename
 # desync the test from the code.
-@test "docs/*.md references in bin/dejima, bin/dejima-anthropic-proxy and bin/dejima-audit resolve to real files" {
+@test "bin/dejima states the whole Anthropic arrangement to the credential proxy" {
+    # The proxy defaults nothing about a provider any more (#171). That is the
+    # point - a default is one provider's arrangement wearing every provider's
+    # name - but it moves the burden onto the caller, and a caller that forgets
+    # a flag does not fail here. It fails at launch, or worse, sends a request
+    # without the header the provider needs and reports the API's rejection.
+    #
+    # Every flag the Anthropic path needs, asserted on the launch itself rather
+    # than anywhere in the file: the arguments have to be on this invocation.
+    local launch
+    launch="$(sed -n '/dejima-credential-proxy" \\/,/^    SANDBOX_ANTHROPIC_PROXY_PID=/p' "$REPO_ROOT/bin/dejima")"
+    [ -n "$launch" ] || { echo "bin/dejima no longer launches the credential proxy"; return 1; }
+    local flag
+    for flag in --socket --credentials --upstream --credential-kind \
+                --oauth-endpoint --oauth-client-id --auth-header \
+                --auth-format --strip-header --ensure-header; do
+        grep -q -- "$flag" <<< "$launch" \
+            || { echo "the launch passes no $flag"; return 1; }
+    done
+    # And the values that carry the security property rather than just the
+    # shape: x-api-key must not travel beside the injected Authorization, and
+    # the OAuth beta must be present or the API rejects the token.
+    grep -q -- '--strip-header x-api-key' <<< "$launch" \
+        || { echo "x-api-key is no longer stripped"; return 1; }
+    grep -q -- 'anthropic-beta=oauth-2025-04-20' <<< "$launch" \
+        || { echo "the OAuth beta is no longer ensured"; return 1; }
+    grep -q -- '--credential-kind anthropic-oauth' <<< "$launch" \
+        || { echo "the launch no longer asks for the refreshing credential kind"; return 1; }
+}
+
+@test "the credential proxy names no provider constant anywhere in its code" {
+    # The whole of #171: a proxy that knows one provider's name has to grow a
+    # branch for every other. The credential KIND is allowed to say anthropic,
+    # since the OAuth file shape genuinely is Anthropic's, and so is the CLI
+    # that names the choices - what must not come back is a hostname, an
+    # endpoint or a header value baked into the request path.
+    local f="$REPO_ROOT/bin/dejima-credential-proxy" body
+    # The whole file, comments excluded. Argument parsing was excluded here at
+    # first, which let a default of --upstream https://api.anthropic.com back
+    # in without failing - and a default is exactly where this regresses,
+    # because it is the form that keeps working for the one provider while
+    # being wrong for every other. Comments stay excluded: this is about what
+    # the code does, not what it is allowed to explain.
+    body="$(grep -v '^[[:space:]]*#' "$f")"
+    local bad
+    for bad in 'api.anthropic.com' 'platform.claude.com' 'oauth-2025-04-20' \
+               '9d1c250a'; do
+        grep -q -- "$bad" <<< "$body" \
+            && { echo "the proxy has learned a provider constant again: $bad"; return 1; }
+    done
+    return 0
+}
+
+@test "docs/*.md references in bin/dejima, bin/dejima-credential-proxy and bin/dejima-audit resolve to real files" {
     local f doc missing=0
-    for f in bin/dejima bin/dejima-anthropic-proxy bin/dejima-audit; do
+    for f in bin/dejima bin/dejima-credential-proxy bin/dejima-audit; do
         for doc in $(grep -ohE 'docs/[a-z-]+\.md' "$REPO_ROOT/$f" | sort -u); do
             if [ ! -f "$REPO_ROOT/$doc" ]; then
                 echo "$f references $doc, which does not exist" >&2
