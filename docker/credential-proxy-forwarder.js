@@ -1,6 +1,6 @@
 // TCP front door for the host-side credential proxy, which listens on a
 // bind-mounted unix socket (no host TCP exposure - see
-// bin/dejima-anthropic-proxy). Deliberately no HTTP awareness in either
+// bin/dejima-credential-proxy). Deliberately no HTTP awareness in either
 // mode: bytes in, bytes out.
 //
 // tls (default): terminates TLS for api.anthropic.com on :443, which
@@ -29,7 +29,7 @@ const port = parseInt(
   10,
 );
 if (!socketPath) {
-  console.error("anthropic-proxy-forwarder: SANDBOX_ANTHROPIC_PROXY_SOCKET not set");
+  console.error("credential-proxy-forwarder: SANDBOX_ANTHROPIC_PROXY_SOCKET not set");
   process.exit(1);
 }
 
@@ -47,7 +47,7 @@ if (transport === "tls") {
   const keyPath = process.env.SANDBOX_ANTHROPIC_TLS_KEY;
   if (!certPath || !keyPath) {
     console.error(
-      "anthropic-proxy-forwarder: SANDBOX_ANTHROPIC_TLS_CERT/SANDBOX_ANTHROPIC_TLS_KEY not set",
+      "credential-proxy-forwarder: SANDBOX_ANTHROPIC_TLS_CERT/SANDBOX_ANTHROPIC_TLS_KEY not set",
     );
     process.exit(1);
   }

@@ -571,7 +571,7 @@ session, where the credential deliberately never goes.
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
   inside the container to that file. `dejima` starts a host-side proxy
-  (`bin/dejima-anthropic-proxy`) on a per-session unix socket and mounts a
+  (`bin/dejima-credential-proxy`) on a per-session unix socket and mounts a
   fake credential in place of the real one - the secrets are placeholders,
   while `scopes`/`subscriptionType`/`rateLimitTier`/`clientId` are copied so
   the session's UI stays accurate. Its expiry is a year out rather than
@@ -579,7 +579,7 @@ session, where the credential deliberately never goes.
   refresh token that isn't real, logging the session out. Inside the
   container,
   `entrypoint.sh` points `api.anthropic.com` at a loopback TLS terminator
-  (`anthropic-proxy-forwarder.js`) whose certificate is generated at startup
+  (`credential-proxy-forwarder.js`) whose certificate is generated at startup
   and trusted only there, and which pipes raw bytes into the proxy's socket.
   The proxy injects the real access token per request and owns OAuth refresh
   - rotated tokens are written back to the real host file atomically, so
@@ -588,7 +588,13 @@ session, where the credential deliberately never goes.
   `ANTHROPIC_AUTH_TOKEN`, nothing marking the session as unusual. The proxy
   forwards the client's header block verbatim - same names, casing, order and
   repeats, and no `Accept-Encoding` it didn't send - changing only
-  `Authorization`, and `anthropic-beta` if the OAuth value isn't there. Left
+  `Authorization`, and `anthropic-beta` if the OAuth value isn't there.
+  Neither of those is a name the proxy holds: which header carries the
+  credential, what shape it takes, what must not travel beside it and which
+  comma-list value has to be present are all arguments, and `bin/dejima`
+  supplies the Anthropic ones (#171). The credential kind is an argument too -
+  a refreshing OAuth file, or a static key that is read and sent - so a
+  provider that cannot be refreshed is not a branch here. Left
   alone, Python's `http.client` would rewrite all of that into its own style
   and move the fingerprint from the client to the wire. It cannot disguise
   that the connection is CPython's `ssl` rather than Node: the TLS handshake

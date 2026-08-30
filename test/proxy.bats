@@ -7,7 +7,7 @@ PLACEHOLDER="sandbox-credential-proxy-placeholder"
 
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
-    PROXY="$REPO_ROOT/bin/dejima-anthropic-proxy"
+    PROXY="$REPO_ROOT/bin/dejima-credential-proxy"
     TD="$(mktemp -d)"
     SOCK="$TD/proxy.sock"
     CREDS="$TD/credentials.json"
@@ -27,10 +27,21 @@ EOF
     chmod 600 "$CREDS"
 }
 
+# The Anthropic arrangement, spelled the way bin/dejima spells it. The proxy
+# itself now defaults none of this (#171), so a test that omitted a flag would
+# be exercising a configuration no launch produces - which is why these are
+# here in full rather than left to defaults, and why static.bats pins that
+# bin/dejima still passes the same set.
 start_proxy() {
     "$PROXY" --socket "$SOCK" --credentials "$CREDS" \
         --upstream "http://127.0.0.1:$PORT" \
-        --oauth-endpoint "http://127.0.0.1:$PORT/v1/oauth/token" "$@" 2>"$TD/stderr" &
+        --credential-kind anthropic-oauth \
+        --oauth-endpoint "http://127.0.0.1:$PORT/v1/oauth/token" \
+        --oauth-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+        --auth-header Authorization \
+        --auth-format "Bearer {token}" \
+        --strip-header x-api-key \
+        --ensure-header "anthropic-beta=oauth-2025-04-20" "$@" 2>"$TD/stderr" &
     PROXY_PID=$!
     for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
     [ -S "$SOCK" ]
@@ -268,8 +279,13 @@ teardown() {
 @test "an already-expired refresh token is fatal at startup, before the socket exists" {
     write_creds 7200
     sed -i 's/"refreshTokenExpiresAt":[0-9]*/"refreshTokenExpiresAt":1000/' "$CREDS"
-    run "$PROXY" --socket "$SOCK" --credentials "$CREDS" --upstream "http://127.0.0.1:$PORT"
-    [ "$status" -ne 0 ]
+    run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$CREDS" \
+        --upstream "http://127.0.0.1:$PORT" --credential-kind anthropic-oauth \
+        --oauth-endpoint "http://127.0.0.1:$PORT/v1/oauth/token" \
+        --oauth-client-id probe
+    # 1, not just nonzero: an argument mistake exits 2, and this test would
+    # otherwise pass on one while proving nothing about the expiry check.
+    [ "$status" -eq 1 ]
     [[ "$output" == *"log in"* ]]
     [ ! -S "$SOCK" ]
 }
@@ -278,7 +294,7 @@ teardown() {
     start_proxy
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
         SANDBOX_ANTHROPIC_TRANSPORT=loopback \
-        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" &
+        node "$REPO_ROOT/docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
     for _ in $(seq 1 50); do
@@ -347,7 +363,7 @@ start_forwarder() {  # start_forwarder <transport> <port>; extra env passes thro
     SANDBOX_ANTHROPIC_PROXY_PORT="$2" \
     SANDBOX_ANTHROPIC_TLS_CERT="$TD/cert.pem" \
     SANDBOX_ANTHROPIC_TLS_KEY="$TD/key.pem" \
-        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js" 2>"$TD/fwd-stderr" &
+        node "$REPO_ROOT/docker/credential-proxy-forwarder.js" 2>"$TD/fwd-stderr" &
     FWD_PID=$!
     for _ in $(seq 1 50); do
         (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null && return 0
@@ -422,7 +438,7 @@ make_cert() {
     run env -u SANDBOX_ANTHROPIC_TLS_CERT -u SANDBOX_ANTHROPIC_TLS_KEY \
         SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
         SANDBOX_ANTHROPIC_PROXY_PORT=18398 \
-        node "$REPO_ROOT/docker/anthropic-proxy-forwarder.js"
+        node "$REPO_ROOT/docker/credential-proxy-forwarder.js"
     [ "$status" -ne 0 ]
     [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
 }
@@ -463,4 +479,154 @@ make_cert() {
         "http://localhost/v1/messages"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$output" = "200" ] || { echo "a 2MiB body was refused with $output"; return 1; }
+}
+
+# --- provider-generic behaviour (#171) ---------------------------------------
+#
+# The proxy no longer knows a provider's name: upstream, credential kind, auth
+# header and shape, what to strip and what to ensure are all arguments. These
+# exercise the second kind - a static key, which is what an OpenAI-compatible
+# hosted provider has - and the parts of the shape a provider can move.
+
+# A static-key proxy against the same fake upstream. $1.. are extra flags.
+# Startup refusals run the proxy in the FOREGROUND and expect it to exit, so
+# every one of them is bounded by `timeout`. Without it, a check that stopped
+# refusing does not fail the test - the proxy starts, serves forever, and the
+# test hangs until the whole suite is killed, which reports as no result rather
+# than as a wrong one. Found by mutating two of these and watching them time
+# out instead of going red.
+start_static() {
+    printf 'sk-test-static-key\n' > "$TD/key"
+    chmod 600 "$TD/key"
+    "$PROXY" --socket "$SOCK" --credentials "$TD/key" \
+        --upstream "http://127.0.0.1:$PORT" \
+        --credential-kind static "$@" 2>"$TD/stderr" &
+    PROXY_PID=$!
+    for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
+    [ -S "$SOCK" ]
+}
+
+@test "a static key is injected, and the placeholder never reaches upstream" {
+    start_static
+    run pcurl -d '{"hello":1}' http://proxy/v1/chat/completions
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer sk-test-static-key" ]
+    [[ "$output" != *"$PLACEHOLDER"* ]]
+    [ "$(jq -r '.body' <<<"$output")" = '{"hello":1}' ]
+}
+
+@test "a static key file's trailing newline does not reach the header" {
+    # Written by an editor or a shell redirection as often as by a tool. A
+    # newline in a header value is not cosmetic: it would be rejected or split
+    # the block.
+    start_static
+    run pcurl -d '{}' http://proxy/v1/chat/completions
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer sk-test-static-key" ]
+}
+
+@test "a static credential is never refreshed, so a 401 is reported once" {
+    # Refreshing needs somewhere to refresh against, and a static key has
+    # none. Retrying would send the same bytes and turn one rejection into
+    # two, which reads as a flapping upstream rather than a wrong key.
+    # The same route the OAuth retry test uses: 401 on the first call, echo
+    # after. An OAuth credential refreshes and the second call succeeds; a
+    # static one has nowhere to refresh against, so the 401 is what the
+    # session sees.
+    start_static
+    run pcurl -o /dev/null -w '%{http_code}' -d '{}' http://proxy/echo-401-once
+    [ "$output" = "401" ]
+    # And no refresh was attempted anywhere, which the fake counts for us.
+    [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "0" ]
+}
+
+@test "the auth header and its format are the provider's, not Bearer by fiat" {
+    # A provider that wants its key in a header of its own, unprefixed, needs
+    # no code here. Asserted together because the pair is the shape.
+    start_static --auth-header x-goog-api-key --auth-format '{token}'
+    run pcurl -d '{}' http://proxy/v1/chat/completions
+    [ "$(jq -r '.headers["x-goog-api-key"]' <<<"$output")" = "sk-test-static-key" ]
+    # And the client's own Authorization placeholder is left alone rather than
+    # silently rewritten: it is not this provider's auth header. Stripping it
+    # is a separate declaration, which the next test covers.
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer $PLACEHOLDER" ]
+}
+
+@test "a header named in strip-header does not travel beside the injected one" {
+    start_static --auth-header x-goog-api-key --auth-format '{token}' \
+        --strip-header authorization
+    run pcurl -d '{}' http://proxy/v1/chat/completions
+    [ "$(jq -r '.headers.authorization // "absent"' <<<"$output")" = "absent" ]
+    [ "$(jq -r '.headers["x-goog-api-key"]' <<<"$output")" = "sk-test-static-key" ]
+}
+
+@test "the auth header cannot be stripped out from under itself" {
+    # Naming it in both places is a provider's mistake, and the safe reading
+    # is that the credential still goes: dropping it would send an
+    # unauthenticated request and report the provider's 401 as the fault.
+    #
+    # Position as well as presence, because presence alone does not
+    # distinguish the two paths. A stripped-then-re-added header arrives at
+    # the END of the block from the supplied-names pass; a replaced one keeps
+    # the slot the client gave it. Both send the credential, and only one of
+    # them leaves the request looking like the client wrote it - which is the
+    # property the whole header-emission dance exists for.
+    start_static --strip-header authorization
+    run pcurl -H "Content-Type: application/json" -H "X-Stainless-Lang: js" \
+        -d '{}' http://proxy/v1/chat/completions
+    [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer sk-test-static-key" ]
+    local auth_at type_at
+    auth_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("authorization")' <<<"$output")"
+    type_at="$(jq -r '[.header_lines[][0] | ascii_downcase] | index("content-type")' <<<"$output")"
+    [ "$auth_at" -lt "$type_at" ] \
+        || { echo "Authorization moved to position $auth_at, after Content-Type at $type_at"; return 1; }
+}
+
+@test "no ensure-header means none is invented" {
+    # anthropic-beta is one provider's requirement. A proxy that added it
+    # anyway would put an Anthropic tell on every other provider's wire.
+    start_static
+    run pcurl -d '{}' http://proxy/v1/chat/completions
+    [ "$(jq -r '.headers["anthropic-beta"] // "absent"' <<<"$output")" = "absent" ]
+}
+
+@test "an unusable static key is fatal at startup, before the socket exists" {
+    : > "$TD/key"
+    run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$TD/key" \
+        --upstream "http://127.0.0.1:$PORT" --credential-kind static
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"empty"* ]]
+    [ ! -S "$SOCK" ]
+}
+
+@test "a key carrying a control character is refused rather than sanitised" {
+    # A key that needs sanitising was pasted wrong. Trimming it would send
+    # mangled bytes and report the provider's rejection as the fault.
+    printf 'sk-good\x1bbad\n' > "$TD/key"
+    run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$TD/key" \
+        --upstream "http://127.0.0.1:$PORT" --credential-kind static
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"control character"* ]]
+    [ ! -S "$SOCK" ]
+}
+
+@test "an auth-format with no token placeholder is refused" {
+    # It would start, answer requests, and send every one of them without a
+    # credential. Refusing at parse time is the difference between a
+    # configuration error and a silently unauthenticated session.
+    printf 'k\n' > "$TD/key"
+    run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$TD/key" \
+        --upstream "http://127.0.0.1:$PORT" --credential-kind static \
+        --auth-format 'Bearer'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"{token}"* ]]
+    [ ! -S "$SOCK" ]
+}
+
+@test "anthropic-oauth without its endpoint or client id is refused" {
+    write_creds 7200
+    run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$CREDS" \
+        --upstream "http://127.0.0.1:$PORT" --credential-kind anthropic-oauth
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"oauth-endpoint"* ]]
+    [ ! -S "$SOCK" ]
 }
