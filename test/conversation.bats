@@ -106,6 +106,23 @@ await_shipped() {
     return 1
 }
 
+# Blocks until the shipper has finished a poll and is asleep between polls.
+# The two SIGTERM tests below need exactly that state - the trap installed, one
+# scan done - and both used to state it by sleeping for a second. That is a
+# statement about the machine rather than about the shipper: under load the
+# startup that precedes the trap takes longer than the sleep, the TERM lands
+# before there is a trap to catch it, and the process dies flushing nothing.
+# The nap is a child `sleep` of the shipper, which makes the state observable.
+await_napping() {
+    local i
+    for i in $(seq 1 200); do
+        pgrep -P "$SHIP_PID" -x sleep >/dev/null 2>&1 && return 0
+        sleep 0.05
+    done
+    echo "the shipper never reached its first nap" >&2
+    return 1
+}
+
 @test "a line is shipped to Loki while the session runs" {
     start_loki
     write_config
@@ -156,10 +173,11 @@ await_shipped() {
     write_config
     mkdir -p "$(slug_dir)"
     start_ship
-    # Long enough for one poll to read the line into the batch, short enough
-    # that the 2s batch interval has not flushed it on its own.
+    # Written before the first poll, so the poll reads it into the batch; the
+    # kill then lands while the shipper is asleep with it still in there,
+    # because the batch interval has not elapsed since it started.
     say "already batched" >> "$(slug_dir)/s1.jsonl"
-    sleep 1
+    await_napping
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true
     SHIP_PID=""
@@ -172,10 +190,11 @@ await_shipped() {
     write_config
     mkdir -p "$(slug_dir)"
     start_ship
-    # Written and killed inside one poll interval, so nothing has read it yet:
-    # only the trap's own rescan can find it. A final_flush that flushed the
-    # batch without rescanning would pass the test above and fail this one.
-    sleep 1
+    # Written after a poll has already run and killed before the next one, so
+    # nothing has read it yet: only the trap's own rescan can find it. A
+    # final_flush that flushed the batch without rescanning would pass the test
+    # above and fail this one.
+    await_napping
     say "the final answer" >> "$(slug_dir)/s1.jsonl"
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true

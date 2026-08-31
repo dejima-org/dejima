@@ -28,29 +28,46 @@ MAX_MANIFEST_LINES=200
 # filling this on first use meant filling it again in every `$(...)` that
 # reached it, which was a fork apiece and hundreds of them per launch.
 _PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-provider_root() {
+# Assigns rather than prints, so a caller reaching it in a loop does not pay a
+# `$( )` fork per call. provider_root below is the printing form for everyone
+# who wants a value in a substitution anyway.
+_provider_root_into() {
     if [ -n "${DEJIMA_PROVIDER_ROOT:-}" ]; then
-        printf '%s' "$DEJIMA_PROVIDER_ROOT"
+        printf -v "$1" '%s' "$DEJIMA_PROVIDER_ROOT"
         return 0
     fi
     # Only the repo path is cached. The test hook is re-read every call, so a
     # test that repoints it mid-process still gets the directory it just set.
     [ -n "$_PROVIDER_ROOT_CACHE" ] || _PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-    printf '%s' "$_PROVIDER_ROOT_CACHE"
+    printf -v "$1" '%s' "$_PROVIDER_ROOT_CACHE"
 }
 
-_provider_axis_dir() {
-    case "$1" in
-        forge)    printf 'forges' ;;
-        workflow) printf 'workflows' ;;
-        harness)  printf 'harnesses' ;;
+provider_root() {
+    local _root
+    _provider_root_into _root
+    printf '%s' "$_root"
+}
+
+# Same assign-instead-of-print split as _provider_root_into, for the same
+# reason: provider_dir is reached once per manifest read.
+_provider_axis_dir_into() {
+    case "$2" in
+        forge)    printf -v "$1" 'forges' ;;
+        workflow) printf -v "$1" 'workflows' ;;
+        harness)  printf -v "$1" 'harnesses' ;;
         # Not an axis in the select-one sense the other three are: a launch
         # enables zero or more tools, and none is the default. It is here
         # because everything else about it is the same - a manifest that is
         # data, validated by the same schema machinery, never sourced.
-        tool)     printf 'tools' ;;
-        *) echo "unknown provider axis: $1" >&2; return 1 ;;
+        tool)     printf -v "$1" 'tools' ;;
+        *) echo "unknown provider axis: $2" >&2; return 1 ;;
     esac
+}
+
+_provider_axis_dir() {
+    local _sub
+    _provider_axis_dir_into _sub "$1" || return 1
+    printf '%s' "$_sub"
 }
 
 _provider_manifest_name() {
@@ -72,6 +89,18 @@ valid_provider_name() {
     [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]
 }
 
+# `readlink -m` answers memoized per path, because the containment check below
+# resolves the same axis directory once per provider and provider_dir is
+# reached from inside each `$( manifest_get ... )`. What is cached is one
+# path's resolution, not a verdict: every caller still runs the containment
+# comparison and the -d check itself.
+declare -gA _PROVIDER_REAL_CACHE=()
+_provider_resolve_into() {
+    [ -n "${_PROVIDER_REAL_CACHE[$2]+set}" ] \
+        || _PROVIDER_REAL_CACHE["$2"]="$(readlink -m "$2")"
+    printf -v "$1" '%s' "${_PROVIDER_REAL_CACHE[$2]}"
+}
+
 # Resolved once per root+axis+name. The two readlinks are the containment
 # check, and it is called on every manifest read; keying the cache on the
 # resolved root rather than just the name is what keeps a test that repoints
@@ -79,19 +108,19 @@ valid_provider_name() {
 declare -gA _PROVIDER_DIR_CACHE=()
 provider_dir() {
     local axis="$1" name="$2" sub root axis_root dir_real id
-    sub="$(_provider_axis_dir "$axis")" || return 1
+    _provider_axis_dir_into sub "$axis" || return 1
     if ! valid_provider_name "$name"; then
         echo "invalid $axis name: $name" >&2
         return 1
     fi
-    root="$(provider_root)"
+    _provider_root_into root
     id="$root:$axis:$name"
     if [ -n "${_PROVIDER_DIR_CACHE[$id]+set}" ]; then
         printf '%s' "${_PROVIDER_DIR_CACHE[$id]}"
         return 0
     fi
-    axis_root="$(readlink -m "$root/$sub")"
-    dir_real="$(readlink -m "$root/$sub/$name")"
+    _provider_resolve_into axis_root "$root/$sub"
+    _provider_resolve_into dir_real "$root/$sub/$name"
     case "$dir_real/" in
         "$axis_root"/*) ;;
         *)  echo "refusing $axis '$name': it resolves outside $axis_root" >&2
@@ -122,15 +151,26 @@ _config_extra_type_valid() {
     esac
 }
 
-provider_list() {
-    local axis="$1" sub entry name
-    sub="$(_provider_axis_dir "$axis")" || return 1
-    for entry in "$(provider_root)/$sub"/*/; do
+# Fills _PROVIDER_LIST_OUT rather than printing, so the warm-up at the bottom
+# of this file can walk all three axes without a `$( )` fork apiece.
+declare -ga _PROVIDER_LIST_OUT=()
+_provider_list_into() {
+    local axis="$1" sub root entry name
+    _PROVIDER_LIST_OUT=()
+    _provider_axis_dir_into sub "$axis" || return 1
+    _provider_root_into root
+    for entry in "$root/$sub"/*/; do
         [ -d "$entry" ] || continue
-        name="$(basename "$entry")"
+        name="${entry%/}"
+        name="${name##*/}"
         valid_provider_name "$name" || continue
-        printf '%s\n' "$name"
+        _PROVIDER_LIST_OUT+=("$name")
     done
+}
+
+provider_list() {
+    _provider_list_into "$1" || return 1
+    [ "${#_PROVIDER_LIST_OUT[@]}" -eq 0 ] || printf '%s\n' "${_PROVIDER_LIST_OUT[@]}"
 }
 
 # Manifest schema. Same three-column shape as the config table: key, type,
@@ -513,12 +553,45 @@ manifest_validate() {
 #
 # Failures are ignored: a missing or unreadable directory is not this loop's
 # to report, and provider_dir refuses it again when something asks.
-for _axis in forge workflow harness; do
-    for _name in $(provider_list "$_axis" 2>/dev/null); do
-        provider_dir "$_axis" "$_name" >/dev/null 2>&1 || true
+#
+# One `readlink -m` for every path rather than two per provider. It takes
+# several operands and prints one resolved path per line, so the warm-up costs
+# a single process instead of one per directory - which is most of what
+# sourcing this file costs, and is paid by every `bin/dejima` invocation and
+# every test that drives the library in a fresh shell. The batch only fills
+# the resolution cache; provider_dir still does its own containment check
+# against what it finds there.
+_provider_warm_dirs() {
+    local axis sub root name path i=0
+    local -a axes=() names=() paths=() lines=()
+    _provider_root_into root
+    for axis in forge workflow harness; do
+        _provider_axis_dir_into sub "$axis" || continue
+        paths+=("$root/$sub")
+        _provider_list_into "$axis" || continue
+        for name in "${_PROVIDER_LIST_OUT[@]}"; do
+            axes+=("$axis")
+            names+=("$name")
+            paths+=("$root/$sub/$name")
+        done
     done
-done
-unset _axis _name
+    mapfile -t lines < <(readlink -m -- "${paths[@]}" 2>/dev/null)
+    # A path containing a newline would desync the one-line-per-operand
+    # pairing. Nothing shipped can produce one - names are validated and the
+    # root comes from `pwd` - but a mismatched count means the pairing cannot
+    # be trusted, so the batch is dropped rather than cached wrong. provider_dir
+    # then resolves each path itself, exactly as it would have.
+    if [ "${#lines[@]}" -eq "${#paths[@]}" ]; then
+        for path in "${paths[@]}"; do
+            _PROVIDER_REAL_CACHE["$path"]="${lines[$i]}"
+            i=$((i + 1))
+        done
+    fi
+    for i in "${!names[@]}"; do
+        provider_dir "${axes[$i]}" "${names[$i]}" >/dev/null 2>&1 || true
+    done
+}
+_provider_warm_dirs
 
 _manifest_parse() {
     local axis="$1" name="$2" dir="$3" id="$4" file line key value type line_count

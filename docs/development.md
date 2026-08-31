@@ -151,10 +151,22 @@ attached: read what `gitea-pr` printed.
 ### Running the tests
 
 ```sh
-bats test/               # everything
-bats test/audit.bats     # one suite - the suites are independent, see .dejima.md
+bash test/run-confined.sh             # every confined suite - the pull-request gate
+bash test/run-confined.sh --changed   # only the suites your diff calls for
+bats test/audit.bats                  # one suite - the suites are independent
 SKIP_BUILD=1 bats test/runtime.bats   # the one suite needing Docker; reuse the current image
 ```
+
+`test/run-confined.sh` runs the files concurrently and, within each file, the
+tests too, via bats' own `--jobs`. Adding `--jobs $(nproc)
+--no-parallelize-across-files` to a bare `bats` invocation gets the same effect
+for a single suite; both halves of that are needed, because bats otherwise
+requires GNU parallel for `--jobs` and only the across-files half actually does.
+
+`--changed` is for iterating. It maps the diff to suites through `suites_for()`
+in that script, prints which lane it ran, and says plainly that it is not the
+gate - a change is tested when the whole set has run, not when the selected
+subset has.
 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.

@@ -246,6 +246,28 @@ def await_reclaim(timeout=10.0):
     return reclaimed()
 
 
+def raw_restored():
+    """True once the resumed client has put the terminal back into raw mode."""
+    flags = lflag()
+    return not (flags & termios.ICANON) and not (flags & termios.ECHO)
+
+
+def await_raw(timeout=15.0):
+    """Wait for that, rather than reading the flags at a fixed moment after fg.
+
+    `fg` returns as soon as the job is continued; the client sets raw mode some
+    scheduling later. Sampling the flags right after fg was timing the machine,
+    and on a loaded one it read the shell's own canonical mode and reported it
+    as a failure to restore - the same shape as the reclaim wait above.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if raw_restored():
+            return True
+        pump(0.05)
+    return raw_restored()
+
+
 def received():
     try:
         with open(RECEIVED, "rb") as fh:
@@ -301,12 +323,11 @@ try:
               expect("SHELL-ALIVE-%d" % cycle, 5.0))
         forget()
         send("fg\n")
-        expect("CONTAINER-REDRAW", 5.0)
+        restored = await_raw()
         flags = lflag()
-        check("cycle%d-raw-mode-restored" % cycle,
-              not (flags & termios.ICANON) and not (flags & termios.ECHO),
+        check("cycle%d-raw-mode-restored" % cycle, restored,
               "ICANON=%s ECHO=%s" % (bool(flags & termios.ICANON), bool(flags & termios.ECHO)))
-        check("cycle%d-redraw-poked" % cycle, "CONTAINER-REDRAW" in "".join(seen))
+        check("cycle%d-redraw-poked" % cycle, expect("CONTAINER-REDRAW", 15.0))
         check("cycle%d-session-alive" % cycle, "LAUNCHER-DONE" not in "".join(seen))
 
     before = received()
