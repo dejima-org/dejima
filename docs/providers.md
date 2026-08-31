@@ -291,6 +291,28 @@ Where it matters below, "model provider" means this axis.
 | `keys` | `?list:keyspec` | (empty) | This provider's own `[provider.<name>]` config schema, exactly as a forge's works. Every provider is expected to declare `credential_file`. |
 | `requires` | `?list:identifier` | (empty) | Which of those must be set for a launch to proceed. |
 
+### What pairs with what
+
+Compatibility is not a list anyone maintains: it is the provider's `api_style`
+against the harness's `api_styles`, checked at launch. This table is what those
+declarations currently work out to.
+
+| Provider | `claude-code` | `cline` | Credential | You configure |
+| --- | --- | --- | --- | --- |
+| `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
+| `openrouter` | no | yes | a static key, held on the host | `[provider.openrouter] credential_file` |
+| `self-hosted` | no | yes | none, and so no proxy at all | `[provider.self-hosted] base_url` |
+
+`claude-code` speaks Anthropic's Messages API and nothing else, so the two
+OpenAI-compatible providers are refused with it - at launch, naming both sides,
+rather than by sending well-formed requests in a shape the endpoint cannot
+parse. `cline` has a client for each dialect, which is what makes it the
+provider-agnostic one.
+
+Adding a provider does not change this table by hand: a new directory whose
+`api_style` is one a harness already declares works with that harness the day
+it lands.
+
 **Which provider a launch uses is the harness's setting**, `[harness.<name>]
 provider`, overridable for one launch with `--provider`. Per harness because
 that is how it is used: one harness against Anthropic and another against

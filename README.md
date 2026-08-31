@@ -305,19 +305,31 @@ There is no credential to hold or expire; what that setup needs instead is for
 the endpoint to be reachable from inside the container, which is an allowlist
 question rather than a sign-in one.
 
-## Provider axes: forge, workflow, harness
+## Provider axes: forge, workflow, harness, model provider
 
-The forge integration, the push/PR workflow, and the agent harness aren't
-hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
-`harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
-`[core] harness`.
+The forge integration, the push/PR workflow, the agent harness and the model
+API aren't hardcoded into dejima: each is a directory under `forges/`,
+`workflows/`, `harnesses/` or `providers/`, selected independently by
+`[core] forge`, `[core] workflow`, `[core] harness` and
+`[harness.<name>] provider`.
 
 - **Forges:** `none`, `gitea`, `github`
 - **Workflows:** `local-only`, `branch-push`, `worktree-pr`
 - **Harnesses:** `claude-code`, `cline`
+- **Model providers:** `anthropic`, `openrouter`, `self-hosted`
+
+Which of those last two pair up is the provider's API dialect against the
+harness's, checked at launch rather than maintained as a list:
+
+| Provider | `claude-code` | `cline` | Credential |
+| --- | --- | --- | --- |
+| `anthropic` | yes | yes | OAuth, held on the host |
+| `openrouter` | no | yes | a static key, held on the host |
+| `self-hosted` | no | yes | none, and so no proxy at all |
 
 **→ [docs/providers.md](docs/providers.md)** - the manifest contract, key by
-key, and the shipped providers as worked examples.
+key, what each pairing needs configured, and the shipped providers as worked
+examples.
 
 ## Using this responsibly
 

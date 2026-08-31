@@ -1512,3 +1512,48 @@ assert_remedy_forges_exist() {
         bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
     [ "$status" -ne 0 ] || { echo "an unknown api_style validated"; return 1; }
 }
+
+@test "the provider/harness matrix in the docs agrees with the manifests" {
+    # A compatibility table is derived data: every cell is the provider's
+    # api_style against the harness's api_styles. Written by hand it goes stale
+    # the first time a provider is added, and a stale one is worse than none -
+    # a reader trusts it and dejima refuses the launch.
+    #
+    # So it is recomputed here and compared cell by cell, rather than spot
+    # -checked. A new provider or harness that nobody adds a row for fails
+    # this, which is the point.
+    # Both copies, because the README carries a shorter one and two copies of
+    # derived data is two things to drift. Checked against the manifests
+    # rather than against each other, so neither can be right by agreeing with
+    # a wrong one.
+    local doc rows
+    for doc in "$REPO_ROOT/docs/providers.md" "$REPO_ROOT/README.md"; do
+    rows="$(sed -n '/^| Provider | `claude-code` | `cline` |/,/^$/p' "$doc")"
+    [ -n "$rows" ] || { echo "the matrix is gone from $doc, or its header changed"; return 1; }
+
+    local p h styles want got row
+    for p in $(lib provider_list provider); do
+        row="$(grep -E "^\| \`$p\` \|" <<< "$rows")" \
+            || { echo "no row for provider '$p'"; return 1; }
+        local i=0
+        for h in claude-code cline; do
+            i=$((i + 1))
+            styles="$(lib manifest_get harness "$h" api_styles)"
+            if [[ " $styles " == *" $(lib manifest_get provider "$p" api_style) "* ]]; then
+                want=yes
+            else
+                want=no
+            fi
+            got="$(awk -F'|' -v n=$((i + 2)) '{gsub(/^ +| +$/,"",$n); print $n}' <<< "$row")"
+            [ "$got" = "$want" ] \
+                || { echo "$p x $h: the table says '$got', the manifests say '$want'"; return 1; }
+        done
+    done
+
+    # And every shipped harness has a column, or the table is answering for
+    # fewer pairs than exist.
+    for h in $(lib provider_list harness); do
+        grep -q "\`$h\`" <<< "$rows" || { echo "no column for harness '$h' in $doc"; return 1; }
+    done
+    done
+}
