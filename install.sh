@@ -2,9 +2,9 @@
 # Idempotent installer for dejima. Registers the selected harness's guard
 # hooks wherever that harness reads them from, and puts
 # bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
-# bin/dejima-audit and the opt-in remote-access scripts on PATH. Safe to
-# re-run - every step is a no-op if already done, and every change is
-# printed as it happens.
+# bin/dejima-audit, bin/dejima-share and the opt-in remote-access scripts on
+# PATH. Safe to re-run - every step is a no-op if already done, and every
+# change is printed as it happens.
 #
 # It never enables anything: the remote-access scripts do nothing without
 # [remote-access] enabled = on in ~/.config/dejima/config, and the user units
@@ -76,6 +76,10 @@ link_bin dejima-project
 # operator to run `dejima-audit ack`, which is only true once it is on PATH.
 link_bin dejima-audit
 link_bin dejima-epitaph
+# ~/shared is one directory per project now, so "where do I put a file for the
+# next session" has an answer only this can give - and the launch notice about
+# files left over from the old layout tells the operator to run it.
+link_bin dejima-share
 link_bin dejima-update-check
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
