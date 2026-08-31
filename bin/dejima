@@ -622,11 +622,18 @@ SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
 # operator names in [mounts] readonly, which is computed at run time. Listed
 # whatever [epitaph] enabled says: turning the feature off stops new
 # epitaphs being written, it does not empty the store.
+#
+# The per-project share root is here because the ~/shared mount is only per
+# project while nothing else hands the whole of it over. A session's own share
+# arrives at ~/shared without going through this list; naming the root that
+# holds every project's would put the pile back, which is the thing the split
+# removed.
 GUARDED_STORES=()
 _guarded_stores() {
     [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
     GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
-                    "$(config_get epitaph dir)")
+                    "$(config_get epitaph dir)" \
+                    "$(share_projects_root "$(config_get core share_dir)")")
 }
 
 # Refuse $2 if it overlaps any of the paths in $3.., in either direction: an
@@ -644,8 +651,9 @@ _refuse_guarded_mount() {
         _paths_overlap "$real" "$guarded_real" || continue
         echo "Refusing $kind: $path" >&2
         echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
-        echo "Even read-only, that hands the session every project's approvals or the" >&2
-        echo "record of what earlier sessions were caught doing." >&2
+        echo "Even read-only, that hands the session every project's approvals, the" >&2
+        echo "record of what earlier sessions were caught doing, or every project's" >&2
+        echo "handoff files." >&2
         exit 1
     done
 }
@@ -685,8 +693,9 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
             echo "Refusing $(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path"): $path" >&2
             echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
             echo "A writable mount there would let a session approve its own domains and" >&2
-            echo "dependencies, delete the audit findings it is named in, or plant code" >&2
-            echo "that runs unsandboxed on the host the next time you start an agent." >&2
+            echo "dependencies, delete the audit findings it is named in, read and rewrite" >&2
+            echo "every project's handoff files, or plant code that runs unsandboxed on the" >&2
+            echo "host the next time you start an agent." >&2
             exit 1
         done
         # A path in both lists would be resolved by whichever mount Docker
@@ -974,8 +983,34 @@ fi
 # touching the actual project checkout. Persists across sessions (it's a
 # real host directory, not a container volume) since the point is sharing
 # things with the host, not just scratch space for one run.
-SANDBOX_SHARE_DIR="$(config_get core share_dir)"
+#
+# One directory per project, not one for the host. `[core] share_dir` was
+# mounted whole, so every session saw the handoff files of every session
+# before it and of every session running beside it, across projects - the same
+# boundary ~/.claude is already sliced per project to hold. What the container
+# sees is still ~/shared, so nothing an agent has been told changes; what it
+# cannot see any more is another project's.
+SANDBOX_SHARE_ROOT="$(config_get core share_dir)"
+SANDBOX_SHARE_DIR="$(share_dir_for "$SANDBOX_SHARE_ROOT" "$WORKSPACE_DIR")"
 mkdir -p "$SANDBOX_SHARE_DIR"
+
+# Files an operator left in share_dir before the split are still there and are
+# no longer mounted anywhere. Said every launch while that is true, because
+# the alternative is a file that was handed to a session yesterday silently
+# not arriving today.
+share_loose="$(find "$SANDBOX_SHARE_ROOT" -mindepth 1 -maxdepth 1 \
+    ! -name projects -printf '%f\n' 2>/dev/null | sort)" || true
+if [ -n "$share_loose" ]; then
+    echo "Note: $SANDBOX_SHARE_ROOT holds entries no session can see any more," >&2
+    echo "      because ~/shared is now this project's own subdirectory of it:" >&2
+    while IFS= read -r _entry; do
+        [ -n "$_entry" ] || continue
+        printf '        %s\n' "$_entry" >&2
+    done <<< "$share_loose"
+    echo "      Move them into a project's share with 'dejima-share adopt <path>'," >&2
+    echo "      or delete them. 'dejima-share list' shows what each project holds." >&2
+fi
+unset share_loose _entry
 
 # ~/.claude is not mounted as a whole (see the mount inventory in
 # docker-compose.yml) - every path that crosses into the container is named

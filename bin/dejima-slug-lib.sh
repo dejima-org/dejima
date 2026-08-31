@@ -1,18 +1,32 @@
-# Shared library: the ~/.claude/projects slug scheme, and which slugs belong
-# to a given workspace. Sourced by bin/dejima (to decide what to mount) and
-# bin/dejima-epitaph (to decide whose transcripts to keep). Not on PATH and
-# not executable.
+# Shared library: the ~/.claude/projects slug scheme, which slugs belong to a
+# given workspace, and the share_dir layout keyed by that slug. Sourced by
+# bin/dejima (to decide what to mount), bin/dejima-epitaph (to decide whose
+# transcripts to keep) and bin/dejima-share. Not on PATH and not executable.
 #
 # One definition, because the callers must not disagree. A slug the mount
 # exposes but a caller treats as foreign is a session whose work is silently
 # left behind; a slug a caller treats as the workspace's own but the mount
-# does not expose is a hole that nothing reports.
+# does not expose is a hole that nothing reports. The share layout is here for
+# the same reason: bin/dejima mounts a directory and dejima-share tells an
+# operator where to put files in it, and those two naming different places
+# would be an operator dropping a file where nothing will ever read it.
 
 # Claude Code's own project key: the absolute cwd with every non-alphanumeric
 # replaced by a dash. Matches docker/log-shipper.sh's Loki key and
 # dejima-project-lib.sh's project_slug, which cannot source this file (one
 # runs inside the container, the other is a separate library).
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+
+# Every per-project share directory lives under this one subdirectory of
+# `[core] share_dir` rather than directly in it, which is what makes "left
+# over from before the split" a decidable question: anything at share_dir's
+# top level other than this directory predates the layout, because nothing
+# writes there any more. It is also the directory to mount over sshfs - one
+# entry per project, with no loose files mixed in.
+share_projects_root() { printf '%s/projects' "${1%/}"; }
+
+# The host directory mounted at ~/shared for a launch against $2.
+share_dir_for() { printf '%s/%s' "$(share_projects_root "$1")" "$(ws_slug "$2")"; }
 
 # The slugs belonging to $1: its own, plus one per live git worktree nested
 # underneath it. One per line, sorted, no duplicates.

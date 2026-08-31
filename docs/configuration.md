@@ -31,7 +31,7 @@ config file behind them.
 | `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
 | `[ui] banner` | `on` | the three-line summary at the top of a launch - project and branch, the selection, and the switches whose state changes what a session can do. `off` prints nothing. Never drawn when output is redirected |
 | `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
-| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
+| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir. One directory per project underneath it, and only that project's is mounted at `~/shared`. `dejima-share` is the host side of it |
 | `[core] ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
@@ -662,11 +662,32 @@ pick up from somewhere else, run dejima inside tmux and use
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `[core] share_dir` (default
-`~/.local/share/dejima/shared`, created automatically) - separate
-from the project mount, for passing files (screenshots, temp scripts) in and
-out of a session without touching the actual checkout. Persists across
-sessions since it's a real directory, not a container volume.
+`~/shared` is a read-write bind mount of one project's directory under
+`[core] share_dir` (default `~/.local/share/dejima/shared`, created
+automatically) - separate from the project mount, for passing files
+(screenshots, temp scripts) in and out of a session without touching the actual
+checkout. Persists across sessions since it's a real directory, not a container
+volume.
+
+**One directory per project, not one for the host.** A launch mounts
+`<share_dir>/projects/<slug>` at `~/shared`, where the slug is the project's
+absolute path with every non-alphanumeric character replaced by a dash - the
+same key the audit and epitaph stores use. So a session sees its own project's
+handoff files and no other project's, and nothing an agent has been told
+changes, because inside the container the path is still `~/shared`.
+
+`dejima-share` is the host side of that:
+
+```sh
+dejima-share path            # the host directory for this project, created if new
+dejima-share path ~/code/x   # …for another project
+dejima-share list            # every project's share, with size and last write
+dejima-share adopt           # move files left loose in share_dir into this project's
+```
+
+**To hand a file *to* a session,** put it in `dejima-share path` before
+launching. That is what makes the inbound direction work without a mount that
+every project can read.
 
 Treat it as a handoff point, not as general-purpose storage. If your own
 project instructions tell agents to write somewhere at a fixed host path -
@@ -680,10 +701,20 @@ being rewritten to point at `~/shared`.
 only writable host paths in the container. Everything else a session writes
 goes away with it.
 
-**Clear it out periodically.** It persists across sessions by design, which
-means anything you left in it is readable by every session after the one you
-left it for. A credential dropped in there to get one job done, and then
-forgotten, is a credential you have handed to every session since.
+**Clear it out periodically.** The per-project split bounds which sessions can
+read what you left, and bounds nothing about how long. A project's share
+persists by design, so anything in it is readable by every future session
+against that project: a credential dropped in there to get one job done, and
+then forgotten, is a credential you have handed to every session against that
+project since. Nothing prunes `share_dir` - `dejima-share list` prints each
+project's size and the date of its last write, and deleting is yours.
+
+**Files from before the split.** `share_dir` used to be mounted whole, so
+anything at its top level was visible to every session. Those files are still
+there and are now mounted into nothing; dejima says so at every launch while
+that is true, rather than moving an operator's files on its own.
+`dejima-share adopt <project>` moves them into one project's share after
+showing what it will move and asking, and it never overwrites.
 
 ## Reading what a session left behind
 

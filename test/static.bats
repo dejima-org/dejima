@@ -4607,6 +4607,30 @@ EOF
     grep -qx 'link_bin dejima-project' "$REPO_ROOT/install.sh"
 }
 
+@test "install.sh puts the share CLI on PATH" {
+    # bin/dejima's launch notice tells the operator to run `dejima-share
+    # adopt` by name, and now that ~/shared is one directory per project,
+    # "where do I put a file for the next session" has no other answer.
+    grep -qx 'link_bin dejima-share' "$REPO_ROOT/install.sh"
+}
+
+@test "the docs say what happened to files left in share_dir's top level" {
+    # share_dir used to be mounted whole. Splitting it per project stops a
+    # file that was handed to a session yesterday from arriving today, and a
+    # behaviour change that makes something silently not happen is the one
+    # that has to be written down rather than discovered.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/configuration.md")"
+    grep -q 'dejima-share adopt' <<< "$flat" \
+        || { echo "nothing tells the reader how to move them"; return 1; }
+    grep -q 'mounted into nothing' <<< "$flat" \
+        || { echo "the doc does not say those files stopped being mounted"; return 1; }
+    # The retention story, which is that there isn't one: dejima removes
+    # nothing from share_dir and never has.
+    grep -qi 'Nothing prunes' <<< "$flat" \
+        || { echo "the doc no longer says share_dir grows until you clear it"; return 1; }
+}
+
 @test "install.sh puts the exit-time audit CLI on PATH" {
     # bin/dejima's own startup warning tells the operator to run
     # `dejima-audit ack ...` by name; that instruction is only true if the
