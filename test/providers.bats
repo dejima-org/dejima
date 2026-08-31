@@ -1447,3 +1447,47 @@ assert_remedy_forges_exist() {
         bash -c 'source "$1"; config_type harness.bare.provider' _ "$LIB"
     [ "$status" -ne 0 ] || { echo "a harness that declares nothing got a provider key"; return 1; }
 }
+
+@test "openrouter is declared as a static-key, openai-style provider" {
+    # The second shipped provider, and the case #171 was filed about: a hosted
+    # endpoint behind a static API key, which dejima previously had no answer
+    # for other than refusing it.
+    lib manifest_validate provider openrouter
+    [ "$(lib manifest_get provider openrouter upstream)" = "https://openrouter.ai/api/v1" ]
+    [ "$(lib manifest_get provider openrouter proxied_domain)" = "openrouter.ai" ]
+    [ "$(lib manifest_get provider openrouter api_style)" = "openai" ]
+    [ "$(lib manifest_get provider openrouter credential)" = "static" ]
+    # Both spellings an OpenAI-compatible client might use for a key, so a
+    # placeholder cannot travel beside the injected Authorization.
+    [ "$(lib manifest_get provider openrouter strip_headers)" = "x-api-key api-key" ]
+    # No default for the key's location and no assumed value: an unset one is
+    # a refusal at launch, not a guess at a path.
+    [ "$(lib manifest_get provider openrouter requires)" = "credential_file" ]
+    [ -z "$(lib config_default provider.openrouter.credential_file)" ]
+    # proxied_domain is the HOST alone. upstream carries the path; a
+    # certificate and a DNS pin are about a name.
+    [[ "$(lib manifest_get provider openrouter proxied_domain)" != */* ]]
+}
+
+@test "a harness and a provider have to speak the same API" {
+    # Anthropic's Messages API is not OpenAI-compatible. Pairing a harness
+    # with a provider it has no client for is knowable at launch and produces
+    # nothing but confusion later, so both sides declare what they speak.
+    [ "$(lib manifest_get provider anthropic api_style)" = "anthropic" ]
+    [ "$(lib manifest_get harness claude-code api_styles)" = "anthropic" ]
+    # cline is the provider-agnostic one and says so.
+    [ "$(lib manifest_get harness cline api_styles)" = "anthropic openai" ]
+
+    # A dialect outside the two is refused by the schema. An ABSENT one is not
+    # - manifest_validate only type-checks the keys a file actually has, which
+    # is true of every axis and not something this one changed - so bin/dejima
+    # names the four a provider cannot work without where it reads them. That
+    # refusal is covered in config.bats, at the launch.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/style.XXXXXX")"
+    mkdir -p "$d/providers/probe"
+    printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\napi_style = sideways\n' \
+        > "$d/providers/probe/provider.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+    [ "$status" -ne 0 ] || { echo "an unknown api_style validated"; return 1; }
+}

@@ -970,9 +970,9 @@ _cline_prepare() {
     # URL through the environment that cline does not read.
     local cfg
     for cfg in 'proxy = off' 'transport = loopback'; do
-        run _cline_prepare "$(_cline_cfg 'model = m' '[credentials]' "$cfg")" "$BATS_TEST_TMPDIR/ws"
+        run _cline_prepare "$(_cline_cfg 'model = m' 'provider = anthropic' '[credentials]' "$cfg")" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -ne 0 ] || { echo "accepted $cfg"; return 1; }
-        [[ "$output" == *"no way to reach Anthropic"* ]] || { echo "$output"; return 1; }
+        [[ "$output" == *"no way to reach a proxied"* ]] || { echo "$output"; return 1; }
     done
 }
 
@@ -1043,7 +1043,7 @@ _cline_prepare() {
     # container holds is a placeholder, and the host-side proxy substitutes the
     # real credential on the way out. Confirmed end to end against the API.
     local cfg ws
-    cfg="$(_cline_cfg 'model = claude-haiku-4-5-20251001')"
+    cfg="$(_cline_cfg 'model = claude-haiku-4-5-20251001' 'provider = anthropic')"
     ws="$BATS_TEST_TMPDIR/ws"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1068,7 +1068,7 @@ _cline_prepare() {
     # survived every test that wrote providers.json by hand: those included the
     # field, and the plugin did not. It took a run against a real endpoint.
     local cfg ws f
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'provider = anthropic')"
     ws="$BATS_TEST_TMPDIR/ws-ts"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1103,14 +1103,14 @@ _cline_prepare() {
     # being served, and dejima guessing one is worse than leaving Cline to its
     # catalogue for a model it does know.
     local cfg f
-    cfg="$(_cline_cfg 'model = m' 'context_window = 15000')"
+    cfg="$(_cline_cfg 'model = m' 'provider = anthropic' 'context_window = 15000')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     f="$(find "$cfg/state" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow' "$f"
     [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
 
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'provider = anthropic')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
     f="$(find "$cfg/state" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
@@ -1124,7 +1124,7 @@ _cline_prepare() {
     # and the only thing that keeps one project's transcripts out of another's
     # session - #104 - is dejima handing each workspace its own data directory.
     local cfg a b
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'provider = anthropic')"
     a="$(DEJIMA_CONFIG_DIR="$cfg" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
         source "$2/bin/dejima-harness-lib.sh"
@@ -7631,4 +7631,69 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     grep -q 'security.md#four-arrangements-and-what-a-session-can-take-from-each' \
         "$REPO_ROOT/docs/threat-model.md" \
         || { echo "nothing points at the arrangement comparison"; return 1; }
+}
+
+@test "cline takes where the model is from one setting, not two that can disagree" {
+    # An unset base_url used to mean Anthropic implicitly. With a provider axis
+    # that rule is gone (#171), and the two settings name different places: a
+    # provider is an API dejima proxies, base_url is a model the operator
+    # serves. Both set would be two answers, and picking one silently is how a
+    # session ends up talking to an endpoint nobody chose.
+    local cfg
+    cfg="$(_cline_cfg 'model = m' 'provider = anthropic' 'base_url = http://127.0.0.1:8080/v1')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "accepted both"; return 1; }
+    [[ "$output" == *"both"* ]] || { echo "$output"; return 1; }
+
+    # And neither is a refusal too, rather than a default: one dejima could
+    # change later would move a session to another endpoint without its config
+    # changing.
+    cfg="$(_cline_cfg 'model = m')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "accepted neither"; return 1; }
+    [[ "$output" == *"neither"* ]] || { echo "$output"; return 1; }
+}
+
+# The providers.json cline is actually given, for one config. Prints it as JSON.
+_cline_providers_json() {
+    local cfg="$1" out
+    _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws" >/dev/null 2>&1 || return 1
+    out="$(ls -d "$(sed -n 's/^state_dir *= *//p' "$cfg/config")"/*/settings 2>/dev/null | head -1)"
+    [ -n "$out" ] || return 1
+    cat "$out/providers.json"
+}
+
+@test "cline's provider type follows the provider's api_style, not a second setting" {
+    # Anthropic's Messages API and an OpenAI-compatible one are different wire
+    # formats and cline has a client for each. Which one to write is the
+    # selected provider's api_style, so an operator never has to keep a
+    # dialect setting in step with an endpoint by hand.
+    local j
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'provider = anthropic')")" \
+        || { echo "anthropic path produced nothing"; return 1; }
+    [ "$(jq -r .lastUsedProvider <<< "$j")" = anthropic ] || { echo "$j"; return 1; }
+    # No baseUrl on this path: cline addresses the API by name and the
+    # terminator already answers for it.
+    [ "$(jq -r '.providers.anthropic.settings.baseUrl // "absent"' <<< "$j")" = absent ] \
+        || { echo "$j"; return 1; }
+
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'provider = openrouter')")" \
+        || { echo "openrouter path produced nothing"; return 1; }
+    [ "$(jq -r .lastUsedProvider <<< "$j")" = openai-compatible ] || { echo "$j"; return 1; }
+    # And addressed by the endpoint's REAL hostname, not a loopback one: the
+    # terminator answers for that name inside the container and the host-side
+    # proxy holds the key, which is what keeps the session looking like one
+    # talking to the API directly.
+    [ "$(jq -r '.providers["openai-compatible"].settings.baseUrl' <<< "$j")" \
+        = "https://openrouter.ai/api/v1" ] || { echo "$j"; return 1; }
+    # A placeholder, never a key. The real one is read host-side per request.
+    [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
+        = "sandbox-credential-proxy-placeholder" ] || { echo "$j"; return 1; }
+
+    # A model the operator serves takes the same openai-compatible client, and
+    # is the one path with no credential anywhere: nothing to withhold.
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:8080/v1')")" \
+        || { echo "the self-served path produced nothing"; return 1; }
+    [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
+        = "dejima-no-credential-needed" ] || { echo "$j"; return 1; }
 }

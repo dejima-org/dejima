@@ -584,7 +584,7 @@ it.
 | Arrangement | In the container | What a compromised session can take | What it can still do |
 | --- | --- | --- | --- |
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
-| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own provider config. | The placeholder. | The same. |
+| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own provider config, and the endpoint's real hostname. | The placeholder. | The same. |
 | **No provider** (a model you serve yourself) | Nothing. The endpoint needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
 | **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
@@ -613,6 +613,20 @@ that tries to reach the API by name finds it unresolvable and goes through the
 terminator instead. Worth being precise about the limit: this defeats a lookup,
 not a route. The API's address stays reachable as an IP literal for as long as
 any other allowlisted name resolves to it.
+
+**A hosted OpenAI-compatible provider is the second arrangement, and it is
+what `providers/openrouter` is.** The key sits in a file on the host, named by
+`[provider.openrouter] credential_file` and read per request; the container
+gets `sandbox-credential-proxy-placeholder` and the endpoint's real hostname,
+which the in-container terminator answers for. Nothing about the arrangement
+is visible to the session, which is the same property the Anthropic path has
+and the reason both are worth having rather than one.
+
+Worth naming what a *hosted* provider adds over Anthropic's OAuth, since it is
+not the container that changes: an API key is typically long-lived and
+account-wide where an access token is short-lived and rotated, so the host-side
+file is worth more. Scope the key at the provider where it offers that, the
+same argument this repository makes for a repository-scoped forge token.
 
 **No provider is the strongest posture available**, and it is worth saying so
 plainly rather than treating it as the degraded one. A harness pointed at a

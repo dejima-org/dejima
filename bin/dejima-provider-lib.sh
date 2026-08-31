@@ -242,6 +242,12 @@ autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # api_style is which dialect the endpoint speaks, and it is a property
+        # of the API rather than of any harness: Anthropic's Messages API and
+        # an OpenAI-compatible one are different wire formats, so a harness
+        # that can only speak one has to know which it is being pointed at
+        # before it writes its own configuration.
+        #
         # A model API and how its credential is presented. Every field here
         # is an argument bin/dejima-credential-proxy already takes (#171):
         # this axis is what turns "the caller states the arrangement" into
@@ -253,6 +259,7 @@ EOF
         provider) cat <<'EOF'
 upstream	url
 proxied_domain	hostname
+api_style	enum:anthropic|openai
 credential	enum:static|anthropic-oauth
 auth_header	identifier	Authorization
 auth_format	authformat	Bearer {token}
@@ -264,6 +271,10 @@ keys	?list:keyspec
 requires	?list:identifier
 EOF
             ;;
+        # api_styles is which of those dialects this harness can speak. A
+        # launch pairing it with a provider it has no client for is refused at
+        # launch rather than failing later with well-formed requests in the
+        # wrong shape.
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
@@ -273,6 +284,7 @@ command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
 guards	?list:identifier
+api_styles	?list:identifier
 briefing_args	?args
 briefing_path	?homepath
 no_confirm_args	?args

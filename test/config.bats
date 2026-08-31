@@ -3117,9 +3117,62 @@ EOF
         "$RW_KEY" > "$CONFIG_DIR/config"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched with no provider: $output"; return 1; }
-    [[ "$output" == *"provider is not set"* ]] || { echo "$output"; return 1; }
+    # cline's own refusal answers first and says more than core's would: it
+    # names both ways to say where the model is, because for this harness
+    # either is a valid answer.
+    [[ "$output" == *"neither [harness.cline] provider nor base_url is set"* ]] \
+        || { echo "$output"; return 1; }
     # And nothing was written into the operator's file.
     grep -q 'provider =' "$CONFIG_DIR/config" \
         && { echo "a provider was guessed and recorded:"; cat "$CONFIG_DIR/config"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a provider missing a key it cannot work without is refused at launch" {
+    # manifest_validate only type-checks the keys a manifest actually has, so
+    # an absent upstream is not caught there - true of every axis. Unchecked,
+    # it reaches the credential proxy as an empty --upstream and fails as a
+    # connection error with no hint of the cause (#171).
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local proot; proot="$(mktemp -d)"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+          "$REPO_ROOT/providers" "$proot/"
+    printf 'proxied_domain = x.example\ncredential = static\napi_style = anthropic\n' \
+        > "$proot/providers/anthropic/provider.conf"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'provider = anthropic'
+    DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with no upstream: $output"; return 1; }
+    [[ "$output" == *"declares no upstream"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$proot"
+}
+
+@test "a harness and a provider that speak different APIs are refused at launch" {
+    # claude-code has one client and it speaks Anthropic's Messages API.
+    # Pointed at an OpenAI-compatible provider it would send well-formed
+    # requests in a shape the endpoint cannot parse, which is knowable here.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'provider = openrouter'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched a mismatched pair: $output"; return 1; }
+    [[ "$output" == *"cannot talk to provider"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a provider that needs a credential file refuses without one" {
+    # openrouter's key has no sensible default location, so `requires` makes an
+    # unset one a refusal here rather than an authentication failure several
+    # layers down: without it the proxy is simply skipped, and the session
+    # reaches a real endpoint holding a placeholder.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' '[harness.cline]' 'provider = openrouter' 'model = m'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with no key file: $output"; return 1; }
+    [[ "$output" == *"credential_file"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }

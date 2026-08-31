@@ -170,32 +170,78 @@ harness_prepare_config() {
     local ctx
     ctx="$(harness_config_get context_window)"
 
-    # The Anthropic path is the credential proxy's path, and it only works in
-    # the shape that was actually tested: the proxy on, terminating TLS for
-    # api.anthropic.com in-container, with Cline configured for the real
-    # hostname and a placeholder key.
+    # WHERE THE MODEL IS, decided once.
     #
-    # With the proxy off, Claude Code mounts the operator's real credential -
-    # a downgrade this repository documents and accepts. There is no
-    # equivalent here: the credential Cline would need is in the operator's
-    # own providers.json, which is exactly the file dejima declines to mount,
-    # and writing a placeholder anyway would produce an auth failure whose
-    # cause is three layers away. The loopback transport is the same story
-    # from the other end - it hands the harness a base URL and a token through
-    # the environment, which Cline does not read for provider selection
+    # Two settings can answer that and they used to be able to disagree: an
+    # unset base_url implicitly meant Anthropic, and a set one meant something
+    # the operator serves. With a provider axis (#171) that implicit rule is
+    # gone, and the two are now one decision with exactly one answer:
+    #
+    #   provider set   - a model API dejima proxies. The credential stays on
+    #                    the host; Cline gets a placeholder and the endpoint's
+    #                    real hostname, which the in-container terminator
+    #                    answers for.
+    #   base_url set   - a model the operator serves, needing no credential,
+    #                    reached directly. No proxy is involved at all.
+    #
+    # Neither is a refusal because nothing then says where the model is. Both
+    # is a refusal because they would name different places, and picking one
+    # silently is how a session ends up talking to an endpoint the operator
+    # did not choose.
+    local provider
+    provider="$(harness_config_get provider)"
+    if [ -n "$provider" ] && [ -n "$base_url" ]; then
+        echo "harness.cline: both [harness.cline] provider and base_url are set." >&2
+        echo "They name different places for the model to be, and dejima will not" >&2
+        echo "choose between them:" >&2
+        echo "" >&2
+        echo "  provider = $provider   reaches that API through dejima's credential" >&2
+        echo "                          proxy, with the key kept on the host" >&2
+        echo "  base_url = $base_url" >&2
+        echo "                          reaches a model you serve, with no key at all" >&2
+        echo "" >&2
+        echo "Unset whichever one you did not mean." >&2
+        return 1
+    fi
+    if [ -z "$provider" ] && [ -z "$base_url" ]; then
+        echo "harness.cline: neither [harness.cline] provider nor base_url is set," >&2
+        echo "so nothing says where the model is." >&2
+        echo "" >&2
+        echo "  [harness.cline]" >&2
+        echo "  provider = openrouter    a hosted API, key held on the host" >&2
+        echo "" >&2
+        echo "or point base_url at a model you serve yourself, which needs no key." >&2
+        echo "There is deliberately no default: one dejima could change later would" >&2
+        echo "move your session to another endpoint without your config changing." >&2
+        return 1
+    fi
+
+    # The proxy is what keeps the credential out of the container on the
+    # provider path, and it only works in the shape that was actually tested:
+    # the proxy on, terminating TLS in-container, with Cline configured for the
+    # endpoint's real hostname and a placeholder key.
+    #
+    # With the proxy off, claude-code mounts the operator's real credential - a
+    # downgrade this repository documents and accepts. There is no equivalent
+    # here: the credential Cline would need is in the operator's own
+    # providers.json, which is exactly the file dejima declines to mount, and
+    # writing a placeholder anyway would produce an auth failure whose cause is
+    # three layers away. The loopback transport is the same story from the
+    # other end - it hands the harness a base URL and a token through the
+    # environment, which Cline does not read for provider selection
     # (CLINE_PROVIDER and CLINE_MODEL were tried and ignored).
     #
     # Both refuse rather than start something that will fail confusingly, and
     # both have the same way out: point base_url at a model you serve.
-    if [ -z "$base_url" ]; then
+    if [ -n "$provider" ]; then
         local why=""
         [ "$(config_get_bool credentials proxy)" = "1" ] \
             || why="[credentials] proxy is off"
         [ -n "$why" ] || [ "$(config_get credentials transport)" = "tls" ] \
             || why="[credentials] transport is loopback"
         if [ -n "$why" ]; then
-            echo "harness.cline: $why, and cline has no way to reach Anthropic" >&2
-            echo "without the TLS terminator the proxy puts in front of it." >&2
+            echo "harness.cline: $why, and cline has no way to reach a proxied" >&2
+            echo "provider without the TLS terminator the proxy puts in front of it." >&2
             echo "Its credential lives in the providers.json dejima declines to" >&2
             echo "mount, so there is nothing to fall back to - unlike claude-code," >&2
             echo "which mounts the real credential in that mode." >&2
@@ -208,15 +254,19 @@ harness_prepare_config() {
 
     if [ -n "$base_url" ] && ! _cline_host_local "$base_url"; then
         echo "harness.cline: refusing base_url $base_url." >&2
-        echo "It is not a host-local endpoint, so it would need an API key" >&2
-        echo "inside the container, and dejima has no proxy that can hold one" >&2
-        echo "back for that provider - the model credential would stop being" >&2
-        echo "something the sandbox never sees." >&2
+        echo "base_url is for a model you serve yourself, which needs no key." >&2
+        echo "This is not a host-local endpoint, so it would need one inside the" >&2
+        echo "container, and the model credential would stop being something the" >&2
+        echo "sandbox never sees." >&2
         echo "" >&2
-        echo "Supported today: leave base_url unset for Anthropic through" >&2
-        echo "dejima's own credential proxy, or point it at a model you serve" >&2
-        echo "yourself, which needs no key. That means a loopback or RFC 1918" >&2
-        echo "address, or a host you have allowlisted:" >&2
+        echo "For a hosted API, name it as a provider instead - the key is then" >&2
+        echo "held on the host and injected per request:" >&2
+        echo "" >&2
+        echo "  [harness.cline]" >&2
+        echo "  provider = openrouter" >&2
+        echo "" >&2
+        echo "For one you serve, that means a loopback or RFC 1918 address, or a" >&2
+        echo "host you have allowlisted:" >&2
         echo "" >&2
         echo "  dejima-allow --project <path> <host>" >&2
         echo "" >&2
@@ -246,25 +296,44 @@ harness_prepare_config() {
 
     local tmp
     tmp="$(mktemp "$settings/.providers.XXXXXX")" || return 1
-    if [ -n "$base_url" ]; then
-        jq -n --arg m "$model" --arg u "$base_url" \
+    # Which of Cline's own provider types to write, from the selected
+    # provider's api_style rather than from a second setting an operator has
+    # to keep in step. Anthropic's Messages API and an OpenAI-compatible one
+    # are different wire formats, and Cline has a client for each.
+    local style="" endpoint="$base_url" key="dejima-no-credential-needed"
+    if [ -n "$provider" ]; then
+        style="$(manifest_get provider "$provider" api_style)" || return 1
+        # The endpoint's REAL hostname, not a loopback one. The terminator
+        # answers for it inside the container and the host-side proxy holds the
+        # credential, which is what keeps the session indistinguishable from
+        # one talking to the API directly.
+        endpoint="$(manifest_get provider "$provider" upstream)" || return 1
+        # The placeholder is what Cline sends; the host-side proxy replaces it
+        # with the real credential on the way out. Same arrangement as Claude
+        # Code's faked .credentials.json, confirmed end to end against the API.
+        key="sandbox-credential-proxy-placeholder"
+    else
+        style=openai
+    fi
+
+    if [ "$style" = anthropic ]; then
+        # Cline's native Anthropic client, which addresses the API by name and
+        # so needs no baseUrl: entrypoint.sh has already pointed that name at
+        # the terminator.
+        jq -n --arg m "$model" --arg k "$key" \
+            --arg t "$now" --arg c "$ctx" \
+            '{version: 1, lastUsedProvider: "anthropic", modes: {},
+              providers: {anthropic: {
+                settings: ({provider: "anthropic", model: $m, apiKey: $k}
+                           + (if $c == "" then {} else {contextWindow: ($c|tonumber)} end)),
+                updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
+    else
+        jq -n --arg m "$model" --arg u "$endpoint" --arg k "$key" \
             --arg t "$now" --arg c "$ctx" \
             '{version: 1, lastUsedProvider: "openai-compatible", modes: {},
               providers: {"openai-compatible": {
                 settings: ({provider: "openai-compatible", model: $m,
-                            baseUrl: $u, apiKey: "dejima-no-credential-needed"}
-                           + (if $c == "" then {} else {contextWindow: ($c|tonumber)} end)),
-                updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
-    else
-        # The placeholder is what Cline sends; the host-side proxy replaces it
-        # with the real credential on the way out. Same arrangement as Claude
-        # Code's faked .credentials.json, confirmed end to end against the API.
-        jq -n --arg m "$model" \
-            --arg t "$now" --arg c "$ctx" \
-            '{version: 1, lastUsedProvider: "anthropic", modes: {},
-              providers: {anthropic: {
-                settings: ({provider: "anthropic", model: $m,
-                            apiKey: "sandbox-credential-proxy-placeholder"}
+                            baseUrl: $u, apiKey: $k}
                            + (if $c == "" then {} else {contextWindow: ($c|tonumber)} end)),
                 updatedAt: $t, tokenSource: "manual"}}}' > "$tmp"
     fi || { rm -f "$tmp"; return 1; }
