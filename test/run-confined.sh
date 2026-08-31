@@ -47,7 +47,11 @@ suites_for() {
         bin/dejima-tty-suspend)              echo static ;;
         bin/dejima-color-lib.sh)             echo 'remote project' ;;
         bin/dejima-tui-lib.sh)               echo 'remote project' ;;
-        bin/dejima-conversation-ship|bin/dejima-slug-lib.sh) echo conversation ;;
+        bin/dejima-conversation-ship)        echo conversation ;;
+        bin/dejima-share)                    echo share ;;
+        # The slug scheme keys the transcript mounts, the epitaph and audit
+        # stores, and the share layout, so a change to it is not one area's.
+        bin/dejima-slug-lib.sh)              echo 'share conversation audit static' ;;
         bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo proxy ;;
         bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep|bin/dejima-allow) echo project ;;
         bin/dejima-attach|bin/dejima-ttyd|bin/dejima-notify-watch) echo remote ;;
