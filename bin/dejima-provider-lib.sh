@@ -778,6 +778,12 @@ manifest_get() {
 #
 # Keyed on the resolved directory rather than the name, like every other cache
 # here, so two roots cannot answer for each other.
+#
+# SUCCESSES ONLY. A remembered refusal was the first shape of this and it is
+# the wrong one: it turns one transient failure into a permanent one, and the
+# symptom is indistinguishable from the bug this exists to fix - a lookup that
+# worked at startup failing for the rest of the process. Nothing here is
+# expensive enough to be worth remembering a "no" for.
 declare -gA _PROVIDER_KEYS_CACHE=() _PROVIDER_KEYS_SEEN=()
 
 _provider_keys_field() {
@@ -789,14 +795,11 @@ _provider_keys_field() {
     dir="$(provider_dir "$axis" "$name")" || return 1
     id="$axis:$dir"
     if [ -n "${_PROVIDER_KEYS_SEEN[$id]+set}" ]; then
-        # A remembered refusal stays a refusal: re-deriving it would put the
-        # same `|| return 1` chain back in the signal handler's path.
-        [ "${_PROVIDER_KEYS_SEEN[$id]}" = ok ] || return 1
         printf '%s' "${_PROVIDER_KEYS_CACHE[$id]}"
         return 0
     fi
     file="$dir/$(_provider_manifest_name "$axis")"
-    [ -f "$file" ] || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    [ -f "$file" ] || return 1
     type="$(_manifest_type "$axis" keys)" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
@@ -812,7 +815,7 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
-    _provider_valid_value "$type" "$value" || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    _provider_valid_value "$type" "$value" || return 1
     _PROVIDER_KEYS_CACHE[$id]="$value"
     _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"

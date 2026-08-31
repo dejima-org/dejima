@@ -388,8 +388,16 @@ EOF
     # a concurrent run is unaffected.
     local proot="$BATS_TEST_TMPDIR/proot"
     mkdir -p "$proot"
+    # Loudly: a partial copy here produces exactly the symptom this test is
+    # about - a lookup that fails - and swallowing the error would report the
+    # fixture's fault as the code's.
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-          "$REPO_ROOT/providers" "$proot/" 2>/dev/null || true
+          "$REPO_ROOT/providers" "$proot/" \
+        || { echo "could not build the probe provider root"; return 1; }
+    local axis
+    for axis in forges workflows harnesses providers; do
+        [ -d "$proot/$axis" ] || { echo "the probe provider root has no $axis/"; return 1; }
+    done
     sed -i 's/^keys \( *\)=/keys \1= probe_only_key:?identifier/' \
         "$proot/harnesses/claude-code/harness.conf"
     grep -q 'probe_only_key:?identifier' "$proot/harnesses/claude-code/harness.conf" \
