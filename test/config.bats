@@ -3073,3 +3073,53 @@ EOF
     [ "$status" -ne 0 ] || { echo "an unknown provider was accepted"; return 1; }
     [[ "$output" == *"--provider"* ]] || { echo "$output"; return 1; }
 }
+
+@test "an unset provider is recorded in the config, not defaulted on every read" {
+    # A migration rather than a default (#171). A default is dejima's answer
+    # re-decided on every read, so changing it later moves a session whose
+    # config never changed. This records the operator's answer once, into
+    # their own file.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # write_config seeds a provider, so this writes the file directly: the
+    # state under test is a config that predates the key existing.
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    grep -q 'provider' "$CONFIG_DIR/config" && { echo "the fixture already names a provider"; return 1; }
+
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Recorded [harness.claude-code] provider = anthropic"* ]] \
+        || { echo "the migration was silent: $output"; return 1; }
+    # In the operator's file, so the next launch reads it rather than assuming
+    # it again.
+    grep -qx 'provider = anthropic' "$CONFIG_DIR/config" \
+        || { echo "nothing was written:"; cat "$CONFIG_DIR/config"; return 1; }
+
+    # And it happens once. A second launch finds the value and says nothing.
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Recorded [harness"* ]] \
+        || { echo "the migration ran again: $output"; return 1; }
+    [ "$(grep -c 'provider = anthropic' "$CONFIG_DIR/config")" -eq 1 ] \
+        || { echo "the value was written twice:"; cat "$CONFIG_DIR/config"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a harness with nothing to assume refuses rather than guessing" {
+    # cline declares no assumed_provider on purpose: what it talked to before
+    # the key existed depends on base_url, so there is no single value to
+    # record and recording the wrong one would write a proxied endpoint into
+    # the config of a session that never used one.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = cline\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.cline]\nmodel = probe\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with no provider: $output"; return 1; }
+    [[ "$output" == *"provider is not set"* ]] || { echo "$output"; return 1; }
+    # And nothing was written into the operator's file.
+    grep -q 'provider =' "$CONFIG_DIR/config" \
+        && { echo "a provider was guessed and recorded:"; cat "$CONFIG_DIR/config"; return 1; }
+    rm -rf "$workspace"
+}

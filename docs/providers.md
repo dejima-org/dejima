@@ -289,6 +289,20 @@ Where it matters below, "model provider" means this axis.
 | `keys` | `?list:keyspec` | (empty) | This provider's own `[provider.<name>]` config schema, exactly as a forge's works. Every provider is expected to declare `credential_file`. |
 | `requires` | `?list:identifier` | (empty) | Which of those must be set for a launch to proceed. |
 
+**Which provider a launch uses is the harness's setting**, `[harness.<name>]
+provider`, overridable for one launch with `--provider`. Per harness because
+that is how it is used: one harness against Anthropic and another against
+something else, on the same machine.
+
+No harness ships a default for it, for the reason `[core] harness` has none. A
+harness may instead declare `assumed_provider`: what it was talking to before
+the key existed, which dejima writes into the operator's config the first time
+it finds the key unset, and says so. That is a migration rather than a default
+- recorded once in the operator's own file, so a later change to dejima cannot
+move a session whose config never changed. A harness only states it where the
+value is not a guess; one whose past endpoint depended on other settings
+declares nothing, and an unset provider is then a refusal.
+
 **Nothing here is a secret.** A provider declares *where* its credential is
 read from - `credential_file` is a path - never what it is. The file it names
 is read host-side per request and is never mounted into the container, which

@@ -281,6 +281,7 @@ keys	?list:keyspec
 resume_command	?template
 transcript_update	enum:append|rewrite	append
 briefing	?relpath
+assumed_provider	?provider:provider
 EOF
             ;;
         *) return 1 ;;

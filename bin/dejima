@@ -1395,7 +1395,35 @@ DEJIMA_PROVIDER_CREDENTIAL_KIND=""
 DEJIMA_PROVIDER_CREDENTIAL_FILE=""
 if config_type "harness.$DEJIMA_HARNESS_NAME.provider" >/dev/null 2>&1; then
     DEJIMA_PROVIDER_NAME="$(config_get "harness.$DEJIMA_HARNESS_NAME" provider)"
-    # Declared and unset is a refusal, not a default.
+    # Unset, and the harness says what it used to talk to: write that down.
+    #
+    # A MIGRATION, NOT A DEFAULT, and the difference is the point. A default is
+    # dejima's answer re-decided on every read, so changing it later moves a
+    # session whose config never changed. This records the operator's answer
+    # once, into their own file; after it runs, nothing dejima decides later
+    # can move them. It is only ever stated by a harness for which the value is
+    # not a guess - what every existing session of that harness already was -
+    # so the launch it runs in behaves identically either way.
+    #
+    # Appended as its own section rather than edited into an existing one: the
+    # parser takes the last assignment, and a rewrite of an operator's config
+    # is a much larger thing to get right than an append.
+    if [ -z "$DEJIMA_PROVIDER_NAME" ]; then
+        _assumed="$(manifest_get harness "$DEJIMA_HARNESS_NAME" assumed_provider)"
+        if [ -n "$_assumed" ] && [ -w "$(config_path)" ]; then
+            printf '\n[harness.%s]\nprovider = %s\n' \
+                "$DEJIMA_HARNESS_NAME" "$_assumed" >> "$(config_path)"
+            DEJIMA_PROVIDER_NAME="$_assumed"
+            echo "Recorded [harness.$DEJIMA_HARNESS_NAME] provider = $_assumed in $(config_path)." >&2
+            echo "That is what this harness was already talking to; it is written down now" >&2
+            echo "so a later change to dejima cannot move it. Nothing about this launch" >&2
+            echo "differs because of it." >&2
+        fi
+        unset _assumed
+    fi
+
+    # Still unset, and nothing could say what it should be: a refusal, not a
+    # default.
     #
     # No harness ships one, for the reason [core] harness has none: a default
     # that could change later is a config file that is not the source of
