@@ -371,3 +371,43 @@ EOF
     run grep -c "should not ship" "$LOKI_LOG"
     [ "$output" -eq 0 ] || { echo "shipped without a resolvable layout: $(shipped)"; return 1; }
 }
+
+@test "the tail survives a kill even when the harness declares an optional key with no default" {
+    # #284, and it is worth pinning by SHAPE rather than by the key that
+    # exposed it. Any optional keyspec with an empty default in the selected
+    # harness's `keys` used to make final_flush's config lookup fail: it
+    # re-resolves the transcript paths from the SIGTERM handler, and bash
+    # reports 128+n for commands completing while it delivers a signal, so a
+    # perfectly valid manifest was rejected and the tail - usually the agent's
+    # final answer, which is the whole reason final_flush exists - was dropped
+    # with no error the operator would ever see.
+    #
+    # Nothing shipped for claude-code had that shape until #171 added one, so
+    # this adds one of its own rather than depending on a real key keeping it.
+    # A provider root of its own, so the shipped manifests are not edited and
+    # a concurrent run is unaffected.
+    local proot="$BATS_TEST_TMPDIR/proot"
+    mkdir -p "$proot"
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+          "$REPO_ROOT/providers" "$proot/" 2>/dev/null || true
+    sed -i 's/^keys \( *\)=/keys \1= probe_only_key:?identifier/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    grep -q 'probe_only_key:?identifier' "$proot/harnesses/claude-code/harness.conf" \
+        || { echo "the probe key was not injected"; return 1; }
+    export DEJIMA_PROVIDER_ROOT="$proot"
+
+    start_loki
+    write_config
+    mkdir -p "$(slug_dir)"
+    start_ship
+    sleep 1
+    say "the final answer" >> "$(slug_dir)/s1.jsonl"
+    kill -TERM "$SHIP_PID"
+    wait "$SHIP_PID" 2>/dev/null || true
+    SHIP_PID=""
+    [[ "$(shipped)" == *"the final answer"* ]] \
+        || { echo "the unread tail was lost: $(shipped)"; return 1; }
+    # And the lookup did not merely survive - it never failed. That message
+    # reaching an operator's terminal is the visible half of this bug.
+    [[ "$(shipped)" != *"unknown config key"* ]] || { echo "$(shipped)"; return 1; }
+}
