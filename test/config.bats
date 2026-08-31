@@ -3280,3 +3280,51 @@ EOF
         && { echo "the real credential was mounted anyway"; return 1; }
     rm -rf "$workspace"
 }
+
+@test "a console API key in ~/.claude.json does not reach the container" {
+    # Found on a real desktop launch. A Claude Code signed in with a console
+    # API token keeps the key as a top-level primaryApiKey in ~/.claude.json,
+    # and leaves .credentials.json as `{}`. dejima stages that file as a
+    # throwaway copy for mcpServers and project state - and copied it
+    # verbatim, so the key crossed on every launch whatever the backend and
+    # whether or not the proxy was running.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST","mcpServers":{"keepme":{"command":"x"}},"numStartups":7}
+JSON
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    # The staged copy reaches the container through compose rather than
+    # docker's argv, and the EXIT trap removes it, so the stub has to read it
+    # from the environment while the launch still holds it.
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; cat "$log"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$staged")" = "absent" ] \
+        || { echo "the console API key reached the container"; return 1; }
+    grep -q 'REAL-KEY-FROM-THE-HOST' "$log" \
+        && { echo "the key reached docker's arguments"; return 1; }
+    # Everything the copy exists for survives.
+    [ "$(jq -r '.mcpServers.keepme.command' "$staged")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = "7" ] || { echo "lost app state"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}

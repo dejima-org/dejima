@@ -1053,9 +1053,31 @@ harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 # than merged back - nothing a session writes here reaches the host, and
 # concurrent sessions never contend. See docs/configuration.md, "Config
 # parity with your host Claude Code setup".
+#
+# Seeded through jq rather than cp, because this file HOLDS A CREDENTIAL. A
+# Claude Code signed in with a console API token stores it as a top-level
+# primaryApiKey here - not in .credentials.json, which stays `{}` for that
+# login. Copied verbatim, that key entered every container, whatever the
+# selected backend and whether or not the credential proxy was running: the
+# proxy withholds one file while this copied another.
+#
+# Stripped rather than the whole file withheld, because everything else in it
+# is why the copy exists - mcpServers, project state, onboarding flags.
+#
+# customApiKeyResponses is left: it holds hashes of keys the operator
+# approved, not the keys, and dropping it re-prompts inside the sandbox for a
+# decision already made on the host.
+#
+# A file jq cannot parse is a refusal, not a fallback to cp. Falling back
+# would restore the exact leak this exists to close, at the moment least
+# likely to be noticed.
 SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then
-    cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+    if ! jq 'del(.primaryApiKey)' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
+        echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
+        echo "credential it may hold before copying it into the container." >&2
+        exit 1
+    fi
 else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi

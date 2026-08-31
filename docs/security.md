@@ -606,6 +606,14 @@ at all.
 What lands in the fourth row is `proxy = off`, and a login whose shape no
 selected backend serves.
 
+**`~/.claude.json` is staged, not mounted, and the staging strips a
+credential.** That file mixes app state with configuration the copy exists to
+carry, and a Claude Code signed in with a console API token keeps its key
+there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
+`{}` for that login. The copy drops that key. Without it the proxy would
+withhold one file while dejima copied another, on every launch and whatever
+backend was selected.
+
 **The residual the first two share is use-while-running.** A session that has
 been turned can spend your quota, ask the model anything, and read the answers
 - through the proxy, without ever holding the credential. That is inherent to
