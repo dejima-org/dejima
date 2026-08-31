@@ -56,7 +56,6 @@ mounts.read_write	?list:path
 mounts.nvim_config	?path
 credentials.proxy	bool	on
 credentials.transport	enum:tls|loopback	tls
-credentials.provider	provider:provider	anthropic
 logging.loki_url	?url
 logging.conversation	bool	off
 epitaph.enabled	bool	on

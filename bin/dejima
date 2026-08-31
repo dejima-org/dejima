@@ -37,11 +37,12 @@ Options (each overrides the config file for one launch only):
   --identity <name>       which [identity.<name>] supplies the credentials
   -i, --include <tool>    add an optional tool to this launch (repeatable);
                           see docs/tools.md for what dejima ships
-  --model <id>            the selected harness's model, where it has one;
-  --base-url <url>          its endpoint, and how much context it may use.
-  --context-window <n>      Refused for a harness with no such setting
-  --ro <path>             mount read-only; --rw read-write. Repeatable. Long
-                          forms --extra-readonly and --extra-read-write. Both
+  --provider <name>       the selected harness's model API, model, endpoint
+  --model <id>            and context budget, each refused for a harness with
+  --base-url <url>        no such setting
+  --context-window <n>
+  --ro <path>             mount read-only; --rw read-write. Repeatable, long
+                          forms --extra-readonly/--extra-read-write, and both
                           refuse a path overlapping dejima's own stores
   --allow-github-push     open GitHub's push path (port 22)
   --strict-audit          refuse to start over unacknowledged CRITICAL findings
@@ -49,15 +50,14 @@ Options (each overrides the config file for one launch only):
   --no-conversation       keep this session's transcript out of the log
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
-  --print-config          print the resolved configuration and exit
+  --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
 
 Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
 config that says off is a decision, not a default to override in passing.
 
-Config lives in ~/.config/dejima/config and [core] harness must be set before
-a launch starts. --print-config prints every key as it resolves.
+Config lives in ~/.config/dejima/config; [core] harness must be set there.
 DEJIMA_HELP
         exit 0 ;;
 esac
@@ -244,6 +244,12 @@ while [ $# -gt 0 ]; do
                           _defer_harness_key --base-url base_url "$2"; shift 2 ;;
         --context-window) _need_value --context-window "${2:-}"
                           _defer_harness_key --context-window context_window "$2"; shift 2 ;;
+        # Deferred like the three above, and for the extra reason that this one
+        # is per harness by design: which provider a launch uses is the
+        # harness's setting, so "claude-code has no provider setting" is the
+        # error a harness that declares none should give.
+        --provider)       _need_value --provider "${2:-}"
+                          _defer_harness_key --provider provider "$2"; shift 2 ;;
         --cmd)      _need_value --cmd "${2:-}";      _set_override core.command "$2";  shift 2 ;;
         --harness)  _need_value --harness "${2:-}";  _set_override core.harness "$2";  shift 2 ;;
         --identity) _need_value --identity "${2:-}"; _set_override core.identity "$2"; shift 2 ;;
@@ -1363,16 +1369,38 @@ SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domai
 # The selected model provider, and the name the in-container terminator has to
 # answer for.
 #
-# On the PROVIDER, not the harness, and that is the whole point of the move
-# (#171). A harness reaches whichever endpoint it is configured for, so the
-# same harness needs a different name in front of it when a different provider
-# is selected. Declared on the harness, the terminator would answer for
-# Anthropic while the session talked to somewhere else, and the credential the
-# proxy exists to withhold would be the one in use.
-DEJIMA_PROVIDER_NAME="$(config_get credentials provider)"
-SANDBOX_PROVIDER_PROXIED_DOMAIN="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" proxied_domain)"
-DEJIMA_PROVIDER_CREDENTIAL_KIND="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" credential)"
-DEJIMA_PROVIDER_CREDENTIAL_FILE="$(config_get "provider.$DEJIMA_PROVIDER_NAME" credential_file)"
+# Two different things, and it is worth keeping them apart.
+#
+# WHICH provider a launch uses is the harness's setting - [harness.<name>]
+# provider, defaulted by that harness's manifest. Per harness because that is
+# how it is actually used: Claude Code against Anthropic and Cline against
+# somewhere else, in different launches on the same machine, which one global
+# setting cannot express.
+#
+# WHAT that provider looks like is the provider's manifest, including the name
+# the terminator answers for. That one moved off the harness (#171): a harness
+# reaches whichever endpoint it is configured for, so with the name declared on
+# the harness the terminator would answer for Anthropic while the session
+# talked somewhere else - and the session would reach that API directly, with
+# the credential the proxy exists to withhold being the one in use.
+# A harness that declares no `provider` key at all names no endpoint for the
+# proxy to stand in front of, and the launch runs without one. That is the
+# self-served case: a model on the operator's own network needs no credential
+# withheld, because there is none. Asked with config_type rather than by
+# swallowing config_get's error, so a real fault reading a key the harness DOES
+# declare still stops the launch.
+DEJIMA_PROVIDER_NAME=""
+SANDBOX_PROVIDER_PROXIED_DOMAIN=""
+DEJIMA_PROVIDER_CREDENTIAL_KIND=""
+DEJIMA_PROVIDER_CREDENTIAL_FILE=""
+if config_type "harness.$DEJIMA_HARNESS_NAME.provider" >/dev/null 2>&1; then
+    DEJIMA_PROVIDER_NAME="$(config_get "harness.$DEJIMA_HARNESS_NAME" provider)"
+fi
+if [ -n "$DEJIMA_PROVIDER_NAME" ]; then
+    SANDBOX_PROVIDER_PROXIED_DOMAIN="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" proxied_domain)"
+    DEJIMA_PROVIDER_CREDENTIAL_KIND="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" credential)"
+    DEJIMA_PROVIDER_CREDENTIAL_FILE="$(config_get "provider.$DEJIMA_PROVIDER_NAME" credential_file)"
+fi
 # The two ways a briefing reaches a harness that is not handed it by a
 # session-start hook. A hook cannot carry a large one: Claude Code persists a
 # big payload to a file and injects a short preview in its place - measured in
@@ -1690,16 +1718,24 @@ SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_ANTHROPIC_PROXY_PID=""
 # Whether this provider's credential is in a state the proxy can use.
 #
-# Not the same question as "does the file exist", and the answer is the
-# provider's kind rather than a fixed check: an OAuth file that holds an API
-# key instead of a claudeAiOauth block is a setup the proxy cannot serve, and
-# has always been the case that skips it and mounts the real credential
-# instead. A static key is usable when it is a non-empty file.
+# Not "does the file exist", and the answer belongs to the provider's kind
+# rather than to one fixed check.
 #
-# Only a skippable answer here. Whether the credential is WELL FORMED is the
-# proxy's own startup check, which fails the launch loudly rather than
-# silently falling back - a fallback for a malformed key would be a session
-# running with the operator's real credential mounted in.
+# For anthropic-oauth it is whether ~/.claude/.credentials.json holds a
+# claudeAiOauth block. Claude Code can be set up with a plain API key instead,
+# and then it does not: there is no OAuth token for the proxy to inject and
+# nothing for it to refresh. That setup has always skipped the proxy and
+# mounted the real credential file into the container, which is the one
+# arrangement where dejima's own credential does enter it. Nothing is passed
+# through to the harness here and the proxy does not forward an API key on the
+# session's behalf - it is simply not in the path.
+#
+# For a static key it is whether the file has anything in it.
+#
+# Only a skippable answer. Whether the credential is WELL FORMED is the proxy's
+# own startup check, which fails the launch loudly rather than falling back -
+# a fallback for a malformed key would be a session running with the
+# operator's real credential mounted in.
 _credential_usable() {  # <kind> <path>
     case "$1" in
         anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
@@ -1708,7 +1744,8 @@ _credential_usable() {  # <kind> <path>
     esac
 }
 
-if [ "$(config_get_bool credentials proxy)" != "0" ] \
+if [ -n "$DEJIMA_PROVIDER_NAME" ] \
+    && [ "$(config_get_bool credentials proxy)" != "0" ] \
     && _credential_usable "$DEJIMA_PROVIDER_CREDENTIAL_KIND" "$DEJIMA_PROVIDER_CREDENTIAL_FILE"; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"

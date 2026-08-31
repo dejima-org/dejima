@@ -1417,3 +1417,27 @@ assert_remedy_forges_exist() {
     run lib _config_valid_value provider:provider ../etc
     [ "$status" -ne 0 ] || { echo "a traversal was accepted"; return 1; }
 }
+
+@test "the provider is selected per harness, not globally" {
+    # An operator running Claude Code against Anthropic and Cline against
+    # something else is the ordinary case, and it is why this is not one
+    # [credentials] key. Each harness declares its own, with its own default.
+    [ "$(lib config_type harness.claude-code.provider)" = "provider:provider" ]
+    [ "$(lib config_type harness.cline.provider)" = "provider:provider" ]
+    [ "$(lib config_default harness.claude-code.provider)" = "anthropic" ]
+    # And there is no global one to disagree with them.
+    run lib config_type credentials.provider
+    [ "$status" -ne 0 ] || { echo "a global provider key is back"; return 1; }
+}
+
+@test "a harness that declares no provider names no endpoint to proxy" {
+    # The self-served case: a model on the operator's own network needs no
+    # credential withheld because there is none, so a harness may decline to
+    # name a provider and the launch runs without a proxy.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/noprov.XXXXXX")"
+    mkdir -p "$d/harnesses/bare"
+    printf 'command = true\n' > "$d/harnesses/bare/harness.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; config_type harness.bare.provider' _ "$LIB"
+    [ "$status" -ne 0 ] || { echo "a harness that declares nothing got a provider key"; return 1; }
+}

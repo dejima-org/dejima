@@ -3038,3 +3038,20 @@ EOF
         || { echo "the migrated key is not the one in force: $output"; return 1; }
     rm -rf "$ID_DIR"
 }
+
+@test "--provider overrides the selected harness's provider for one launch" {
+    # Deferred like --model and --base-url, because which harness is selected
+    # is not known until every flag has been read: --harness may come after
+    # --provider.
+    write_config '[core]' 'harness = claude-code'
+    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --provider anthropic --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'harness.claude-code.provider=anthropic' <<< "$output" \
+        || { echo "$output"; return 1; }
+
+    # A name with no directory under providers/ is refused at parse time,
+    # rather than resolving to nothing three layers down.
+    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --provider no-such-provider --print-config
+    [ "$status" -ne 0 ] || { echo "an unknown provider was accepted"; return 1; }
+    [[ "$output" == *"--provider"* ]] || { echo "$output"; return 1; }
+}
