@@ -955,10 +955,10 @@ _cline_prepare() {
     # there is no proxy that could hold a key back, so the key would have to
     # go in. That is the one thing this harness may not do quietly.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://api.openai.com/v1')"
+    cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = https://api.openai.com/v1")"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -ne 0 ] || { echo "accepted a hosted endpoint"; return 1; }
-    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"refusing [provider.self-hosted] base_url"* ]] || { echo "$output"; return 1; }
 }
 
 @test "cline refuses the credential modes it has no path through" {
@@ -982,7 +982,7 @@ _cline_prepare() {
     # and refusing there would be refusing the configuration that made this
     # harness worth adding.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:11434/v1' \
+    cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = http://127.0.0.1:11434/v1" \
         '[credentials]' 'proxy = off')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -994,7 +994,7 @@ _cline_prepare() {
     # R5 to protect and the endpoint is supported today.
     local addr cfg
     for addr in 127.0.0.1 10.1.2.3 192.168.1.5 172.17.0.1 localhost; do
-        cfg="$(_cline_cfg 'model = m' "base_url = http://$addr:11434/v1")"
+        cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = http://$addr:11434/v1")"
         run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -eq 0 ] || { echo "refused $addr: $output"; return 1; }
     done
@@ -1010,7 +1010,7 @@ _cline_prepare() {
     # same store that decides what the container can reach: an endpoint that
     # fails this is one the session could not have connected to anyway.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = https://llm.example.test/v1")"
     printf 'llm.example.test\n' > "$cfg/allowed-domains"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -eq 0 ] || { echo "refused an allowlisted endpoint: $output"; return 1; }
@@ -1020,10 +1020,10 @@ _cline_prepare() {
     # The same endpoint without the grant. Nothing about the URL changed;
     # what changed is whether the operator asked for it.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = https://llm.example.test/v1")"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -ne 0 ] || { echo "accepted an endpoint nothing granted"; return 1; }
-    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"refusing [provider.self-hosted] base_url"* ]] || { echo "$output"; return 1; }
 }
 
 @test "cline does not mistake a hostname for the private range it starts with" {
@@ -1032,7 +1032,7 @@ _cline_prepare() {
     # as numbers for exactly this.
     local host cfg
     for host in 10.example.com 192.168.example.com 172.16.example.com; do
-        cfg="$(_cline_cfg 'model = m' "base_url = http://$host/v1")"
+        cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = http://$host/v1")"
         run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -ne 0 ] || { echo "accepted $host as a private address"; return 1; }
     done
@@ -1084,7 +1084,7 @@ _cline_prepare() {
 @test "cline's local-endpoint provider entry carries it too" {
     # Same field, the other branch. The bug was found on this one.
     local cfg ws f
-    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:8080/v1')"
+    cfg="$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = http://127.0.0.1:8080/v1")"
     ws="$BATS_TEST_TMPDIR/ws-ts2"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -7597,7 +7597,7 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     local rows
     rows="$(sed -n '/^| Arrangement | In the container |/,/^$/p' "$sec")"
     local arrangement
-    for arrangement in 'anthropic-oauth' 'credential = static' 'No provider' 'No proxy'; do
+    for arrangement in 'anthropic-oauth' 'credential = static' 'credential = none' 'No proxy'; do
         grep -qF "$arrangement" <<< "$rows" \
             || { echo "no row for: $arrangement"; return 1; }
     done
@@ -7633,25 +7633,27 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
         || { echo "nothing points at the arrangement comparison"; return 1; }
 }
 
-@test "cline takes where the model is from one setting, not two that can disagree" {
-    # An unset base_url used to mean Anthropic implicitly. With a provider axis
-    # that rule is gone (#171), and the two settings name different places: a
-    # provider is an API dejima proxies, base_url is a model the operator
-    # serves. Both set would be two answers, and picking one silently is how a
-    # session ends up talking to an endpoint nobody chose.
-    local cfg
-    cfg="$(_cline_cfg 'model = m' 'provider = anthropic' 'base_url = http://127.0.0.1:8080/v1')"
-    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
-    [ "$status" -ne 0 ] || { echo "accepted both"; return 1; }
-    [[ "$output" == *"both"* ]] || { echo "$output"; return 1; }
+@test "cline takes where the model is from the provider, and only from there" {
+    # base_url used to live on the harness, so two settings could name
+    # different places and an unset base_url meant Anthropic implicitly. It is
+    # a provider key now (#171): a self-served endpoint is its own provider
+    # carrying its own base_url, which is what lets an operator keep a local
+    # model configured while using a hosted API.
+    #
+    # So the harness has no base_url at all, and setting one is an unknown key
+    # rather than a second opinion.
+    run bash -c 'source "$1"; source "$2"; config_type harness.cline.base_url' _ \
+        "$REPO_ROOT/bin/dejima-config-lib.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ] || { echo "cline still declares a base_url of its own"; return 1; }
 
-    # And neither is a refusal too, rather than a default: one dejima could
-    # change later would move a session to another endpoint without its config
-    # changing.
+    # And an unset provider is a refusal rather than a default, naming both
+    # kinds because for this harness either is a valid answer.
+    local cfg
     cfg="$(_cline_cfg 'model = m')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
-    [ "$status" -ne 0 ] || { echo "accepted neither"; return 1; }
-    [[ "$output" == *"neither"* ]] || { echo "$output"; return 1; }
+    [ "$status" -ne 0 ] || { echo "launched with no provider"; return 1; }
+    [[ "$output" == *"no [harness.cline] provider is set"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"self-hosted"* ]] || { echo "the self-served option is unnamed: $output"; return 1; }
 }
 
 # The providers.json cline is actually given, for one config. Prints it as JSON.
@@ -7692,7 +7694,7 @@ _cline_providers_json() {
 
     # A model the operator serves takes the same openai-compatible client, and
     # is the one path with no credential anywhere: nothing to withhold.
-    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:8080/v1')")" \
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'provider = self-hosted' '[provider.self-hosted]' "base_url = http://127.0.0.1:8080/v1")")" \
         || { echo "the self-served path produced nothing"; return 1; }
     [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
         = "dejima-no-credential-needed" ] || { echo "$j"; return 1; }

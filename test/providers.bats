@@ -1469,6 +1469,27 @@ assert_remedy_forges_exist() {
     [[ "$(lib manifest_get provider openrouter proxied_domain)" != */* ]]
 }
 
+@test "a self-served endpoint is a provider like any other" {
+    # Where the model is belongs to the provider, including when the operator
+    # serves it. That is what lets a local endpoint stay configured while a
+    # hosted API is selected: it is [provider.self-hosted] base_url, not a
+    # setting on the harness that has to be unset to get out of the way.
+    lib manifest_validate provider self-hosted
+    [ "$(lib manifest_get provider self-hosted credential)" = "none" ]
+    [ "$(lib manifest_get provider self-hosted api_style)" = "openai" ]
+    [ "$(lib manifest_get provider self-hosted requires)" = "base_url" ]
+    [ "$(lib config_type provider.self-hosted.base_url)" = "?url" ]
+    [ -z "$(lib config_default provider.self-hosted.base_url)" ] \
+        || { echo "self-hosted ships a default endpoint"; return 1; }
+    # upstream and proxied_domain describe an endpoint dejima stands in front
+    # of, and it stands in front of nothing here.
+    [ -z "$(lib manifest_get provider self-hosted upstream)" ]
+    [ -z "$(lib manifest_get provider self-hosted proxied_domain)" ]
+    # And the harness no longer carries one of its own to disagree with it.
+    run lib config_type harness.cline.base_url
+    [ "$status" -ne 0 ] || { echo "cline still declares base_url"; return 1; }
+}
+
 @test "a harness and a provider have to speak the same API" {
     # Anthropic's Messages API is not OpenAI-compatible. Pairing a harness
     # with a provider it has no client for is knowable at launch and produces

@@ -240,8 +240,6 @@ while [ $# -gt 0 ]; do
                              NO_LOG=1; shift ;;
         --model)          _need_value --model "${2:-}"
                           _defer_harness_key --model model "$2"; shift 2 ;;
-        --base-url)       _need_value --base-url "${2:-}"
-                          _defer_harness_key --base-url base_url "$2"; shift 2 ;;
         --context-window) _need_value --context-window "${2:-}"
                           _defer_harness_key --context-window context_window "$2"; shift 2 ;;
         # Deferred like the three above, and for the extra reason that this one
@@ -1459,7 +1457,14 @@ if [ -n "$DEJIMA_PROVIDER_NAME" ]; then
     # proxy as an empty --upstream and fails as a connection error with no
     # hint of the cause, so the four a provider cannot work without are named
     # where they are read.
-    for _need in upstream proxied_domain api_style credential; do
+    _p_kind="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" credential)"
+    _p_required="api_style credential"
+    # upstream and proxied_domain describe an endpoint dejima stands in front
+    # of, so they are required of a proxied provider and meaningless to a
+    # direct one - which reaches a model the operator serves, with nothing to
+    # withhold and so no proxy at all.
+    [ "$_p_kind" = none ] || _p_required="$_p_required upstream proxied_domain"
+    for _need in $_p_required; do
         if [ -z "$(manifest_get provider "$DEJIMA_PROVIDER_NAME" "$_need")" ]; then
             echo "provider '$DEJIMA_PROVIDER_NAME' declares no $_need, so dejima cannot" >&2
             echo "tell where its API is or how to speak to it." >&2
@@ -1491,17 +1496,30 @@ if [ -n "$DEJIMA_PROVIDER_NAME" ]; then
             echo "provider '$DEJIMA_PROVIDER_NAME' needs [provider.$DEJIMA_PROVIDER_NAME] $_need, which is not set." >&2
             echo "" >&2
             echo "    [provider.$DEJIMA_PROVIDER_NAME]" >&2
-            echo "    $_need = /path/to/your/key" >&2
-            echo "" >&2
-            echo "The file stays on the host and is read per request; it is never" >&2
-            echo "mounted into the container." >&2
+            case "$_need" in
+                *_file)
+                    echo "    $_need = /path/to/your/key" >&2
+                    echo "" >&2
+                    echo "The file stays on the host and is read per request; it is" >&2
+                    echo "never mounted into the container." >&2
+                    ;;
+                base_url)
+                    echo "    $_need = http://127.0.0.1:8080/v1" >&2
+                    echo "" >&2
+                    echo "Where you serve the model. There is deliberately no default:" >&2
+                    echo "whatever is at some other address is not your model." >&2
+                    ;;
+                *)  echo "    $_need = ..." >&2 ;;
+            esac
             exit 1
         fi
     done
-    unset _p_style _h_styles _need
+    unset _p_style _h_styles _need _p_required
     SANDBOX_PROVIDER_PROXIED_DOMAIN="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" proxied_domain)"
     DEJIMA_PROVIDER_CREDENTIAL_KIND="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" credential)"
-    DEJIMA_PROVIDER_CREDENTIAL_FILE="$(config_get "provider.$DEJIMA_PROVIDER_NAME" credential_file)"
+    if config_type "provider.$DEJIMA_PROVIDER_NAME.credential_file" >/dev/null 2>&1; then
+        DEJIMA_PROVIDER_CREDENTIAL_FILE="$(config_get "provider.$DEJIMA_PROVIDER_NAME" credential_file)"
+    fi
 fi
 # The two ways a briefing reaches a harness that is not handed it by a
 # session-start hook. A hook cannot carry a large one: Claude Code persists a
@@ -1846,7 +1864,11 @@ _credential_usable() {  # <kind> <path>
     esac
 }
 
+# A direct provider runs no proxy: there is no credential to withhold, so
+# there is nothing for one to do. That is the self-served case, and it is the
+# arrangement with nothing in the container to steal.
 if [ -n "$DEJIMA_PROVIDER_NAME" ] \
+    && [ "$DEJIMA_PROVIDER_CREDENTIAL_KIND" != none ] \
     && [ "$(config_get_bool credentials proxy)" != "0" ] \
     && _credential_usable "$DEJIMA_PROVIDER_CREDENTIAL_KIND" "$DEJIMA_PROVIDER_CREDENTIAL_FILE"; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"

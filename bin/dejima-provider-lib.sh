@@ -242,6 +242,14 @@ autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # credential = none is an endpoint that needs no credential - a model
+        # the operator serves. There is nothing to withhold, so no proxy runs
+        # and neither upstream nor proxied_domain applies: the session reaches
+        # it directly, and where it is comes from the operator's own
+        # [provider.<name>] base_url rather than from the manifest. Both are
+        # optional for that reason and bin/dejima requires them where they do
+        # apply.
+        #
         # api_style is which dialect the endpoint speaks, and it is a property
         # of the API rather than of any harness: Anthropic's Messages API and
         # an OpenAI-compatible one are different wire formats, so a harness
@@ -257,10 +265,10 @@ EOF
         # is read from, never what it is - credential_file is a path, and the
         # file it names is read host-side per request and never mounted.
         provider) cat <<'EOF'
-upstream	url
-proxied_domain	hostname
+upstream	?url
+proxied_domain	?hostname
 api_style	enum:anthropic|openai
-credential	enum:static|anthropic-oauth
+credential	enum:static|anthropic-oauth|none
 auth_header	identifier	Authorization
 auth_format	authformat	Bearer {token}
 strip_headers	?list:identifier

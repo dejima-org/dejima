@@ -585,7 +585,7 @@ it.
 | --- | --- | --- | --- |
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
 | **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own provider config, and the endpoint's real hostname. | The placeholder. | The same. |
-| **No provider** (a model you serve yourself) | Nothing. The endpoint needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
+| **A provider with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
 | **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
 **The first three keep the credential out; the fourth does not.** That is the
@@ -628,11 +628,17 @@ account-wide where an access token is short-lived and rotated, so the host-side
 file is worth more. Scope the key at the provider where it offers that, the
 same argument this repository makes for a repository-scoped forge token.
 
-**No provider is the strongest posture available**, and it is worth saying so
-plainly rather than treating it as the degraded one. A harness pointed at a
-model on your own network has no credential anywhere in the picture, so there
-is nothing to place, nothing to withhold and nothing to steal. What it costs is
-that the model is yours to run.
+**A provider you serve yourself is the strongest posture available**, and it is
+worth saying so plainly rather than treating it as the degraded one. A session
+pointed at a model on your own network has no credential anywhere in the
+picture, so there is nothing to place, nothing to withhold and nothing to
+steal. What it costs is that the model is yours to run.
+
+It is a provider like any other - `providers/self-hosted`, with
+`credential = none` and its address in `[provider.self-hosted] base_url`. That
+placement is deliberate: an operator who serves a model locally and also uses a
+hosted API keeps both configured and switches by changing one word, rather than
+having to unset one setting to stop it overriding another.
 
 **This assumes the host has one.** dejima authenticates nothing: the proxy
 holds a credential the harness wrote on the host, so a machine where the

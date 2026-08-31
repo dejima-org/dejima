@@ -841,10 +841,10 @@ _identity_fixture() {
     run "$REPO_ROOT/bin/dejima" --print-config
     [[ "$output" == *"harness.cline.model=from-the-file"* ]] || { echo "$output"; return 1; }
 
-    run "$REPO_ROOT/bin/dejima" --model from-the-flag --base-url http://127.0.0.1:8080 \
+    run "$REPO_ROOT/bin/dejima" --model from-the-flag --provider self-hosted \
         --context-window 60000 --print-config
     [[ "$output" == *"harness.cline.model=from-the-flag"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"harness.cline.base_url=http://127.0.0.1:8080"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.provider=self-hosted"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"harness.cline.context_window=60000"* ]] || { echo "$output"; return 1; }
 }
 
@@ -3120,7 +3120,7 @@ EOF
     # cline's own refusal answers first and says more than core's would: it
     # names both ways to say where the model is, because for this harness
     # either is a valid answer.
-    [[ "$output" == *"neither [harness.cline] provider nor base_url is set"* ]] \
+    [[ "$output" == *"no [harness.cline] provider is set"* ]] \
         || { echo "$output"; return 1; }
     # And nothing was written into the operator's file.
     grep -q 'provider =' "$CONFIG_DIR/config" \
