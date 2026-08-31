@@ -29,17 +29,25 @@ teardown() {
 # A real HTTP server standing in for Loki, appending each pushed body to a
 # file. Real because the shipper reaches it with curl: a stub that replaced
 # curl would stop testing the thing that formats and sends the payload.
+# The server binds port 0 itself and reports what it got, rather than a helper
+# picking a free port and handing the number over.
+#
+# That handover was a race, and `bats --jobs` is what makes it fire: the helper
+# bound port 0, read the number, CLOSED the socket, and only then did the
+# server bind it. Another test starting in that window takes the same port, and
+# the loser dies with "Address already in use" - but the readiness probe below
+# still succeeds, because something IS listening on that port. The test then
+# ships to the other test's Loki, finds its own log empty, and reports the
+# failure as a lost transcript. Seen in CI, not locally: it needs enough cores
+# for two tests to be in that window at once.
 start_loki() {
-    LOKI_PORT="$(python3 - <<'EOF'
-import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
-EOF
-)"
-    python3 - "$LOKI_PORT" "$LOKI_LOG" <<'EOF' &
-import sys
+    local portfile="$BATS_TEST_TMPDIR/loki-port"
+    rm -f "$portfile"
+    python3 - "$portfile" "$LOKI_LOG" <<'EOF' &
+import sys, os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-port, path = int(sys.argv[1]), sys.argv[2]
+portfile, path = sys.argv[1], sys.argv[2]
 
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -51,12 +59,26 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+srv = HTTPServer(("127.0.0.1", 0), H)
+# Written only once the socket is bound and listening, and atomically, so the
+# shell can never read a half-written number or one for a socket that is gone.
+tmp = portfile + ".tmp"
+with open(tmp, "w") as f:
+    f.write(str(srv.server_address[1]))
+os.replace(tmp, portfile)
+srv.serve_forever()
 EOF
     LOKI_PID=$!
     local i
-    for i in $(seq 1 50); do
-        (exec 3<>/dev/tcp/127.0.0.1/"$LOKI_PORT") 2>/dev/null && return 0
+    for i in $(seq 1 100); do
+        if [ -s "$portfile" ]; then
+            LOKI_PORT="$(cat "$portfile")"
+            return 0
+        fi
+        # A server that died on startup will never write the file, and waiting
+        # the full timeout for a process that is already gone only delays the
+        # real message.
+        kill -0 "$LOKI_PID" 2>/dev/null || break
         sleep 0.1
     done
     echo "the fake Loki never came up" >&2
@@ -408,7 +430,15 @@ EOF
     write_config
     mkdir -p "$(slug_dir)"
     start_ship
-    sleep 1
+
+    # Wait for the shipper to be demonstrably running rather than sleeping at
+    # it. A fixed sleep is a second race on a loaded machine: if the process
+    # is still starting when the signal arrives, the handler runs before the
+    # key schema has been resolved, which fails for the ORIGINAL #284 reason
+    # and would read as this fix not working.
+    say "a first line" >> "$(slug_dir)/s1.jsonl"
+    await_shipped "a first line" || { echo "the shipper never started"; return 1; }
+
     say "the final answer" >> "$(slug_dir)/s1.jsonl"
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true
