@@ -1441,6 +1441,54 @@ _cli_tools() {
     done
 }
 
+@test "the changed lane's map names only suites that exist" {
+    # The map is what --changed selects with, so a suite renamed out from under
+    # it stops being selected silently: the run still says green, having
+    # covered less than it claims. That is the exact failure the fast lane is
+    # not allowed to have, so it is asserted rather than trusted.
+    local names n
+    names="$(sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" \
+        | grep -oE "echo '[^']*'|echo [A-Za-z][A-Za-z-]*" \
+        | sed -E "s/^echo '?//; s/'\$//")"
+    [ -n "$names" ] || { echo "found no suite names in the map"; return 1; }
+    for n in $names; do
+        [ "$n" = ALL ] && continue
+        [ -f "$REPO_ROOT/test/$n.bats" ] \
+            || { echo "the change map names a suite that does not exist: $n"; return 1; }
+    done
+}
+
+@test "an unmapped path selects every suite rather than none" {
+    # A path nobody has mapped is a path nobody has decided about. Selecting
+    # nothing there would be a run that passes having tested the change with
+    # no suite at all, which reads identically to a run that covered it.
+    run bash "$REPO_ROOT/test/run-confined.sh" --changed --list a/path/nobody/mapped
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local suite
+    for suite in static config providers project remote proxy audit; do
+        [ -f "$REPO_ROOT/test/$suite.bats" ] || continue
+        grep -qx "$suite" <<< "$output" \
+            || { echo "an unmapped path did not select $suite: $output"; return 1; }
+    done
+}
+
+@test "each lane says which one it is, and only one claims to be the gate" {
+    # Two lanes are only safe while a run can be read back and identified. The
+    # failure mode this exists against is an agent running the quick one,
+    # seeing green and reporting the change as tested.
+    local out
+    out="$(bash "$REPO_ROOT/test/run-confined.sh" --changed --list bin/dejima-audit 2>&1)"
+    [[ "$out" == *"lane: CHANGED"* ]] || { echo "$out"; return 1; }
+    [[ "$out" == *"NOT the pull-request gate"* ]] || { echo "$out"; return 1; }
+
+    out="$(bash "$REPO_ROOT/test/run-confined.sh" --list 2>&1)"
+    [[ "$out" == *"lane: ALL"* ]] || { echo "$out"; return 1; }
+    [[ "$out" == *"pull-request gate"* ]] || { echo "$out"; return 1; }
+    # And it names what it still does not cover, since the privileged suites
+    # are outside every lane here.
+    [[ "$out" == *runtime* ]] || { echo "the gate lane hides what it cannot run: $out"; return 1; }
+}
+
 @test "shellcheck covers harness plugins, which carry no shebang" {
     # Plugins are sourced, so they have no shebang, so the shebang-based
     # discovery dropped them - silently, while they sit in the trusted

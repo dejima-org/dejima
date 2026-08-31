@@ -163,9 +163,16 @@ jobs:
       # they fail on the terminal rather than on anything they mean to check.
       # xterm-256color ships in ncurses-base, which is Essential - nothing to
       # install. Set on the command rather than in env: so it survives su.
+      #
+      # --jobs runs the tests within the file concurrently. bats needs GNU
+      # parallel only to parallelize ACROSS files; within one file it uses its
+      # own flock-based semaphore, and flock is in util-linux, which Debian
+      # marks Essential - so nothing here has to install anything for it.
+      # --no-parallelize-across-files is what tells bats that, since it
+      # otherwise refuses --jobs outright when GNU parallel is absent.
       - run: |
           chown -R node:node .
-          su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
+          su node -c "TERM=xterm-256color bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
 
   shellcheck:
     # Its own job rather than a matrix entry: it installs a different package,
