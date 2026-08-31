@@ -1832,6 +1832,7 @@ export SANDBOX_HARNESS_SEED
 SANDBOX_ANTHROPIC_TRANSPORT="$(config_get credentials transport)"
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
+SANDBOX_ANTHROPIC_API_KEY=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
@@ -1842,13 +1843,12 @@ SANDBOX_ANTHROPIC_PROXY_PID=""
 # rather than to one fixed check.
 #
 # For anthropic-oauth it is whether ~/.claude/.credentials.json holds a
-# claudeAiOauth block. Claude Code can be set up with a plain API key instead,
-# and then it does not: there is no OAuth token for the proxy to inject and
-# nothing for it to refresh. That setup has always skipped the proxy and
-# mounted the real credential file into the container, which is the one
-# arrangement where dejima's own credential does enter it. Nothing is passed
-# through to the harness here and the proxy does not forward an API key on the
-# session's behalf - it is simply not in the path.
+# claudeAiOauth block. A Claude Code set up with a console key rather than a
+# login has none, and there is then no OAuth token for the proxy to inject or
+# refresh - so selecting this backend for that setup falls through to mounting
+# the real credential file, which is the one arrangement where dejima's own
+# credential enters the container. The backend for that setup is
+# anthropic-api-key, which keeps the key on the host like any other.
 #
 # For a static key it is whether the file has anything in it.
 #
@@ -1916,6 +1916,19 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "loopback" ]; then
         SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
         SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+    elif [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" = static ]; then
+        # API billing: the session authenticates with a key rather than a
+        # login, so there is no credential FILE to fake - Claude Code reads
+        # ANTHROPIC_API_KEY, and a placeholder there is the whole of what the
+        # container needs. The host-side proxy swaps it for the real key per
+        # request, the same arrangement the OAuth path has.
+        #
+        # Set here rather than by the harness plugin because it reaches the
+        # container through compose, which is core's side of the boundary.
+        # It is Anthropic-shaped, like the two variables beside it, and a
+        # second backend wanting a different variable is the point at which
+        # this becomes a declaration rather than a branch.
+        SANDBOX_ANTHROPIC_API_KEY="sandbox-credential-proxy-placeholder"
     else
         # With no ANTHROPIC_AUTH_TOKEN set, Claude Code authenticates from
         # .credentials.json directly, so the container needs a well-formed
@@ -1954,6 +1967,7 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+export SANDBOX_ANTHROPIC_API_KEY
 export SANDBOX_ANTHROPIC_TRANSPORT
 
 # Optional remote access (see docs/remote-access.md). Entirely skipped

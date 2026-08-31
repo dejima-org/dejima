@@ -589,11 +589,22 @@ it.
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
 | **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
 | **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
-| **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+| **No proxy** (`[credentials] proxy = off`, or a Claude Code login the selected backend cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
 **The first three keep the credential out; the fourth does not.** That is the
 whole of the difference, and it is why `proxy = off` is described here as a
 kill switch rather than as an option.
+
+**Both Anthropic billing models are in the first three.** A subscription login
+is `backends/anthropic`, whose OAuth token the proxy refreshes and writes back;
+a console key is `backends/anthropic-api-key`, a static credential against the
+same endpoint presented as `x-api-key`. Either way the credential is held on
+the host and injected per request. On the API-key path the container gets
+`ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
+at all.
+
+What lands in the fourth row is `proxy = off`, and a login whose shape no
+selected backend serves.
 
 **The residual the first two share is use-while-running.** A session that has
 been turned can spend your quota, ask the model anything, and read the answers

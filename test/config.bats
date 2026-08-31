@@ -3215,3 +3215,44 @@ EOF
         && { echo "the real token reached the container"; return 1; }
     rm -rf "$workspace" "$stub" "$log"
 }
+
+@test "an API-billing session gets a placeholder key, and the real one stays on the host" {
+    # A console key rather than a subscription login. What the container is
+    # given is a placeholder in ANTHROPIC_API_KEY; the real key is read
+    # host-side per request by the proxy, exactly as a login's token is.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local keyfile="$CONFIG_DIR/anthropic-key"
+    printf 'sk-ant-api03-NOT-THE-PLACEHOLDER\n' > "$keyfile"
+    chmod 600 "$keyfile"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
+                 "credential_file = $keyfile"
+
+    # A stub that records both what compose would read from the environment
+    # and what docker itself was called with, because a credential can reach a
+    # container by either route.
+    local stub log
+    stub="$(mktemp -d)"; log="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep '^SANDBOX_ANTHROPIC' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    grep -q 'SANDBOX_ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder' "$log" \
+        || { echo "no placeholder key reached the container:"; cat "$log"; return 1; }
+    grep -q 'NOT-THE-PLACEHOLDER' "$log" \
+        && { echo "the real key reached the container"; return 1; }
+    # And no credential file is mounted: on this path there is no login to
+    # fake and nothing to write back.
+    grep -q 'credentials.json' "$log" \
+        && { echo "a credential file was mounted anyway"; return 1; }
+    rm -rf "$workspace" "$stub" "$log"
+}

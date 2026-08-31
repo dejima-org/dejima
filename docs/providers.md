@@ -13,7 +13,7 @@ core. Each is a directory under `forges/`, `workflows/`, `harnesses/` or
 | forge | `forges/` | `[core] forge` | `forges/gitea`, `forges/github`, `forges/none` |
 | workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only` |
 | harness | `harnesses/` | `[core] harness` | `harnesses/claude-code`, `harnesses/cline` |
-| backend | `backends/` | `[harness.<name>] backend` | `backends/anthropic`, `backends/openrouter`, `backends/self-hosted` |
+| backend | `backends/` | `[harness.<name>] backend` | `backends/anthropic`, `backends/anthropic-api-key`, `backends/openrouter`, `backends/self-hosted` |
 
 The backend is selected per harness rather than in `[core]`, because it is the
 harness that talks to a model API - see [Model backends](#model-backends).
@@ -302,6 +302,7 @@ declarations currently work out to.
 | Backend | `claude-code` | `cline` | Credential | You configure |
 | --- | --- | --- | --- | --- |
 | `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
+| `anthropic-api-key` | yes | yes | a static key, held on the host | `[backend.anthropic-api-key] credential_file` |
 | `openrouter` | no | yes | a static key, held on the host | `[backend.openrouter] credential_file` |
 | `self-hosted` | no | yes | none, and so no proxy at all | `[backend.self-hosted] base_url` |
 
@@ -516,6 +517,7 @@ every launch:
 | harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
 | harness | `cline` | backend-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
 | backend | `anthropic` | Anthropic on a subscription login; the OAuth token is refreshed and written back to the host |
+| backend | `anthropic-api-key` | Anthropic on API billing; a static console key, held on the host |
 | backend | `openrouter` | a hosted OpenAI-compatible API; a static key, held on the host |
 | backend | `self-hosted` | a model you serve; no credential and so no proxy, and the endpoint must be host-local |
 

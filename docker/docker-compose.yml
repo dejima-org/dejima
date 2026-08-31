@@ -168,6 +168,10 @@ services:
       # empty - and unset by entrypoint.sh - otherwise.
       ANTHROPIC_BASE_URL: ${SANDBOX_ANTHROPIC_BASE_URL:-}
       ANTHROPIC_AUTH_TOKEN: ${SANDBOX_ANTHROPIC_AUTH_TOKEN:-}
+      # The placeholder an API-billing session authenticates with. The real key
+      # never enters the container; the host-side proxy swaps this for it per
+      # request, exactly as it does for a subscription login's token.
+      ANTHROPIC_API_KEY: ${SANDBOX_ANTHROPIC_API_KEY:-}
       SANDBOX_ANTHROPIC_PROXY_SOCKET: ${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}
       SANDBOX_ANTHROPIC_TRANSPORT: ${SANDBOX_ANTHROPIC_TRANSPORT:-}
     volumes:

@@ -1535,6 +1535,14 @@ assert_remedy_forges_exist() {
     for p in $(lib provider_list backend); do
         row="$(grep -E "^\| \`$p\` \|" <<< "$rows")" \
             || { echo "no row for backend '$p'"; return 1; }
+        # Column count first. A row with a doubled separator still answers
+        # the cells this asks for by index, so without this a malformed row
+        # passes - which is how one got in.
+        local want_cols cols
+        want_cols="$(awk -F'|' 'NR==1 {print NF}' <<< "$rows")"
+        cols="$(awk -F'|' '{print NF}' <<< "$row")"
+        [ "$cols" = "$want_cols" ] \
+            || { echo "$p's row has $cols columns, the header has $want_cols"; return 1; }
         local i=0
         for h in claude-code cline; do
             i=$((i + 1))
@@ -1556,4 +1564,27 @@ assert_remedy_forges_exist() {
         grep -q "\`$h\`" <<< "$rows" || { echo "no column for harness '$h' in $doc"; return 1; }
     done
     done
+}
+
+@test "an Anthropic API key is a backend, so it stays on the host too" {
+    # The setup most organisations use: a console key on API billing, rather
+    # than a subscription login. Without a backend to declare it, dejima has
+    # no claudeAiOauth block to protect, skips the proxy, and mounts the
+    # operator's real key into the container - so the common arrangement
+    # would be the one where a long-lived, account-wide credential sits where
+    # a compromised session can read it.
+    lib manifest_validate backend anthropic-api-key
+    [ "$(lib manifest_get backend anthropic-api-key credential)" = "static" ]
+    [ "$(lib manifest_get backend anthropic-api-key upstream)" = "https://api.anthropic.com" ]
+    [ "$(lib manifest_get backend anthropic-api-key api_style)" = "anthropic" ]
+    # Anthropic's own header, bare - no scheme prefix. That pair is the whole
+    # difference from the subscription backend: a token is a Bearer, a key is
+    # x-api-key.
+    [ "$(lib manifest_get backend anthropic-api-key auth_header)" = "x-api-key" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_format)" = "{token}" ]
+    [ "$(lib manifest_get backend anthropic auth_header)" = "Authorization" ]
+    # And the other slot stripped, so a placeholder cannot travel beside the
+    # injected key and be the one the API reads.
+    [ "$(lib manifest_get backend anthropic-api-key strip_headers)" = "authorization" ]
+    [ "$(lib manifest_get backend anthropic-api-key requires)" = "credential_file" ]
 }
