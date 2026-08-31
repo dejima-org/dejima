@@ -198,6 +198,24 @@ write_config() {
         [[ "$_a" =~ ^[[:space:]]*harness[[:space:]]*= ]] && _has=1
     done
     [ "$_has" -eq 1 ] || printf '[core]\nharness = claude-code\n' >> "$CONFIG_DIR/config"
+
+    # And a provider, for the same reason and with the same shape: a shipped
+    # harness declares the key with no default, so a launch is refused without
+    # it (#171). Seeded only for the harnesses that ship - a fixture's own
+    # synthetic harness may declare no provider key at all, and writing one
+    # into its section would be an unknown-key error rather than a default.
+    local _harness=claude-code _hasprov=0
+    for _a in "$@"; do
+        [[ "$_a" =~ ^[[:space:]]*harness[[:space:]]*= ]] \
+            && _harness="$(sed 's/^[[:space:]]*harness[[:space:]]*=[[:space:]]*//' <<< "$_a")"
+        [[ "$_a" =~ ^[[:space:]]*provider[[:space:]]*= ]] && _hasprov=1
+    done
+    case "$_harness" in
+        claude-code|cline)
+            [ "$_hasprov" -eq 1 ] \
+                || printf '[harness.%s]\nprovider = anthropic\n' "$_harness" >> "$CONFIG_DIR/config"
+            ;;
+    esac
 }
 
 @test "config_get returns the schema default when the key is absent" {
@@ -1950,7 +1968,7 @@ EOF
     # a gitea token reaching the container: the shipped defaults select no
     # forge at all, so leaving them implicit would mean nothing ever reads
     # token_file and the refusal under test could never fire.
-    printf '[core]\nharness = claude-code\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+    printf '[core]\nharness = claude-code\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[harness.claude-code]\nprovider = anthropic\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
         "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
     printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
     STUB_DIR="$(mktemp -d)"

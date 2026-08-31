@@ -98,7 +98,8 @@ launch() {
     # launch is what triggers it. Its cache needs nothing further: it lands
     # under $HOME, which every launch fixture already points somewhere of its
     # own.
-    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n' \
+    # provider is stated, not defaulted: it has none and never will (#171).
+    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n[harness.claude-code]\nprovider = anthropic\n' \
         "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
@@ -981,7 +982,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # no domains at all, or by the env prefix below never reaching the child.
     printf 'good.example.com\n' > "$CONFIG_DIR/allowed-domains"
     launch_setup
-    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
+    printf '[core]\nharness = claude-code\nssh_key = %s\n[harness.claude-code]\nprovider = anthropic\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \

@@ -1395,6 +1395,34 @@ DEJIMA_PROVIDER_CREDENTIAL_KIND=""
 DEJIMA_PROVIDER_CREDENTIAL_FILE=""
 if config_type "harness.$DEJIMA_HARNESS_NAME.provider" >/dev/null 2>&1; then
     DEJIMA_PROVIDER_NAME="$(config_get "harness.$DEJIMA_HARNESS_NAME" provider)"
+    # Declared and unset is a refusal, not a default.
+    #
+    # No harness ships one, for the reason [core] harness has none: a default
+    # that could change later is a config file that is not the source of
+    # truth, and a session whose config did not change must not start talking
+    # to a different endpoint because dejima's idea of a sensible one moved.
+    # The risk is concrete rather than theoretical for a harness that supports
+    # many providers and has a backend of its own.
+    #
+    # Declaring the key is how a harness says it talks to a model API at all,
+    # so this needs no harness name here: one pointed only at a model on the
+    # operator's own network leaves the key out and never reaches this.
+    if [ -z "$DEJIMA_PROVIDER_NAME" ]; then
+        echo "[harness.$DEJIMA_HARNESS_NAME] provider is not set, so nothing says which" >&2
+        echo "model API this session talks to." >&2
+        echo "" >&2
+        echo "    [harness.$DEJIMA_HARNESS_NAME]" >&2
+        echo "    provider = anthropic" >&2
+        echo "" >&2
+        echo "There is deliberately no default: one dejima could change later" >&2
+        echo "would move your session to another endpoint without your config" >&2
+        echo "changing. --provider <name> sets it for a single launch." >&2
+        echo "" >&2
+        printf 'Available:' >&2
+        for _p in $(provider_list provider); do printf ' %s' "$_p" >&2; done
+        printf '\n' >&2
+        exit 1
+    fi
 fi
 if [ -n "$DEJIMA_PROVIDER_NAME" ]; then
     SANDBOX_PROVIDER_PROXIED_DOMAIN="$(manifest_get provider "$DEJIMA_PROVIDER_NAME" proxied_domain)"

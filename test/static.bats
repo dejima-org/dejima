@@ -5815,12 +5815,18 @@ EOF
     # providers.bats) - this fixture sidesteps that with the honest
     # "no forge, no push" pair rather than configuring a forge just to get
     # past validation.
+    # [harness.claude-code] provider, because it has no default and never
+    # will: one dejima could change later would move a session to another
+    # endpoint without its config changing (#171). A launch fixture has to
+    # state it like any other operator config.
     cat > "$DEJIMA_T/config/config" <<EOF
 [core]
 harness = claude-code
 ssh_key = $DEJIMA_T/sandbox-key
 forge = none
 workflow = local-only
+[harness.claude-code]
+provider = anthropic
 [audit]
 dir = $DEJIMA_T/audit
 EOF
@@ -7576,4 +7582,53 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     # should be told Basic is a trade, not that it is the answer.
     grep -qi 'no per-operator identity' <<< "$flat" \
         || { echo "what Basic costs is unstated"; return 1; }
+}
+
+@test "the four credential arrangements are documented with what each exposes" {
+    # There is more than one kind of provider now, and they differ in exactly
+    # one way that matters: three keep the credential on the host and one
+    # mounts it. A reader choosing a provider needs that comparison in one
+    # place rather than assembled from a section written when Anthropic OAuth
+    # was the only path (#171).
+    local sec="$REPO_ROOT/docs/security.md" flat
+    flat="$(flat_prose "$sec")"
+    grep -q '^| Arrangement | In the container | What a compromised session can take |' "$sec" \
+        || { echo "the arrangement table is gone or lost a column"; return 1; }
+    local rows
+    rows="$(sed -n '/^| Arrangement | In the container |/,/^$/p' "$sec")"
+    local arrangement
+    for arrangement in 'anthropic-oauth' 'credential = static' 'No provider' 'No proxy'; do
+        grep -qF "$arrangement" <<< "$rows" \
+            || { echo "no row for: $arrangement"; return 1; }
+    done
+    # The one that differs, said outright rather than left to the table.
+    grep -qi 'first three keep the credential out; the fourth does not' <<< "$flat" \
+        || { echo "nothing says which arrangement mounts the credential"; return 1; }
+    # The residual the proxied ones share. A page that only lists what is
+    # prevented reads as a stronger claim than the code makes.
+    grep -qi 'residual the first two share is use-while-running' <<< "$flat" \
+        || { echo "the use-while-running residual is undocumented"; return 1; }
+    # Refreshing vs static, which is about the HOST-side value rather than
+    # about what the container sees.
+    grep -qi 'differ in what a leak elsewhere costs, not in what the' <<< "$flat" \
+        || { echo "oauth and static read as equivalent"; return 1; }
+    # And the firewall asymmetry, with its limit attached. Without the limit
+    # this reads as a route block, which it is not.
+    grep -qi 'not in the egress allowlist while the proxy is on' <<< "$flat" \
+        || { echo "the allowlist asymmetry is undocumented"; return 1; }
+    grep -qi 'defeats a lookup, not a route' <<< "$flat" \
+        || { echo "the asymmetry is stated without its limit"; return 1; }
+}
+
+@test "the threat model owns the use-while-running residual" {
+    # security.md is the control-by-control account; the threat model is where
+    # a reader looks for what is NOT claimed, and this is the claim a
+    # credential proxy most invites someone to overstate.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    grep -qi 'cannot use the model API as you while it runs' <<< "$flat" \
+        || { echo "the not-claimed list does not carry it"; return 1; }
+    grep -q 'security.md#four-arrangements-and-what-a-session-can-take-from-each' \
+        "$REPO_ROOT/docs/threat-model.md" \
+        || { echo "nothing points at the arrangement comparison"; return 1; }
 }

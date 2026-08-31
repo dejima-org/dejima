@@ -379,6 +379,7 @@ _plugin_version_mounts() {
 harness_prepare_config() {
     local overlay="$1" settings="$HOME/.claude/settings.json" settings_error
 
+
     # install.sh normally creates settings.json, and many hosts have no
     # CLAUDE.md at all. Created empty rather than left absent because
     # harness_staged_config below emits both unconditionally and core skips

@@ -574,6 +574,52 @@ approximation of its name.
   The session's own share arrives at `~/shared` without going through either.
 ## The model API credential never enters the container
 
+### Four arrangements, and what a session can take from each
+
+Which one a launch is in comes from the selected provider's `credential` kind
+and from whether the proxy is on. The differences are worth stating together,
+because only the last one puts a durable credential where a session can read
+it.
+
+| Arrangement | In the container | What a compromised session can take | What it can still do |
+| --- | --- | --- | --- |
+| **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
+| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own provider config. | The placeholder. | The same. |
+| **No provider** (a model you serve yourself) | Nothing. The endpoint needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
+| **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+
+**The first three keep the credential out; the fourth does not.** That is the
+whole of the difference, and it is why `proxy = off` is described here as a
+kill switch rather than as an option.
+
+**The residual the first two share is use-while-running.** A session that has
+been turned can spend your quota, ask the model anything, and read the answers
+- through the proxy, without ever holding the credential. That is inherent to
+the sandbox working at all: the session has to be able to reach the model, and
+anything it can reach it can misuse. What the proxy buys is that the misuse
+stops when the session does, and nothing durable leaves.
+
+**Refreshing and static differ in what a leak elsewhere costs, not in what the
+container sees.** Neither enters it. But an OAuth access token is short-lived
+and the proxy rotates it, while an API key is typically long-lived and
+account-wide - so the host-side file is worth more in the static case, and a
+compromise of the *host* is correspondingly worse. Scope the key at the
+provider where you can, the same argument
+[docs/providers.md](providers.md) makes for a repository-scoped forge token.
+
+**The proxied domain is not in the egress allowlist while the proxy is on.**
+`docker/fixed-domains.sh` adds it only when there is no proxy, so a session
+that tries to reach the API by name finds it unresolvable and goes through the
+terminator instead. Worth being precise about the limit: this defeats a lookup,
+not a route. The API's address stays reachable as an IP literal for as long as
+any other allowlisted name resolves to it.
+
+**No provider is the strongest posture available**, and it is worth saying so
+plainly rather than treating it as the degraded one. A harness pointed at a
+model on your own network has no credential anywhere in the picture, so there
+is nothing to place, nothing to withhold and nothing to steal. What it costs is
+that the model is yours to run.
+
 **This assumes the host has one.** dejima authenticates nothing: the proxy
 holds a credential the harness wrote on the host, so a machine where the
 harness has never signed in has nothing for it to hold. The proxy then does

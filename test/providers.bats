@@ -1422,9 +1422,15 @@ assert_remedy_forges_exist() {
     # An operator running Claude Code against Anthropic and Cline against
     # something else is the ordinary case, and it is why this is not one
     # [credentials] key. Each harness declares its own, with its own default.
-    [ "$(lib config_type harness.claude-code.provider)" = "provider:provider" ]
-    [ "$(lib config_type harness.cline.provider)" = "provider:provider" ]
-    [ "$(lib config_default harness.claude-code.provider)" = "anthropic" ]
+    [ "$(lib config_type harness.claude-code.provider)" = "?provider:provider" ]
+    [ "$(lib config_type harness.cline.provider)" = "?provider:provider" ]
+    # And NO default, on either. One that could change later would move a
+    # session to another endpoint without its config changing, which is the
+    # reason [core] harness has none either.
+    [ -z "$(lib config_default harness.claude-code.provider)" ] \
+        || { echo "claude-code ships a default provider"; return 1; }
+    [ -z "$(lib config_default harness.cline.provider)" ] \
+        || { echo "cline ships a default provider"; return 1; }
     # And there is no global one to disagree with them.
     run lib config_type credentials.provider
     [ "$status" -ne 0 ] || { echo "a global provider key is back"; return 1; }

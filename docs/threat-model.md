@@ -276,6 +276,14 @@ this section. Nothing in dejima can bound its own host.
   belongs in that harness's assessment.
   [security.md](security.md#the-firewall-bounds-the-container-not-the-harness)
   has the evidence.
+- **That a session cannot use the model API as you while it runs.** It can.
+  The credential proxy keeps the credential on the host, so nothing durable
+  leaves and the misuse stops when the session does - but a session that has
+  been turned can spend your quota and read whatever it asks for, through the
+  proxy, without ever holding the credential. That is inherent to the sandbox
+  working at all. [security.md](security.md#four-arrangements-and-what-a-session-can-take-from-each)
+  has the four arrangements and what each one puts in the container, including
+  the one that puts the credential itself there.
 - **That escape is impossible.** It is a row in the table with controls of its
   own, not an outcome that has been designed away.
 - **That the hooks stop a hostile agent.** They stop an unlucky one.
