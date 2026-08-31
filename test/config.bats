@@ -199,21 +199,21 @@ write_config() {
     done
     [ "$_has" -eq 1 ] || printf '[core]\nharness = claude-code\n' >> "$CONFIG_DIR/config"
 
-    # And a provider, for the same reason and with the same shape: a shipped
+    # And a backend, for the same reason and with the same shape: a shipped
     # harness declares the key with no default, so a launch is refused without
     # it (#171). Seeded only for the harnesses that ship - a fixture's own
-    # synthetic harness may declare no provider key at all, and writing one
+    # synthetic harness may declare no backend key at all, and writing one
     # into its section would be an unknown-key error rather than a default.
     local _harness=claude-code _hasprov=0
     for _a in "$@"; do
         [[ "$_a" =~ ^[[:space:]]*harness[[:space:]]*= ]] \
             && _harness="$(sed 's/^[[:space:]]*harness[[:space:]]*=[[:space:]]*//' <<< "$_a")"
-        [[ "$_a" =~ ^[[:space:]]*provider[[:space:]]*= ]] && _hasprov=1
+        [[ "$_a" =~ ^[[:space:]]*backend[[:space:]]*= ]] && _hasprov=1
     done
     case "$_harness" in
         claude-code|cline)
             [ "$_hasprov" -eq 1 ] \
-                || printf '[harness.%s]\nprovider = anthropic\n' "$_harness" >> "$CONFIG_DIR/config"
+                || printf '[harness.%s]\nbackend = anthropic\n' "$_harness" >> "$CONFIG_DIR/config"
             ;;
     esac
 }
@@ -841,10 +841,10 @@ _identity_fixture() {
     run "$REPO_ROOT/bin/dejima" --print-config
     [[ "$output" == *"harness.cline.model=from-the-file"* ]] || { echo "$output"; return 1; }
 
-    run "$REPO_ROOT/bin/dejima" --model from-the-flag --provider self-hosted \
+    run "$REPO_ROOT/bin/dejima" --model from-the-flag --backend self-hosted \
         --context-window 60000 --print-config
     [[ "$output" == *"harness.cline.model=from-the-flag"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"harness.cline.provider=self-hosted"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"harness.cline.backend=self-hosted"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"harness.cline.context_window=60000"* ]] || { echo "$output"; return 1; }
 }
 
@@ -1968,7 +1968,7 @@ EOF
     # a gitea token reaching the container: the shipped defaults select no
     # forge at all, so leaving them implicit would mean nothing ever reads
     # token_file and the refusal under test could never fire.
-    printf '[core]\nharness = claude-code\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[harness.claude-code]\nprovider = anthropic\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
+    printf '[core]\nharness = claude-code\nfirewall = on\nssh_key = %s\nforge = gitea\nworkflow = worktree-pr\n[harness.claude-code]\nbackend = anthropic\n[forge.gitea]\nssh_host = git.example\napi = https://api.example\ntoken_file = %s/token\n' \
         "$RW_KEY" "$CONFIG_DIR" > "$CONFIG_DIR/config"
     printf 'real-secret\ngarbage\n' > "$CONFIG_DIR/token"
     STUB_DIR="$(mktemp -d)"
@@ -2283,7 +2283,7 @@ _epitaph_three() {
     # with a concurrent run.
     proot="$(mktemp -d)"
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-       "$REPO_ROOT/providers" "$proot/"
+       "$REPO_ROOT/backends" "$proot/"
     mkdir -p "$proot/harnesses/test-no-plugin"
     printf 'command = true\n' > "$proot/harnesses/test-no-plugin/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
@@ -2320,7 +2320,7 @@ _epitaph_three() {
     workspace="$(mktemp -d)"
     proot="$(mktemp -d)"
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-       "$REPO_ROOT/providers" "$proot/"
+       "$REPO_ROOT/backends" "$proot/"
     # Same harness, minus two guards, so the message is the only difference.
     sed -i 's/^guards .*/guards          = bash-deny notify/' \
         "$proot/harnesses/claude-code/harness.conf"
@@ -2362,7 +2362,7 @@ _epitaph_three() {
     workspace="$(mktemp -d)"
     proot="$(mktemp -d)"
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-       "$REPO_ROOT/providers" "$proot/"
+       "$REPO_ROOT/backends" "$proot/"
     sed -i 's/^guards .*/guards          = bash-deny push-gaurd/' \
         "$proot/harnesses/claude-code/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
@@ -2378,7 +2378,7 @@ _epitaph_three() {
     # config belonging to a harness the operator did not choose.
     local proot; proot="$(mktemp -d)"
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-       "$REPO_ROOT/providers" "$proot/"
+       "$REPO_ROOT/backends" "$proot/"
     sed -i 's/^guards .*/guards          = bash-deny/' \
         "$proot/harnesses/claude-code/harness.conf"
     run_install DEJIMA_PROVIDER_ROOT="$proot"
@@ -2559,10 +2559,10 @@ STUB
     workspace="$(mktemp -d)"
     local root
     root="$(mktemp -d)"
-    mkdir -p "$root/harnesses/evil" "$root/forges" "$root/workflows" "$root/providers"
+    mkdir -p "$root/harnesses/evil" "$root/forges" "$root/workflows" "$root/backends"
     cp -r "$REPO_ROOT/forges/." "$root/forges/"
     cp -r "$REPO_ROOT/workflows/." "$root/workflows/"
-    cp -r "$REPO_ROOT/providers/." "$root/providers/"
+    cp -r "$REPO_ROOT/backends/." "$root/backends/"
     printf 'command = evil\ninstall = npm:x$(id>/tmp/pwned)\nno_confirm_args = -y\n' \
         > "$root/harnesses/evil/harness.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'harness = evil' 'forge = none' 'workflow = local-only'
@@ -2697,7 +2697,7 @@ _upd_fixture() {
     _upd_commit "$UPD_ORIGIN" first
     git clone -q "$UPD_ORIGIN" "$UPD_CHECKOUT"
     cp -r "$REPO_ROOT/bin" "$REPO_ROOT/forges" "$REPO_ROOT/harnesses" \
-          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$REPO_ROOT/providers" \
+          "$REPO_ROOT/workflows" "$REPO_ROOT/tools" "$REPO_ROOT/backends" \
           "$UPD_CHECKOUT/"
     printf '[core]\nharness = claude-code\n' > "$CONFIG_DIR/config"
 }
@@ -3057,24 +3057,24 @@ EOF
     rm -rf "$ID_DIR"
 }
 
-@test "--provider overrides the selected harness's provider for one launch" {
+@test "--backend overrides the selected harness's backend for one launch" {
     # Deferred like --model and --base-url, because which harness is selected
     # is not known until every flag has been read: --harness may come after
-    # --provider.
+    # --backend.
     write_config '[core]' 'harness = claude-code'
-    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --provider anthropic --print-config
+    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --backend anthropic --print-config
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qx 'harness.claude-code.provider=anthropic' <<< "$output" \
+    grep -qx 'harness.claude-code.backend=anthropic' <<< "$output" \
         || { echo "$output"; return 1; }
 
     # A name with no directory under providers/ is refused at parse time,
     # rather than resolving to nothing three layers down.
-    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --provider no-such-provider --print-config
+    run env HOME="$HOME" "$REPO_ROOT/bin/dejima" --backend no-such-provider --print-config
     [ "$status" -ne 0 ] || { echo "an unknown provider was accepted"; return 1; }
-    [[ "$output" == *"--provider"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"--backend"* ]] || { echo "$output"; return 1; }
 }
 
-@test "an unset provider is recorded in the config, not defaulted on every read" {
+@test "an unset backend is recorded in the config, not defaulted on every read" {
     # A migration rather than a default (#171). A default is dejima's answer
     # re-decided on every read, so changing it later moves a session whose
     # config never changed. This records the operator's answer once, into
@@ -3089,11 +3089,11 @@ EOF
 
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"Recorded [harness.claude-code] provider = anthropic"* ]] \
+    [[ "$output" == *"Recorded [harness.claude-code] backend = anthropic"* ]] \
         || { echo "the migration was silent: $output"; return 1; }
     # In the operator's file, so the next launch reads it rather than assuming
     # it again.
-    grep -qx 'provider = anthropic' "$CONFIG_DIR/config" \
+    grep -qx 'backend = anthropic' "$CONFIG_DIR/config" \
         || { echo "nothing was written:"; cat "$CONFIG_DIR/config"; return 1; }
 
     # And it happens once. A second launch finds the value and says nothing.
@@ -3101,13 +3101,13 @@ EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *"Recorded [harness"* ]] \
         || { echo "the migration ran again: $output"; return 1; }
-    [ "$(grep -c 'provider = anthropic' "$CONFIG_DIR/config")" -eq 1 ] \
+    [ "$(grep -c 'backend = anthropic' "$CONFIG_DIR/config")" -eq 1 ] \
         || { echo "the value was written twice:"; cat "$CONFIG_DIR/config"; return 1; }
     rm -rf "$workspace"
 }
 
 @test "a harness with nothing to assume refuses rather than guessing" {
-    # cline declares no assumed_provider on purpose: what it talked to before
+    # cline declares no assumed_backend on purpose: what it talked to before
     # the key existed depends on base_url, so there is no single value to
     # record and recording the wrong one would write a proxied endpoint into
     # the config of a session that never used one.
@@ -3120,7 +3120,7 @@ EOF
     # cline's own refusal answers first and says more than core's would: it
     # names both ways to say where the model is, because for this harness
     # either is a valid answer.
-    [[ "$output" == *"no [harness.cline] provider is set"* ]] \
+    [[ "$output" == *"no [harness.cline] backend is set"* ]] \
         || { echo "$output"; return 1; }
     # And nothing was written into the operator's file.
     grep -q 'provider =' "$CONFIG_DIR/config" \
@@ -3128,7 +3128,7 @@ EOF
     rm -rf "$workspace"
 }
 
-@test "a provider missing a key it cannot work without is refused at launch" {
+@test "a backend missing a key it cannot work without is refused at launch" {
     # manifest_validate only type-checks the keys a manifest actually has, so
     # an absent upstream is not caught there - true of every axis. Unchecked,
     # it reaches the credential proxy as an empty --upstream and fails as a
@@ -3137,32 +3137,32 @@ EOF
     workspace="$(mktemp -d)"
     local proot; proot="$(mktemp -d)"
     cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
-          "$REPO_ROOT/providers" "$proot/"
+          "$REPO_ROOT/backends" "$proot/"
     printf 'proxied_domain = x.example\ncredential = static\napi_style = anthropic\n' \
-        > "$proot/providers/anthropic/provider.conf"
+        > "$proot/backends/anthropic/backend.conf"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
-                 'harness = claude-code' '[harness.claude-code]' 'provider = anthropic'
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
     DEJIMA_PROVIDER_ROOT="$proot" _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched with no upstream: $output"; return 1; }
     [[ "$output" == *"declares no upstream"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace" "$proot"
 }
 
-@test "a harness and a provider that speak different APIs are refused at launch" {
+@test "a harness and a backend that speak different APIs are refused at launch" {
     # claude-code has one client and it speaks Anthropic's Messages API.
-    # Pointed at an OpenAI-compatible provider it would send well-formed
+    # Pointed at an OpenAI-compatible backend it would send well-formed
     # requests in a shape the endpoint cannot parse, which is knowable here.
     _rw_setup
     workspace="$(mktemp -d)"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
-                 'harness = claude-code' '[harness.claude-code]' 'provider = openrouter'
+                 'harness = claude-code' '[harness.claude-code]' 'backend = openrouter'
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched a mismatched pair: $output"; return 1; }
-    [[ "$output" == *"cannot talk to provider"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"cannot talk to backend"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
 
-@test "a provider that needs a credential file refuses without one" {
+@test "a backend that needs a credential file refuses without one" {
     # openrouter's key has no sensible default location, so `requires` makes an
     # unset one a refusal here rather than an authentication failure several
     # layers down: without it the proxy is simply skipped, and the session
@@ -3170,7 +3170,7 @@ EOF
     _rw_setup
     workspace="$(mktemp -d)"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
-                 'harness = cline' '[harness.cline]' 'provider = openrouter' 'model = m'
+                 'harness = cline' '[harness.cline]' 'backend = openrouter' 'model = m'
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched with no key file: $output"; return 1; }
     [[ "$output" == *"credential_file"* ]] || { echo "$output"; return 1; }

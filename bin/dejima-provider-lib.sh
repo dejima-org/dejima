@@ -60,12 +60,12 @@ _provider_axis_dir_into() {
         # it configures is the credential proxy rather than the shape of the
         # work (#171).
         #
-        # The word is overloaded here and deliberately so: "provider" is what
-        # this repo calls the forge/workflow/harness axes AND what the whole
-        # industry calls a model API endpoint. Renaming either would be worse
-        # than the overlap - a harness's own config file is literally
-        # providers.json with a lastUsedProvider key.
-        provider) printf -v "$1" 'providers' ;;
+        # "backend" and not "provider", which is what the industry calls a
+        # model API: this repo already calls the axes themselves providers, and
+        # one word for both reads as one thing. A harness's own config keeps
+        # its own vocabulary - cline writes providers.json with a
+        # lastUsedProvider key, and bin/harness/cline.sh translates.
+        backend) printf -v "$1" 'backends' ;;
         # Not an axis in the select-one sense the other three are: a launch
         # enables zero or more tools, and none is the default. It is here
         # because everything else about it is the same - a manifest that is
@@ -86,7 +86,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
-        provider) printf 'provider.conf' ;;
+        backend) printf 'backend.conf' ;;
         tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
@@ -246,7 +246,7 @@ EOF
         # the operator serves. There is nothing to withhold, so no proxy runs
         # and neither upstream nor proxied_domain applies: the session reaches
         # it directly, and where it is comes from the operator's own
-        # [provider.<name>] base_url rather than from the manifest. Both are
+        # [backend.<name>] base_url rather than from the manifest. Both are
         # optional for that reason and bin/dejima requires them where they do
         # apply.
         #
@@ -259,12 +259,12 @@ EOF
         # A model API and how its credential is presented. Every field here
         # is an argument bin/dejima-credential-proxy already takes (#171):
         # this axis is what turns "the caller states the arrangement" into
-        # "a file states it", so adding a provider is adding a directory.
+        # "a file states it", so adding a backend is adding a directory.
         #
-        # Nothing here is a secret. A provider declares WHERE its credential
+        # Nothing here is a secret. A backend declares WHERE its credential
         # is read from, never what it is - credential_file is a path, and the
         # file it names is read host-side per request and never mounted.
-        provider) cat <<'EOF'
+        backend) cat <<'EOF'
 upstream	?url
 proxied_domain	?hostname
 api_style	enum:anthropic|openai
@@ -280,7 +280,7 @@ requires	?list:identifier
 EOF
             ;;
         # api_styles is which of those dialects this harness can speak. A
-        # launch pairing it with a provider it has no client for is refused at
+        # launch pairing it with a backend it has no client for is refused at
         # launch rather than failing later with well-formed requests in the
         # wrong shape.
         harness) cat <<'EOF'
@@ -301,7 +301,7 @@ keys	?list:keyspec
 resume_command	?template
 transcript_update	enum:append|rewrite	append
 briefing	?relpath
-assumed_provider	?provider:provider
+assumed_backend	?provider:backend
 EOF
             ;;
         *) return 1 ;;
@@ -639,7 +639,7 @@ _provider_warm_dirs() {
     local axis sub root name path i=0
     local -a axes=() names=() paths=() lines=()
     _provider_root_into root
-    for axis in forge workflow harness; do
+    for axis in forge workflow harness backend; do
         _provider_axis_dir_into sub "$axis" || continue
         paths+=("$root/$sub")
         _provider_list_into "$axis" || continue
@@ -829,7 +829,7 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
-        provider.*) axis=provider; name="${section#provider.}" ;;
+        backend.*) axis=backend; name="${section#backend.}" ;;
         # An identity is the operator's own name for a set of credentials, so
         # there is no directory to check it against - only that it is a name
         # at all. Unlike a provider, an unused one is not a misconfiguration:
@@ -885,7 +885,7 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
-        provider.*) axis=provider ;;
+        backend.*) axis=backend ;;
         identity.*)
             rest="${want#identity.}"
             key="${rest#*.}"

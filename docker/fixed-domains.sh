@@ -54,8 +54,8 @@ fi
 # Which name this is comes from the provider (proxied_domain); the rule
 # about when to allowlist it is dejima's, and stays here.
 if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ] \
-    && [ -n "${SANDBOX_PROVIDER_PROXIED_DOMAIN:-}" ]; then
-    FIXED_DOMAINS+=("$SANDBOX_PROVIDER_PROXIED_DOMAIN")
+    && [ -n "${SANDBOX_BACKEND_PROXIED_DOMAIN:-}" ]; then
+    FIXED_DOMAINS+=("$SANDBOX_BACKEND_PROXIED_DOMAIN")
 fi
 
 # GitHub itself is allowlisted by IP range (see github-domains ipset,

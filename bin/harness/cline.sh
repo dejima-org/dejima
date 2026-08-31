@@ -40,10 +40,10 @@ harness_briefing_state_dir() {
 
 # Which endpoints a session may be pointed at, and why the answer is not "any".
 #
-# The selected provider says where the model is. A proxied one carries its own
+# The selected backend says where the model is. A proxied one carries its own
 # upstream and dejima's terminator stands in front of it, so the credential
-# never enters the container. A provider with `credential = none` is a model
-# the operator serves, carrying its own [provider.<name>] base_url, and it is
+# never enters the container. A backend with `credential = none` is a model
+# the operator serves, carrying its own [backend.<name>] base_url, and it is
 # reached directly because there is nothing to withhold.
 #
 # That second kind has to be an endpoint that genuinely needs no credential.
@@ -66,7 +66,7 @@ harness_briefing_state_dir() {
 # one the session could not have connected to anyway. Requiring a literal
 # address instead was too strict by half: a model server on someone's own
 # network normally has a name, and refusing it made this path - the reason
-# this harness is provider-agnostic at all - unusable for the ordinary case.
+# this harness is backend-agnostic at all - unusable for the ordinary case.
 #
 # What this is not doing is protecting the model credential. dejima writes a
 # placeholder into providers.json on every proxied path whatever the endpoint
@@ -127,7 +127,7 @@ _cline_host_allowlisted() {
     return 1
 }
 
-# The provider configuration the session runs with, and the three conditions
+# The backend configuration the session runs with, and the three conditions
 # that make a launch wrong: no model, a credential mode with no path through,
 # and an endpoint whose key dejima would have to put in the container.
 #
@@ -159,30 +159,29 @@ harness_prepare_config() {
         echo "  [harness.cline]" >&2
         echo "  model = claude-haiku-4-5-20251001" >&2
         echo "" >&2
-        echo "\`cline auth\` outside the sandbox lists what your provider offers." >&2
+        echo "\`cline auth\` outside the sandbox lists what your backend offers." >&2
         return 1
     fi
 
     local ctx
     ctx="$(harness_config_get context_window)"
 
-    # WHERE THE MODEL IS is the provider's, and only the provider's.
+    # WHERE THE MODEL IS is the backend's, and only the backend's. One
+    # setting, so there is nothing for a second one to disagree with.
     #
-    # This used to be two settings that could disagree: an unset base_url meant
-    # Anthropic implicitly, and a set one meant something the operator serves.
-    # Both are providers now (#171). A self-served endpoint is
-    # `provider = self-hosted` carrying its own [provider.self-hosted]
-    # base_url, which is what lets an operator keep a local model configured
-    # while using a hosted API and switch by changing one word.
-    local provider
-    provider="$(harness_config_get provider)"
-    if [ -z "$provider" ]; then
-        echo "harness.cline: no [harness.cline] provider is set, so nothing says" >&2
+    # A self-served endpoint is `backend = self-hosted`, carrying its own
+    # [backend.self-hosted] base_url. That placement is what lets an operator
+    # keep a local model configured while using a hosted API, and switch
+    # between them by changing one word.
+    local backend
+    backend="$(harness_config_get backend)"
+    if [ -z "$backend" ]; then
+        echo "harness.cline: no [harness.cline] backend is set, so nothing says" >&2
         echo "where the model is." >&2
         echo "" >&2
         echo "  [harness.cline]" >&2
-        echo "  provider = openrouter      a hosted API, key held on the host" >&2
-        echo "  provider = self-hosted     a model you serve, with no key at all" >&2
+        echo "  backend = openrouter      a hosted API, key held on the host" >&2
+        echo "  backend = self-hosted     a model you serve, with no key at all" >&2
         echo "" >&2
         echo "There is deliberately no default: one dejima could change later would" >&2
         echo "move your session to another endpoint without your config changing." >&2
@@ -190,9 +189,9 @@ harness_prepare_config() {
     fi
 
     local kind base_url=""
-    kind="$(manifest_get provider "$provider" credential)" || return 1
+    kind="$(manifest_get backend "$backend" credential)" || return 1
     if [ "$kind" = none ]; then
-        base_url="$(config_get "provider.$provider" base_url)" || return 1
+        base_url="$(config_get "backend.$backend" base_url)" || return 1
     fi
 
     # The proxy is what keeps a credential out of the container, and it only
@@ -210,7 +209,7 @@ harness_prepare_config() {
     # environment, which Cline does not read for provider selection
     # (CLINE_PROVIDER and CLINE_MODEL were tried and ignored).
     #
-    # A provider with no credential is unaffected: there is nothing to withhold
+    # A backend with no credential is unaffected: there is nothing to withhold
     # and no proxy in the path.
     if [ "$kind" != none ]; then
         local why=""
@@ -220,13 +219,13 @@ harness_prepare_config() {
             || why="[credentials] transport is loopback"
         if [ -n "$why" ]; then
             echo "harness.cline: $why, and cline has no way to reach a proxied" >&2
-            echo "provider without the TLS terminator the proxy puts in front of it." >&2
+            echo "backend without the TLS terminator the proxy puts in front of it." >&2
             echo "Its credential lives in the providers.json dejima declines to" >&2
             echo "mount, so there is nothing to fall back to - unlike claude-code," >&2
             echo "which mounts the real credential in that mode." >&2
             echo "" >&2
             echo "Either turn the proxy back on with the default tls transport," >&2
-            echo "or select a provider you serve yourself." >&2
+            echo "or select a backend you serve yourself." >&2
             return 1
         fi
     fi
@@ -239,16 +238,16 @@ harness_prepare_config() {
     # Still here rather than in core because cline is the only harness with a
     # direct path today. It belongs in core the moment a second one has one.
     if [ "$kind" = none ] && ! _cline_host_local "$base_url"; then
-        echo "harness.cline: refusing [provider.$provider] base_url $base_url." >&2
-        echo "That provider needs no credential, so the endpoint has to be one" >&2
+        echo "harness.cline: refusing [backend.$backend] base_url $base_url." >&2
+        echo "That backend needs no credential, so the endpoint has to be one" >&2
         echo "that needs none: a model you serve. This is not host-local, so it" >&2
         echo "would want a key inside the container." >&2
         echo "" >&2
-        echo "For a hosted API, select a provider for it instead - the key is then" >&2
+        echo "For a hosted API, select a backend for it instead - the key is then" >&2
         echo "held on the host and injected per request:" >&2
         echo "" >&2
         echo "  [harness.cline]" >&2
-        echo "  provider = openrouter" >&2
+        echo "  backend = openrouter" >&2
         echo "" >&2
         echo "For one you serve, that means a loopback or RFC 1918 address, or a" >&2
         echo "host you have allowlisted:" >&2
@@ -282,11 +281,11 @@ harness_prepare_config() {
     local tmp
     tmp="$(mktemp "$settings/.providers.XXXXXX")" || return 1
     # Which of Cline's own provider types to write, from the selected
-    # provider's api_style rather than from a second setting an operator has
+    # backend's api_style rather than from a second setting an operator has
     # to keep in step. Anthropic's Messages API and an OpenAI-compatible one
     # are different wire formats, and Cline has a client for each.
     local style endpoint key
-    style="$(manifest_get provider "$provider" api_style)" || return 1
+    style="$(manifest_get backend "$backend" api_style)" || return 1
     if [ "$kind" = none ]; then
         endpoint="$base_url"
         key="dejima-no-credential-needed"
@@ -295,7 +294,7 @@ harness_prepare_config() {
         # answers for it inside the container and the host-side proxy holds the
         # credential, which is what keeps the session indistinguishable from
         # one talking to the API directly.
-        endpoint="$(manifest_get provider "$provider" upstream)" || return 1
+        endpoint="$(manifest_get backend "$backend" upstream)" || return 1
         # The placeholder is what Cline sends; the host-side proxy replaces it
         # with the real credential on the way out. Same arrangement as Claude
         # Code's faked .credentials.json, confirmed end to end against the API.

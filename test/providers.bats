@@ -1348,21 +1348,21 @@ assert_remedy_forges_exist() {
 
 # --- the model provider axis (#171) ------------------------------------------
 
-@test "the anthropic provider manifest validates and answers for every field" {
-    lib manifest_validate provider anthropic
-    [ "$(lib manifest_get provider anthropic upstream)" = "https://api.anthropic.com" ]
-    [ "$(lib manifest_get provider anthropic proxied_domain)" = "api.anthropic.com" ]
-    [ "$(lib manifest_get provider anthropic credential)" = "anthropic-oauth" ]
-    [ "$(lib manifest_get provider anthropic auth_format)" = "Bearer {token}" ]
-    [ "$(lib manifest_get provider anthropic strip_headers)" = "x-api-key" ]
-    [ "$(lib manifest_get provider anthropic ensure_headers)" = "anthropic-beta=oauth-2025-04-20" ]
+@test "the anthropic backend manifest validates and answers for every field" {
+    lib manifest_validate backend anthropic
+    [ "$(lib manifest_get backend anthropic upstream)" = "https://api.anthropic.com" ]
+    [ "$(lib manifest_get backend anthropic proxied_domain)" = "api.anthropic.com" ]
+    [ "$(lib manifest_get backend anthropic credential)" = "anthropic-oauth" ]
+    [ "$(lib manifest_get backend anthropic auth_format)" = "Bearer {token}" ]
+    [ "$(lib manifest_get backend anthropic strip_headers)" = "x-api-key" ]
+    [ "$(lib manifest_get backend anthropic ensure_headers)" = "anthropic-beta=oauth-2025-04-20" ]
 }
 
-@test "a provider's own keys become [provider.<name>] config keys" {
-    # The same machinery a forge's keys go through, so a provider declaring
+@test "a backend's own keys become [backend.<name>] config keys" {
+    # The same machinery a forge's keys go through, so a backend declaring
     # where its credential lives needs no row hardcoded in core's schema.
-    [ "$(lib config_type provider.anthropic.credential_file)" = "path" ]
-    run lib config_type provider.anthropic.not_a_key
+    [ "$(lib config_type backend.anthropic.credential_file)" = "path" ]
+    run lib config_type backend.anthropic.not_a_key
     [ "$status" -ne 0 ]
 }
 
@@ -1372,12 +1372,12 @@ assert_remedy_forges_exist() {
     # a format without {token} produces a proxy that starts, answers, and
     # sends every request unauthenticated.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/authfmt.XXXXXX")"
-    mkdir -p "$d/providers/probe"
+    mkdir -p "$d/backends/probe"
     _probe() {
         printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\nauth_format = %s\n' "$1" \
-            > "$d/providers/probe/provider.conf"
+            > "$d/backends/probe/backend.conf"
         run env DEJIMA_PROVIDER_ROOT="$d" \
-            bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+            bash -c 'source "$1"; manifest_validate backend probe' _ "$LIB"
     }
     _probe 'Bearer'
     [ "$status" -ne 0 ] || { echo "a format with no {token} was accepted"; return 1; }
@@ -1391,12 +1391,12 @@ assert_remedy_forges_exist() {
     # envpair would refuse anthropic-beta outright: it wants an upper-case
     # environment variable, and a header name is lower case with dashes.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/ensure.XXXXXX")"
-    mkdir -p "$d/providers/probe"
+    mkdir -p "$d/backends/probe"
     _ensure() {
         printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\nensure_headers = %s\n' "$1" \
-            > "$d/providers/probe/provider.conf"
+            > "$d/backends/probe/backend.conf"
         run env DEJIMA_PROVIDER_ROOT="$d" \
-            bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+            bash -c 'source "$1"; manifest_validate backend probe' _ "$LIB"
     }
     local bad
     for bad in 'anthropic-beta' '=value' 'name=' 'has space=v'; do
@@ -1407,36 +1407,36 @@ assert_remedy_forges_exist() {
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "a provider name that is not a directory is refused by the config type" {
+@test "a backend name that is not a directory is refused by the config type" {
     # The same provider:<axis> check core.forge and core.harness go through,
     # so a typo names nothing rather than resolving somewhere.
-    run lib _config_valid_value provider:provider anthropic
+    run lib _config_valid_value provider:backend anthropic
     [ "$status" -eq 0 ] || { echo "the shipped provider was refused: $output"; return 1; }
-    run lib _config_valid_value provider:provider no-such-provider
+    run lib _config_valid_value provider:backend no-such-provider
     [ "$status" -ne 0 ] || { echo "a provider with no directory was accepted"; return 1; }
-    run lib _config_valid_value provider:provider ../etc
+    run lib _config_valid_value provider:backend ../etc
     [ "$status" -ne 0 ] || { echo "a traversal was accepted"; return 1; }
 }
 
-@test "the provider is selected per harness, not globally" {
+@test "the backend is selected per harness, not globally" {
     # An operator running Claude Code against Anthropic and Cline against
     # something else is the ordinary case, and it is why this is not one
     # [credentials] key. Each harness declares its own, with its own default.
-    [ "$(lib config_type harness.claude-code.provider)" = "?provider:provider" ]
-    [ "$(lib config_type harness.cline.provider)" = "?provider:provider" ]
+    [ "$(lib config_type harness.claude-code.backend)" = "?provider:backend" ]
+    [ "$(lib config_type harness.cline.backend)" = "?provider:backend" ]
     # And NO default, on either. One that could change later would move a
     # session to another endpoint without its config changing, which is the
     # reason [core] harness has none either.
-    [ -z "$(lib config_default harness.claude-code.provider)" ] \
-        || { echo "claude-code ships a default provider"; return 1; }
-    [ -z "$(lib config_default harness.cline.provider)" ] \
-        || { echo "cline ships a default provider"; return 1; }
+    [ -z "$(lib config_default harness.claude-code.backend)" ] \
+        || { echo "claude-code ships a default backend"; return 1; }
+    [ -z "$(lib config_default harness.cline.backend)" ] \
+        || { echo "cline ships a default backend"; return 1; }
     # And there is no global one to disagree with them.
-    run lib config_type credentials.provider
-    [ "$status" -ne 0 ] || { echo "a global provider key is back"; return 1; }
+    run lib config_type credentials.backend
+    [ "$status" -ne 0 ] || { echo "a global backend key is back"; return 1; }
 }
 
-@test "a harness that declares no provider names no endpoint to proxy" {
+@test "a harness that declares no backend names no endpoint to proxy" {
     # The self-served case: a model on the operator's own network needs no
     # credential withheld because there is none, so a harness may decline to
     # name a provider and the launch runs without a proxy.
@@ -1444,57 +1444,57 @@ assert_remedy_forges_exist() {
     mkdir -p "$d/harnesses/bare"
     printf 'command = true\n' > "$d/harnesses/bare/harness.conf"
     run env DEJIMA_PROVIDER_ROOT="$d" \
-        bash -c 'source "$1"; config_type harness.bare.provider' _ "$LIB"
+        bash -c 'source "$1"; config_type harness.bare.backend' _ "$LIB"
     [ "$status" -ne 0 ] || { echo "a harness that declares nothing got a provider key"; return 1; }
 }
 
-@test "openrouter is declared as a static-key, openai-style provider" {
+@test "openrouter is declared as a static-key, openai-style backend" {
     # The second shipped provider, and the case #171 was filed about: a hosted
     # endpoint behind a static API key, which dejima previously had no answer
     # for other than refusing it.
-    lib manifest_validate provider openrouter
-    [ "$(lib manifest_get provider openrouter upstream)" = "https://openrouter.ai/api/v1" ]
-    [ "$(lib manifest_get provider openrouter proxied_domain)" = "openrouter.ai" ]
-    [ "$(lib manifest_get provider openrouter api_style)" = "openai" ]
-    [ "$(lib manifest_get provider openrouter credential)" = "static" ]
+    lib manifest_validate backend openrouter
+    [ "$(lib manifest_get backend openrouter upstream)" = "https://openrouter.ai/api/v1" ]
+    [ "$(lib manifest_get backend openrouter proxied_domain)" = "openrouter.ai" ]
+    [ "$(lib manifest_get backend openrouter api_style)" = "openai" ]
+    [ "$(lib manifest_get backend openrouter credential)" = "static" ]
     # Both spellings an OpenAI-compatible client might use for a key, so a
     # placeholder cannot travel beside the injected Authorization.
-    [ "$(lib manifest_get provider openrouter strip_headers)" = "x-api-key api-key" ]
+    [ "$(lib manifest_get backend openrouter strip_headers)" = "x-api-key api-key" ]
     # No default for the key's location and no assumed value: an unset one is
     # a refusal at launch, not a guess at a path.
-    [ "$(lib manifest_get provider openrouter requires)" = "credential_file" ]
-    [ -z "$(lib config_default provider.openrouter.credential_file)" ]
+    [ "$(lib manifest_get backend openrouter requires)" = "credential_file" ]
+    [ -z "$(lib config_default backend.openrouter.credential_file)" ]
     # proxied_domain is the HOST alone. upstream carries the path; a
     # certificate and a DNS pin are about a name.
-    [[ "$(lib manifest_get provider openrouter proxied_domain)" != */* ]]
+    [[ "$(lib manifest_get backend openrouter proxied_domain)" != */* ]]
 }
 
-@test "a self-served endpoint is a provider like any other" {
+@test "a self-served endpoint is a backend like any other" {
     # Where the model is belongs to the provider, including when the operator
     # serves it. That is what lets a local endpoint stay configured while a
-    # hosted API is selected: it is [provider.self-hosted] base_url, not a
+    # hosted API is selected: it is [backend.self-hosted] base_url, not a
     # setting on the harness that has to be unset to get out of the way.
-    lib manifest_validate provider self-hosted
-    [ "$(lib manifest_get provider self-hosted credential)" = "none" ]
-    [ "$(lib manifest_get provider self-hosted api_style)" = "openai" ]
-    [ "$(lib manifest_get provider self-hosted requires)" = "base_url" ]
-    [ "$(lib config_type provider.self-hosted.base_url)" = "?url" ]
-    [ -z "$(lib config_default provider.self-hosted.base_url)" ] \
+    lib manifest_validate backend self-hosted
+    [ "$(lib manifest_get backend self-hosted credential)" = "none" ]
+    [ "$(lib manifest_get backend self-hosted api_style)" = "openai" ]
+    [ "$(lib manifest_get backend self-hosted requires)" = "base_url" ]
+    [ "$(lib config_type backend.self-hosted.base_url)" = "?url" ]
+    [ -z "$(lib config_default backend.self-hosted.base_url)" ] \
         || { echo "self-hosted ships a default endpoint"; return 1; }
     # upstream and proxied_domain describe an endpoint dejima stands in front
     # of, and it stands in front of nothing here.
-    [ -z "$(lib manifest_get provider self-hosted upstream)" ]
-    [ -z "$(lib manifest_get provider self-hosted proxied_domain)" ]
+    [ -z "$(lib manifest_get backend self-hosted upstream)" ]
+    [ -z "$(lib manifest_get backend self-hosted proxied_domain)" ]
     # And the harness no longer carries one of its own to disagree with it.
     run lib config_type harness.cline.base_url
     [ "$status" -ne 0 ] || { echo "cline still declares base_url"; return 1; }
 }
 
-@test "a harness and a provider have to speak the same API" {
+@test "a harness and a backend have to speak the same API" {
     # Anthropic's Messages API is not OpenAI-compatible. Pairing a harness
     # with a provider it has no client for is knowable at launch and produces
     # nothing but confusion later, so both sides declare what they speak.
-    [ "$(lib manifest_get provider anthropic api_style)" = "anthropic" ]
+    [ "$(lib manifest_get backend anthropic api_style)" = "anthropic" ]
     [ "$(lib manifest_get harness claude-code api_styles)" = "anthropic" ]
     # cline is the provider-agnostic one and says so.
     [ "$(lib manifest_get harness cline api_styles)" = "anthropic openai" ]
@@ -1505,22 +1505,22 @@ assert_remedy_forges_exist() {
     # names the four a provider cannot work without where it reads them. That
     # refusal is covered in config.bats, at the launch.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/style.XXXXXX")"
-    mkdir -p "$d/providers/probe"
+    mkdir -p "$d/backends/probe"
     printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\napi_style = sideways\n' \
-        > "$d/providers/probe/provider.conf"
+        > "$d/backends/probe/backend.conf"
     run env DEJIMA_PROVIDER_ROOT="$d" \
-        bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+        bash -c 'source "$1"; manifest_validate backend probe' _ "$LIB"
     [ "$status" -ne 0 ] || { echo "an unknown api_style validated"; return 1; }
 }
 
-@test "the provider/harness matrix in the docs agrees with the manifests" {
+@test "the backend/harness matrix in the docs agrees with the manifests" {
     # A compatibility table is derived data: every cell is the provider's
     # api_style against the harness's api_styles. Written by hand it goes stale
     # the first time a provider is added, and a stale one is worse than none -
     # a reader trusts it and dejima refuses the launch.
     #
     # So it is recomputed here and compared cell by cell, rather than spot
-    # -checked. A new provider or harness that nobody adds a row for fails
+    # -checked. A new backend or harness that nobody adds a row for fails
     # this, which is the point.
     # Both copies, because the README carries a shorter one and two copies of
     # derived data is two things to drift. Checked against the manifests
@@ -1528,18 +1528,18 @@ assert_remedy_forges_exist() {
     # a wrong one.
     local doc rows
     for doc in "$REPO_ROOT/docs/providers.md" "$REPO_ROOT/README.md"; do
-    rows="$(sed -n '/^| Provider | `claude-code` | `cline` |/,/^$/p' "$doc")"
+    rows="$(sed -n '/^| Backend | `claude-code` | `cline` |/,/^$/p' "$doc")"
     [ -n "$rows" ] || { echo "the matrix is gone from $doc, or its header changed"; return 1; }
 
     local p h styles want got row
-    for p in $(lib provider_list provider); do
+    for p in $(lib provider_list backend); do
         row="$(grep -E "^\| \`$p\` \|" <<< "$rows")" \
-            || { echo "no row for provider '$p'"; return 1; }
+            || { echo "no row for backend '$p'"; return 1; }
         local i=0
         for h in claude-code cline; do
             i=$((i + 1))
             styles="$(lib manifest_get harness "$h" api_styles)"
-            if [[ " $styles " == *" $(lib manifest_get provider "$p" api_style) "* ]]; then
+            if [[ " $styles " == *" $(lib manifest_get backend "$p" api_style) "* ]]; then
                 want=yes
             else
                 want=no

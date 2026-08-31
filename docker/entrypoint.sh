@@ -352,7 +352,7 @@ fi
 # socket, and credential-proxy-forwarder.js pipes bytes into it. Only started
 # when this session actually has a proxy socket.
 #
-# In the default tls transport the provider's proxied_domain is pointed at
+# In the default tls transport the backend's proxied_domain is pointed at
 # loopback here and the forwarder terminates TLS for it, so the harness runs
 # with no base-URL override and no placeholder token - it is indistinguishable
 # from a stock install, which is the whole point (see docs/security.md). The hosts
@@ -382,14 +382,14 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
     forwarder_port=18300
     # Which name the terminator answers for is the selected harness's, from
     # `proxied_domain` in its manifest - this image is shared by every
-    # provider and must name none of them. Empty here means a proxy socket was
+    # backend and must name none of them. Empty here means a proxy socket was
     # mounted with no endpoint declared for it: the terminator would come up
     # answering for nothing, the session would reach the real API directly, and
     # the credential the proxy exists to withhold would be the one in use.
-    proxied_domain="${SANDBOX_PROVIDER_PROXIED_DOMAIN:-}"
+    proxied_domain="${SANDBOX_BACKEND_PROXIED_DOMAIN:-}"
     if [ -z "$proxied_domain" ]; then
         echo "FATAL: a credential proxy socket is mounted, but the selected" >&2
-        echo "provider declares no proxied_domain for the terminator." >&2
+        echo "backend declares no proxied_domain for the terminator." >&2
         echo "Not starting the session - traffic would reach the API unintercepted." >&2
         exit 1
     fi

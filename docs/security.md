@@ -277,6 +277,9 @@ a line added to a manifest widens the egress boundary on the next run.
 container: it names a tarball URL, the sha256 checked against it and the
 layout it is unpacked with, all consumed by the image build - so a session
 that edits one chooses what the next launch downloads and installs as root.
+`backends/*/backend.conf` names the upstream every request is forwarded to and
+the host path the credential is read from, so an edit there redirects where a
+real credential is sent.
 
 An ordinary edit is a diff you are about to read and is not reported; one git
 cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
@@ -576,7 +579,7 @@ approximation of its name.
 
 ### Four arrangements, and what a session can take from each
 
-Which one a launch is in comes from the selected provider's `credential` kind
+Which one a launch is in comes from the selected backend's `credential` kind
 and from whether the proxy is on. The differences are worth stating together,
 because only the last one puts a durable credential where a session can read
 it.
@@ -584,8 +587,8 @@ it.
 | Arrangement | In the container | What a compromised session can take | What it can still do |
 | --- | --- | --- | --- |
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
-| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own provider config, and the endpoint's real hostname. | The placeholder. | The same. |
-| **A provider with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
+| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
+| **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
 | **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
 **The first three keep the credential out; the fourth does not.** That is the
@@ -604,7 +607,7 @@ container sees.** Neither enters it. But an OAuth access token is short-lived
 and the proxy rotates it, while an API key is typically long-lived and
 account-wide - so the host-side file is worth more in the static case, and a
 compromise of the *host* is correspondingly worse. Scope the key at the
-provider where you can, the same argument
+backend where you can, the same argument
 [docs/providers.md](providers.md) makes for a repository-scoped forge token.
 
 **The proxied domain is not in the egress allowlist while the proxy is on.**
@@ -614,28 +617,28 @@ terminator instead. Worth being precise about the limit: this defeats a lookup,
 not a route. The API's address stays reachable as an IP literal for as long as
 any other allowlisted name resolves to it.
 
-**A hosted OpenAI-compatible provider is the second arrangement, and it is
-what `providers/openrouter` is.** The key sits in a file on the host, named by
-`[provider.openrouter] credential_file` and read per request; the container
+**A hosted OpenAI-compatible backend is the second arrangement, and it is
+what `backends/openrouter` is.** The key sits in a file on the host, named by
+`[backend.openrouter] credential_file` and read per request; the container
 gets `sandbox-credential-proxy-placeholder` and the endpoint's real hostname,
 which the in-container terminator answers for. Nothing about the arrangement
 is visible to the session, which is the same property the Anthropic path has
 and the reason both are worth having rather than one.
 
-Worth naming what a *hosted* provider adds over Anthropic's OAuth, since it is
+Worth naming what a *hosted* backend adds over Anthropic's OAuth, since it is
 not the container that changes: an API key is typically long-lived and
 account-wide where an access token is short-lived and rotated, so the host-side
-file is worth more. Scope the key at the provider where it offers that, the
+file is worth more. Scope the key at the backend where it offers that, the
 same argument this repository makes for a repository-scoped forge token.
 
-**A provider you serve yourself is the strongest posture available**, and it is
+**A backend you serve yourself is the strongest posture available**, and it is
 worth saying so plainly rather than treating it as the degraded one. A session
 pointed at a model on your own network has no credential anywhere in the
 picture, so there is nothing to place, nothing to withhold and nothing to
 steal. What it costs is that the model is yours to run.
 
-It is a provider like any other - `providers/self-hosted`, with
-`credential = none` and its address in `[provider.self-hosted] base_url`. That
+It is a backend like any other - `backends/self-hosted`, with
+`credential = none` and its address in `[backend.self-hosted] base_url`. That
 placement is deliberate: an operator who serves a model locally and also uses a
 hosted API keeps both configured and switches by changing one word, rather than
 having to unset one setting to stop it overriding another.
@@ -677,7 +680,7 @@ session, where the credential deliberately never goes.
   comma-list value has to be present are all arguments, and `bin/dejima`
   supplies the Anthropic ones (#171). The credential kind is an argument too -
   a refreshing OAuth file, or a static key that is read and sent - so a
-  provider that cannot be refreshed is not a branch here. Left
+  backend that cannot be refreshed is not a branch here. Left
   alone, Python's `http.client` would rewrite all of that into its own style
   and move the fingerprint from the client to the wire. It cannot disguise
   that the connection is CPython's `ssl` rather than Node: the TLS handshake

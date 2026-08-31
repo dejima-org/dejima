@@ -305,23 +305,23 @@ There is no credential to hold or expire; what that setup needs instead is for
 the endpoint to be reachable from inside the container, which is an allowlist
 question rather than a sign-in one.
 
-## Provider axes: forge, workflow, harness, model provider
+## Provider axes: forge, workflow, harness, model backend
 
 The forge integration, the push/PR workflow, the agent harness and the model
 API aren't hardcoded into dejima: each is a directory under `forges/`,
-`workflows/`, `harnesses/` or `providers/`, selected independently by
+`workflows/`, `harnesses/` or `backends/`, selected independently by
 `[core] forge`, `[core] workflow`, `[core] harness` and
-`[harness.<name>] provider`.
+`[harness.<name>] backend`.
 
 - **Forges:** `none`, `gitea`, `github`
 - **Workflows:** `local-only`, `branch-push`, `worktree-pr`
 - **Harnesses:** `claude-code`, `cline`
-- **Model providers:** `anthropic`, `openrouter`, `self-hosted`
+- **Model backends:** `anthropic`, `openrouter`, `self-hosted`
 
-Which of those last two pair up is the provider's API dialect against the
+Which of those last two pair up is the backend's API dialect against the
 harness's, checked at launch rather than maintained as a list:
 
-| Provider | `claude-code` | `cline` | Credential |
+| Backend | `claude-code` | `cline` | Credential |
 | --- | --- | --- | --- |
 | `anthropic` | yes | yes | OAuth, held on the host |
 | `openrouter` | no | yes | a static key, held on the host |
@@ -329,7 +329,8 @@ harness's, checked at launch rather than maintained as a list:
 
 **→ [docs/providers.md](docs/providers.md)** - the manifest contract, key by
 key, what each pairing needs configured, and the shipped providers as worked
-examples.
+examples. The model API is called a *backend* throughout, to keep it apart
+from the axes themselves.
 
 ## Using this responsibly
 
@@ -664,7 +665,7 @@ and how to run them.
 | [research-review.md](docs/research-review.md) | Checking the threat model against the field's, and the standing questions that are the agenda |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [tools.md](docs/tools.md) | The optional tools a session can be given, and what hardening each one carries |
-| [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
+| [providers.md](docs/providers.md) | Forge, workflow, harness and model-backend axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
