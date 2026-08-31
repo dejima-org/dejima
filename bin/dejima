@@ -1517,7 +1517,7 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     unset _p_style _h_styles _need _p_required
     SANDBOX_BACKEND_PROXIED_DOMAIN="$(manifest_get backend "$DEJIMA_BACKEND_NAME" proxied_domain)"
     DEJIMA_BACKEND_CREDENTIAL_KIND="$(manifest_get backend "$DEJIMA_BACKEND_NAME" credential)"
-    if config_type "provider.$DEJIMA_BACKEND_NAME.credential_file" >/dev/null 2>&1; then
+    if config_type "backend.$DEJIMA_BACKEND_NAME.credential_file" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FILE="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_file)"
     fi
 fi

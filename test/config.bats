@@ -3176,3 +3176,42 @@ EOF
     [[ "$output" == *"credential_file"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
+
+@test "a subscription login reaches the proxy, and its credential file is not mounted" {
+    # The whole point of the axis, pinned end to end rather than by unit: the
+    # selected backend's credential_file has to actually resolve, because the
+    # proxy is started only when it does. When that lookup silently answers
+    # nothing - a wrong section name is enough - the launch does not fail. It
+    # skips the proxy and falls through to mounting the operator's real
+    # credential into the container, which is the one arrangement dejima
+    # exists to avoid.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    local stub log
+    stub="$(mktemp -d)"; log="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep '^SANDBOX_ANTHROPIC' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$log" \
+        || { echo "the proxy did not start:"; cat "$log"; return 1; }
+    grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$log" \
+        && { echo "the real credential file was mounted"; return 1; }
+    grep -q 'real-access-token' "$log" \
+        && { echo "the real token reached the container"; return 1; }
+    rm -rf "$workspace" "$stub" "$log"
+}
