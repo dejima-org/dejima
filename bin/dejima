@@ -1864,7 +1864,52 @@ _credential_usable() {  # <kind> <path>
     esac
 }
 
-# A direct provider runs no proxy: there is no credential to withhold, so
+# Asked for the proxy, selected a backend, and the credential is not one that
+# backend can serve: refuse.
+#
+# The fallthrough below mounts the real credential file, which is the right
+# answer when the operator asked for it with `proxy = off` and the wrong one
+# here - it silently moves a launch from the strongest posture to the weakest,
+# and the session still works, so nothing about the result says it happened.
+# A credential shape dejima does not recognise is exactly when that is most
+# likely: a Claude Code signed in with a console API token has no
+# claudeAiOauth block, so the anthropic backend cannot serve it and every
+# launch quietly mounted the real key.
+#
+# Refusing rather than warning, because docs/security.md describes the mounted
+# arrangement as a kill switch rather than an option, and a kill switch that
+# can engage itself is not one.
+#
+# Scoped to a credential that EXISTS and cannot be served. An absent one is
+# not this: nothing is mounted, nothing is downgraded, and the launch is
+# someone who has not logged in on the host yet.
+if [ -n "$DEJIMA_BACKEND_NAME" ] \
+    && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+    && [ "$(config_get_bool credentials proxy)" != "0" ] \
+    && [ -s "$DEJIMA_BACKEND_CREDENTIAL_FILE" ] \
+    && ! _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE"; then
+    echo "backend '$DEJIMA_BACKEND_NAME' cannot serve the credential in" >&2
+    echo "$DEJIMA_BACKEND_CREDENTIAL_FILE." >&2
+    echo "" >&2
+    case "$DEJIMA_BACKEND_CREDENTIAL_KIND" in
+        anthropic-oauth)
+            echo "It expects a subscription login - a claudeAiOauth block - and that" >&2
+            echo "file has none. A Claude Code signed in with a console API token" >&2
+            echo "stores it differently." >&2
+            ;;
+        static)
+            echo "It expects a key, and that file is empty or unreadable." >&2
+            ;;
+    esac
+    echo "" >&2
+    echo "Launching anyway would mount that file into the container, which is" >&2
+    echo "the one arrangement where your real credential leaves the host. Pick a" >&2
+    echo "backend that fits the credential, or ask for that arrangement" >&2
+    echo "deliberately with [credentials] proxy = off." >&2
+    exit 1
+fi
+
+# A direct backend runs no proxy: there is no credential to withhold, so
 # there is nothing for one to do. That is the self-served case, and it is the
 # arrangement with nothing in the container to steal.
 if [ -n "$DEJIMA_BACKEND_NAME" ] \

@@ -3256,3 +3256,27 @@ EOF
         && { echo "a credential file was mounted anyway"; return 1; }
     rm -rf "$workspace" "$stub" "$log"
 }
+
+@test "a credential the selected backend cannot serve is refused, not mounted" {
+    # Reported from a real desktop launch: a Claude Code signed in with a
+    # console API token has no claudeAiOauth block, so the anthropic backend
+    # could not serve it - and dejima skipped the proxy and mounted the real
+    # credential file, saying nothing. The session worked, which is what made
+    # it invisible: the only outward sign was a credential in the container.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"someOtherShape":{"key":"real-console-token"}}\n' \
+        > "$RW_HOME/.claude/.credentials.json"
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with an unservable credential: $output"; return 1; }
+    [[ "$output" == *"cannot serve the credential"* ]] || { echo "$output"; return 1; }
+    # And it names the way out, so the refusal is actionable rather than a wall.
+    [[ "$output" == *"proxy = off"* ]] || { echo "$output"; return 1; }
+    # Nothing was mounted on the way to refusing.
+    grep -q -- "$RW_HOME/.claude/.credentials.json:" "$docker_log" \
+        && { echo "the real credential was mounted anyway"; return 1; }
+    rm -rf "$workspace"
+}
