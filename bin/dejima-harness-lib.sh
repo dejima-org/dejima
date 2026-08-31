@@ -128,6 +128,30 @@ harness_plugin_load() {
     fi
     # shellcheck disable=SC1090
     source "$plugin"
+
+    # Resolve this harness's key schema now, in the caller's own shell.
+    #
+    # A plugin reads its settings through harness_config_get, and its callers
+    # reach it from inside subshells - a process substitution, a pipeline. A
+    # subshell inherits this shell's variables, so warming the cache here means
+    # those never re-derive it; without this they each start cold, because a
+    # cache filled in a subshell dies with it.
+    #
+    # That is a correctness fix and not only a speed one (#284).
+    # dejima-conversation-ship re-resolves its transcript paths from a SIGTERM
+    # handler, and bash reports 128+n for commands completing while it is
+    # delivering a signal - measured, _config_valid_value returned 0 and its
+    # caller read 143. So a perfectly valid manifest was rejected inside the
+    # trap, "unknown config key" was printed, and the tail of the session's
+    # transcript went unshipped. Resolved before any signal is possible, the
+    # handler answers from cache and has nothing left to fail at.
+    #
+    # Failure is ignored on purpose: an unreadable manifest is the caller's to
+    # report when it asks for a value, in its own words, not this function's to
+    # turn into a plugin-load error.
+    if declare -F _provider_keys_field >/dev/null 2>&1; then
+        _provider_keys_field harness "$name" >/dev/null 2>&1 || true
+    fi
 }
 
 # Calls one hook of the loaded plugin, if it defines it. Absence is normal:

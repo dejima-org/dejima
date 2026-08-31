@@ -686,15 +686,43 @@ manifest_get() {
 # `wc -l`, both to avoid a subshell/external-process fork per manifest line:
 # this runs once per key in a [forge.<name>]/[harness.<name>] section, on
 # every config_validate pass that has not already been answered from cache.
+# Cached, and that is a correctness fix as well as a speed one (#284).
+#
+# Speed: this is reached once per key of a [forge.<name>]/[harness.<name>]
+# section on every config_validate pass, and each miss re-reads the manifest
+# and revalidates the whole keys list - a fork per element for the keyspec
+# parse.
+#
+# Correctness: dejima-conversation-ship re-resolves its transcript paths from
+# a SIGTERM handler, and bash clobbers $? with 128+n when it delivers a pending
+# signal at a command boundary. Measured: _config_valid_value returned 0 and
+# its caller read 143, so the `|| return 1` chain below failed for a manifest
+# that is perfectly valid, the shipper reported "unknown config key" and the
+# last lines of the session's transcript went unshipped. Anything that has
+# already been resolved once is answered from here instead, so the signal
+# handler does no work that a spurious status can fail.
+#
+# Keyed on the resolved directory rather than the name, like every other cache
+# here, so two roots cannot answer for each other.
+declare -gA _PROVIDER_KEYS_CACHE=() _PROVIDER_KEYS_SEEN=()
+
 _provider_keys_field() {
-    local axis="$1" name="$2" dir file line key value="" seen=0 type n=0
+    local axis="$1" name="$2" dir file line key value="" seen=0 type n=0 id
     # An unselected axis contributes no keys - a different question from
     # whether a selection is valid. Without this, --print-config prints
     # "invalid harness name:" and fails at the thing it is for.
     [ -n "$name" ] || return 1
     dir="$(provider_dir "$axis" "$name")" || return 1
+    id="$axis:$dir"
+    if [ -n "${_PROVIDER_KEYS_SEEN[$id]+set}" ]; then
+        # A remembered refusal stays a refusal: re-deriving it would put the
+        # same `|| return 1` chain back in the signal handler's path.
+        [ "${_PROVIDER_KEYS_SEEN[$id]}" = ok ] || return 1
+        printf '%s' "${_PROVIDER_KEYS_CACHE[$id]}"
+        return 0
+    fi
     file="$dir/$(_provider_manifest_name "$axis")"
-    [ -f "$file" ] || return 1
+    [ -f "$file" ] || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
     type="$(_manifest_type "$axis" keys)" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
@@ -710,7 +738,9 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
-    _provider_valid_value "$type" "$value" || return 1
+    _provider_valid_value "$type" "$value" || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    _PROVIDER_KEYS_CACHE[$id]="$value"
+    _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"
 }
 
