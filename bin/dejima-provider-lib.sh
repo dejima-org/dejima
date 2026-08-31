@@ -242,6 +242,20 @@ autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # credential = none is an endpoint that needs no credential - a model
+        # the operator serves. There is nothing to withhold, so no proxy runs
+        # and neither upstream nor proxied_domain applies: the session reaches
+        # it directly, and where it is comes from the operator's own
+        # [provider.<name>] base_url rather than from the manifest. Both are
+        # optional for that reason and bin/dejima requires them where they do
+        # apply.
+        #
+        # api_style is which dialect the endpoint speaks, and it is a property
+        # of the API rather than of any harness: Anthropic's Messages API and
+        # an OpenAI-compatible one are different wire formats, so a harness
+        # that can only speak one has to know which it is being pointed at
+        # before it writes its own configuration.
+        #
         # A model API and how its credential is presented. Every field here
         # is an argument bin/dejima-credential-proxy already takes (#171):
         # this axis is what turns "the caller states the arrangement" into
@@ -251,9 +265,10 @@ EOF
         # is read from, never what it is - credential_file is a path, and the
         # file it names is read host-side per request and never mounted.
         provider) cat <<'EOF'
-upstream	url
-proxied_domain	hostname
-credential	enum:static|anthropic-oauth
+upstream	?url
+proxied_domain	?hostname
+api_style	enum:anthropic|openai
+credential	enum:static|anthropic-oauth|none
 auth_header	identifier	Authorization
 auth_format	authformat	Bearer {token}
 strip_headers	?list:identifier
@@ -264,6 +279,10 @@ keys	?list:keyspec
 requires	?list:identifier
 EOF
             ;;
+        # api_styles is which of those dialects this harness can speak. A
+        # launch pairing it with a provider it has no client for is refused at
+        # launch rather than failing later with well-formed requests in the
+        # wrong shape.
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
@@ -273,6 +292,7 @@ command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
 guards	?list:identifier
+api_styles	?list:identifier
 briefing_args	?args
 briefing_path	?homepath
 no_confirm_args	?args
@@ -758,6 +778,12 @@ manifest_get() {
 #
 # Keyed on the resolved directory rather than the name, like every other cache
 # here, so two roots cannot answer for each other.
+#
+# SUCCESSES ONLY. A remembered refusal was the first shape of this and it is
+# the wrong one: it turns one transient failure into a permanent one, and the
+# symptom is indistinguishable from the bug this exists to fix - a lookup that
+# worked at startup failing for the rest of the process. Nothing here is
+# expensive enough to be worth remembering a "no" for.
 declare -gA _PROVIDER_KEYS_CACHE=() _PROVIDER_KEYS_SEEN=()
 
 _provider_keys_field() {
@@ -769,14 +795,11 @@ _provider_keys_field() {
     dir="$(provider_dir "$axis" "$name")" || return 1
     id="$axis:$dir"
     if [ -n "${_PROVIDER_KEYS_SEEN[$id]+set}" ]; then
-        # A remembered refusal stays a refusal: re-deriving it would put the
-        # same `|| return 1` chain back in the signal handler's path.
-        [ "${_PROVIDER_KEYS_SEEN[$id]}" = ok ] || return 1
         printf '%s' "${_PROVIDER_KEYS_CACHE[$id]}"
         return 0
     fi
     file="$dir/$(_provider_manifest_name "$axis")"
-    [ -f "$file" ] || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    [ -f "$file" ] || return 1
     type="$(_manifest_type "$axis" keys)" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
@@ -792,7 +815,7 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
-    _provider_valid_value "$type" "$value" || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    _provider_valid_value "$type" "$value" || return 1
     _PROVIDER_KEYS_CACHE[$id]="$value"
     _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"

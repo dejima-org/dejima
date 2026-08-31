@@ -1447,3 +1447,113 @@ assert_remedy_forges_exist() {
         bash -c 'source "$1"; config_type harness.bare.provider' _ "$LIB"
     [ "$status" -ne 0 ] || { echo "a harness that declares nothing got a provider key"; return 1; }
 }
+
+@test "openrouter is declared as a static-key, openai-style provider" {
+    # The second shipped provider, and the case #171 was filed about: a hosted
+    # endpoint behind a static API key, which dejima previously had no answer
+    # for other than refusing it.
+    lib manifest_validate provider openrouter
+    [ "$(lib manifest_get provider openrouter upstream)" = "https://openrouter.ai/api/v1" ]
+    [ "$(lib manifest_get provider openrouter proxied_domain)" = "openrouter.ai" ]
+    [ "$(lib manifest_get provider openrouter api_style)" = "openai" ]
+    [ "$(lib manifest_get provider openrouter credential)" = "static" ]
+    # Both spellings an OpenAI-compatible client might use for a key, so a
+    # placeholder cannot travel beside the injected Authorization.
+    [ "$(lib manifest_get provider openrouter strip_headers)" = "x-api-key api-key" ]
+    # No default for the key's location and no assumed value: an unset one is
+    # a refusal at launch, not a guess at a path.
+    [ "$(lib manifest_get provider openrouter requires)" = "credential_file" ]
+    [ -z "$(lib config_default provider.openrouter.credential_file)" ]
+    # proxied_domain is the HOST alone. upstream carries the path; a
+    # certificate and a DNS pin are about a name.
+    [[ "$(lib manifest_get provider openrouter proxied_domain)" != */* ]]
+}
+
+@test "a self-served endpoint is a provider like any other" {
+    # Where the model is belongs to the provider, including when the operator
+    # serves it. That is what lets a local endpoint stay configured while a
+    # hosted API is selected: it is [provider.self-hosted] base_url, not a
+    # setting on the harness that has to be unset to get out of the way.
+    lib manifest_validate provider self-hosted
+    [ "$(lib manifest_get provider self-hosted credential)" = "none" ]
+    [ "$(lib manifest_get provider self-hosted api_style)" = "openai" ]
+    [ "$(lib manifest_get provider self-hosted requires)" = "base_url" ]
+    [ "$(lib config_type provider.self-hosted.base_url)" = "?url" ]
+    [ -z "$(lib config_default provider.self-hosted.base_url)" ] \
+        || { echo "self-hosted ships a default endpoint"; return 1; }
+    # upstream and proxied_domain describe an endpoint dejima stands in front
+    # of, and it stands in front of nothing here.
+    [ -z "$(lib manifest_get provider self-hosted upstream)" ]
+    [ -z "$(lib manifest_get provider self-hosted proxied_domain)" ]
+    # And the harness no longer carries one of its own to disagree with it.
+    run lib config_type harness.cline.base_url
+    [ "$status" -ne 0 ] || { echo "cline still declares base_url"; return 1; }
+}
+
+@test "a harness and a provider have to speak the same API" {
+    # Anthropic's Messages API is not OpenAI-compatible. Pairing a harness
+    # with a provider it has no client for is knowable at launch and produces
+    # nothing but confusion later, so both sides declare what they speak.
+    [ "$(lib manifest_get provider anthropic api_style)" = "anthropic" ]
+    [ "$(lib manifest_get harness claude-code api_styles)" = "anthropic" ]
+    # cline is the provider-agnostic one and says so.
+    [ "$(lib manifest_get harness cline api_styles)" = "anthropic openai" ]
+
+    # A dialect outside the two is refused by the schema. An ABSENT one is not
+    # - manifest_validate only type-checks the keys a file actually has, which
+    # is true of every axis and not something this one changed - so bin/dejima
+    # names the four a provider cannot work without where it reads them. That
+    # refusal is covered in config.bats, at the launch.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/style.XXXXXX")"
+    mkdir -p "$d/providers/probe"
+    printf 'upstream = https://x.example\nproxied_domain = x.example\ncredential = static\napi_style = sideways\n' \
+        > "$d/providers/probe/provider.conf"
+    run env DEJIMA_PROVIDER_ROOT="$d" \
+        bash -c 'source "$1"; manifest_validate provider probe' _ "$LIB"
+    [ "$status" -ne 0 ] || { echo "an unknown api_style validated"; return 1; }
+}
+
+@test "the provider/harness matrix in the docs agrees with the manifests" {
+    # A compatibility table is derived data: every cell is the provider's
+    # api_style against the harness's api_styles. Written by hand it goes stale
+    # the first time a provider is added, and a stale one is worse than none -
+    # a reader trusts it and dejima refuses the launch.
+    #
+    # So it is recomputed here and compared cell by cell, rather than spot
+    # -checked. A new provider or harness that nobody adds a row for fails
+    # this, which is the point.
+    # Both copies, because the README carries a shorter one and two copies of
+    # derived data is two things to drift. Checked against the manifests
+    # rather than against each other, so neither can be right by agreeing with
+    # a wrong one.
+    local doc rows
+    for doc in "$REPO_ROOT/docs/providers.md" "$REPO_ROOT/README.md"; do
+    rows="$(sed -n '/^| Provider | `claude-code` | `cline` |/,/^$/p' "$doc")"
+    [ -n "$rows" ] || { echo "the matrix is gone from $doc, or its header changed"; return 1; }
+
+    local p h styles want got row
+    for p in $(lib provider_list provider); do
+        row="$(grep -E "^\| \`$p\` \|" <<< "$rows")" \
+            || { echo "no row for provider '$p'"; return 1; }
+        local i=0
+        for h in claude-code cline; do
+            i=$((i + 1))
+            styles="$(lib manifest_get harness "$h" api_styles)"
+            if [[ " $styles " == *" $(lib manifest_get provider "$p" api_style) "* ]]; then
+                want=yes
+            else
+                want=no
+            fi
+            got="$(awk -F'|' -v n=$((i + 2)) '{gsub(/^ +| +$/,"",$n); print $n}' <<< "$row")"
+            [ "$got" = "$want" ] \
+                || { echo "$p x $h: the table says '$got', the manifests say '$want'"; return 1; }
+        done
+    done
+
+    # And every shipped harness has a column, or the table is answering for
+    # fewer pairs than exist.
+    for h in $(lib provider_list harness); do
+        grep -q "\`$h\`" <<< "$rows" || { echo "no column for harness '$h' in $doc"; return 1; }
+    done
+    done
+}

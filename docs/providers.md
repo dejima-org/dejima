@@ -229,6 +229,7 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `command_path` | `?path` | (empty) | Where the real binary lives, behind the shadow. |
 | `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the *fixed* allowlist rather than the extra one, which `dns-proxy.sh` exempts from stop-dns-rebind and `init-firewall.sh` treats as non-fatal when it fails to resolve. |
 | `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
+| `api_styles` | `?list:identifier` | (empty) | Which provider `api_style`s this harness has a client for. `claude-code` speaks `anthropic`; `cline` speaks both, which is what makes it the provider-agnostic one. Empty means unchecked. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
 | `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
 | `briefing_path` | `?homepath` | (empty) | Where this harness reads its briefing from, relative to `$HOME`, for a harness that has no session-start hook to be handed it through. Set, `entrypoint.sh` renders the briefing into that path root-owned and read-only before the session starts, and refuses to start it at all if that fails. Empty for a harness that registers a hook instead, which is how Claude Code gets it. |
@@ -278,6 +279,7 @@ Where it matters below, "model provider" means this axis.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `upstream` | `url` | (required) | Where the proxy forwards to. |
+| `api_style` | `enum:anthropic\|openai` | (required) | Which dialect the endpoint speaks. A property of the API rather than of any harness: Anthropic's Messages API and an OpenAI-compatible one are different wire formats. A harness declares which it can speak in `api_styles`, and a launch pairing the two wrongly is refused rather than sending well-formed requests in a shape the endpoint cannot parse. |
 | `proxied_domain` | `hostname` | (required) | The name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. On this axis rather than the harness's since [#171](https://gitbox.branderson.io/dejima/dejima/issues/171): a harness reaches whichever endpoint it is configured for, so the name belongs to the endpoint. Declared on the harness, the terminator would answer for one API while the session talked to another, and the credential the proxy exists to withhold would be the one in use. |
 | `credential` | `enum:static\|anthropic-oauth` | (required) | Whether the credential expires. `static` is read and sent; `anthropic-oauth` is refreshed against `oauth_endpoint` and the rotated token written back to the host file, which is what keeps a host-side login working rather than being signed out by a sandbox run. |
 | `auth_header` | `identifier` | `Authorization` | Which header carries it. |
@@ -288,6 +290,28 @@ Where it matters below, "model provider" means this axis.
 | `oauth_client_id` | `?identifier` | (empty) | Same. |
 | `keys` | `?list:keyspec` | (empty) | This provider's own `[provider.<name>]` config schema, exactly as a forge's works. Every provider is expected to declare `credential_file`. |
 | `requires` | `?list:identifier` | (empty) | Which of those must be set for a launch to proceed. |
+
+### What pairs with what
+
+Compatibility is not a list anyone maintains: it is the provider's `api_style`
+against the harness's `api_styles`, checked at launch. This table is what those
+declarations currently work out to.
+
+| Provider | `claude-code` | `cline` | Credential | You configure |
+| --- | --- | --- | --- | --- |
+| `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
+| `openrouter` | no | yes | a static key, held on the host | `[provider.openrouter] credential_file` |
+| `self-hosted` | no | yes | none, and so no proxy at all | `[provider.self-hosted] base_url` |
+
+`claude-code` speaks Anthropic's Messages API and nothing else, so the two
+OpenAI-compatible providers are refused with it - at launch, naming both sides,
+rather than by sending well-formed requests in a shape the endpoint cannot
+parse. `cline` has a client for each dialect, which is what makes it the
+provider-agnostic one.
+
+Adding a provider does not change this table by hand: a new directory whose
+`api_style` is one a harness already declares works with that harness the day
+it lands.
 
 **Which provider a launch uses is the harness's setting**, `[harness.<name>]
 provider`, overridable for one launch with `--provider`. Per harness because
