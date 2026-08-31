@@ -438,11 +438,16 @@ over and what doesn't, and why single-file mounts couldn't be trusted here.
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `[core] share_dir`, separate from the
-project mount, for passing files in and out of a session without touching the
-checkout. It persists across sessions since it's a real directory, not a
-container volume. **Clear it out between sessions:** anything left there is
-readable by the next session, and by every session after that.
+`~/shared` is a read-write bind mount of this project's directory under
+`[core] share_dir`, separate from the project mount, for passing files in and
+out of a session without touching the checkout. One directory per project, so a
+session sees its own project's handoff files and no other project's.
+`dejima-share path` prints the host directory to drop a file into before a
+launch; `dejima-share list` shows what every project is holding.
+
+It persists across sessions since it's a real directory, not a container
+volume. **Clear it out between sessions:** anything left there is readable by
+the next session against that project, and by every session after that.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes

@@ -555,6 +555,23 @@ approximation of its name.
   they are extracted from *is* session-writable, so a summary records what was
   there rather than vouching for it - and nothing loads one back into a later
   session, deliberately: that would be the channel #104 closed, rebuilt.
+- `[core] share_dir` is **not** mounted whole. A launch mounts
+  `<share_dir>/projects/<slug>` at `~/shared`, so a session sees its own
+  project's handoff files and no other project's - the same slicing as
+  `projects/` above, applied to the directory that was the remaining way
+  around it. A handoff file is session-authored by design, and one project's
+  session writing a plausible-looking note that a session in another project
+  then picks up is #104's channel by a different route.
+
+  The per-project split bounds *which* sessions, not *how long*: a project's
+  share persists, so everything in it is readable by every later session
+  against that project. Nothing prunes it, which is why
+  [docs/configuration.md](configuration.md#shared-scratch-space) says to clear
+  it out and `dejima-share list` prints what each project is holding.
+
+  `<share_dir>/projects` is in the guarded list, so an operator cannot hand
+  the whole of it back through `[mounts] readonly` or `[mounts] read_write`.
+  The session's own share arrives at `~/shared` without going through either.
 ## The model API credential never enters the container
 
 **This assumes the host has one.** dejima authenticates nothing: the proxy

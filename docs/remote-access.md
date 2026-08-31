@@ -1098,14 +1098,18 @@ key that already gets you a normal shell on the box is the right one, and it
 grants nothing new here - you had the shell.
 
 **Find the host path first.** `~/shared` is where the *container* sees it; on
-the host it is `[core] share_dir`, which defaults to
-`~/.local/share/dejima/shared` and is not named `shared` at all.
-`dejima --print-config | grep share_dir` on the box prints the resolved path.
+the host it is one project's directory under `[core] share_dir`, which defaults
+to `~/.local/share/dejima/shared` and is not named `shared` at all.
+`dejima --print-config | grep share_dir` on the box prints the resolved root,
+and `dejima-share list` prints what is under it. Mount `<share_dir>/projects`
+to get one directory per project with no loose files mixed in, or a single
+project's directory - `dejima-share path <project>` - to keep the mount to the
+one you actually pull from.
 Anything in `[mounts] read_write` needs no lookup, because those mount at the
 host path they name: `~/specs` in the container is `~/specs` on the box.
 
 ```sh
-sshfs box:.local/share/dejima/shared ~/mnt/dejima-shared \
+sshfs box:.local/share/dejima/shared/projects ~/mnt/dejima-shared \
     -o IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes \
     -o PasswordAuthentication=no \
     -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \

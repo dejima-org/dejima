@@ -1364,10 +1364,12 @@ the user's machine, with
 
 What this means:
 - The workspace directory is bind-mounted read-write and is the real
-  project. ~/shared is also a real, persistent host directory (not part of
-  the project) - use it to hand the user a file (a screenshot, a temp
-  script) without touching the project checkout, or to pick up something
-  they left there for you. Your harness keeps its own state on the host too,
+  project. ~/shared is also a real, persistent host directory (this
+  project's own, and not part of its checkout) - use it to hand the user a
+  file (a screenshot, a temp script) without touching the project checkout,
+  or to pick up something they left there for you. It outlives this session
+  and every session against this project shares it, so treat what is in it
+  as readable by all of them. Your harness keeps its own state on the host too,
   so this session's transcript outlives the container - the work is
   recoverable on the host with the command at the end of this
   briefing.{{writable_mounts}} Everything else is disposable: installed system
