@@ -120,19 +120,13 @@ done
 
 # Within-file parallelism is bats' own, and it needs flock. Without it bats
 # exits before running anything, so the fallback is stated rather than left to
-# look like a broken suite.
-if [ -z "$jobs" ]; then
-    if command -v flock >/dev/null 2>&1; then
-        jobs="$(nproc 2>/dev/null || echo 4)"
-    else
-        jobs=1
-    fi
+# look like a broken suite. The size of it is decided after the selection,
+# below, because it depends on how many suites there are.
+if command -v flock >/dev/null 2>&1; then
+    can_parallelize=1
+else
+    can_parallelize=0
 fi
-bats_flags=()
-# Deliberately more concurrent tests than cores when the whole set runs: these
-# tests spend their time forking rather than computing, so oversubscribing
-# measured faster and levelled off rather than degrading.
-[ "$jobs" -gt 1 ] && bats_flags=(--jobs "$jobs" --no-parallelize-across-files)
 
 selected=()
 changed_paths=()
@@ -189,6 +183,31 @@ done
 # Which lane ran, before anything else, because the whole point of having two
 # is that a run can be read back later without guessing which one it was. To
 # stderr, so --list's stdout is the suite names and nothing else.
+# How much concurrency to actually ask for.
+#
+# Every selected suite runs at once, so what lands on the machine is
+# suites x jobs. Asking each suite for `nproc` made that ten times the cores
+# on a ten-core box, and #295 is what that cost: the tests that wait on a
+# bounded deadline - a pty reaching raw mode, a shipper polling, an audit
+# finishing - blow through it on a machine that oversubscribed, and fail for
+# the load rather than for the thing they check.
+#
+# Oversubscription still helps, because these tests fork more than they
+# compute. It is a property of the whole run rather than of each suite, so it
+# is budgeted once and divided: roughly twice the cores, in total.
+if [ -z "$jobs" ]; then
+    if [ "$can_parallelize" = 1 ] && [ "${#selected[@]}" -gt 0 ]; then
+        cores="$(nproc 2>/dev/null || echo 4)"
+        budget=$(( cores * 2 ))
+        jobs=$(( (budget + ${#selected[@]} - 1) / ${#selected[@]} ))
+        [ "$jobs" -ge 1 ] || jobs=1
+    else
+        jobs=1
+    fi
+fi
+bats_flags=()
+[ "$jobs" -gt 1 ] && bats_flags=(--jobs "$jobs" --no-parallelize-across-files)
+
 {
     if [ "$lane" = changed ]; then
         printf 'lane: CHANGED - %d of %d confined suites, from %d changed path(s)\n' \
@@ -200,7 +219,8 @@ done
         printf 'lane: ALL - every confined suite (the pull-request gate)\n'
         printf '      not run: runtime, ci-runner - they need Docker and a real runner.\n'
     fi
-    [ "$list_only" = 1 ] || printf '      %d test(s) at a time within each suite\n' "$jobs"
+    [ "$list_only" = 1 ] || printf '      %d test(s) at a time within each suite, %d suites at once\n' \
+        "$jobs" "${#selected[@]}"
     printf '\n'
 } >&2
 

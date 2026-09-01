@@ -443,7 +443,12 @@ EOF
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true
     SHIP_PID=""
-    [[ "$(shipped)" == *"the final answer"* ]] \
+    # Wait for the line rather than reading the log the instant the shipper
+    # exits. `wait` returns when the SHIPPER is gone, which says nothing about
+    # the collector on the other end having written what it was sent - so
+    # reading immediately is a race the loaded machine loses, and it fails as
+    # "the tail was lost", which is precisely this test's bug signature (#295).
+    await_shipped "the final answer" \
         || { echo "the unread tail was lost: $(shipped)"; return 1; }
     # And the lookup did not merely survive - it never failed. That message
     # reaching an operator's terminal is the visible half of this bug.
