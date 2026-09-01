@@ -165,6 +165,30 @@ _config_keys() {
     _config_extra_keys
 }
 
+# A key that used to exist and now lives somewhere else.
+#
+# "unknown key" is true and useless on its own: an operator who wrote a key
+# dejima once accepted has no way to tell a typo from a move, and the answer
+# is in a document they have no reason to think they need. A rename that
+# ships without this costs every operator who had the old key the same search.
+#
+# Keep this to keys that dejima ITSELF moved. A key nobody ever accepted is a
+# typo, and guessing at what it was meant to be is worse than saying nothing.
+_config_moved_hint() {  # <section> <key>
+    local section="$1" key="$2"
+    case "$section.$key" in
+        harness.*.base_url|harness.*base_url)
+            printf '  Where the model is belongs to the backend now, not the harness.\n' >&2
+            printf '  For one you serve yourself:\n\n' >&2
+            printf '      [harness.%s]\n      backend = self-hosted\n\n' \
+                "${section#harness.}" >&2
+            printf '      [backend.self-hosted]\n      base_url = ...\n\n' >&2
+            printf '  A hosted API is a backend of its own instead, which carries its own\n' >&2
+            printf '  address - see docs/providers.md, "Model backends".\n' >&2
+            ;;
+    esac
+}
+
 config_root() {
     printf '%s' "${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}"
 }
@@ -532,6 +556,7 @@ _config_parse() {
         _config_trim_into value "${line#*=}"
         if ! _config_type_into type "$section.$key"; then
             echo "unknown key in $conf: [$section] $key" >&2
+            _config_moved_hint "$section" "$key"
             return 1
         fi
         if ! _config_valid_value "$type" "$value"; then

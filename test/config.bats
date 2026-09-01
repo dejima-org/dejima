@@ -3089,7 +3089,7 @@ EOF
 
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"Recorded [harness.claude-code] backend = anthropic"* ]] \
+    [[ "$output" == *"wrote a line into"* ]] && [[ "$output" == *"backend = anthropic"* ]] \
         || { echo "the migration was silent: $output"; return 1; }
     # In the operator's file, so the next launch reads it rather than assuming
     # it again.
@@ -3099,7 +3099,7 @@ EOF
     # And it happens once. A second launch finds the value and says nothing.
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" != *"Recorded [harness"* ]] \
+    [[ "$output" != *"wrote a line into"* ]] \
         || { echo "the migration ran again: $output"; return 1; }
     [ "$(grep -c 'backend = anthropic' "$CONFIG_DIR/config")" -eq 1 ] \
         || { echo "the value was written twice:"; cat "$CONFIG_DIR/config"; return 1; }
@@ -3790,4 +3790,46 @@ JSON
     [ "$(wc -l <<< "$output")" = 6 ] || { echo "unexpected count:"; echo "$output"; return 1; }
     grep -q 'CANARY' <<< "$output" && { echo "a value leaked"; return 1; }
     rm -rf "$d"
+}
+
+@test "the migration writes into the operator's existing section, not a second one" {
+    # Reported from a real launch: the config already had a
+    # [harness.claude-code] section, and dejima appended a second one holding
+    # only the migrated key. It parses, and it reads as a mistake dejima made
+    # in the operator's own file.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nprojects_dir = ~/.claude/projects\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ "$(grep -c '^\[harness\.claude-code\]' "$CONFIG_DIR/config")" -eq 1 ] \
+        || { echo "a second section was appended:"; cat "$CONFIG_DIR/config"; return 1; }
+    grep -qx 'backend = anthropic' "$CONFIG_DIR/config" \
+        || { echo "the key was not written:"; cat "$CONFIG_DIR/config"; return 1; }
+    # The key the operator already had is untouched, and still in that section.
+    grep -qx 'projects_dir = ~/.claude/projects' "$CONFIG_DIR/config" \
+        || { echo "an existing key was lost:"; cat "$CONFIG_DIR/config"; return 1; }
+    # And the file keeps its own permissions rather than a fresh temp file's.
+    [ "$(stat -c '%a' "$CONFIG_DIR/config")" = "$(stat -c '%a' "$RW_KEY")" ] \
+        || echo "note: config mode is now $(stat -c '%a' "$CONFIG_DIR/config")"
+    rm -rf "$workspace"
+}
+
+@test "a key dejima moved says where it went, not just that it is unknown" {
+    # base_url left the harness for the backend in the provider axis. An
+    # operator who had it gets "unknown key", which is true and useless: it
+    # does not distinguish a typo from a move, and the answer is in a document
+    # they have no reason to think they need.
+    _rw_setup
+    printf '[core]\nharness = cline\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.cline]\nmodel = m\nbase_url = http://127.0.0.1:8080/v1\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    HOME="$RW_HOME" run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ] || { echo "an unknown key was accepted: $output"; return 1; }
+    [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"backend = self-hosted"* ]] \
+        || { echo "it does not name where the key went: $output"; return 1; }
+    [[ "$output" == *"[backend.self-hosted]"* ]] \
+        || { echo "it does not name the new section: $output"; return 1; }
 }

@@ -364,7 +364,6 @@ _warn_legacy_env() {
     done
     if [ "$shown" = 1 ]; then
         echo "Set them in $(config_path) instead, then unset them in your shell profile." >&2
-        echo "" >&2
     fi
 
     # GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) -
@@ -1683,19 +1682,47 @@ if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
     # not a guess - what every existing session of that harness already was -
     # so the launch it runs in behaves identically either way.
     #
-    # Appended as its own section rather than edited into an existing one: the
-    # parser takes the last assignment, and a rewrite of an operator's config
-    # is a much larger thing to get right than an append.
+    # Written INTO the operator's existing section for this harness when there
+    # is one, and appended as a new section only when there is not.
+    #
+    # Appending unconditionally is simpler and produces a config with the same
+    # section header twice, which parses correctly and reads as a mistake
+    # dejima made in the operator's own file. Reported as exactly that.
+    #
+    # Inserting immediately after the header is safe here specifically because
+    # the key is UNSET: there is no later assignment for a line near the top
+    # to lose to, which is the thing that makes editing a config file
+    # dangerous in general.
     if [ -z "$DEJIMA_BACKEND_NAME" ]; then
         _assumed="$(manifest_get harness "$DEJIMA_HARNESS_NAME" assumed_backend)"
         if [ -n "$_assumed" ] && [ -w "$(config_path)" ]; then
-            printf '\n[harness.%s]\nbackend = %s\n' \
-                "$DEJIMA_HARNESS_NAME" "$_assumed" >> "$(config_path)"
+            _cfg_tmp="$(mktemp "$(dirname "$(config_path)")/.config.XXXXXX")" || exit 1
+            awk -v sec="[harness.$DEJIMA_HARNESS_NAME]" \
+                -v line="backend = $_assumed" '
+                { print }
+                !done {
+                    t = $0
+                    gsub(/^[ \t]+|[ \t]+$/, "", t)
+                    if (t == sec) { print line; done = 1 }
+                }
+                END { if (!done) printf "\n%s\n%s\n", sec, line }
+            ' "$(config_path)" > "$_cfg_tmp" || exit 1
+            # The operator's file keeps its own permissions rather than a
+            # fresh mktemp's.
+            chmod --reference="$(config_path)" "$_cfg_tmp" 2>/dev/null || true
+            mv "$_cfg_tmp" "$(config_path)" || exit 1
+            unset _cfg_tmp
             DEJIMA_BACKEND_NAME="$_assumed"
-            echo "Recorded [harness.$DEJIMA_HARNESS_NAME] backend = $_assumed in $(config_path)." >&2
-            echo "That is what this harness was already talking to; it is written down now" >&2
-            echo "so a later change to dejima cannot move it. Nothing about this launch" >&2
-            echo "differs because of it." >&2
+            # Its own block, and the line that was written picked out: this
+            # is dejima editing the operator's config, which is the one
+            # startup notice they may want to go and look at.
+            printf '\n  %sdejima wrote a line into %s%s\n' \
+                "${C_WARN:-}" "$(config_path)" "${C_RESET:-}" >&2
+            printf '      [harness.%s]\n      %sbackend = %s%s\n\n' \
+                "$DEJIMA_HARNESS_NAME" "${C_KEY:-}" "$_assumed" "${C_RESET:-}" >&2
+            printf '  That is what this harness was already talking to, written down so a\n' >&2
+            printf '  later change to dejima cannot move it. Nothing about this launch\n' >&2
+            printf '  differs because of it.\n' >&2
         fi
         unset _assumed
     fi
@@ -2589,7 +2616,7 @@ startup_banner() {
 }
 startup_banner
 
-printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
+printf '\n%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
     "$C_DIM" "$C_RESET" >&2
 
@@ -2605,7 +2632,7 @@ harness_report_guards "$DEJIMA_HARNESS_NAME"
 # after it with no briefing and no guards, and nothing said so. The project's
 # own standard is that a silently narrower run is worse than a noisy one.
 if ! _unwired="$(harness_guards_wired)"; then
-    printf '  %snot registered for %s, so not in force this session:%s\n' \
+    printf '\n  %snot registered for %s, so not in force this session:%s\n' \
         "$C_WARN" "$DEJIMA_HARNESS_NAME" "$C_RESET" >&2
     printf '%s\n' "$_unwired" | while IFS= read -r _u; do
         [ -n "$_u" ] && printf '    %s%s%s\n' "$C_KEY" "$_u" "$C_RESET" >&2
