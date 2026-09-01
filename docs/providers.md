@@ -13,7 +13,7 @@ core. Each is a directory under `forges/`, `workflows/`, `harnesses/` or
 | forge | `forges/` | `[core] forge` | `forges/gitea`, `forges/github`, `forges/none` |
 | workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only` |
 | harness | `harnesses/` | `[core] harness` | `harnesses/claude-code`, `harnesses/cline` |
-| backend | `backends/` | `[harness.<name>] backend` | `backends/anthropic`, `backends/anthropic-api-key`, `backends/anthropic-console`, `backends/openrouter`, `backends/self-hosted` |
+| backend | `backends/` | `[harness.<name>] backend` | `backends/anthropic`, `backends/anthropic-api-key`, `backends/openrouter`, `backends/self-hosted` |
 
 The backend is selected per harness rather than in `[core]`, because it is the
 harness that talks to a model API - see [Model backends](#model-backends).
@@ -283,7 +283,6 @@ and `bin/harness/cline.sh` translates.
 | `upstream` | `?url` | (empty) | Where the proxy forwards to. Required unless `credential` is `none`, which runs no proxy. |
 | `api_style` | `enum:anthropic\|openai` | (required) | Which dialect the endpoint speaks. A property of the API rather than of any harness: Anthropic's Messages API and an OpenAI-compatible one are different wire formats. A harness declares which it can speak in `api_styles`, and a launch pairing the two wrongly is refused rather than sending well-formed requests in a shape the endpoint cannot parse. |
 | `proxied_domain` | `?hostname` | (empty) | The name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. Required unless `credential` is `none`. On this axis rather than the harness's: a harness reaches whichever endpoint it is configured for, so the name belongs to the endpoint. Declared on the harness, the terminator would answer for one API while the session talked to another, and the credential the proxy exists to withhold would be the one in use. |
-| `credential_field` | `?jsonfield` | (empty) | Which value inside `credential_file` is the key, as dot-separated object names. Empty means the whole file is the key. Only the `static` kind reads it. Claude Code's console login keeps its key as `primaryApiKey` in `~/.claude.json`, beside unrelated app state, so a backend has to be able to say which value is the credential. |
 | `credential` | `enum:static\|anthropic-oauth\|none` | (required) | Whether there is a credential, and whether it expires. `static` is read and sent; `anthropic-oauth` is refreshed against `oauth_endpoint` and the rotated token written back to the host file, which is what keeps a host-side login working rather than being signed out by a sandbox run; `none` is a model you serve, with nothing to withhold and so no proxy at all. |
 | `auth_header` | `identifier` | `Authorization` | Which header carries it. |
 | `auth_format` | `authformat` | `Bearer {token}` | How it is written. Must contain `{token}`, so a backend wanting a bare key or a prefix of its own needs no code; a format without it produces a proxy that starts, answers, and sends every request unauthenticated. |
@@ -303,8 +302,7 @@ declarations currently work out to.
 | Backend | `claude-code` | `cline` | Credential | You configure |
 | --- | --- | --- | --- | --- |
 | `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
-| `anthropic-api-key` | yes | yes | a static key, held on the host | `[backend.anthropic-api-key] credential_file` |
-| `anthropic-console` | yes | yes | a static key, held on the host | nothing, once Claude Code has signed you in |
+| `anthropic-api-key` | yes | yes | a static key, held on the host | nothing, if Claude Code signed you in; otherwise `[backend.anthropic-api-key] credential_file` |
 | `openrouter` | no | yes | a static key, held on the host | `[backend.openrouter] credential_file` |
 | `self-hosted` | no | yes | none, and so no proxy at all | `[backend.self-hosted] base_url` |
 
@@ -519,8 +517,7 @@ every launch:
 | harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
 | harness | `cline` | backend-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
 | backend | `anthropic` | Anthropic on a subscription login; the OAuth token is refreshed and written back to the host |
-| backend | `anthropic-api-key` | Anthropic on API billing; a key you hold in a file of your own |
-| backend | `anthropic-console` | Anthropic on API billing through Claude Code's console login; the key is `primaryApiKey` in `~/.claude.json` |
+| backend | `anthropic-api-key` | Anthropic on API billing, whether the key came from Claude Code's console login (`primaryApiKey` in `~/.claude.json`, the default) or a file you hold yourself |
 | backend | `openrouter` | a hosted OpenAI-compatible API; a static key, held on the host |
 | backend | `self-hosted` | a model you serve; no credential and so no proxy, and the endpoint must be host-local |
 

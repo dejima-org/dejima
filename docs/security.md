@@ -598,7 +598,8 @@ kill switch rather than as an option.
 **Both Anthropic billing models are in the first three.** A subscription login
 is `backends/anthropic`, whose OAuth token the proxy refreshes and writes back;
 a console key is `backends/anthropic-api-key`, a static credential against the
-same endpoint presented as `x-api-key`. Either way the credential is held on
+same endpoint presented as `x-api-key` - one backend whether the key came from
+Claude Code's own login or a file you hold. Either way the credential is held on
 the host and injected per request. On the API-key path the container gets
 `ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
 at all.
@@ -625,7 +626,7 @@ interface - is [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
 credential.** That file mixes app state with configuration the copy exists to
 carry, and a Claude Code signed in with a console API token keeps its key
 there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
-`{}` for that login. The copy drops that key, and `backends/anthropic-console`
+`{}` for that login. The copy drops that key, and `backends/anthropic-api-key`
 reads it host-side per request instead. Without it the proxy would
 withhold one file while dejima copied another, on every launch and whatever
 backend was selected.

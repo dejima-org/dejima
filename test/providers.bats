@@ -1589,41 +1589,55 @@ assert_remedy_forges_exist() {
     [ "$(lib manifest_get backend anthropic-api-key requires)" = "credential_file" ]
 }
 
-@test "the console-login backend reads a field, not the whole file" {
+@test "one API-billing backend serves both places the key can live" {
     # Claude Code's console login keeps its key as primaryApiKey in
-    # ~/.claude.json, beside unrelated app state, and leaves
-    # .credentials.json as `{}`. A backend that read the whole file would
-    # send the entire document as the key.
-    lib manifest_validate backend anthropic-console
-    [ "$(lib manifest_get backend anthropic-console credential)" = "static" ]
-    [ "$(lib manifest_get backend anthropic-console credential_field)" = "primaryApiKey" ]
-    [ "$(lib manifest_get backend anthropic-console auth_header)" = "x-api-key" ]
-    # Defaulted, unlike anthropic-api-key's: this is not a path an operator
-    # chose, it is where Claude Code puts it.
-    [ "$(lib config_default backend.anthropic-console.credential_file)" = "~/.claude.json" ]
-    # And the key-in-a-file backend stays field-less, or the two would be the
-    # same backend wearing two names.
-    [ -z "$(lib manifest_get backend anthropic-api-key credential_field)" ]
+    # ~/.claude.json; a key you hold yourself is a file that is nothing but
+    # the key. Same endpoint, same header, same static credential - one
+    # backend, with WHERE the key sits left to the operator.
+    lib manifest_validate backend anthropic-api-key
+    [ "$(lib manifest_get backend anthropic-api-key credential)" = "static" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_header)" = "x-api-key" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_format)" = "{token}" ]
+    [ "$(lib manifest_get backend anthropic-api-key strip_headers)" = "authorization" ]
+    # Defaulted to the console login, so the common case needs no config.
+    [ "$(lib config_default backend.anthropic-api-key.credential_file)" = "~/.claude.json" ]
+    [ "$(lib config_default backend.anthropic-api-key.credential_field)" = "primaryApiKey" ]
+    # And clearable, which is what serves a bare key file.
+    [ "$(lib config_type backend.anthropic-api-key.credential_field)" = "?jsonfield" ]
+    # Two backends for Anthropic, not three: the split is the wire
+    # arrangement, not where a file happens to be.
+    run lib provider_dir backend anthropic-console
+    [ "$status" -ne 0 ] || { echo "anthropic-console is back"; return 1; }
+    [ "$(lib manifest_get backend anthropic credential)" = "anthropic-oauth" ]
+}
+
+@test "the endpoint is identical across the anthropic backends" {
+    # Three values describe Anthropic's API rather than any credential, so
+    # they must not drift between the two backends that reach it. This is what
+    # the duplication costs, and it is cheaper to test than to deduplicate.
+    local field a b
+    for field in upstream proxied_domain api_style; do
+        a="$(lib manifest_get backend anthropic "$field")"
+        b="$(lib manifest_get backend anthropic-api-key "$field")"
+        [ -n "$a" ] || { echo "anthropic declares no $field"; return 1; }
+        [ "$a" = "$b" ] \
+            || { echo "$field differs: anthropic=$a anthropic-api-key=$b"; return 1; }
+    done
 }
 
 @test "a credential_field is dot-separated names, not an expression" {
-    # The proxy walks these segments itself. A manifest that could name an
-    # expression would be a manifest that could name a computation.
-    local d; d="$(mktemp -d)"
-    mkdir -p "$d/backends/probe"
-    _probe() {
-        printf 'upstream = https://x.example\nproxied_domain = x.example\napi_style = anthropic\ncredential = static\ncredential_field = %s\n' \
-            "$1" > "$d/backends/probe/backend.conf"
-        DEJIMA_PROVIDER_ROOT="$d" run env DEJIMA_PROVIDER_ROOT="$d" \
-            bash -c 'source "$1"; manifest_validate backend probe' _ "$LIB"
-    }
-    _probe 'primaryApiKey';   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    _probe 'a.b.c';           [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    for bad in '.leading' 'trailing.' 'a..b' 'a[0]' 'a|keys' '$env' 'a b'; do
-        _probe "$bad"
+    # The proxy walks these segments itself, so a value that could name an
+    # expression would be one that could name a computation. It is a config
+    # type now, because where a key sits in a file is the operator's.
+    local good bad
+    for good in primaryApiKey a.b.c _x1; do
+        lib _config_valid_value jsonfield "$good" \
+            || { echo "refused '$good'"; return 1; }
+    done
+    for bad in '.leading' 'trailing.' 'a..b' 'a[0]' 'a|keys' '$env' 'a b' '1abc'; do
+        run lib _config_valid_value jsonfield "$bad"
         [ "$status" -ne 0 ] || { echo "accepted '$bad'"; return 1; }
     done
-    rm -rf "$d"
 }
 
 @test "every backend section takes a proxy key, whatever its manifest says" {

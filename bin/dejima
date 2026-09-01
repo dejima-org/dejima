@@ -1670,9 +1670,13 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     unset _p_style _h_styles _need _p_required
     SANDBOX_BACKEND_PROXIED_DOMAIN="$(manifest_get backend "$DEJIMA_BACKEND_NAME" proxied_domain)"
     DEJIMA_BACKEND_CREDENTIAL_KIND="$(manifest_get backend "$DEJIMA_BACKEND_NAME" credential)"
-    DEJIMA_BACKEND_CREDENTIAL_FIELD="$(manifest_get backend "$DEJIMA_BACKEND_NAME" credential_field)"
     if config_type "backend.$DEJIMA_BACKEND_NAME.credential_file" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FILE="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_file)"
+    fi
+    # The operator's, not the manifest's: one static arrangement serves both
+    # a key inside a JSON document and a file that is nothing but the key.
+    if config_type "backend.$DEJIMA_BACKEND_NAME.credential_field" >/dev/null 2>&1; then
+        DEJIMA_BACKEND_CREDENTIAL_FIELD="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_field)"
     fi
 
     # The deliberate downgrade, for a backend whose credential lives IN the

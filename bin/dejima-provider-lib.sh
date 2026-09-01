@@ -262,19 +262,20 @@ EOF
         # "a file states it", so adding a backend is adding a directory.
         #
         # Nothing here is a secret. A backend declares WHERE its credential
-        # is read from, never what it is - credential_file is a path,
-        # credential_field is which value inside it, and the file they name is
-        # read host-side per request and never mounted.
+        # is read from, never what it is - the file it names is read
+        # host-side per request and never mounted.
         #
-        # credential_field exists because a key is not always the whole file.
-        # Claude Code signed in with a console API token keeps its key as
-        # primaryApiKey in ~/.claude.json, beside unrelated app state.
+        # WHERE a credential sits is the operator's, so credential_field is
+        # a `keys` entry rather than a manifest key. A key is not always the
+        # whole file - Claude Code's console login keeps its key as
+        # primaryApiKey in ~/.claude.json, beside unrelated app state - and
+        # the same static arrangement serves a bare key file with the field
+        # cleared. Two placements of one credential, not two backends.
         backend) cat <<'EOF'
 upstream	?url
 proxied_domain	?hostname
 api_style	enum:anthropic|openai
 credential	enum:static|anthropic-oauth|none
-credential_field	?jsonfield
 auth_header	identifier	Authorization
 auth_format	authformat	Bearer {token}
 strip_headers	?list:identifier
@@ -419,14 +420,6 @@ _provider_valid_value() {
             local sub="${value%%:*}" seg="${value#*:}"
             [[ "$sub" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1
             [[ "$seg" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
-            ;;
-        jsonfield)
-            # Which value inside a credentials file is the key: dot-separated
-            # object keys, nothing else. No array indices and no jq syntax,
-            # because the proxy walks these segments itself and a manifest
-            # that could name an expression would be a manifest that could
-            # name a computation.
-            [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$ ]]
             ;;
         authformat)
             # How the credential is written into its header. "{token}" rather

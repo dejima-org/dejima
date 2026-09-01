@@ -3217,7 +3217,8 @@ EOF
 }
 
 @test "an API-billing session gets a placeholder key, and the real one stays on the host" {
-    # A console key rather than a subscription login. What the container is
+    # A key in a file of the operator's own, which is the second of the two
+    # places the one API-billing backend reads from. What the container is
     # given is a placeholder in ANTHROPIC_API_KEY; the real key is read
     # host-side per request by the proxy, exactly as a login's token is.
     _rw_setup
@@ -3225,10 +3226,12 @@ EOF
     local keyfile="$CONFIG_DIR/anthropic-key"
     printf 'sk-ant-api03-NOT-THE-PLACEHOLDER\n' > "$keyfile"
     chmod 600 "$keyfile"
+    # A key you hold yourself: point at the file and clear the field, which is
+    # what says "the whole file is the key" rather than "a value inside it".
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  'harness = claude-code' '[harness.claude-code]' \
                  'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
-                 "credential_file = $keyfile"
+                 "credential_file = $keyfile" "credential_field ="
 
     # A stub that records both what compose would read from the environment
     # and what docker itself was called with, because a credential can reach a
@@ -3341,7 +3344,7 @@ JSON
     echo '{}' > "$RW_HOME/.claude/.credentials.json"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  'harness = claude-code' '[harness.claude-code]' \
-                 'backend = anthropic-console' "$@"
+                 'backend = anthropic-api-key' "$@"
     CSTUB="$(mktemp -d)"; CLOG="$(mktemp)"; CSTAGED="$(mktemp)"
     cat > "$CSTUB/docker" <<EOF
 #!/bin/sh
@@ -3381,7 +3384,7 @@ EOF
     # The operator asked for the credential to be in the container. Stripping
     # it anyway would leave the session with no credential and nothing to
     # mount, because the staged file is a throwaway copy.
-    _console_launch '[backend.anthropic-console]' 'proxy = off'
+    _console_launch '[backend.anthropic-api-key]' 'proxy = off'
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$(jq -r '.primaryApiKey' "$CSTAGED")" = "sk-ant-api03-REAL-CONSOLE-KEY" ] \
         || { echo "the downgrade did not deliver the credential"; return 1; }
@@ -3403,7 +3406,7 @@ EOF
     chmod 600 "$RW_HOME/.claude/.credentials.json"
     write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
                  'harness = claude-code' '[harness.claude-code]' 'backend = anthropic' \
-                 '[backend.anthropic-console]' 'proxy = off'
+                 '[backend.anthropic-api-key]' 'proxy = off'
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$docker_log" \
@@ -3426,21 +3429,15 @@ _console_host() {  # <backend name to select>
 
 @test "a refusal names the backend that fits the credential on this host" {
     # Reported: an operator with a console login tried `anthropic`, then
-    # `anthropic-api-key`, and neither refusal mentioned `anthropic-console`.
-    # Each dead end has to point somewhere.
+    # `anthropic-api-key`, and neither refusal named the one that fits. Each
+    # dead end has to point somewhere - and now that API billing is one
+    # backend, the console login IS anthropic-api-key.
     _console_host anthropic
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"anthropic-console"* ]] \
+    [[ "$output" == *"anthropic-api-key"* ]] \
         || { echo "the wrong-shape refusal names no fitting backend: $output"; return 1; }
-    [[ "$output" == *"backend = anthropic-console"* ]] \
+    [[ "$output" == *"backend = anthropic-api-key"* ]] \
         || { echo "it does not show the line to write: $output"; return 1; }
-    rm -rf "$workspace"
-
-    # The other dead end: a backend that fits nothing here and wants a path.
-    _console_host anthropic-api-key
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"anthropic-console"* ]] \
-        || { echo "the requires refusal names no fitting backend: $output"; return 1; }
     rm -rf "$workspace"
 }
 
@@ -3455,7 +3452,7 @@ _console_host() {  # <backend name to select>
                  'harness = cline' '[harness.cline]' 'model = m'
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"backend = anthropic-console"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"backend = anthropic-api-key"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
 
@@ -3473,7 +3470,7 @@ _console_host() {  # <backend name to select>
                  '[backend.openrouter]' "credential_file = $RW_HOME/openrouter-key"
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"anthropic-console"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-api-key"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"openrouter"* ]] \
         && { echo "suggested a backend claude-code cannot speak to: $output"; return 1; }
     rm -rf "$workspace"
