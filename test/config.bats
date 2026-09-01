@@ -3533,3 +3533,261 @@ EOF
         || { echo "the operator was not told: $output"; return 1; }
     rm -rf "$workspace" "$stub" "$log" "$staged"
 }
+
+# A host with an unrecognised credential in ~/.claude.json: a field no
+# denylist knows about, which is the case #291 exists for.
+_scan_host() {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"someNewField":{"authToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"},"mcpServers":{"ok":{"command":"x"}}}\n' \
+        > "$RW_HOME/.claude.json"
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    SCAN_STUB="$(mktemp -d)"; SCAN_STAGED="$(mktemp)"
+    cat > "$SCAN_STUB/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$SCAN_STAGED"
+exit 0
+EOF
+    chmod +x "$SCAN_STUB/docker"
+}
+
+# Answers the prompt on a real pty. The scan only asks when stdin is a
+# terminal, so a piped stdin exercises the other branch entirely.
+_scan_answer() {  # <answer>
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run python3 "$BATS_TEST_DIRNAME/fixtures/answer-prompt.py" "$1" -- \
+            "$REPO_ROOT/bin/dejima" "$workspace"
+}
+
+_scan_staged_has_token() {
+    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('yes' if d.get('someNewField',{}).get('authToken') else 'no')" \
+        "$SCAN_STAGED"
+}
+
+@test "an unrecognised credential names the field, the harness and the backend" {
+    # Everything an operator needs to report it, and nothing that would make
+    # the report itself worth intercepting.
+    _scan_host
+    _scan_answer r
+    [[ "$output" == *"someNewField.authToken"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"jwt"* ]] || { echo "no shape named: $output"; return 1; }
+    [[ "$output" == *"claude-code"* ]] || { echo "no harness named: $output"; return 1; }
+    [[ "$output" == *"anthropic"* ]] || { echo "no backend named: $output"; return 1; }
+    # And never the value.
+    [[ "$output" == *"eyJhbGciOiJIUzI1NiJ9"* ]] \
+        && { echo "the credential value was printed"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "refusing at the prompt stops the launch before anything is copied" {
+    _scan_host
+    _scan_answer r
+    [ "$status" -ne 0 ] || { echo "launched anyway: $output"; return 1; }
+    [ ! -s "$SCAN_STAGED" ] || { echo "a copy reached docker"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "scrubbing at the prompt keeps it out, for this launch only" {
+    # One launch, deliberately. Removing a field the harness turns out to need
+    # would otherwise break every launch after, with the cause several layers
+    # from the symptom - so the safe answer must not also be the sticky one.
+    _scan_host
+    _scan_answer s
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = no ] \
+        || { echo "the credential reached the container"; return 1; }
+    # The rest of the file still does its job.
+    [ "$(jq -r '.mcpServers.ok.command' "$SCAN_STAGED")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ ! -f "$CONFIG_DIR/credential-scan.decisions" ] \
+        || { echo "a one-launch answer was recorded"; \
+             cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a standing scrub written by hand is honoured, and holds no value" {
+    # Not offered at the prompt, but available to someone who has read what it
+    # does - and it is the only way a scrubbed field survives an unattended
+    # launch.
+    _scan_host
+    _scan_answer r
+    local fid; fid="$(tr -d '\r' <<< "$output" | awk '/^  id /{print $2}')"
+    [ -n "$fid" ] || { echo "no id in the report: $output"; return 1; }
+    printf 'scrub\t%s\t# by hand\n' "$fid" > "$CONFIG_DIR/credential-scan.decisions"
+    : > "$SCAN_STAGED"
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -eq 0 ] || { echo "a standing scrub did not apply: $output"; return 1; }
+    [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
+    [ "$(_scan_staged_has_token)" = no ] || { echo "scrub was not applied"; return 1; }
+    # Keyed on the field, never the value.
+    grep -q 'eyJhbGciOiJIUzI1NiJ9' "$CONFIG_DIR/credential-scan.decisions" \
+        && { echo "the decisions file holds a credential value"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a value split across gitconfig continuation lines is found and fully removed" {
+    # Reading line by line finds the credential under a key that does not
+    # exist, and removing one line of it leaves the rest behind as an orphan
+    # with a dangling backslash - which changes what git parses next.
+    local d; d="$(mktemp -d)"
+    printf '[credential]\n\thelper = !echo \\\n\t\tpassword=ghp_SPLITCANARY123456\n[alias]\n\tst = status\n' \
+        > "$d/gc"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # One finding, under the real key.
+    [ "$(wc -l <<< "$output")" = 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"credential.helper"* ]] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' <<< "$output" && { echo "the value leaked"; return 1; }
+    cut -f2 <<< "$output" > "$d/ids"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g --scrub "$d/ids"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' "$d/gc" && { echo "the value survived"; cat "$d/gc"; return 1; }
+    grep -qE '\\$' "$d/gc" && { echo "a dangling continuation was left"; cat "$d/gc"; return 1; }
+    [ "$(git config -f "$d/gc" alias.st)" = "status" ] || { echo "took too much"; return 1; }
+    rm -rf "$d"
+}
+
+@test "allowing at the prompt carries it in, and is remembered" {
+    _scan_host
+    _scan_answer a
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] \
+        || { echo "allow did not carry the value in"; return 1; }
+    grep -q '^allow' "$CONFIG_DIR/credential-scan.decisions" \
+        || { echo "the decision was not recorded"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "allowing once carries it in and records nothing" {
+    _scan_host
+    _scan_answer o
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] || { echo "once did not carry it in"; return 1; }
+    [ ! -f "$CONFIG_DIR/credential-scan.decisions" ] \
+        || { echo "a one-off answer was recorded"; cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "with nothing attached to answer, the launch stops rather than carrying it" {
+    # An unattended run must not block on a question nobody will see, and must
+    # not answer it by carrying the credential in either.
+    _scan_host
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -ne 0 ] || { echo "launched unattended: $output"; return 1; }
+    [[ "$output" == *"Nothing is attached to answer"* ]] || { echo "$output"; return 1; }
+    # And it says how to answer without a terminal.
+    [[ "$output" == *"scrub"* ]] && [[ "$output" == *"allow"* ]] \
+        || { echo "no way forward given: $output"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "an allow recorded at the prompt applies without asking again" {
+    # The only answer that persists from the prompt, and the one that makes an
+    # unattended launch possible afterwards.
+    _scan_host
+    _scan_answer a
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    : > "$SCAN_STAGED"
+    # Second launch, nothing attached: the standing decision has to carry it.
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -eq 0 ] || { echo "a recorded decision did not apply: $output"; return 1; }
+    [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] || { echo "allow was not applied"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "the scanner never emits a credential, even when the path is one" {
+    # In a gitconfig the userinfo sits in the SECTION HEADER, so
+    # `url.https://me:PAT@github.com/` is a path that IS a credential.
+    # Reporting paths verbatim would leak one in the finding itself.
+    local d; d="$(mktemp -d)"
+    cat > "$d/gitconfig" <<'GC'
+[credential]
+	helper = !echo password=ghp_LEAKCANARY123456
+[http "https://gitbox.example"]
+	extraHeader = Authorization: Bearer LEAKCANARY234567
+[url "https://someone:LEAKCANARY345678@github.com/"]
+	insteadOf = https://github.com/
+GC
+    printf '{"a":{"tok":"sk-ant-api03-LEAKCANARY456789"}}\n' > "$d/claude.json"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gitconfig" --format ini --label g
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local ini_out="$output"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/claude.json" --format json --label c
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'LEAKCANARY' <<< "$ini_out$output" \
+        && { echo "a credential appeared in a finding:"; echo "$ini_out$output"; return 1; }
+    # It still identifies the field well enough to act on and report.
+    [[ "$ini_out" == *"credential.helper"* ]] || { echo "$ini_out"; return 1; }
+    [[ "$ini_out" == *"url-userinfo"* ]] || { echo "$ini_out"; return 1; }
+    rm -rf "$d"
+}
+
+@test "a judged-safe path is not reported, and the list gives a reason for each" {
+    # The allowlist half: it is what makes the scanner quiet about one thing,
+    # so a line with no reason above it is a line nobody reviewed.
+    local d; d="$(mktemp -d)"
+    printf '{"customApiKeyResponses":{"approved":["al-proxy-placeholder"]},"userID":"%s"}\n' \
+        "$(printf 'a%.0s' {1..40})" > "$d/claude.json"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/claude.json" --format json \
+        --label '~/.claude.json' --known-safe "$REPO_ROOT/bin/dejima-credential-scan-known-safe"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ] || { echo "judged-safe paths were reported: $output"; return 1; }
+    # Every entry has a comment above it somewhere in the file.
+    local entries comments
+    entries="$(grep -cvE '^\s*(#|$)' "$REPO_ROOT/bin/dejima-credential-scan-known-safe")"
+    comments="$(grep -cE '^#' "$REPO_ROOT/bin/dejima-credential-scan-known-safe")"
+    [ "$entries" -gt 0 ] || { echo "the judged-safe list is empty"; return 1; }
+    [ "$comments" -ge 3 ] || { echo "the judged-safe list carries no reasons"; return 1; }
+    rm -rf "$d"
+}
+
+@test "the scanner catches secrets without flagging prose or plain identifiers" {
+    # Measured against a real ~/.claude.json, the first version produced 22
+    # findings and none of them was a credential: entropy alone flags every
+    # sentence in a config file, because English scores 4.0-4.5 bits per
+    # character by that measure. Both halves of the fix are pinned here.
+    local d; d="$(mktemp -d)"
+    cat > "$d/t.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-CANARY1",
+ "a":{"authToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.CANARY2"},
+ "b":{"sessionSecret":"9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c"},
+ "c":{"apiKey":"CANARY3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+ "d":{"blob":"aGVsbG8td29ybGQtdGhpcy1pcy1iYXNlNjQtaXNoLXNlY3JldC1DQU5BUlk0"},
+ "g":{"ghToken":"ghp_CANARY5abcdefghijklmno"},
+ "e":{"note":"This is a perfectly ordinary sentence of prose that is quite long."},
+ "f":{"authDescription":"Authentication is handled by the provider you select."},
+ "oauthAccount":{"billingType":"subscription","organizationType":"enterprise"},
+ "flags":{"tengu_mcp_local_oauth_blocked_hosts":{"hosts":["example.com"]}},
+ "h":{"slug":"claude-plugins-official"},
+ "i":{"path":"~/.claude/statusline.sh"},
+ "j":{"model":"claude-haiku-4-5-20251001"}}
+JSON
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/t.json" --format json --label t
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local want
+    for want in primaryApiKey a.authToken b.sessionSecret c.apiKey d.blob g.ghToken; do
+        [[ "$output" == *"$want"* ]] || { echo "missed $want:"; echo "$output"; return 1; }
+    done
+    # Prose, identifiers, paths and model names are not credentials. The
+    # oauthAccount and oauth-named-flag entries are the substring bug: `auth`
+    # inside `oauthAccount` flagged every field of the account description.
+    local quiet
+    for quiet in e.note f.authDescription billingType organizationType hosts \
+                 h.slug i.path j.model; do
+        [[ "$output" == *"$quiet"* ]] \
+            && { echo "false positive on $quiet:"; echo "$output"; return 1; }
+    done
+    [ "$(wc -l <<< "$output")" = 6 ] || { echo "unexpected count:"; echo "$output"; return 1; }
+    grep -q 'CANARY' <<< "$output" && { echo "a value leaked"; return 1; }
+    rm -rf "$d"
+}

@@ -7714,3 +7714,28 @@ _cline_providers_json() {
     [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
         = "dejima-no-credential-needed" ] || { echo "$j"; return 1; }
 }
+
+@test "docs/security.md states what the credential scan does not catch" {
+    # A best-effort control that reads as a guarantee is worse than none: an
+    # operator who thinks nothing can cross stops looking. These four limits
+    # are the ones a later tidy-up is most likely to cut as hedging, and each
+    # is a real hole someone could otherwise walk into.
+    local doc; doc="$REPO_ROOT/docs/security.md"
+    local prose; prose="$(flat_prose "$doc")"
+    [[ "$prose" == *"What the scan does not catch"* ]] \
+        || { echo "the limits section is gone"; return 1; }
+    # Whitespace, which is the trade that makes the rest work.
+    [[ "$prose" == *"spaces in passphrases"* ]] \
+        || { echo "the whitespace limit is not stated"; return 1; }
+    # And that it is a trade rather than an oversight.
+    [[ "$prose" == *"deliberate trade"* ]] \
+        || { echo "the whitespace limit reads as an oversight"; return 1; }
+    # Formats it cannot read.
+    [[ "$prose" == *"format it cannot parse"* ]] \
+        || { echo "the unparseable-file limit is not stated"; return 1; }
+    # And the boundary of what is scanned at all.
+    [[ "$prose" == *"Anything dejima does not copy"* ]] \
+        || { echo "the scope limit is not stated"; return 1; }
+    [[ "$prose" == *"read-write mounts"* ]] \
+        || { echo "read-write mounts are not named as unscanned"; return 1; }
+}
