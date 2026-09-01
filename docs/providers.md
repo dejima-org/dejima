@@ -3,16 +3,20 @@
 [← dejima README](../README.md)
 
 dejima's forge (Gitea/Forgejo/...), workflow (worktree-and-PR, or something
-else) and harness (Claude Code, or another agent CLI) behaviour are not
-hardcoded into core. Each is a directory under `forges/`, `workflows/` or
-`harnesses/`, selected by `[core] forge`, `[core] workflow` and
-`[core] harness` in `~/.config/dejima/config`. Shipped today:
+else), harness (Claude Code, or another agent CLI) and model backend
+(Anthropic, OpenRouter, something you serve) behaviour are not hardcoded into
+core. Each is a directory under `forges/`, `workflows/`, `harnesses/` or
+`backends/`. Shipped today:
 
 | Axis | Directory | Selector | Ships |
 | --- | --- | --- | --- |
 | forge | `forges/` | `[core] forge` | `forges/gitea`, `forges/github`, `forges/none` |
 | workflow | `workflows/` | `[core] workflow` | `workflows/worktree-pr`, `workflows/branch-push`, `workflows/local-only` |
-| harness | `harnesses/` | `[core] harness` | `harnesses/claude-code` |
+| harness | `harnesses/` | `[core] harness` | `harnesses/claude-code`, `harnesses/cline` |
+| backend | `backends/` | `[harness.<name>] backend` | `backends/anthropic`, `backends/anthropic-api-key`, `backends/openrouter`, `backends/self-hosted` |
+
+The backend is selected per harness rather than in `[core]`, because it is the
+harness that talks to a model API - see [Model backends](#model-backends).
 
 See [Shipped providers](#shipped-providers) below for what each one is for.
 
@@ -44,7 +48,7 @@ elsewhere needs to change.
 ## The manifest file
 
 Each provider directory has exactly one manifest file, named for its axis:
-`forge.conf`, `workflow.conf`, `harness.conf`. Format is the same
+`forge.conf`, `workflow.conf`, `harness.conf`, `backend.conf`. Format is the same
 `key = value` shape as the main config file:
 
 - One `key = value` pair per line; surrounding whitespace is trimmed.
@@ -229,6 +233,7 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `command_path` | `?path` | (empty) | Where the real binary lives, behind the shadow. |
 | `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the *fixed* allowlist rather than the extra one, which `dns-proxy.sh` exempts from stop-dns-rebind and `init-firewall.sh` treats as non-fatal when it fails to resolve. |
 | `proxied_api_domain` | `?hostname` | (empty) | The model API endpoint the credential proxy stands in front of. Allowlisted **only when the proxy is off**: with it on, the session reaches the API through the forwarder, so leaving the name unresolvable defeats a bypass that looks it up by DNS. Which name it is comes from here; when to allowlist it is dejima's rule. |
+| `api_styles` | `?list:identifier` | (empty) | Which backend `api_style`s this harness has a client for. `claude-code` speaks `anthropic`; `cline` speaks both, which is what makes it the backend-agnostic one. Empty means unchecked. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
 | `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
 | `briefing_path` | `?homepath` | (empty) | Where this harness reads its briefing from, relative to `$HOME`, for a harness that has no session-start hook to be handed it through. Set, `entrypoint.sh` renders the briefing into that path root-owned and read-only before the session starts, and refuses to start it at all if that fails. Empty for a harness that registers a hook instead, which is how Claude Code gets it. |
@@ -261,6 +266,74 @@ with defaults;
 resuming the session on the host is `claude --resume <session id>`, with
 `{{session_id}}` filled in at composition time; and its briefing fragment is
 `briefing.md`.
+
+## Model backends
+
+`backends/<name>/backend.conf`. Which model API a session talks to, and how the
+credential proxy presents the credential to it.
+
+**"Backend" and not "provider",** which is what the industry usually calls a
+model API. This document already calls forge, workflow and harness "provider
+axes", and one word for both reads as one thing. A harness keeps its own
+vocabulary: `cline` writes a `providers.json` with a `lastUsedProvider` key,
+and `bin/harness/cline.sh` translates.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `upstream` | `?url` | (empty) | Where the proxy forwards to. Required unless `credential` is `none`, which runs no proxy. |
+| `api_style` | `enum:anthropic\|openai` | (required) | Which dialect the endpoint speaks. A property of the API rather than of any harness: Anthropic's Messages API and an OpenAI-compatible one are different wire formats. A harness declares which it can speak in `api_styles`, and a launch pairing the two wrongly is refused rather than sending well-formed requests in a shape the endpoint cannot parse. |
+| `proxied_domain` | `?hostname` | (empty) | The name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. Required unless `credential` is `none`. On this axis rather than the harness's: a harness reaches whichever endpoint it is configured for, so the name belongs to the endpoint. Declared on the harness, the terminator would answer for one API while the session talked to another, and the credential the proxy exists to withhold would be the one in use. |
+| `credential` | `enum:static\|anthropic-oauth\|none` | (required) | Whether there is a credential, and whether it expires. `static` is read and sent; `anthropic-oauth` is refreshed against `oauth_endpoint` and the rotated token written back to the host file, which is what keeps a host-side login working rather than being signed out by a sandbox run; `none` is a model you serve, with nothing to withhold and so no proxy at all. |
+| `auth_header` | `identifier` | `Authorization` | Which header carries it. |
+| `auth_format` | `authformat` | `Bearer {token}` | How it is written. Must contain `{token}`, so a backend wanting a bare key or a prefix of its own needs no code; a format without it produces a proxy that starts, answers, and sends every request unauthenticated. |
+| `strip_headers` | `?list:identifier` | (empty) | Headers that must not travel beside the injected one. `x-api-key` next to an `Authorization` is two answers to the same question, and which one an API prefers is not dejima's to guess. The auth header is never stripped from under itself. |
+| `ensure_headers` | `?list:headerpair` | (empty) | `NAME=VALUE` that has to appear in a comma-list header, merged into whatever the client sent and left alone when already present. Anthropic's OAuth beta is the one shipped example. |
+| `oauth_endpoint` | `?url` | (empty) | Required by the `anthropic-oauth` kind, meaningless to `static`. |
+| `oauth_client_id` | `?identifier` | (empty) | Same. |
+| `keys` | `?list:keyspec` | (empty) | This backend's own `[backend.<name>]` config schema, exactly as a forge's works. A backend with a credential is expected to declare `credential_file`. |
+| `requires` | `?list:identifier` | (empty) | Which of those must be set for a launch to proceed. |
+
+### What pairs with what
+
+Compatibility is not a list anyone maintains: it is the backend's `api_style`
+against the harness's `api_styles`, checked at launch. This table is what those
+declarations currently work out to.
+
+| Backend | `claude-code` | `cline` | Credential | You configure |
+| --- | --- | --- | --- | --- |
+| `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
+| `anthropic-api-key` | yes | yes | a static key, held on the host | nothing, if Claude Code signed you in; otherwise `[backend.anthropic-api-key] credential_file` |
+| `openrouter` | no | yes | a static key, held on the host | `[backend.openrouter] credential_file` |
+| `self-hosted` | no | yes | none, and so no proxy at all | `[backend.self-hosted] base_url` |
+
+`claude-code` speaks Anthropic's Messages API and nothing else, so the two
+OpenAI-compatible backends are refused with it - at launch, naming both sides,
+rather than by sending well-formed requests in a shape the endpoint cannot
+parse. `cline` has a client for each dialect, which is what makes it the
+backend-agnostic one.
+
+Adding a backend does not change this table by hand: a new directory whose
+`api_style` is one a harness already declares works with that harness the day
+it lands.
+
+**Which backend a launch uses is the harness's setting**, `[harness.<name>]
+backend`, overridable for one launch with `--backend`. Per harness because
+that is how it is used: one harness against Anthropic and another against
+something else, on the same machine.
+
+No harness ships a default for it, for the reason `[core] harness` has none. A
+harness may instead declare `assumed_backend`: what it was talking to before
+the key existed, which dejima writes into the operator's config the first time
+it finds the key unset, and says so. That is a migration rather than a default
+- recorded once in the operator's own file, so a later change to dejima cannot
+move a session whose config never changed. A harness only states it where the
+value is not a guess; one whose past endpoint depended on other settings
+declares nothing, and an unset backend is then a refusal.
+
+**Nothing here is a secret.** A backend declares *where* its credential is
+read from - `credential_file` is a path - never what it is. The file it names
+is read host-side per request and is never mounted into the container, which
+is the property the whole arrangement exists for.
 
 ## Tool
 
@@ -442,7 +515,11 @@ every launch:
 | workflow | `branch-push` | worktree → push, stops at the branch |
 | workflow | `local-only` | **default** - commits locally, pushes nothing |
 | harness | `claude-code` | hosts every guard; **not a default** - `[core] harness` must be set |
-| harness | `cline` | provider-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
+| harness | `cline` | backend-agnostic, so it can be pointed at an open-weight model served locally; hosts no guards, and needs `[harness.cline] model` set and a CPU with AVX2 |
+| backend | `anthropic` | Anthropic on a subscription login; the OAuth token is refreshed and written back to the host |
+| backend | `anthropic-api-key` | Anthropic on API billing, whether the key came from Claude Code's console login (`primaryApiKey` in `~/.claude.json`, the default) or a file you hold yourself |
+| backend | `openrouter` | a hosted OpenAI-compatible API; a static key, held on the host |
+| backend | `self-hosted` | a model you serve; no credential and so no proxy, and the endpoint must be host-local |
 
 ### Harness integration maturity
 
@@ -461,7 +538,7 @@ over, which is a kind of coverage no test suite substitutes for.
 **Cline is new, and has barely been used.** Its integration was built
 deliberately and is tested, but a test only covers what someone thought to
 check. The first run against a live model immediately turned up a bug no test
-had: Cline silently discards a provider entry with no `updatedAt` and falls back
+had: Cline silently discards a `providers.json` entry with no `updatedAt` and falls back
 to its own hosted endpoint, which presents as a connection failure to a host
 nobody configured. The first real session turned up a second, in a component
 Cline does not own at all - the conversation shipper passed its payload as a

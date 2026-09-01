@@ -955,10 +955,10 @@ _cline_prepare() {
     # there is no proxy that could hold a key back, so the key would have to
     # go in. That is the one thing this harness may not do quietly.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://api.openai.com/v1')"
+    cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = https://api.openai.com/v1")"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -ne 0 ] || { echo "accepted a hosted endpoint"; return 1; }
-    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"refusing [backend.self-hosted] base_url"* ]] || { echo "$output"; return 1; }
 }
 
 @test "cline refuses the credential modes it has no path through" {
@@ -970,9 +970,9 @@ _cline_prepare() {
     # URL through the environment that cline does not read.
     local cfg
     for cfg in 'proxy = off' 'transport = loopback'; do
-        run _cline_prepare "$(_cline_cfg 'model = m' '[credentials]' "$cfg")" "$BATS_TEST_TMPDIR/ws"
+        run _cline_prepare "$(_cline_cfg 'model = m' 'backend = anthropic' '[credentials]' "$cfg")" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -ne 0 ] || { echo "accepted $cfg"; return 1; }
-        [[ "$output" == *"no way to reach Anthropic"* ]] || { echo "$output"; return 1; }
+        [[ "$output" == *"no way to reach a proxied"* ]] || { echo "$output"; return 1; }
     done
 }
 
@@ -982,7 +982,7 @@ _cline_prepare() {
     # and refusing there would be refusing the configuration that made this
     # harness worth adding.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:11434/v1' \
+    cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = http://127.0.0.1:11434/v1" \
         '[credentials]' 'proxy = off')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -994,7 +994,7 @@ _cline_prepare() {
     # R5 to protect and the endpoint is supported today.
     local addr cfg
     for addr in 127.0.0.1 10.1.2.3 192.168.1.5 172.17.0.1 localhost; do
-        cfg="$(_cline_cfg 'model = m' "base_url = http://$addr:11434/v1")"
+        cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = http://$addr:11434/v1")"
         run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -eq 0 ] || { echo "refused $addr: $output"; return 1; }
     done
@@ -1010,7 +1010,7 @@ _cline_prepare() {
     # same store that decides what the container can reach: an endpoint that
     # fails this is one the session could not have connected to anyway.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = https://llm.example.test/v1")"
     printf 'llm.example.test\n' > "$cfg/allowed-domains"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -eq 0 ] || { echo "refused an allowlisted endpoint: $output"; return 1; }
@@ -1020,10 +1020,10 @@ _cline_prepare() {
     # The same endpoint without the grant. Nothing about the URL changed;
     # what changed is whether the operator asked for it.
     local cfg
-    cfg="$(_cline_cfg 'model = m' 'base_url = https://llm.example.test/v1')"
+    cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = https://llm.example.test/v1")"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
     [ "$status" -ne 0 ] || { echo "accepted an endpoint nothing granted"; return 1; }
-    [[ "$output" == *"refusing base_url"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"refusing [backend.self-hosted] base_url"* ]] || { echo "$output"; return 1; }
 }
 
 @test "cline does not mistake a hostname for the private range it starts with" {
@@ -1032,7 +1032,7 @@ _cline_prepare() {
     # as numbers for exactly this.
     local host cfg
     for host in 10.example.com 192.168.example.com 172.16.example.com; do
-        cfg="$(_cline_cfg 'model = m' "base_url = http://$host/v1")"
+        cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = http://$host/v1")"
         run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
         [ "$status" -ne 0 ] || { echo "accepted $host as a private address"; return 1; }
     done
@@ -1043,7 +1043,7 @@ _cline_prepare() {
     # container holds is a placeholder, and the host-side proxy substitutes the
     # real credential on the way out. Confirmed end to end against the API.
     local cfg ws
-    cfg="$(_cline_cfg 'model = claude-haiku-4-5-20251001')"
+    cfg="$(_cline_cfg 'model = claude-haiku-4-5-20251001' 'backend = anthropic')"
     ws="$BATS_TEST_TMPDIR/ws"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1068,7 +1068,7 @@ _cline_prepare() {
     # survived every test that wrote providers.json by hand: those included the
     # field, and the plugin did not. It took a run against a real endpoint.
     local cfg ws f
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     ws="$BATS_TEST_TMPDIR/ws-ts"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1084,7 +1084,7 @@ _cline_prepare() {
 @test "cline's local-endpoint provider entry carries it too" {
     # Same field, the other branch. The bug was found on this one.
     local cfg ws f
-    cfg="$(_cline_cfg 'model = m' 'base_url = http://127.0.0.1:8080/v1')"
+    cfg="$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = http://127.0.0.1:8080/v1")"
     ws="$BATS_TEST_TMPDIR/ws-ts2"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1103,14 +1103,14 @@ _cline_prepare() {
     # being served, and dejima guessing one is worse than leaving Cline to its
     # catalogue for a model it does know.
     local cfg f
-    cfg="$(_cline_cfg 'model = m' 'context_window = 15000')"
+    cfg="$(_cline_cfg 'model = m' 'backend = anthropic' 'context_window = 15000')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     f="$(find "$cfg/state" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow' "$f"
     [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
 
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
     f="$(find "$cfg/state" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
@@ -1124,7 +1124,7 @@ _cline_prepare() {
     # and the only thing that keeps one project's transcripts out of another's
     # session - #104 - is dejima handing each workspace its own data directory.
     local cfg a b
-    cfg="$(_cline_cfg 'model = m')"
+    cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     a="$(DEJIMA_CONFIG_DIR="$cfg" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
         source "$2/bin/dejima-harness-lib.sh"
@@ -3650,9 +3650,24 @@ registered_commands() {
     grep -q 'return 0' <<< "$output"
 }
 
-@test "credential proxy is on by default, gated only by credentials.proxy" {
-    grep -q 'config_get_bool credentials proxy' "$REPO_ROOT/bin/dejima"
+@test "credential proxy is on by default, and unset per backend means inherit" {
     grep -Pq 'credentials\.proxy\tbool\ton' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    # Every gate goes through the helper. A raw config_get_bool read here
+    # would ignore [backend.<name>] proxy and re-widen the switch to every
+    # backend at once.
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/dejima"
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/harness/cline.sh"
+    run grep -rn 'config_get_bool credentials proxy' "$REPO_ROOT/bin" "$REPO_ROOT/docker"
+    [ -z "$output" ] || { echo "an ungated read of the global switch: $output"; return 1; }
+    # And the helper must not be config_get_bool underneath, which reports an
+    # unset optional key as off - that would turn the proxy off for every
+    # backend the moment the per-backend key existed.
+    run sed -n '/^backend_proxy_enabled() {/,/^}/p' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ -n "$output" ] || { echo "backend_proxy_enabled is not defined"; return 1; }
+    grep -q 'config_get_bool' <<< "$output" \
+        && { echo "the helper reads an unset key as off"; return 1; }
+    grep -q 'config_get credentials proxy' <<< "$output" \
+        || { echo "the helper does not fall back to the global switch"; return 1; }
 }
 
 @test "bin/dejima mounts the proxy socket dir and masks nothing" {
@@ -5285,7 +5300,7 @@ EOF
         || { echo "the opening pitch is only $words words"; return 1; }
 }
 
-@test "the README's provider lists match what is shipped" {
+@test "the README's axis lists match what is shipped" {
     # It listed claude-code as the only harness for as long as cline had been
     # shipping: a hand-maintained list of directories goes stale in the
     # direction of telling a reader the thing they came for does not exist.
@@ -5488,34 +5503,67 @@ EOF
 # docs/*.md reference actually present in these scripts and checks the target
 # exists, rather than hardcoding the two names here too and letting a rename
 # desync the test from the code.
-@test "bin/dejima states the whole Anthropic arrangement to the credential proxy" {
-    # The proxy defaults nothing about a provider any more (#171). That is the
-    # point - a default is one provider's arrangement wearing every provider's
-    # name - but it moves the burden onto the caller, and a caller that forgets
-    # a flag does not fail here. It fails at launch, or worse, sends a request
-    # without the header the provider needs and reports the API's rejection.
+@test "the Anthropic arrangement is declared in its manifest, not written in core" {
+    # #171's whole point. Before the axis these values were flags on
+    # bin/dejima's launch line; now they are a file, and adding a provider is
+    # adding a directory rather than editing core.
     #
-    # Every flag the Anthropic path needs, asserted on the launch itself rather
-    # than anywhere in the file: the arguments have to be on this invocation.
-    local launch
-    launch="$(sed -n '/dejima-credential-proxy" \\/,/^    SANDBOX_ANTHROPIC_PROXY_PID=/p' "$REPO_ROOT/bin/dejima")"
-    [ -n "$launch" ] || { echo "bin/dejima no longer launches the credential proxy"; return 1; }
-    local flag
-    for flag in --socket --credentials --upstream --credential-kind \
-                --oauth-endpoint --oauth-client-id --auth-header \
-                --auth-format --strip-header --ensure-header; do
-        grep -q -- "$flag" <<< "$launch" \
-            || { echo "the launch passes no $flag"; return 1; }
+    # The three that carry the security property rather than the shape:
+    # x-api-key must not travel beside the injected Authorization, the OAuth
+    # beta must be present or the API rejects the token, and the kind has to
+    # be the refreshing one or a rotated token is never written back.
+    local m="$REPO_ROOT/backends/anthropic/backend.conf"
+    [ -f "$m" ] || { echo "the anthropic provider manifest is gone"; return 1; }
+    local want
+    for want in 'upstream *= *https://api\.anthropic\.com' \
+                'proxied_domain *= *api\.anthropic\.com' \
+                'credential *= *anthropic-oauth' \
+                'oauth_endpoint *= *https://platform\.claude\.com' \
+                'auth_header *= *Authorization' \
+                'auth_format *= *Bearer \{token\}' \
+                'strip_headers *=.*x-api-key' \
+                'ensure_headers *=.*anthropic-beta=oauth-2025-04-20'; do
+        grep -qE "^$want" "$m" \
+            || { echo "the manifest no longer declares: $want"; return 1; }
     done
-    # And the values that carry the security property rather than just the
-    # shape: x-api-key must not travel beside the injected Authorization, and
-    # the OAuth beta must be present or the API rejects the token.
-    grep -q -- '--strip-header x-api-key' <<< "$launch" \
-        || { echo "x-api-key is no longer stripped"; return 1; }
-    grep -q -- 'anthropic-beta=oauth-2025-04-20' <<< "$launch" \
-        || { echo "the OAuth beta is no longer ensured"; return 1; }
-    grep -q -- '--credential-kind anthropic-oauth' <<< "$launch" \
-        || { echo "the launch no longer asks for the refreshing credential kind"; return 1; }
+    # And core writes none of it. A constant here would be the arrangement
+    # living in two places, which is how they drift.
+    local d="$REPO_ROOT/bin/dejima" body
+    body="$(grep -v '^[[:space:]]*#' "$d")"
+    for want in 'api\.anthropic\.com' 'platform\.claude\.com' \
+                'oauth-2025-04-20' '9d1c250a'; do
+        grep -qE -- "$want" <<< "$body" \
+            && { echo "core still writes a provider constant: $want"; return 1; }
+    done
+    return 0
+}
+
+@test "every field the backend manifest declares reaches the proxy's argv" {
+    # A manifest key nothing passes through is a declaration that does
+    # nothing, and the failure is silent: the proxy falls back to its own
+    # default, or to none, and the session runs with an arrangement the
+    # operator did not configure. Pinned on the launch block itself rather
+    # than anywhere in the file.
+    local launch
+    launch="$(sed -n '/_proxy_args=(/,/dejima-credential-proxy" "\${_proxy_args\[@\]}"/p' "$REPO_ROOT/bin/dejima")"
+    [ -n "$launch" ] || { echo "bin/dejima no longer builds the proxy argument list"; return 1; }
+    local pair
+    for pair in 'upstream:--upstream' 'auth_header:--auth-header' \
+                'auth_format:--auth-format' 'strip_headers:--strip-header' \
+                'ensure_headers:--ensure-header' \
+                'oauth_endpoint:--oauth-endpoint' \
+                'oauth_client_id:--oauth-client-id'; do
+        grep -q -- "${pair##*:}" <<< "$launch" \
+            || { echo "no ${pair##*:} on the launch"; return 1; }
+        grep -q -- "${pair%%:*}" <<< "$launch" \
+            || { echo "${pair%%:*} is never read from the manifest"; return 1; }
+    done
+    # The credential kind and file come from the provider too, not from a
+    # hardcoded path to one harness's credential store.
+    grep -q -- '--credential-kind "\$DEJIMA_BACKEND_CREDENTIAL_KIND"' <<< "$launch" \
+        || { echo "the credential kind is not the provider's"; return 1; }
+    grep -q -- '--credentials "\$DEJIMA_BACKEND_CREDENTIAL_FILE"' <<< "$launch" \
+        || { echo "the credential file is not the provider's"; return 1; }
 }
 
 @test "the credential proxy names no provider constant anywhere in its code" {
@@ -5782,12 +5830,18 @@ EOF
     # providers.bats) - this fixture sidesteps that with the honest
     # "no forge, no push" pair rather than configuring a forge just to get
     # past validation.
+    # [harness.claude-code] backend, because it has no default and never
+    # will: one dejima could change later would move a session to another
+    # endpoint without its config changing (#171). A launch fixture has to
+    # state it like any other operator config.
     cat > "$DEJIMA_T/config/config" <<EOF
 [core]
 harness = claude-code
 ssh_key = $DEJIMA_T/sandbox-key
 forge = none
 workflow = local-only
+[harness.claude-code]
+backend = anthropic
 [audit]
 dir = $DEJIMA_T/audit
 EOF
@@ -6027,8 +6081,11 @@ q
 _harness_api_domains() {
     sed -n 's/^api_domains *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
 }
-_harness_proxied_domain() {
-    sed -n 's/^proxied_api_domain *= *//p' "$REPO_ROOT/harnesses/claude-code/harness.conf"
+# The endpoint the terminator stands in front of. On the PROVIDER manifest
+# since #171: a harness reaches whichever endpoint it is configured for, so
+# the name belongs to the endpoint rather than to the program talking to it.
+_provider_proxied_domain() {
+    sed -n 's/^proxied_domain *= *//p' "$REPO_ROOT/backends/anthropic/backend.conf"
 }
 
 @test "the selected harness's own domains are in the fixed list, not built into the image" {
@@ -6058,20 +6115,20 @@ _harness_proxied_domain() {
     # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
     # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
     # non-fatal when it fails to resolve.
-    local pd; pd="$(_harness_proxied_domain)"
+    local pd; pd="$(_provider_proxied_domain)"
     [ -n "$pd" ] || { echo "the harness declares no proxied_api_domain"; return 1; }
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'api.anthropic.com' <<< "$output"
 
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
     # Under `set -u`, as both consumers run, so that dropping the `:-` default
     # fails here rather than at container start.
-    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_HARNESS_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
@@ -6930,17 +6987,17 @@ _emit_mount_at() {
     [ "$runs" -ge 1 ] || { echo "no compose run names the service"; return 1; }
 }
 
-@test "the TLS terminator answers for the harness's declared domain, not a literal" {
-    # The manifest declares proxied_api_domain; the entrypoint used the name
-    # of one harness's API in the cert, the SAN and the /etc/hosts pin.
+@test "the TLS terminator answers for the provider's declared domain, not a literal" {
+    # The provider manifest declares proxied_domain; the entrypoint used the
+    # name of one API in the cert, the SAN and the /etc/hosts pin.
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
     [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
-    grep -q 'SANDBOX_HARNESS_PROXIED_DOMAIN' "$e" \
+    grep -q 'SANDBOX_BACKEND_PROXIED_DOMAIN' "$e" \
         || { echo "the entrypoint does not read the declared domain"; return 1; }
-    # And a harness that declares a proxy but no domain is refused, rather
+    # And a proxy socket with no domain declared for it is refused, rather
     # than bringing up a terminator that intercepts nothing.
-    grep -q 'declares no proxied_api_domain' "$e" \
+    grep -q 'declares no proxied_domain' "$e" \
         || { echo "an empty proxied domain is not refused"; return 1; }
 }
 
@@ -7073,7 +7130,7 @@ _emit_mount_at() {
     # how two of these failed.
     local rt="$REPO_ROOT/test/runtime.bats" sock dom
     sock=$(grep -c 'SANDBOX_ANTHROPIC_PROXY_SOCKET=.*proxy\.sock' "$rt")
-    dom=$(grep -c 'SANDBOX_HARNESS_PROXIED_DOMAIN=' "$rt")
+    dom=$(grep -c 'SANDBOX_BACKEND_PROXIED_DOMAIN=' "$rt")
     [ "$sock" -gt 0 ] || { echo "no proxy fixtures found - has this moved?"; return 1; }
     # One of the domain lines is the file-wide fixture, which mounts no
     # socket, so the domains must outnumber the sockets that go through a
@@ -7540,4 +7597,145 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     # should be told Basic is a trade, not that it is the answer.
     grep -qi 'no per-operator identity' <<< "$flat" \
         || { echo "what Basic costs is unstated"; return 1; }
+}
+
+@test "the four credential arrangements are documented with what each exposes" {
+    # There is more than one kind of provider now, and they differ in exactly
+    # one way that matters: three keep the credential on the host and one
+    # mounts it. A reader choosing a provider needs that comparison in one
+    # place rather than assembled from a section written when Anthropic OAuth
+    # was the only path (#171).
+    local sec="$REPO_ROOT/docs/security.md" flat
+    flat="$(flat_prose "$sec")"
+    grep -q '^| Arrangement | In the container | What a compromised session can take |' "$sec" \
+        || { echo "the arrangement table is gone or lost a column"; return 1; }
+    local rows
+    rows="$(sed -n '/^| Arrangement | In the container |/,/^$/p' "$sec")"
+    local arrangement
+    for arrangement in 'anthropic-oauth' 'credential = static' 'credential = none' 'No proxy'; do
+        grep -qF "$arrangement" <<< "$rows" \
+            || { echo "no row for: $arrangement"; return 1; }
+    done
+    # The one that differs, said outright rather than left to the table.
+    grep -qi 'first three keep the credential out; the fourth does not' <<< "$flat" \
+        || { echo "nothing says which arrangement mounts the credential"; return 1; }
+    # The residual the proxied ones share. A page that only lists what is
+    # prevented reads as a stronger claim than the code makes.
+    grep -qi 'residual the first two share is use-while-running' <<< "$flat" \
+        || { echo "the use-while-running residual is undocumented"; return 1; }
+    # Refreshing vs static, which is about the HOST-side value rather than
+    # about what the container sees.
+    grep -qi 'differ in what a leak elsewhere costs, not in what the' <<< "$flat" \
+        || { echo "oauth and static read as equivalent"; return 1; }
+    # And the firewall asymmetry, with its limit attached. Without the limit
+    # this reads as a route block, which it is not.
+    grep -qi 'not in the egress allowlist while the proxy is on' <<< "$flat" \
+        || { echo "the allowlist asymmetry is undocumented"; return 1; }
+    grep -qi 'defeats a lookup, not a route' <<< "$flat" \
+        || { echo "the asymmetry is stated without its limit"; return 1; }
+}
+
+@test "the threat model owns the use-while-running residual" {
+    # security.md is the control-by-control account; the threat model is where
+    # a reader looks for what is NOT claimed, and this is the claim a
+    # credential proxy most invites someone to overstate.
+    local flat
+    flat="$(flat_prose "$REPO_ROOT/docs/threat-model.md")"
+    grep -qi 'cannot use the model API as you while it runs' <<< "$flat" \
+        || { echo "the not-claimed list does not carry it"; return 1; }
+    grep -q 'security.md#four-arrangements-and-what-a-session-can-take-from-each' \
+        "$REPO_ROOT/docs/threat-model.md" \
+        || { echo "nothing points at the arrangement comparison"; return 1; }
+}
+
+@test "cline takes where the model is from the provider, and only from there" {
+    # base_url used to live on the harness, so two settings could name
+    # different places and an unset base_url meant Anthropic implicitly. It is
+    # a provider key now (#171): a self-served endpoint is its own provider
+    # carrying its own base_url, which is what lets an operator keep a local
+    # model configured while using a hosted API.
+    #
+    # So the harness has no base_url at all, and setting one is an unknown key
+    # rather than a second opinion.
+    run bash -c 'source "$1"; source "$2"; config_type harness.cline.base_url' _ \
+        "$REPO_ROOT/bin/dejima-config-lib.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ "$status" -ne 0 ] || { echo "cline still declares a base_url of its own"; return 1; }
+
+    # And an unset provider is a refusal rather than a default, naming both
+    # kinds because for this harness either is a valid answer.
+    local cfg
+    cfg="$(_cline_cfg 'model = m')"
+    run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws"
+    [ "$status" -ne 0 ] || { echo "launched with no provider"; return 1; }
+    [[ "$output" == *"no [harness.cline] backend is set"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"self-hosted"* ]] || { echo "the self-served option is unnamed: $output"; return 1; }
+}
+
+# The providers.json cline is actually given, for one config. Prints it as JSON.
+_cline_providers_json() {
+    local cfg="$1" out
+    _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws" >/dev/null 2>&1 || return 1
+    out="$(ls -d "$(sed -n 's/^state_dir *= *//p' "$cfg/config")"/*/settings 2>/dev/null | head -1)"
+    [ -n "$out" ] || return 1
+    cat "$out/providers.json"
+}
+
+@test "cline's provider type follows the provider's api_style, not a second setting" {
+    # Anthropic's Messages API and an OpenAI-compatible one are different wire
+    # formats and cline has a client for each. Which one to write is the
+    # selected provider's api_style, so an operator never has to keep a
+    # dialect setting in step with an endpoint by hand.
+    local j
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'backend = anthropic')")" \
+        || { echo "anthropic path produced nothing"; return 1; }
+    [ "$(jq -r .lastUsedProvider <<< "$j")" = anthropic ] || { echo "$j"; return 1; }
+    # No baseUrl on this path: cline addresses the API by name and the
+    # terminator already answers for it.
+    [ "$(jq -r '.providers.anthropic.settings.baseUrl // "absent"' <<< "$j")" = absent ] \
+        || { echo "$j"; return 1; }
+
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'backend = openrouter')")" \
+        || { echo "openrouter path produced nothing"; return 1; }
+    [ "$(jq -r .lastUsedProvider <<< "$j")" = openai-compatible ] || { echo "$j"; return 1; }
+    # And addressed by the endpoint's REAL hostname, not a loopback one: the
+    # terminator answers for that name inside the container and the host-side
+    # proxy holds the key, which is what keeps the session looking like one
+    # talking to the API directly.
+    [ "$(jq -r '.providers["openai-compatible"].settings.baseUrl' <<< "$j")" \
+        = "https://openrouter.ai/api/v1" ] || { echo "$j"; return 1; }
+    # A placeholder, never a key. The real one is read host-side per request.
+    [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
+        = "sandbox-credential-proxy-placeholder" ] || { echo "$j"; return 1; }
+
+    # A model the operator serves takes the same openai-compatible client, and
+    # is the one path with no credential anywhere: nothing to withhold.
+    j="$(_cline_providers_json "$(_cline_cfg 'model = m' 'backend = self-hosted' '[backend.self-hosted]' "base_url = http://127.0.0.1:8080/v1")")" \
+        || { echo "the self-served path produced nothing"; return 1; }
+    [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
+        = "dejima-no-credential-needed" ] || { echo "$j"; return 1; }
+}
+
+@test "docs/security.md states what the credential scan does not catch" {
+    # A best-effort control that reads as a guarantee is worse than none: an
+    # operator who thinks nothing can cross stops looking. These four limits
+    # are the ones a later tidy-up is most likely to cut as hedging, and each
+    # is a real hole someone could otherwise walk into.
+    local doc; doc="$REPO_ROOT/docs/security.md"
+    local prose; prose="$(flat_prose "$doc")"
+    [[ "$prose" == *"What the scan does not catch"* ]] \
+        || { echo "the limits section is gone"; return 1; }
+    # Whitespace, which is the trade that makes the rest work.
+    [[ "$prose" == *"spaces in passphrases"* ]] \
+        || { echo "the whitespace limit is not stated"; return 1; }
+    # And that it is a trade rather than an oversight.
+    [[ "$prose" == *"deliberate trade"* ]] \
+        || { echo "the whitespace limit reads as an oversight"; return 1; }
+    # Formats it cannot read.
+    [[ "$prose" == *"format it cannot parse"* ]] \
+        || { echo "the unparseable-file limit is not stated"; return 1; }
+    # And the boundary of what is scanned at all.
+    [[ "$prose" == *"Anything dejima does not copy"* ]] \
+        || { echo "the scope limit is not stated"; return 1; }
+    [[ "$prose" == *"read-write mounts"* ]] \
+        || { echo "read-write mounts are not named as unscanned"; return 1; }
 }

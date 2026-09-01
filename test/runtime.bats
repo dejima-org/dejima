@@ -82,8 +82,8 @@ test_container_name() { echo "dejima-test-$1-$(basename "$BATS_RUN_TMPDIR")"; }
 #
 # dejima-credential-proxy defaults none of this any more (#171): which upstream,
 # which credential kind, which header and what shape are all the caller's to
-# state, because a default is one provider's arrangement wearing every
-# provider's name. Three copies of the same eight flags in this file would be
+# state, because a default is one backend's arrangement wearing every
+# backend's name. Three copies of the same eight flags in this file would be
 # three places for them to drift from what bin/dejima actually launches, so
 # there is one - and static.bats pins that bin/dejima still passes the same set.
 #
@@ -189,6 +189,14 @@ wait_ready() {
 # to have declared no endpoint.
 harness_manifest_value() {
     sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../harnesses/claude-code/harness.conf"
+}
+
+# The same, for the selected model backend. proxied_domain lives off the
+# harness manifest onto this one (#171): a harness reaches whichever endpoint
+# it is configured for, so the name the terminator answers for belongs to the
+# endpoint rather than to the program talking to it.
+backend_manifest_value() {
+    sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../backends/anthropic/backend.conf"
 }
 
 # The selected harness's image layer, on top of $1, tagged for this run so
@@ -417,7 +425,7 @@ setup_file() {
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null
 
@@ -1334,7 +1342,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
@@ -1701,7 +1709,7 @@ EOF
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null

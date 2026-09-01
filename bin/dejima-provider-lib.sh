@@ -55,6 +55,17 @@ _provider_axis_dir_into() {
         forge)    printf -v "$1" 'forges' ;;
         workflow) printf -v "$1" 'workflows' ;;
         harness)  printf -v "$1" 'harnesses' ;;
+        # The model API a session talks to, and how its credential is
+        # presented. Selected per harness rather than in [core], because what
+        # it configures is the credential proxy rather than the shape of the
+        # work (#171).
+        #
+        # "backend" and not "provider", which is what the industry calls a
+        # model API: this repo already calls the axes themselves providers, and
+        # one word for both reads as one thing. A harness's own config keeps
+        # its own vocabulary - cline writes providers.json with a
+        # lastUsedProvider key, and bin/harness/cline.sh translates.
+        backend) printf -v "$1" 'backends' ;;
         # Not an axis in the select-one sense the other three are: a launch
         # enables zero or more tools, and none is the default. It is here
         # because everything else about it is the same - a manifest that is
@@ -75,6 +86,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
+        backend) printf 'backend.conf' ;;
         tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
@@ -230,6 +242,54 @@ autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # credential = none is an endpoint that needs no credential - a model
+        # the operator serves. There is nothing to withhold, so no proxy runs
+        # and neither upstream nor proxied_domain applies: the session reaches
+        # it directly, and where it is comes from the operator's own
+        # [backend.<name>] base_url rather than from the manifest. Both are
+        # optional for that reason and bin/dejima requires them where they do
+        # apply.
+        #
+        # api_style is which dialect the endpoint speaks, and it is a property
+        # of the API rather than of any harness: Anthropic's Messages API and
+        # an OpenAI-compatible one are different wire formats, so a harness
+        # that can only speak one has to know which it is being pointed at
+        # before it writes its own configuration.
+        #
+        # A model API and how its credential is presented. Every field here
+        # is an argument bin/dejima-credential-proxy already takes (#171):
+        # this axis is what turns "the caller states the arrangement" into
+        # "a file states it", so adding a backend is adding a directory.
+        #
+        # Nothing here is a secret. A backend declares WHERE its credential
+        # is read from, never what it is - the file it names is read
+        # host-side per request and never mounted.
+        #
+        # WHERE a credential sits is the operator's, so credential_field is
+        # a `keys` entry rather than a manifest key. A key is not always the
+        # whole file - Claude Code's console login keeps its key as
+        # primaryApiKey in ~/.claude.json, beside unrelated app state - and
+        # the same static arrangement serves a bare key file with the field
+        # cleared. Two placements of one credential, not two backends.
+        backend) cat <<'EOF'
+upstream	?url
+proxied_domain	?hostname
+api_style	enum:anthropic|openai
+credential	enum:static|anthropic-oauth|none
+auth_header	identifier	Authorization
+auth_format	authformat	Bearer {token}
+strip_headers	?list:identifier
+ensure_headers	?list:headerpair
+oauth_endpoint	?url
+oauth_client_id	?identifier
+keys	?list:keyspec
+requires	?list:identifier
+EOF
+            ;;
+        # api_styles is which of those dialects this harness can speak. A
+        # launch pairing it with a backend it has no client for is refused at
+        # launch rather than failing later with well-formed requests in the
+        # wrong shape.
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
@@ -238,8 +298,8 @@ image_env	?list:envpair
 command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
-proxied_api_domain	?hostname
 guards	?list:identifier
+api_styles	?list:identifier
 briefing_args	?args
 briefing_path	?homepath
 no_confirm_args	?args
@@ -248,6 +308,7 @@ keys	?list:keyspec
 resume_command	?template
 transcript_update	enum:append|rewrite	append
 briefing	?relpath
+assumed_backend	?provider:backend
 EOF
             ;;
         *) return 1 ;;
@@ -359,6 +420,26 @@ _provider_valid_value() {
             local sub="${value%%:*}" seg="${value#*:}"
             [[ "$sub" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1
             [[ "$seg" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+            ;;
+        authformat)
+            # How the credential is written into its header. "{token}" rather
+            # than a scheme name, so a provider wanting a bare key or a prefix
+            # of its own needs no code - and required, because a format
+            # without it produces a proxy that starts, answers, and sends
+            # every request unauthenticated. The proxy checks this too; a
+            # manifest that cannot be loaded is the better place to find out.
+            case "$value" in *"{token}"*) ;; *) return 1 ;; esac
+            _provider_valid_value text "$value"
+            ;;
+        headerpair)
+            # NAME=VALUE for ensure_headers, where NAME is a header rather
+            # than an environment variable - lower case and dashes are the
+            # norm (anthropic-beta), which is exactly what envpair refuses.
+            case "$value" in *=*) ;; *) return 1 ;; esac
+            local hname="${value%%=*}" hvalue="${value#*=}"
+            [ -n "$hname" ] && [ -n "$hvalue" ] || return 1
+            _provider_valid_value identifier "$hname" || return 1
+            _provider_valid_value identifier "$hvalue"
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no
@@ -565,7 +646,7 @@ _provider_warm_dirs() {
     local axis sub root name path i=0
     local -a axes=() names=() paths=() lines=()
     _provider_root_into root
-    for axis in forge workflow harness; do
+    for axis in forge workflow harness backend; do
         _provider_axis_dir_into sub "$axis" || continue
         paths+=("$root/$sub")
         _provider_list_into "$axis" || continue
@@ -704,6 +785,12 @@ manifest_get() {
 #
 # Keyed on the resolved directory rather than the name, like every other cache
 # here, so two roots cannot answer for each other.
+#
+# SUCCESSES ONLY. A remembered refusal was the first shape of this and it is
+# the wrong one: it turns one transient failure into a permanent one, and the
+# symptom is indistinguishable from the bug this exists to fix - a lookup that
+# worked at startup failing for the rest of the process. Nothing here is
+# expensive enough to be worth remembering a "no" for.
 declare -gA _PROVIDER_KEYS_CACHE=() _PROVIDER_KEYS_SEEN=()
 
 _provider_keys_field() {
@@ -715,14 +802,11 @@ _provider_keys_field() {
     dir="$(provider_dir "$axis" "$name")" || return 1
     id="$axis:$dir"
     if [ -n "${_PROVIDER_KEYS_SEEN[$id]+set}" ]; then
-        # A remembered refusal stays a refusal: re-deriving it would put the
-        # same `|| return 1` chain back in the signal handler's path.
-        [ "${_PROVIDER_KEYS_SEEN[$id]}" = ok ] || return 1
         printf '%s' "${_PROVIDER_KEYS_CACHE[$id]}"
         return 0
     fi
     file="$dir/$(_provider_manifest_name "$axis")"
-    [ -f "$file" ] || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    [ -f "$file" ] || return 1
     type="$(_manifest_type "$axis" keys)" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
@@ -738,10 +822,39 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
-    _provider_valid_value "$type" "$value" || { _PROVIDER_KEYS_SEEN[$id]=no; return 1; }
+    # Core's own key on every backend section, appended rather than declared
+    # by each manifest. Whether to withhold a credential is dejima's question,
+    # not the backend author's, and a backend that forgot to declare it would
+    # silently lose the setting.
+    #
+    # No default, deliberately: unset means "whatever [credentials] proxy
+    # says", which is a third state that on/off cannot carry. See
+    # backend_proxy_enabled.
+    [ "$axis" != backend ] || value="${value:+$value }proxy:?bool"
+    _provider_valid_value "$type" "$value" || return 1
     _PROVIDER_KEYS_CACHE[$id]="$value"
     _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"
+}
+
+# Is the credential proxy on for this backend?
+#
+# [backend.<name>] proxy, falling back to [credentials] proxy. Per backend
+# because the global switch has the wrong blast radius: an operator with one
+# backend the proxy cannot serve had to disable withholding for every backend,
+# including the ones it serves perfectly.
+#
+# Deliberately not config_get_bool, which reports an UNSET optional key as
+# off. Unset here means "inherit", and reading it as "disabled" would turn the
+# credential proxy off for every backend the moment this key existed.
+backend_proxy_enabled() {  # <backend-name>
+    local v=""
+    [ -n "${1:-}" ] || return 1
+    if config_type "backend.$1.proxy" >/dev/null 2>&1; then
+        v="$(config_get "backend.$1" proxy)"
+    fi
+    [ -n "$v" ] || v="$(config_get credentials proxy)"
+    [ "$v" = on ]
 }
 
 # A section is known only when a provider directory for its name actually
@@ -752,6 +865,7 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
+        backend.*) axis=backend; name="${section#backend.}" ;;
         # An identity is the operator's own name for a set of credentials, so
         # there is no directory to check it against - only that it is a name
         # at all. Unlike a provider, an unused one is not a misconfiguration:
@@ -807,6 +921,7 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
+        backend.*) axis=backend ;;
         identity.*)
             rest="${want#identity.}"
             key="${rest#*.}"

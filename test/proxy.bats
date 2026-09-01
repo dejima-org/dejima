@@ -481,12 +481,12 @@ make_cert() {
     [ "$output" = "200" ] || { echo "a 2MiB body was refused with $output"; return 1; }
 }
 
-# --- provider-generic behaviour (#171) ---------------------------------------
+# --- backend-generic behaviour (#171) ----------------------------------------
 #
-# The proxy no longer knows a provider's name: upstream, credential kind, auth
+# The proxy knows no backend's name: upstream, credential kind, auth
 # header and shape, what to strip and what to ensure are all arguments. These
 # exercise the second kind - a static key, which is what an OpenAI-compatible
-# hosted provider has - and the parts of the shape a provider can move.
+# hosted backend has - and the parts of the shape a backend can move.
 
 # A static-key proxy against the same fake upstream. $1.. are extra flags.
 # Startup refusals run the proxy in the FOREGROUND and expect it to exit, so
@@ -539,14 +539,14 @@ start_static() {
     [ "$(curl -s "http://127.0.0.1:$PORT/oauth-hits")" = "0" ]
 }
 
-@test "the auth header and its format are the provider's, not Bearer by fiat" {
-    # A provider that wants its key in a header of its own, unprefixed, needs
+@test "the auth header and its format are the backend's, not Bearer by fiat" {
+    # A backend that wants its key in a header of its own, unprefixed, needs
     # no code here. Asserted together because the pair is the shape.
     start_static --auth-header x-goog-api-key --auth-format '{token}'
     run pcurl -d '{}' http://proxy/v1/chat/completions
     [ "$(jq -r '.headers["x-goog-api-key"]' <<<"$output")" = "sk-test-static-key" ]
     # And the client's own Authorization placeholder is left alone rather than
-    # silently rewritten: it is not this provider's auth header. Stripping it
+    # silently rewritten: it is not this backend's auth header. Stripping it
     # is a separate declaration, which the next test covers.
     [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer $PLACEHOLDER" ]
 }
@@ -560,9 +560,9 @@ start_static() {
 }
 
 @test "the auth header cannot be stripped out from under itself" {
-    # Naming it in both places is a provider's mistake, and the safe reading
+    # Naming it in both places is a backend's mistake, and the safe reading
     # is that the credential still goes: dropping it would send an
-    # unauthenticated request and report the provider's 401 as the fault.
+    # unauthenticated request and report the backend's 401 as the fault.
     #
     # Position as well as presence, because presence alone does not
     # distinguish the two paths. A stripped-then-re-added header arrives at
@@ -582,8 +582,8 @@ start_static() {
 }
 
 @test "no ensure-header means none is invented" {
-    # anthropic-beta is one provider's requirement. A proxy that added it
-    # anyway would put an Anthropic tell on every other provider's wire.
+    # anthropic-beta is one backend's requirement. A proxy that added it
+    # anyway would put an Anthropic tell on every other backend's wire.
     start_static
     run pcurl -d '{}' http://proxy/v1/chat/completions
     [ "$(jq -r '.headers["anthropic-beta"] // "absent"' <<<"$output")" = "absent" ]
@@ -600,7 +600,7 @@ start_static() {
 
 @test "a key carrying a control character is refused rather than sanitised" {
     # A key that needs sanitising was pasted wrong. Trimming it would send
-    # mangled bytes and report the provider's rejection as the fault.
+    # mangled bytes and report the backend's rejection as the fault.
     printf 'sk-good\x1bbad\n' > "$TD/key"
     run timeout 5 "$PROXY" --socket "$SOCK" --credentials "$TD/key" \
         --upstream "http://127.0.0.1:$PORT" --credential-kind static

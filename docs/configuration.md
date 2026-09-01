@@ -34,11 +34,18 @@ config file behind them.
 | `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir. One directory per project underneath it, and only that project's is mounted at `~/shared`. `dejima-share` is the host side of it |
 | `[core] ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
 | `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
+| `[harness.claude-code] backend` | *(none - must be set)* | which model API this harness talks to, and so which credential the proxy injects. A directory under `backends/`, each shipping its own `[backend.<name>]` keys. Per harness rather than global, because running Claude Code against Anthropic and Cline against something else is the ordinary case. No default, for the reason `[core] harness` has none: one that could change later would move a session to another endpoint without its config changing. Unset, dejima writes `anthropic` into your config once and says so - a migration rather than a default, so nothing it decides later can move you. Also settable per launch with `--backend`. See [providers.md](providers.md#model-backends) |
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+| `[harness.cline] backend` | *(none - must be set)* | as above, and the risk is concrete here: Cline supports many backends and has one of its own. Nothing is written for you either, because what this harness talked to before the key existed depends on `base_url`. Also settable per launch with `--backend` |
+| `[backend.anthropic] credential_file` | `~/.claude/.credentials.json` | the host file this backend's credential is read from, per request. A path, never a secret, and never mounted into the container |
+| `[backend.self-hosted] base_url` | *(none - must be set)* | where you serve the model. A loopback or RFC 1918 address, or a host you have allowlisted - it has to be an endpoint needing no credential, since there is none to withhold. On the backend rather than the harness, so a local endpoint stays configured while a hosted API is selected |
+| `[backend.anthropic-api-key] credential_file` | `~/.claude.json` | where your Anthropic API key is. Defaulted to where Claude Code's console login puts it, so the common case needs nothing set; point it at a file of your own if you hold the key yourself. Read host-side per request and never mounted, and the key is stripped from the copy of `~/.claude.json` dejima stages |
+| `[backend.anthropic-api-key] credential_field` | `primaryApiKey` | which value inside that file is the key, as dot-separated object names. Clear it (`credential_field =`) when the file is nothing but the key |
+| `[backend.<name>] proxy` | *(inherits `[credentials] proxy`)* | whether the credential proxy runs for this backend. Per backend so that one backend the proxy cannot serve is not a reason to stop withholding credentials from the ones it can. Off means this backend's real credential is given to the session, and dejima says so at launch |
+| `[backend.openrouter] credential_file` | *(none - must be set)* | your OpenRouter API key, in a file. Read host-side per request and never mounted; the container only ever holds a placeholder. No default, because a key's location is yours and guessing at one would point dejima at a file it has no reason to think exists |
 | `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release. Also settable per launch with `--model` |
-| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted. Also settable per launch with `--base-url` |
 | `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one. Also settable per launch with `--context-window` |
 | `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
 | `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
@@ -348,7 +355,7 @@ Because that directory is dejima's rather than yours, resuming on the host
 needs `CLINE_DATA_DIR` set to it. The exact command is at the end of every
 session's briefing.
 
-The provider configuration is written fresh by dejima at each launch and is
+The model configuration is written fresh by dejima at each launch and is
 not yours either. Two shapes are supported:
 
 - **`base_url` unset** - Anthropic, reached through dejima's own credential
@@ -366,7 +373,7 @@ connected to anyway. A model server on your own network normally has a name,
 so requiring a literal address would have made this path unusable for the
 ordinary case.
 
-Anything else is refused at launch - a hosted provider's API key would have to
+Anything else is refused at launch - a hosted backend's API key would have to
 go inside the container, and dejima has no proxy that could hold one back on
 its behalf. Note what the check is *not* doing: dejima writes a placeholder
 into the container on this path whatever the endpoint is, so no real

@@ -277,6 +277,9 @@ a line added to a manifest widens the egress boundary on the next run.
 container: it names a tarball URL, the sha256 checked against it and the
 layout it is unpacked with, all consumed by the image build - so a session
 that edits one chooses what the next launch downloads and installs as root.
+`backends/*/backend.conf` names the upstream every request is forwarded to and
+the host path the credential is read from, so an edit there redirects where a
+real credential is sent.
 
 An ordinary edit is a diff you are about to read and is not reported; one git
 cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
@@ -574,6 +577,158 @@ approximation of its name.
   The session's own share arrives at `~/shared` without going through either.
 ## The model API credential never enters the container
 
+### Four arrangements, and what a session can take from each
+
+Which one a launch is in comes from the selected backend's `credential` kind
+and from whether the proxy is on. The differences are worth stating together,
+because only the last one puts a durable credential where a session can read
+it.
+
+| Arrangement | In the container | What a compromised session can take | What it can still do |
+| --- | --- | --- | --- |
+| **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
+| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
+| **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
+| **No proxy** (`[credentials] proxy = off`, or a Claude Code login the selected backend cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+
+**The first three keep the credential out; the fourth does not.** That is the
+whole of the difference, and it is why `proxy = off` is described here as a
+kill switch rather than as an option.
+
+**Both Anthropic billing models are in the first three.** A subscription login
+is `backends/anthropic`, whose OAuth token the proxy refreshes and writes back;
+a console key is `backends/anthropic-api-key`, a static credential against the
+same endpoint presented as `x-api-key` - one backend whether the key came from
+Claude Code's own login or a file you hold. Either way the credential is held on
+the host and injected per request. On the API-key path the container gets
+`ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
+at all.
+
+What lands in the fourth row is `proxy = off`, and a login whose shape no
+selected backend serves.
+
+**The proxy is switched per backend, not globally.** `[backend.<name>] proxy`
+falls back to `[credentials] proxy` when unset. One backend whose credential
+the proxy cannot serve is then an opt-out for that backend, rather than a
+reason to stop withholding credentials from the ones it serves. Turning it off
+for a backend prints what the session is being given, because it is a
+downgrade the operator chose rather than a setting that happens to be off.
+
+**Everything dejima copies in is scanned for credential-shaped values it does
+not recognise, and an unknown one is a question rather than a surprise.** The
+scanner reports a redacted path, a shape name, the harness and the backend -
+never the value, and never a real path, since a gitconfig can carry userinfo
+in a section header. **Finding it is best effort**: this recognises common
+credential shapes and can miss an unusual one. Removing one it has found is
+not - a value it names is removed whole, including one split across
+continuation lines.
+
+The choice is yours: keep it out for this launch, let it in for this launch,
+let it in every launch, or stop. Only the third persists, in
+`credential-scan.decisions` beside your config, keyed by field rather than by
+value so rotating a credential does not re-ask a question you already
+answered. A standing *scrub* is available there too but is not offered at the
+prompt: removing something the harness turns out to need would break every
+launch after, with the cause several layers from the symptom. With nothing
+attached to answer, the launch stops rather than carrying it in.
+
+This is the general form of the two fixes below, which are denylists and so
+only know what was already found. See
+[#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+#### What the scan does not catch
+
+It recognises the *shape* of a credential, not its meaning, so it is a
+backstop against the class of leak that has actually happened here twice -
+not a guarantee that nothing crosses. Specifically:
+
+- **Values containing whitespace.** Both heuristic rules require one token
+  from a restricted alphabet, because the alternative flags every sentence in
+  a config file: English prose scores 4.0-4.5 bits per character by the same
+  entropy measure a random key does. People do put spaces in passphrases they
+  chose themselves, and one of those would go straight through. It is a
+  deliberate trade and it fits these files, which hold credentials issued to a
+  machine rather than typed by a person.
+- **Short or low-entropy secrets in fields not named like one.** A token that
+  is eight lowercase letters in a field called `nickname` is indistinguishable
+  from a nickname.
+- **Anything in a format it cannot parse.** JSON and INI only. An unparseable
+  file is copied unchecked, and says so at launch rather than being silently
+  trusted or silently blocked.
+- **Anything dejima does not copy.** This covers the files dejima *stages* -
+  `~/.claude.json` and `~/.gitconfig`. It does not read your read-write
+  mounts, the workspace, or anything else you have pointed a session at, and a
+  credential you leave in one of those is not something dejima is looking for.
+
+The value of it is not that it is exhaustive. It is that a credential shape
+dejima has never seen becomes a question at launch instead of a copy nobody
+noticed for a year.
+
+**Two host files are copied into a container, and both are filtered.**
+`~/.gitconfig` can hold a `credential.helper` that prints a token, an
+`http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
+`url.<...>.insteadOf` key; none of that is part of what the sandbox is
+granted, so the copy drops it and says so. The general problem - that these
+filters are denylists, and a harness's authentication is not a stable
+interface - is [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+**`~/.claude.json` is staged, not mounted, and the staging strips a
+credential.** That file mixes app state with configuration the copy exists to
+carry, and a Claude Code signed in with a console API token keeps its key
+there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
+`{}` for that login. The copy drops that key, and `backends/anthropic-api-key`
+reads it host-side per request instead. Without it the proxy would
+withhold one file while dejima copied another, on every launch and whatever
+backend was selected.
+
+**The residual the first two share is use-while-running.** A session that has
+been turned can spend your quota, ask the model anything, and read the answers
+- through the proxy, without ever holding the credential. That is inherent to
+the sandbox working at all: the session has to be able to reach the model, and
+anything it can reach it can misuse. What the proxy buys is that the misuse
+stops when the session does, and nothing durable leaves.
+
+**Refreshing and static differ in what a leak elsewhere costs, not in what the
+container sees.** Neither enters it. But an OAuth access token is short-lived
+and the proxy rotates it, while an API key is typically long-lived and
+account-wide - so the host-side file is worth more in the static case, and a
+compromise of the *host* is correspondingly worse. Scope the key at the
+backend where you can, the same argument
+[docs/providers.md](providers.md) makes for a repository-scoped forge token.
+
+**The proxied domain is not in the egress allowlist while the proxy is on.**
+`docker/fixed-domains.sh` adds it only when there is no proxy, so a session
+that tries to reach the API by name finds it unresolvable and goes through the
+terminator instead. Worth being precise about the limit: this defeats a lookup,
+not a route. The API's address stays reachable as an IP literal for as long as
+any other allowlisted name resolves to it.
+
+**A hosted OpenAI-compatible backend is the second arrangement, and it is
+what `backends/openrouter` is.** The key sits in a file on the host, named by
+`[backend.openrouter] credential_file` and read per request; the container
+gets `sandbox-credential-proxy-placeholder` and the endpoint's real hostname,
+which the in-container terminator answers for. Nothing about the arrangement
+is visible to the session, which is the same property the Anthropic path has
+and the reason both are worth having rather than one.
+
+Worth naming what a *hosted* backend adds over Anthropic's OAuth, since it is
+not the container that changes: an API key is typically long-lived and
+account-wide where an access token is short-lived and rotated, so the host-side
+file is worth more. Scope the key at the backend where it offers that, the
+same argument this repository makes for a repository-scoped forge token.
+
+**A backend you serve yourself is the strongest posture available**, and it is
+worth saying so plainly rather than treating it as the degraded one. A session
+pointed at a model on your own network has no credential anywhere in the
+picture, so there is nothing to place, nothing to withhold and nothing to
+steal. What it costs is that the model is yours to run.
+
+It is a backend like any other - `backends/self-hosted`, with
+`credential = none` and its address in `[backend.self-hosted] base_url`. That
+placement is deliberate: an operator who serves a model locally and also uses a
+hosted API keeps both configured and switches by changing one word, rather than
+having to unset one setting to stop it overriding another.
+
 **This assumes the host has one.** dejima authenticates nothing: the proxy
 holds a credential the harness wrote on the host, so a machine where the
 harness has never signed in has nothing for it to hold. The proxy then does
@@ -611,7 +766,7 @@ session, where the credential deliberately never goes.
   comma-list value has to be present are all arguments, and `bin/dejima`
   supplies the Anthropic ones (#171). The credential kind is an argument too -
   a refreshing OAuth file, or a static key that is read and sent - so a
-  provider that cannot be refreshed is not a branch here. Left
+  backend that cannot be refreshed is not a branch here. Left
   alone, Python's `http.client` would rewrite all of that into its own style
   and move the fingerprint from the client to the wire. It cannot disguise
   that the connection is CPython's `ssl` rather than Node: the TLS handshake

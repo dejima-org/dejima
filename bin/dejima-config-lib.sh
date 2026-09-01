@@ -371,6 +371,14 @@ _config_valid_value() {
         identifier)
             [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
             ;;
+        jsonfield)
+            # Which value inside a credentials file is the key: dot-separated
+            # object names, nothing else. No array indices and no jq syntax,
+            # because the credential proxy walks these segments itself and a
+            # value that could name an expression would be one that could name
+            # a computation.
+            [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$ ]]
+            ;;
         text)
             # A sentence rather than a token - a person's name, an email
             # address, a one-line description. An identifier has no room for a

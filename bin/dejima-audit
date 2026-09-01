@@ -970,7 +970,11 @@ tcb_snapshot() {
         # missed when that layer landed: a tool.conf names a tarball URL and
         # the sha256 checked against it, and the host's image build installs
         # what it points at as root.
-        for dir in bin hooks docker test forges workflows harnesses tools; do
+        #
+        # backends/ likewise: a backend.conf names the upstream every request
+        # is forwarded to and the host path the credential is read from, so an
+        # edit here redirects where a real credential is sent.
+        for dir in bin hooks docker test forges workflows harnesses tools backends; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
                     stage_entry "tcb:${f#"$ws"/}" "$f"
