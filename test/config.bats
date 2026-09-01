@@ -3749,3 +3749,45 @@ GC
     [ "$comments" -ge 3 ] || { echo "the judged-safe list carries no reasons"; return 1; }
     rm -rf "$d"
 }
+
+@test "the scanner catches secrets without flagging prose or plain identifiers" {
+    # Measured against a real ~/.claude.json, the first version produced 22
+    # findings and none of them was a credential: entropy alone flags every
+    # sentence in a config file, because English scores 4.0-4.5 bits per
+    # character by that measure. Both halves of the fix are pinned here.
+    local d; d="$(mktemp -d)"
+    cat > "$d/t.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-CANARY1",
+ "a":{"authToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.CANARY2"},
+ "b":{"sessionSecret":"9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c"},
+ "c":{"apiKey":"CANARY3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+ "d":{"blob":"aGVsbG8td29ybGQtdGhpcy1pcy1iYXNlNjQtaXNoLXNlY3JldC1DQU5BUlk0"},
+ "g":{"ghToken":"ghp_CANARY5abcdefghijklmno"},
+ "e":{"note":"This is a perfectly ordinary sentence of prose that is quite long."},
+ "f":{"authDescription":"Authentication is handled by the provider you select."},
+ "oauthAccount":{"billingType":"subscription","organizationType":"enterprise"},
+ "flags":{"tengu_mcp_local_oauth_blocked_hosts":{"hosts":["example.com"]}},
+ "h":{"slug":"claude-plugins-official"},
+ "i":{"path":"~/.claude/statusline.sh"},
+ "j":{"model":"claude-haiku-4-5-20251001"}}
+JSON
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/t.json" --format json --label t
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local want
+    for want in primaryApiKey a.authToken b.sessionSecret c.apiKey d.blob g.ghToken; do
+        [[ "$output" == *"$want"* ]] || { echo "missed $want:"; echo "$output"; return 1; }
+    done
+    # Prose, identifiers, paths and model names are not credentials. The
+    # oauthAccount and oauth-named-flag entries are the substring bug: `auth`
+    # inside `oauthAccount` flagged every field of the account description.
+    local quiet
+    for quiet in e.note f.authDescription billingType organizationType hosts \
+                 h.slug i.path j.model; do
+        [[ "$output" == *"$quiet"* ]] \
+            && { echo "false positive on $quiet:"; echo "$output"; return 1; }
+    done
+    [ "$(wc -l <<< "$output")" = 6 ] || { echo "unexpected count:"; echo "$output"; return 1; }
+    grep -q 'CANARY' <<< "$output" && { echo "a value leaked"; return 1; }
+    rm -rf "$d"
+}
