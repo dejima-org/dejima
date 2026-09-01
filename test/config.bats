@@ -3592,7 +3592,10 @@ _scan_staged_has_token() {
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
 }
 
-@test "scrubbing at the prompt keeps it out of the container, and is remembered" {
+@test "scrubbing at the prompt keeps it out, for this launch only" {
+    # One launch, deliberately. Removing a field the harness turns out to need
+    # would otherwise break every launch after, with the cause several layers
+    # from the symptom - so the safe answer must not also be the sticky one.
     _scan_host
     _scan_answer s
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -3601,13 +3604,53 @@ _scan_staged_has_token() {
     # The rest of the file still does its job.
     [ "$(jq -r '.mcpServers.ok.command' "$SCAN_STAGED")" = "x" ] \
         || { echo "the copy lost the config it exists to carry"; return 1; }
-    grep -q '^scrub' "$CONFIG_DIR/credential-scan.decisions" \
-        || { echo "the decision was not recorded"; return 1; }
-    # Recorded by field, not by value: a rotated credential in the same field
-    # must not ask again.
+    [ ! -f "$CONFIG_DIR/credential-scan.decisions" ] \
+        || { echo "a one-launch answer was recorded"; \
+             cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a standing scrub written by hand is honoured, and holds no value" {
+    # Not offered at the prompt, but available to someone who has read what it
+    # does - and it is the only way a scrubbed field survives an unattended
+    # launch.
+    _scan_host
+    _scan_answer r
+    local fid; fid="$(tr -d '\r' <<< "$output" | awk '/^  id /{print $2}')"
+    [ -n "$fid" ] || { echo "no id in the report: $output"; return 1; }
+    printf 'scrub\t%s\t# by hand\n' "$fid" > "$CONFIG_DIR/credential-scan.decisions"
+    : > "$SCAN_STAGED"
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -eq 0 ] || { echo "a standing scrub did not apply: $output"; return 1; }
+    [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
+    [ "$(_scan_staged_has_token)" = no ] || { echo "scrub was not applied"; return 1; }
+    # Keyed on the field, never the value.
     grep -q 'eyJhbGciOiJIUzI1NiJ9' "$CONFIG_DIR/credential-scan.decisions" \
         && { echo "the decisions file holds a credential value"; return 1; }
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a value split across gitconfig continuation lines is found and fully removed" {
+    # Reading line by line finds the credential under a key that does not
+    # exist, and removing one line of it leaves the rest behind as an orphan
+    # with a dangling backslash - which changes what git parses next.
+    local d; d="$(mktemp -d)"
+    printf '[credential]\n\thelper = !echo \\\n\t\tpassword=ghp_SPLITCANARY123456\n[alias]\n\tst = status\n' \
+        > "$d/gc"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # One finding, under the real key.
+    [ "$(wc -l <<< "$output")" = 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"credential.helper"* ]] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' <<< "$output" && { echo "the value leaked"; return 1; }
+    cut -f2 <<< "$output" > "$d/ids"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g --scrub "$d/ids"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' "$d/gc" && { echo "the value survived"; cat "$d/gc"; return 1; }
+    grep -qE '\\$' "$d/gc" && { echo "a dangling continuation was left"; cat "$d/gc"; return 1; }
+    [ "$(git config -f "$d/gc" alias.st)" = "status" ] || { echo "took too much"; return 1; }
+    rm -rf "$d"
 }
 
 @test "allowing at the prompt carries it in, and is remembered" {
@@ -3645,9 +3688,11 @@ _scan_staged_has_token() {
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
 }
 
-@test "a recorded decision applies without asking again" {
+@test "an allow recorded at the prompt applies without asking again" {
+    # The only answer that persists from the prompt, and the one that makes an
+    # unattended launch possible afterwards.
     _scan_host
-    _scan_answer s
+    _scan_answer a
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     : > "$SCAN_STAGED"
     # Second launch, nothing attached: the standing decision has to carry it.
@@ -3655,7 +3700,7 @@ _scan_staged_has_token() {
         run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
     [ "$status" -eq 0 ] || { echo "a recorded decision did not apply: $output"; return 1; }
     [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
-    [ "$(_scan_staged_has_token)" = no ] || { echo "scrub was not applied"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] || { echo "allow was not applied"; return 1; }
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
 }
 

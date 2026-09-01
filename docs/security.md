@@ -618,11 +618,19 @@ downgrade the operator chose rather than a setting that happens to be off.
 not recognise, and an unknown one is a question rather than a surprise.** The
 scanner reports a redacted path, a shape name, the harness and the backend -
 never the value, and never a real path, since a gitconfig can carry userinfo
-in a section header. The choice is yours: scrub it from the copy, allow it,
-allow it once, or stop. Answers are recorded by field rather than by value, in
-`credential-scan.decisions` beside your config, so rotating a credential does
-not re-ask a question you already answered. With nothing attached to answer,
-the launch stops rather than carrying it in.
+in a section header. **Finding it is best effort**: this recognises common
+credential shapes and can miss an unusual one. Removing one it has found is
+not - a value it names is removed whole, including one split across
+continuation lines.
+
+The choice is yours: keep it out for this launch, let it in for this launch,
+let it in every launch, or stop. Only the third persists, in
+`credential-scan.decisions` beside your config, keyed by field rather than by
+value so rotating a credential does not re-ask a question you already
+answered. A standing *scrub* is available there too but is not offered at the
+prompt: removing something the harness turns out to need would break every
+launch after, with the cause several layers from the symptom. With nothing
+attached to answer, the launch stops rather than carrying it in.
 
 This is the general form of the two fixes below, which are denylists and so
 only know what was already found. See

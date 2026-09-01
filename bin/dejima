@@ -1386,17 +1386,22 @@ _scan_staged_file() {  # <path> <format> <label>
         echo "dejima found something credential-shaped in a file it is about to" >&2
         echo "copy into the container." >&2
         echo "" >&2
-        echo "  file      $flabel" >&2
-        echo "  field     $fpath" >&2
-        echo "  looks like $shape ($verdict)" >&2
-        echo "  harness   $DEJIMA_HARNESS_NAME" >&2
-        echo "  backend   ${DEJIMA_BACKEND_NAME:-(none)}" >&2
-        echo "  id        $fid" >&2
+        # Padded to the longest label so the values line up. "looks like" is
+        # that label, and pushing five short ones out of line to accommodate
+        # it reads worse than two extra spaces on each.
+        printf '  %-10s  %s\n' file "$flabel" >&2
+        printf '  %-10s  %s\n' field "$fpath" >&2
+        printf '  %-10s  %s\n' 'looks like' "$shape ($verdict)" >&2
+        printf '  %-10s  %s\n' harness "$DEJIMA_HARNESS_NAME" >&2
+        printf '  %-10s  %s\n' backend "${DEJIMA_BACKEND_NAME:-(none)}" >&2
+        printf '  %-10s  %s\n' id "$fid" >&2
         echo "" >&2
         echo "The value itself is not shown, and dejima has not looked at what it" >&2
-        echo "means - only at its shape. If this is a credential dejima should" >&2
-        echo "know about, that report is what to send: file, field, shape," >&2
-        echo "harness, backend. Never the value." >&2
+        echo "means - only at its shape. Finding it at all is best effort: this" >&2
+        echo "recognises common credential shapes and can miss an unusual one." >&2
+        echo "" >&2
+        echo "If this is a credential dejima should know about, the six lines" >&2
+        echo "above are what to send. Never the value." >&2
         echo "" >&2
         if [ "$interactive" = 0 ]; then
             echo "Nothing is attached to answer, so this launch stops rather than" >&2
@@ -1408,21 +1413,32 @@ _scan_staged_file() {  # <path> <format> <label>
             # with spaces silently fails to match.
             printf '    scrub\t%s\n' "$fid" >&2
             printf '    allow\t%s\n' "$fid" >&2
+            echo "" >&2
+            echo "A standing scrub is not offered at the prompt, because removing" >&2
+            echo "something the harness needs breaks every launch after. Written" >&2
+            echo "here it is your decision, and the line above is how to undo it." >&2
             rm -f "$ids_allow" "$ids_scrub"
             return 1
         fi
-        echo "  s) scrub it from the copy, every time (best effort)" >&2
-        echo "  a) allow it into the container, every time" >&2
-        echo "  o) allow it this once, ask again next launch" >&2
+        # Scrubbing is deliberately one launch only. Removing a field the
+        # harness turns out to need breaks it on every launch after, and the
+        # cause is several layers from the symptom - so the safe answer is
+        # not also the sticky one. A standing scrub is still possible by
+        # writing the line into the decisions file by hand, which is a
+        # deliberate act by someone who has read what it does.
+        echo "  s) keep it out of the container this launch, and ask again next time" >&2
+        echo "  a) let it into the container, every launch" >&2
+        echo "  o) let it into the container this launch, and ask again next time" >&2
         echo "  r) refuse - stop this launch" >&2
         echo "" >&2
         printf 'Which? [s/a/o/r] ' >&2
         read -r answer </dev/tty || answer=r
         case "$answer" in
-            s|S) printf '%s\n' "$fid" >> "$ids_scrub"
-                 _scan_record scrub "$fid" "$flabel" "$fpath" "$shape" ;;
+            s|S) printf '%s\n' "$fid" >> "$ids_scrub" ;;
             a|A) _scan_record allow "$fid" "$flabel" "$fpath" "$shape" ;;
             o|O) echo "Allowed for this launch only; nothing recorded." >&2 ;;
+            # Anything else, including an empty line, is the refusal - the
+            # answer that changes nothing.
             *)   echo "Refused. Nothing was copied." >&2
                  rm -f "$ids_allow" "$ids_scrub"
                  return 1 ;;
