@@ -636,6 +636,34 @@ This is the general form of the two fixes below, which are denylists and so
 only know what was already found. See
 [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
 
+#### What the scan does not catch
+
+It recognises the *shape* of a credential, not its meaning, so it is a
+backstop against the class of leak that has actually happened here twice -
+not a guarantee that nothing crosses. Specifically:
+
+- **Values containing whitespace.** Both heuristic rules require one token
+  from a restricted alphabet, because the alternative flags every sentence in
+  a config file: English prose scores 4.0-4.5 bits per character by the same
+  entropy measure a random key does. People do put spaces in passphrases they
+  chose themselves, and one of those would go straight through. It is a
+  deliberate trade and it fits these files, which hold credentials issued to a
+  machine rather than typed by a person.
+- **Short or low-entropy secrets in fields not named like one.** A token that
+  is eight lowercase letters in a field called `nickname` is indistinguishable
+  from a nickname.
+- **Anything in a format it cannot parse.** JSON and INI only. An unparseable
+  file is copied unchecked, and says so at launch rather than being silently
+  trusted or silently blocked.
+- **Anything dejima does not copy.** This covers the files dejima *stages* -
+  `~/.claude.json` and `~/.gitconfig`. It does not read your read-write
+  mounts, the workspace, or anything else you have pointed a session at, and a
+  credential you leave in one of those is not something dejima is looking for.
+
+The value of it is not that it is exhaustive. It is that a credential shape
+dejima has never seen becomes a question at launch instead of a copy nobody
+noticed for a year.
+
 **Two host files are copied into a container, and both are filtered.**
 `~/.gitconfig` can hold a `credential.helper` that prints a token, an
 `http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
