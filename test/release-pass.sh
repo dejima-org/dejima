@@ -132,8 +132,11 @@ added="$(comm -13 \
 # itself the thing that makes the rollback refuse.
 # The singular is spelled out rather than derived: "harnesses" does not lose
 # an s to become "harness", and a manifest is named for the singular.
+#
+# Every axis, including backends: the newest one is exactly the one a stale
+# list would miss, because a list is only ever updated by whoever remembers.
 new_providers=""
-for pair in harnesses:harness forges:forge workflows:workflow; do
+for pair in harnesses:harness forges:forge workflows:workflow backends:backend; do
     axis="${pair%%:*}"
     one="${pair#*:}"
     [ -d "$axis" ] || continue
@@ -144,9 +147,35 @@ for pair in harnesses:harness forges:forge workflows:workflow; do
     done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
 done
 
-if [ -n "$added" ] || [ -n "$new_providers" ]; then
+# And the keys a provider DECLARES, which are config keys an operator writes
+# and an older dejima refuses - but which live in a manifest rather than in
+# core's schema, so the diff above cannot see them. `[harness.claude-code]
+# backend` is one: adopting it is what makes the rollback refuse, and nothing
+# said so.
+new_keys=""
+for pair in harnesses:harness forges:forge workflows:workflow backends:backend; do
+    axis="${pair%%:*}"
+    one="${pair#*:}"
+    [ -d "$axis" ] || continue
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        now="$(sed -n 's/^keys *= *//p' "$axis/$name/$one.conf" 2>/dev/null \
+               | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
+        was="$(git show "$base:$axis/$name/$one.conf" 2>/dev/null \
+               | sed -n 's/^keys *= *//p' | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
+        while IFS= read -r k; do
+            [ -n "$k" ] || continue
+            new_keys="$new_keys [$one.$name]|$k"
+        done < <(comm -13 <(printf '%s\n' "$was") <(printf '%s\n' "$now"))
+    done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+done
+
+if [ -n "$added" ] || [ -n "$new_providers" ] || [ -n "$new_keys" ]; then
     [ -z "$added" ] || printf '   %s\n' $added
     [ -z "$new_providers" ] || printf '   [%s] as a config section\n' $new_providers
+    for entry in $new_keys; do
+        printf '   %s %s\n' "${entry%%|*}" "${entry#*|}"
+    done
 else
     echo "   (none - a rollback accepts any config this release accepts)"
 fi
