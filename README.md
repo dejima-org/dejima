@@ -316,7 +316,7 @@ API aren't hardcoded into dejima: each is a directory under `forges/`,
 - **Forges:** `none`, `gitea`, `github`
 - **Workflows:** `local-only`, `branch-push`, `worktree-pr`
 - **Harnesses:** `claude-code`, `cline`
-- **Model backends:** `anthropic`, `openrouter`, `self-hosted`
+- **Model backends:** `anthropic`, `anthropic-api-key`, `openrouter`, `self-hosted`
 
 Which of those last two pair up is the backend's API dialect against the
 harness's, checked at launch rather than maintained as a list:
@@ -324,6 +324,7 @@ harness's, checked at launch rather than maintained as a list:
 | Backend | `claude-code` | `cline` | Credential |
 | --- | --- | --- | --- |
 | `anthropic` | yes | yes | OAuth, held on the host |
+| `anthropic-api-key` | yes | yes | a static key, held on the host |
 | `openrouter` | no | yes | a static key, held on the host |
 | `self-hosted` | no | yes | none, and so no proxy at all |
 

@@ -589,11 +589,97 @@ it.
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
 | **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
 | **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
-| **No proxy** (`[credentials] proxy = off`, or a credential the kind cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+| **No proxy** (`[credentials] proxy = off`, or a Claude Code login the selected backend cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
 **The first three keep the credential out; the fourth does not.** That is the
 whole of the difference, and it is why `proxy = off` is described here as a
 kill switch rather than as an option.
+
+**Both Anthropic billing models are in the first three.** A subscription login
+is `backends/anthropic`, whose OAuth token the proxy refreshes and writes back;
+a console key is `backends/anthropic-api-key`, a static credential against the
+same endpoint presented as `x-api-key` - one backend whether the key came from
+Claude Code's own login or a file you hold. Either way the credential is held on
+the host and injected per request. On the API-key path the container gets
+`ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
+at all.
+
+What lands in the fourth row is `proxy = off`, and a login whose shape no
+selected backend serves.
+
+**The proxy is switched per backend, not globally.** `[backend.<name>] proxy`
+falls back to `[credentials] proxy` when unset. One backend whose credential
+the proxy cannot serve is then an opt-out for that backend, rather than a
+reason to stop withholding credentials from the ones it serves. Turning it off
+for a backend prints what the session is being given, because it is a
+downgrade the operator chose rather than a setting that happens to be off.
+
+**Everything dejima copies in is scanned for credential-shaped values it does
+not recognise, and an unknown one is a question rather than a surprise.** The
+scanner reports a redacted path, a shape name, the harness and the backend -
+never the value, and never a real path, since a gitconfig can carry userinfo
+in a section header. **Finding it is best effort**: this recognises common
+credential shapes and can miss an unusual one. Removing one it has found is
+not - a value it names is removed whole, including one split across
+continuation lines.
+
+The choice is yours: keep it out for this launch, let it in for this launch,
+let it in every launch, or stop. Only the third persists, in
+`credential-scan.decisions` beside your config, keyed by field rather than by
+value so rotating a credential does not re-ask a question you already
+answered. A standing *scrub* is available there too but is not offered at the
+prompt: removing something the harness turns out to need would break every
+launch after, with the cause several layers from the symptom. With nothing
+attached to answer, the launch stops rather than carrying it in.
+
+This is the general form of the two fixes below, which are denylists and so
+only know what was already found. See
+[#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+#### What the scan does not catch
+
+It recognises the *shape* of a credential, not its meaning, so it is a
+backstop against the class of leak that has actually happened here twice -
+not a guarantee that nothing crosses. Specifically:
+
+- **Values containing whitespace.** Both heuristic rules require one token
+  from a restricted alphabet, because the alternative flags every sentence in
+  a config file: English prose scores 4.0-4.5 bits per character by the same
+  entropy measure a random key does. People do put spaces in passphrases they
+  chose themselves, and one of those would go straight through. It is a
+  deliberate trade and it fits these files, which hold credentials issued to a
+  machine rather than typed by a person.
+- **Short or low-entropy secrets in fields not named like one.** A token that
+  is eight lowercase letters in a field called `nickname` is indistinguishable
+  from a nickname.
+- **Anything in a format it cannot parse.** JSON and INI only. An unparseable
+  file is copied unchecked, and says so at launch rather than being silently
+  trusted or silently blocked.
+- **Anything dejima does not copy.** This covers the files dejima *stages* -
+  `~/.claude.json` and `~/.gitconfig`. It does not read your read-write
+  mounts, the workspace, or anything else you have pointed a session at, and a
+  credential you leave in one of those is not something dejima is looking for.
+
+The value of it is not that it is exhaustive. It is that a credential shape
+dejima has never seen becomes a question at launch instead of a copy nobody
+noticed for a year.
+
+**Two host files are copied into a container, and both are filtered.**
+`~/.gitconfig` can hold a `credential.helper` that prints a token, an
+`http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
+`url.<...>.insteadOf` key; none of that is part of what the sandbox is
+granted, so the copy drops it and says so. The general problem - that these
+filters are denylists, and a harness's authentication is not a stable
+interface - is [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+**`~/.claude.json` is staged, not mounted, and the staging strips a
+credential.** That file mixes app state with configuration the copy exists to
+carry, and a Claude Code signed in with a console API token keeps its key
+there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
+`{}` for that login. The copy drops that key, and `backends/anthropic-api-key`
+reads it host-side per request instead. Without it the proxy would
+withhold one file while dejima copied another, on every launch and whatever
+backend was selected.
 
 **The residual the first two share is use-while-running.** A session that has
 been turned can spend your quota, ask the model anything, and read the answers

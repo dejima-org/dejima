@@ -1053,9 +1053,31 @@ harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 # than merged back - nothing a session writes here reaches the host, and
 # concurrent sessions never contend. See docs/configuration.md, "Config
 # parity with your host Claude Code setup".
+#
+# Seeded through jq rather than cp, because this file HOLDS A CREDENTIAL. A
+# Claude Code signed in with a console API token stores it as a top-level
+# primaryApiKey here - not in .credentials.json, which stays `{}` for that
+# login. Copied verbatim, that key entered every container, whatever the
+# selected backend and whether or not the credential proxy was running: the
+# proxy withholds one file while this copied another.
+#
+# Stripped rather than the whole file withheld, because everything else in it
+# is why the copy exists - mcpServers, project state, onboarding flags.
+#
+# customApiKeyResponses is left: it holds hashes of keys the operator
+# approved, not the keys, and dropping it re-prompts inside the sandbox for a
+# decision already made on the host.
+#
+# A file jq cannot parse is a refusal, not a fallback to cp. Falling back
+# would restore the exact leak this exists to close, at the moment least
+# likely to be noticed.
 SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then
-    cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+    if ! jq 'del(.primaryApiKey)' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
+        echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
+        echo "credential it may hold before copying it into the container." >&2
+        exit 1
+    fi
 else
     echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
 fi
@@ -1239,6 +1261,32 @@ trap cleanup EXIT
 SANDBOX_GITCONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-gitconfig.XXXXXX")"
 if [ -f "$HOME/.gitconfig" ]; then
     cp "$HOME/.gitconfig" "$SANDBOX_GITCONFIG_DIR/.gitconfig"
+    # A gitconfig can hold credentials, so the copy does not carry them.
+    #
+    # Three shapes, all ordinary rather than exotic: a `credential.helper`
+    # that prints a token (or is a `!` command that fetches one), an
+    # `http.<url>.extraHeader` holding an Authorization line, and userinfo
+    # embedded in a `url.<...>.insteadOf` key - where the secret is in the key
+    # name itself. None of them is part of what the sandbox is granted: the
+    # session gets the ssh key and forge token dejima manages, and
+    # `gh auth setup-git` writes its own helper inside the container.
+    #
+    # Dropped by name from the copy rather than by editing the operator's
+    # file, which is never touched.
+    while IFS= read -r _gc_key; do
+        case "${_gc_key,,}" in
+            credential.*|*.extraheader) ;;
+            url.*insteadof) case "$_gc_key" in *@*) ;; *) continue ;; esac ;;
+            *) continue ;;
+        esac
+        git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" --unset-all "$_gc_key" 2>/dev/null || true
+        _gc_dropped=1
+    done < <(git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" --list --name-only 2>/dev/null || true)
+    if [ -n "${_gc_dropped:-}" ]; then
+        echo "dejima: credential settings in ~/.gitconfig were left out of the copy" >&2
+        echo "the session gets. Its git access is the key and token dejima manages." >&2
+    fi
+    unset _gc_key _gc_dropped
 else
     touch "$SANDBOX_GITCONFIG_DIR/.gitconfig"
 fi
@@ -1273,6 +1321,140 @@ SANDBOX_GID="$(id -g)"; export SANDBOX_GID
 export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
+
+# Everything dejima copies into a container, checked for credential-shaped
+# values it does not already know about.
+#
+# The two leaks found by hand (#291) were both this: a host file copied
+# wholesale, holding a credential nobody had classified as one. The fixes for
+# those are denylists, which encode last week's knowledge - so this looks for
+# the shape instead, and asks rather than assuming.
+#
+# The scanner never receives a decision and never sees this function's
+# answers; it classifies, and reports redacted paths with opaque ids. Real
+# paths stay inside it, which matters because a gitconfig can carry userinfo
+# in a section header - a path that IS a credential.
+DEJIMA_SCAN_DECISIONS="$(config_root)/credential-scan.decisions"
+
+_scan_record() {  # <decision> <id> <label> <redacted path> <shape>
+    mkdir -p "$(dirname "$DEJIMA_SCAN_DECISIONS")" || return 1
+    # The id is what matches; the rest is so the file can be read and revised
+    # by hand. Keyed on the field rather than the value, so rotating a
+    # credential does not re-ask a question already answered.
+    printf '%s\t%s\t# %s %s (%s)\n' \
+        "$1" "$2" "$3" "$4" "$5" >> "$DEJIMA_SCAN_DECISIONS"
+}
+
+# Applies the operator's standing decisions, asks about the rest, and returns
+# nonzero to stop the launch.
+_scan_staged_file() {  # <path> <format> <label>
+    local file="$1" fmt="$2" label="$3"
+    local findings ids_allow ids_scrub verdict fid flabel fpath shape answer
+    [ -f "$file" ] || return 0
+    [ -x "$SCRIPT_DIR/dejima-credential-scan" ] || return 0
+
+    ids_allow="$(mktemp)"; ids_scrub="$(mktemp)"
+    # Standing decisions are ids in the first two fields; feed the allow ones
+    # in as "already answered" so the scanner does not report them at all.
+    if [ -f "$DEJIMA_SCAN_DECISIONS" ]; then
+        awk -F'\t' '$1 == "allow" { print $2 }' "$DEJIMA_SCAN_DECISIONS" > "$ids_allow"
+        awk -F'\t' '$1 == "scrub" { print $2 }' "$DEJIMA_SCAN_DECISIONS" > "$ids_scrub"
+    fi
+
+    findings="$("$SCRIPT_DIR/dejima-credential-scan" --file "$file" --format "$fmt" \
+        --label "$label" --known-safe "$SCRIPT_DIR/dejima-credential-scan-known-safe" \
+        --decided "$ids_allow" 2>/dev/null)" || {
+        # An unparseable file is not a finding, and not a reason to stop: it
+        # is copied as-is today and the scanner simply cannot speak for it.
+        rm -f "$ids_allow" "$ids_scrub"
+        echo "dejima: could not scan $label for credentials; it is copied unchecked." >&2
+        return 0
+    }
+
+    # Decided BEFORE the loop below, which redirects stdin from a here-string
+    # to read the findings - inside it `[ -t 0 ]` is false however the launch
+    # was started, so asking there would mean never asking at all.
+    local interactive=0
+    [ -t 0 ] && interactive=1
+    local pending=0
+    while IFS=$'\t' read -r verdict fid flabel fpath shape; do
+        [ -n "$fid" ] || continue
+        # Already told to scrub this one: do it and say nothing.
+        if grep -qxF "$fid" "$ids_scrub" 2>/dev/null; then continue; fi
+        pending=1
+        echo "" >&2
+        echo "dejima found something credential-shaped in a file it is about to" >&2
+        echo "copy into the container." >&2
+        echo "" >&2
+        # Padded to the longest label so the values line up. "looks like" is
+        # that label, and pushing five short ones out of line to accommodate
+        # it reads worse than two extra spaces on each.
+        printf '  %-10s  %s\n' file "$flabel" >&2
+        printf '  %-10s  %s\n' field "$fpath" >&2
+        printf '  %-10s  %s\n' 'looks like' "$shape ($verdict)" >&2
+        printf '  %-10s  %s\n' harness "$DEJIMA_HARNESS_NAME" >&2
+        printf '  %-10s  %s\n' backend "${DEJIMA_BACKEND_NAME:-(none)}" >&2
+        printf '  %-10s  %s\n' id "$fid" >&2
+        echo "" >&2
+        echo "The value itself is not shown, and dejima has not looked at what it" >&2
+        echo "means - only at its shape. Finding it at all is best effort: this" >&2
+        echo "recognises common credential shapes and can miss an unusual one." >&2
+        echo "" >&2
+        echo "If this is a credential dejima should know about, the six lines" >&2
+        echo "above are what to send. Never the value." >&2
+        echo "" >&2
+        if [ "$interactive" = 0 ]; then
+            echo "Nothing is attached to answer, so this launch stops rather than" >&2
+            echo "carrying it in. Record a decision by running dejima from a" >&2
+            echo "terminal once, or add a line to" >&2
+            echo "$DEJIMA_SCAN_DECISIONS:" >&2
+            echo "" >&2
+            # Real tabs: the file is tab-separated, and a line written
+            # with spaces silently fails to match.
+            printf '    scrub\t%s\n' "$fid" >&2
+            printf '    allow\t%s\n' "$fid" >&2
+            echo "" >&2
+            echo "A standing scrub is not offered at the prompt, because removing" >&2
+            echo "something the harness needs breaks every launch after. Written" >&2
+            echo "here it is your decision, and the line above is how to undo it." >&2
+            rm -f "$ids_allow" "$ids_scrub"
+            return 1
+        fi
+        # Scrubbing is deliberately one launch only. Removing a field the
+        # harness turns out to need breaks it on every launch after, and the
+        # cause is several layers from the symptom - so the safe answer is
+        # not also the sticky one. A standing scrub is still possible by
+        # writing the line into the decisions file by hand, which is a
+        # deliberate act by someone who has read what it does.
+        echo "  s) keep it out of the container this launch, and ask again next time" >&2
+        echo "  a) let it into the container, every launch" >&2
+        echo "  o) let it into the container this launch, and ask again next time" >&2
+        echo "  r) refuse - stop this launch" >&2
+        echo "" >&2
+        printf 'Which? [s/a/o/r] ' >&2
+        read -r answer </dev/tty || answer=r
+        case "$answer" in
+            s|S) printf '%s\n' "$fid" >> "$ids_scrub" ;;
+            a|A) _scan_record allow "$fid" "$flabel" "$fpath" "$shape" ;;
+            o|O) echo "Allowed for this launch only; nothing recorded." >&2 ;;
+            # Anything else, including an empty line, is the refusal - the
+            # answer that changes nothing.
+            *)   echo "Refused. Nothing was copied." >&2
+                 rm -f "$ids_allow" "$ids_scrub"
+                 return 1 ;;
+        esac
+    done <<< "$findings"
+
+    if [ -s "$ids_scrub" ]; then
+        "$SCRIPT_DIR/dejima-credential-scan" --file "$file" --format "$fmt" \
+            --label "$label" --scrub "$ids_scrub" \
+            || echo "dejima: could not scrub $label; it is copied as it is." >&2
+    fi
+    [ "$pending" = 0 ] || true
+    rm -f "$ids_allow" "$ids_scrub"
+    return 0
+}
+
 export SANDBOX_GITCONFIG_DIR
 # Rule 4's other half: a workflow that never pushes gets no agent socket
 # forwarded either - left empty here, docker-compose.yml's
@@ -1364,6 +1546,104 @@ fi
 # fixed_hosts already has, and since #142 the provider directories are in
 # the audit's TCB list, so widening this unseen is a CRITICAL finding.
 SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domains)"
+
+# Only a skippable answer. Whether the credential is WELL FORMED is the proxy's
+# own startup check, which fails the launch loudly rather than falling back -
+# a fallback for a malformed key would be a session running with the
+# operator's real credential mounted in.
+_credential_usable() {  # <kind> <path> [field]
+    case "$1" in
+        anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
+        static)
+            if [ -n "${3:-}" ]; then
+                # A named field has to actually be there. Without this a
+                # ~/.claude.json with no primaryApiKey passes the gate, the
+                # proxy starts, and the first request fails with an
+                # authentication error several layers from the cause.
+                jq -e --arg f "$3" \
+                    'getpath($f | split(".")) | strings | length > 0' \
+                    "$2" >/dev/null 2>&1
+            else
+                [ -s "$2" ]
+            fi
+            ;;
+        *)               return 1 ;;
+    esac
+}
+
+# Which shipped backends could serve a credential that is actually on this
+# host, for the harness this launch selected.
+#
+# Refusing without this leaves an operator guessing between backends by name,
+# which is exactly the report that produced it: an "anthropic" that wanted a
+# subscription login, an "anthropic-api-key" that wanted a file they did not
+# have, and no sign that "anthropic-console" was the one for the login they
+# had. Derived rather than listed, so a backend added later is suggested the
+# day it lands.
+#
+# Only ones the harness can talk to, since naming a backend it has no client
+# for trades one refusal for another. And only ones whose credential_file
+# resolves to something: a backend whose key has no conventional location
+# cannot be confirmed present, and guessing would be the same unhelpful
+# advice in the other direction.
+_backends_that_fit() {
+    local b kind file field styles
+    styles="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_styles)"
+    for b in $(provider_list backend); do
+        kind="$(manifest_get backend "$b" credential)"
+        [ -n "$kind" ] && [ "$kind" != none ] || continue
+        if [ -n "$styles" ]; then
+            _set_contains "$styles" "$(manifest_get backend "$b" api_style)" || continue
+        fi
+        config_type "backend.$b.credential_file" >/dev/null 2>&1 || continue
+        file="$(config_get "backend.$b" credential_file)" || continue
+        [ -n "$file" ] || continue
+        field="$(manifest_get backend "$b" credential_field)"
+        _credential_usable "$kind" "$file" "$field" && printf '%s\n' "$b"
+    done
+}
+
+# Claude Code can sign in with no stored credential at all, through workload
+# identity federation: ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID
+# name the rule, an OIDC identity token comes from ANTHROPIC_IDENTITY_TOKEN or
+# ANTHROPIC_IDENTITY_TOKEN_FILE, and it exchanges that for an access token by
+# itself. No backend serves it yet.
+#
+# Detected only to explain a refusal. On such a host there is no credential
+# file for any backend to find, so "no backend fits" is true and useless -
+# it reads as dejima not seeing a login that is plainly working.
+_federation_configured() {
+    [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] \
+        || [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ] \
+        || [ -n "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ]
+}
+
+# Prints the "use this one" paragraph, or nothing when nothing fits.
+_suggest_backends() {  # <harness-section-name>
+    local fits
+    fits="$(_backends_that_fit)"
+    if [ -z "$fits" ] && _federation_configured; then
+        echo "" >&2
+        echo "This host is set up for workload identity federation, which signs in" >&2
+        echo "without storing a credential - so there is nothing for a backend to" >&2
+        echo "read, and no backend serves it yet. See issue #290." >&2
+        return 0
+    fi
+    [ -n "$fits" ] || return 0
+    echo "" >&2
+    if [ "$(printf '%s\n' "$fits" | wc -l)" = 1 ]; then
+        echo "A credential for '$fits' is on this host. To use it:" >&2
+    else
+        echo "Credentials for these are on this host:" >&2
+        printf '%s\n' "$fits" | sed 's/^/    /' >&2
+        echo "" >&2
+        echo "To use one:" >&2
+    fi
+    echo "" >&2
+    echo "    [harness.$1]" >&2
+    echo "    backend = $(printf '%s\n' "$fits" | head -1)" >&2
+}
+
 # The selected backend - the model API this session talks to - and the name the
 # in-container terminator has to answer for.
 #
@@ -1391,6 +1671,7 @@ DEJIMA_BACKEND_NAME=""
 SANDBOX_BACKEND_PROXIED_DOMAIN=""
 DEJIMA_BACKEND_CREDENTIAL_KIND=""
 DEJIMA_BACKEND_CREDENTIAL_FILE=""
+DEJIMA_BACKEND_CREDENTIAL_FIELD=""
 if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
     DEJIMA_BACKEND_NAME="$(config_get "harness.$DEJIMA_HARNESS_NAME" backend)"
     # Unset, and the harness says what it used to talk to: write that down.
@@ -1447,6 +1728,7 @@ if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
         printf 'Available:' >&2
         for _p in $(provider_list backend); do printf ' %s' "$_p" >&2; done
         printf '\n' >&2
+        _suggest_backends "$DEJIMA_HARNESS_NAME"
         exit 1
     fi
 fi
@@ -1511,6 +1793,11 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
                     ;;
                 *)  echo "    $_need = ..." >&2 ;;
             esac
+            # A backend asking to be pointed at a key is the other half of the
+            # report: an operator who picked this one by its name, when the
+            # login they actually have is served by a different backend whose
+            # credential is already where dejima can see it.
+            _suggest_backends "$DEJIMA_HARNESS_NAME"
             exit 1
         fi
     done
@@ -1520,7 +1807,53 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     if config_type "backend.$DEJIMA_BACKEND_NAME.credential_file" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FILE="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_file)"
     fi
+    # The operator's, not the manifest's: one static arrangement serves both
+    # a key inside a JSON document and a file that is nothing but the key.
+    if config_type "backend.$DEJIMA_BACKEND_NAME.credential_field" >/dev/null 2>&1; then
+        DEJIMA_BACKEND_CREDENTIAL_FIELD="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_field)"
+    fi
+
 fi
+# Everything staged for the container, checked before anything is put back
+# into it. Placed here rather than beside the copies so a finding can name
+# the harness and backend it belongs to, which is most of a useful report.
+# The tildes are deliberate and must not expand: this argument is the name to
+# SHOW an operator and to key their decisions on, not a path to open. Keyed on
+# the label rather than the temp path so a decision survives the next launch,
+# which stages the same file somewhere else entirely.
+# shellcheck disable=SC2088
+_scan_staged_file "$SANDBOX_CLAUDE_JSON_FILE" json '~/.claude.json' || exit 1
+# shellcheck disable=SC2088
+_scan_staged_file "$SANDBOX_GITCONFIG_DIR/.gitconfig" ini '~/.gitconfig' || exit 1
+
+# Runs after the scan above, deliberately. The scan reads the safe copy and
+# asks about anything credential-shaped in it; this then puts a credential
+# back, because the operator asked for exactly that. Re-seeding first would
+# have the scanner ask about the thing they just chose.
+if [ -n "$DEJIMA_BACKEND_NAME" ]; then
+    # The deliberate downgrade, for a backend whose credential lives IN the
+    # file dejima stages.
+    #
+    # ~/.claude.json is copied in with its credential field stripped, which is
+    # what keeps a console login's key on the host. With the proxy turned off
+    # for this backend the operator has asked for the opposite, and stripping
+    # anyway would leave the session with no credential and no way to supply
+    # one - the file is a throwaway copy, so there is nothing else to mount.
+    #
+    # Re-seeded rather than never stripped, so the safe form is what every
+    # other path gets and this is one explicit step away from it.
+    if [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+        && [ -n "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
+        && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+        && [ -f "$HOME/.claude.json" ] \
+        && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
+             = "$(readlink -m "$HOME/.claude.json")" ]; then
+        cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+        echo "[backend.$DEJIMA_BACKEND_NAME] proxy is off, so this session gets your real" >&2
+        echo "$DEJIMA_BACKEND_CREDENTIAL_FIELD from $HOME/.claude.json." >&2
+    fi
+fi
+
 # The two ways a briefing reaches a harness that is not handed it by a
 # session-start hook. A hook cannot carry a large one: Claude Code persists a
 # big payload to a file and injects a short preview in its place - measured in
@@ -1832,6 +2165,7 @@ export SANDBOX_HARNESS_SEED
 SANDBOX_ANTHROPIC_TRANSPORT="$(config_get credentials transport)"
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
+SANDBOX_ANTHROPIC_API_KEY=""
 SANDBOX_ANTHROPIC_PROXY_SOCKET=""
 SANDBOX_ANTHROPIC_PROXY_DIR=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
@@ -1842,35 +2176,75 @@ SANDBOX_ANTHROPIC_PROXY_PID=""
 # rather than to one fixed check.
 #
 # For anthropic-oauth it is whether ~/.claude/.credentials.json holds a
-# claudeAiOauth block. Claude Code can be set up with a plain API key instead,
-# and then it does not: there is no OAuth token for the proxy to inject and
-# nothing for it to refresh. That setup has always skipped the proxy and
-# mounted the real credential file into the container, which is the one
-# arrangement where dejima's own credential does enter it. Nothing is passed
-# through to the harness here and the proxy does not forward an API key on the
-# session's behalf - it is simply not in the path.
+# claudeAiOauth block. A Claude Code set up with a console key rather than a
+# login has none, and there is then no OAuth token for the proxy to inject or
+# refresh - so selecting this backend for that setup falls through to mounting
+# the real credential file, which is the one arrangement where dejima's own
+# credential enters the container. The backend for that setup is
+# anthropic-api-key, which keeps the key on the host like any other.
 #
 # For a static key it is whether the file has anything in it.
 #
-# Only a skippable answer. Whether the credential is WELL FORMED is the proxy's
-# own startup check, which fails the launch loudly rather than falling back -
-# a fallback for a malformed key would be a session running with the
-# operator's real credential mounted in.
-_credential_usable() {  # <kind> <path>
-    case "$1" in
-        anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
-        static)          [ -s "$2" ] ;;
-        *)               return 1 ;;
-    esac
-}
 
-# A direct provider runs no proxy: there is no credential to withhold, so
+# Asked for the proxy, selected a backend, and the credential is not one that
+# backend can serve: refuse.
+#
+# The fallthrough below mounts the real credential file, which is the right
+# answer when the operator asked for it with `proxy = off` and the wrong one
+# here - it silently moves a launch from the strongest posture to the weakest,
+# and the session still works, so nothing about the result says it happened.
+# A credential shape dejima does not recognise is exactly when that is most
+# likely: a Claude Code signed in with a console API token has no
+# claudeAiOauth block, so the anthropic backend cannot serve it and every
+# launch quietly mounted the real key.
+#
+# Refusing rather than warning, because docs/security.md describes the mounted
+# arrangement as a kill switch rather than an option, and a kill switch that
+# can engage itself is not one.
+#
+# Scoped to a credential that EXISTS and cannot be served. An absent one is
+# not this: nothing is mounted, nothing is downgraded, and the launch is
+# someone who has not logged in on the host yet.
+if [ -n "$DEJIMA_BACKEND_NAME" ] \
+    && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+    && backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+    && [ -s "$DEJIMA_BACKEND_CREDENTIAL_FILE" ] \
+    && ! _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
+    echo "backend '$DEJIMA_BACKEND_NAME' cannot serve the credential in" >&2
+    echo "$DEJIMA_BACKEND_CREDENTIAL_FILE." >&2
+    echo "" >&2
+    case "$DEJIMA_BACKEND_CREDENTIAL_KIND" in
+        anthropic-oauth)
+            echo "It expects a subscription login - a claudeAiOauth block - and that" >&2
+            echo "file has none. A Claude Code signed in with a console API token" >&2
+            echo "stores it differently." >&2
+            ;;
+        static)
+            echo "It expects a key, and that file is empty or unreadable." >&2
+            ;;
+    esac
+    _suggest_backends "$DEJIMA_HARNESS_NAME"
+    echo "" >&2
+    echo "Launching as configured would mount that file into the container," >&2
+    echo "which is the one arrangement where your real credential leaves the" >&2
+    echo "host. If you want that deliberately:" >&2
+    echo "" >&2
+    echo "    [backend.$DEJIMA_BACKEND_NAME]" >&2
+    echo "    proxy = off" >&2
+    echo "" >&2
+    echo "which turns the proxy off for this backend only. [credentials]" >&2
+    echo "proxy = off turns it off for every backend, including ones it" >&2
+    echo "serves." >&2
+    exit 1
+fi
+
+# A direct backend runs no proxy: there is no credential to withhold, so
 # there is nothing for one to do. That is the self-served case, and it is the
 # arrangement with nothing in the container to steal.
 if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
-    && [ "$(config_get_bool credentials proxy)" != "0" ] \
-    && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE"; then
+    && backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+    && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
     # Every value comes from backends/<name>/backend.conf. Nothing about a
@@ -1881,6 +2255,10 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         --credentials "$DEJIMA_BACKEND_CREDENTIAL_FILE"
         --upstream "$(manifest_get backend "$DEJIMA_BACKEND_NAME" upstream)"
         --credential-kind "$DEJIMA_BACKEND_CREDENTIAL_KIND"
+    )
+    [ -z "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
+        || _proxy_args+=(--credential-field "$DEJIMA_BACKEND_CREDENTIAL_FIELD")
+    _proxy_args+=(
         --auth-header "$(manifest_get backend "$DEJIMA_BACKEND_NAME" auth_header)"
         --auth-format "$(manifest_get backend "$DEJIMA_BACKEND_NAME" auth_format)"
     )
@@ -1916,6 +2294,45 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "loopback" ]; then
         SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
         SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
+    elif [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" = static ]; then
+        # API billing: the session authenticates with a key rather than a
+        # login, so there is no credential FILE to fake - Claude Code reads
+        # ANTHROPIC_API_KEY, and a placeholder there is the whole of what the
+        # container needs. The host-side proxy swaps it for the real key per
+        # request, the same arrangement the OAuth path has.
+        #
+        # Set here rather than by the harness plugin because it reaches the
+        # container through compose, which is core's side of the boundary.
+        # It is Anthropic-shaped, like the two variables beside it, and a
+        # second backend wanting a different variable is the point at which
+        # this becomes a declaration rather than a branch.
+        SANDBOX_ANTHROPIC_API_KEY="sandbox-credential-proxy-placeholder"
+        # Pre-approve it, so the session does not open on a prompt whose
+        # recommended answer breaks it.
+        #
+        # Claude Code asks about any ANTHROPIC_API_KEY it did not put there
+        # itself - "Do you want to use this API key?", defaulting to "No
+        # (recommended)" - and records the answer as the last 20 characters
+        # of the key in customApiKeyResponses.approved. Answering the
+        # recommended way leaves an unattended session with no credential,
+        # which is a worse failure than the prompt it avoids.
+        #
+        # Derived from the value rather than written as a literal, so it
+        # follows if the placeholder ever changes. If Claude Code changes how
+        # it records approvals this stops suppressing the prompt and nothing
+        # else - it is a courtesy, not a control.
+        if [ -n "$SANDBOX_CLAUDE_JSON_FILE" ] && [ -f "$SANDBOX_CLAUDE_JSON_FILE" ]; then
+            _ak_seen="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
+            if jq --arg t "${SANDBOX_ANTHROPIC_API_KEY: -20}" \
+                '.customApiKeyResponses.approved =
+                    (((.customApiKeyResponses.approved // []) + [$t]) | unique)' \
+                "$SANDBOX_CLAUDE_JSON_FILE" > "$_ak_seen"; then
+                mv "$_ak_seen" "$SANDBOX_CLAUDE_JSON_FILE"
+            else
+                rm -f "$_ak_seen"
+            fi
+            unset _ak_seen
+        fi
     else
         # With no ANTHROPIC_AUTH_TOKEN set, Claude Code authenticates from
         # .credentials.json directly, so the container needs a well-formed
@@ -1954,6 +2371,7 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+export SANDBOX_ANTHROPIC_API_KEY
 export SANDBOX_ANTHROPIC_TRANSPORT
 
 # Optional remote access (see docs/remote-access.md). Entirely skipped

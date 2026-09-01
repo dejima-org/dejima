@@ -3650,9 +3650,24 @@ registered_commands() {
     grep -q 'return 0' <<< "$output"
 }
 
-@test "credential proxy is on by default, gated only by credentials.proxy" {
-    grep -q 'config_get_bool credentials proxy' "$REPO_ROOT/bin/dejima"
+@test "credential proxy is on by default, and unset per backend means inherit" {
     grep -Pq 'credentials\.proxy\tbool\ton' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    # Every gate goes through the helper. A raw config_get_bool read here
+    # would ignore [backend.<name>] proxy and re-widen the switch to every
+    # backend at once.
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/dejima"
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/harness/cline.sh"
+    run grep -rn 'config_get_bool credentials proxy' "$REPO_ROOT/bin" "$REPO_ROOT/docker"
+    [ -z "$output" ] || { echo "an ungated read of the global switch: $output"; return 1; }
+    # And the helper must not be config_get_bool underneath, which reports an
+    # unset optional key as off - that would turn the proxy off for every
+    # backend the moment the per-backend key existed.
+    run sed -n '/^backend_proxy_enabled() {/,/^}/p' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ -n "$output" ] || { echo "backend_proxy_enabled is not defined"; return 1; }
+    grep -q 'config_get_bool' <<< "$output" \
+        && { echo "the helper reads an unset key as off"; return 1; }
+    grep -q 'config_get credentials proxy' <<< "$output" \
+        || { echo "the helper does not fall back to the global switch"; return 1; }
 }
 
 @test "bin/dejima mounts the proxy socket dir and masks nothing" {
@@ -7698,4 +7713,29 @@ _cline_providers_json() {
         || { echo "the self-served path produced nothing"; return 1; }
     [ "$(jq -r '.providers["openai-compatible"].settings.apiKey' <<< "$j")" \
         = "dejima-no-credential-needed" ] || { echo "$j"; return 1; }
+}
+
+@test "docs/security.md states what the credential scan does not catch" {
+    # A best-effort control that reads as a guarantee is worse than none: an
+    # operator who thinks nothing can cross stops looking. These four limits
+    # are the ones a later tidy-up is most likely to cut as hedging, and each
+    # is a real hole someone could otherwise walk into.
+    local doc; doc="$REPO_ROOT/docs/security.md"
+    local prose; prose="$(flat_prose "$doc")"
+    [[ "$prose" == *"What the scan does not catch"* ]] \
+        || { echo "the limits section is gone"; return 1; }
+    # Whitespace, which is the trade that makes the rest work.
+    [[ "$prose" == *"spaces in passphrases"* ]] \
+        || { echo "the whitespace limit is not stated"; return 1; }
+    # And that it is a trade rather than an oversight.
+    [[ "$prose" == *"deliberate trade"* ]] \
+        || { echo "the whitespace limit reads as an oversight"; return 1; }
+    # Formats it cannot read.
+    [[ "$prose" == *"format it cannot parse"* ]] \
+        || { echo "the unparseable-file limit is not stated"; return 1; }
+    # And the boundary of what is scanned at all.
+    [[ "$prose" == *"Anything dejima does not copy"* ]] \
+        || { echo "the scope limit is not stated"; return 1; }
+    [[ "$prose" == *"read-write mounts"* ]] \
+        || { echo "read-write mounts are not named as unscanned"; return 1; }
 }

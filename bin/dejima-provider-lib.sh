@@ -262,8 +262,15 @@ EOF
         # "a file states it", so adding a backend is adding a directory.
         #
         # Nothing here is a secret. A backend declares WHERE its credential
-        # is read from, never what it is - credential_file is a path, and the
-        # file it names is read host-side per request and never mounted.
+        # is read from, never what it is - the file it names is read
+        # host-side per request and never mounted.
+        #
+        # WHERE a credential sits is the operator's, so credential_field is
+        # a `keys` entry rather than a manifest key. A key is not always the
+        # whole file - Claude Code's console login keeps its key as
+        # primaryApiKey in ~/.claude.json, beside unrelated app state - and
+        # the same static arrangement serves a bare key file with the field
+        # cleared. Two placements of one credential, not two backends.
         backend) cat <<'EOF'
 upstream	?url
 proxied_domain	?hostname
@@ -815,10 +822,39 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
+    # Core's own key on every backend section, appended rather than declared
+    # by each manifest. Whether to withhold a credential is dejima's question,
+    # not the backend author's, and a backend that forgot to declare it would
+    # silently lose the setting.
+    #
+    # No default, deliberately: unset means "whatever [credentials] proxy
+    # says", which is a third state that on/off cannot carry. See
+    # backend_proxy_enabled.
+    [ "$axis" != backend ] || value="${value:+$value }proxy:?bool"
     _provider_valid_value "$type" "$value" || return 1
     _PROVIDER_KEYS_CACHE[$id]="$value"
     _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"
+}
+
+# Is the credential proxy on for this backend?
+#
+# [backend.<name>] proxy, falling back to [credentials] proxy. Per backend
+# because the global switch has the wrong blast radius: an operator with one
+# backend the proxy cannot serve had to disable withholding for every backend,
+# including the ones it serves perfectly.
+#
+# Deliberately not config_get_bool, which reports an UNSET optional key as
+# off. Unset here means "inherit", and reading it as "disabled" would turn the
+# credential proxy off for every backend the moment this key existed.
+backend_proxy_enabled() {  # <backend-name>
+    local v=""
+    [ -n "${1:-}" ] || return 1
+    if config_type "backend.$1.proxy" >/dev/null 2>&1; then
+        v="$(config_get "backend.$1" proxy)"
+    fi
+    [ -n "$v" ] || v="$(config_get credentials proxy)"
+    [ "$v" = on ]
 }
 
 # A section is known only when a provider directory for its name actually

@@ -213,8 +213,8 @@ harness_prepare_config() {
     # and no proxy in the path.
     if [ "$kind" != none ]; then
         local why=""
-        [ "$(config_get_bool credentials proxy)" = "1" ] \
-            || why="[credentials] proxy is off"
+        backend_proxy_enabled "$backend" \
+            || why="the proxy is off for this backend"
         [ -n "$why" ] || [ "$(config_get credentials transport)" = "tls" ] \
             || why="[credentials] transport is loopback"
         if [ -n "$why" ]; then

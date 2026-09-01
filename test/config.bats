@@ -3215,3 +3215,579 @@ EOF
         && { echo "the real token reached the container"; return 1; }
     rm -rf "$workspace" "$stub" "$log"
 }
+
+@test "an API-billing session gets a placeholder key, and the real one stays on the host" {
+    # A key in a file of the operator's own, which is the second of the two
+    # places the one API-billing backend reads from. What the container is
+    # given is a placeholder in ANTHROPIC_API_KEY; the real key is read
+    # host-side per request by the proxy, exactly as a login's token is.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    local keyfile="$CONFIG_DIR/anthropic-key"
+    printf 'sk-ant-api03-NOT-THE-PLACEHOLDER\n' > "$keyfile"
+    chmod 600 "$keyfile"
+    # A key you hold yourself: point at the file and clear the field, which is
+    # what says "the whole file is the key" rather than "a value inside it".
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
+                 "credential_file = $keyfile" "credential_field ="
+
+    # A stub that records both what compose would read from the environment
+    # and what docker itself was called with, because a credential can reach a
+    # container by either route.
+    local stub log
+    stub="$(mktemp -d)"; log="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep '^SANDBOX_ANTHROPIC' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    grep -q 'SANDBOX_ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder' "$log" \
+        || { echo "no placeholder key reached the container:"; cat "$log"; return 1; }
+    grep -q 'NOT-THE-PLACEHOLDER' "$log" \
+        && { echo "the real key reached the container"; return 1; }
+    # And no credential file is mounted: on this path there is no login to
+    # fake and nothing to write back.
+    grep -q 'credentials.json' "$log" \
+        && { echo "a credential file was mounted anyway"; return 1; }
+    rm -rf "$workspace" "$stub" "$log"
+}
+
+@test "a credential the selected backend cannot serve is refused, not mounted" {
+    # Reported from a real desktop launch: a Claude Code signed in with a
+    # console API token has no claudeAiOauth block, so the anthropic backend
+    # could not serve it - and dejima skipped the proxy and mounted the real
+    # credential file, saying nothing. The session worked, which is what made
+    # it invisible: the only outward sign was a credential in the container.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"someOtherShape":{"key":"real-console-token"}}\n' \
+        > "$RW_HOME/.claude/.credentials.json"
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "launched with an unservable credential: $output"; return 1; }
+    [[ "$output" == *"cannot serve the credential"* ]] || { echo "$output"; return 1; }
+    # And it names the way out, so the refusal is actionable rather than a wall.
+    [[ "$output" == *"proxy = off"* ]] || { echo "$output"; return 1; }
+    # Nothing was mounted on the way to refusing.
+    grep -q -- "$RW_HOME/.claude/.credentials.json:" "$docker_log" \
+        && { echo "the real credential was mounted anyway"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a console API key in ~/.claude.json does not reach the container" {
+    # Found on a real desktop launch. A Claude Code signed in with a console
+    # API token keeps the key as a top-level primaryApiKey in ~/.claude.json,
+    # and leaves .credentials.json as `{}`. dejima stages that file as a
+    # throwaway copy for mcpServers and project state - and copied it
+    # verbatim, so the key crossed on every launch whatever the backend and
+    # whether or not the proxy was running.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST","mcpServers":{"keepme":{"command":"x"}},"numStartups":7}
+JSON
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    # The staged copy reaches the container through compose rather than
+    # docker's argv, and the EXIT trap removes it, so the stub has to read it
+    # from the environment while the launch still holds it.
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; cat "$log"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$staged")" = "absent" ] \
+        || { echo "the console API key reached the container"; return 1; }
+    grep -q 'REAL-KEY-FROM-THE-HOST' "$log" \
+        && { echo "the key reached docker's arguments"; return 1; }
+    # Everything the copy exists for survives.
+    [ "$(jq -r '.mcpServers.keepme.command' "$staged")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = "7" ] || { echo "lost app state"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}
+
+# Stages a console-login host: the key in ~/.claude.json, .credentials.json
+# empty, and a stub that reads the staged copy out of compose's environment
+# before the EXIT trap removes it.
+_console_launch() {  # <extra write_config args...>
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY","mcpServers":{"keepme":{"command":"x"}}}
+JSON
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' "$@"
+    CSTUB="$(mktemp -d)"; CLOG="$(mktemp)"; CSTAGED="$(mktemp)"
+    cat > "$CSTUB/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$CLOG"
+printf '%s\n' "\$@" >> "$CLOG"
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$CSTAGED" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$CSTUB/docker"
+    HOME="$RW_HOME" PATH="$CSTUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+}
+
+@test "a console login is served by the proxy, with the key never in the container" {
+    # The whole point: Claude Code's own console login, working, with the key
+    # on the host. It authenticates from ~/.claude.json, which dejima stages
+    # as a copy - so the copy has to lose the key while the proxy gains it.
+    _console_launch
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+        || { echo "the proxy did not start:"; cat "$CLOG"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$CSTAGED")" = "absent" ] \
+        || { echo "the real key reached the container"; return 1; }
+    grep -q 'REAL-CONSOLE-KEY' "$CLOG" \
+        && { echo "the real key reached docker"; return 1; }
+    [ "$(jq -r '.mcpServers.keepme.command' "$CSTAGED")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    # The placeholder is pre-approved, so the session does not open on
+    # "Do you want to use this API key?" - whose recommended answer is No,
+    # and answering it leaves an unattended session with no credential.
+    [ "$(jq -r '.customApiKeyResponses.approved | index("al-proxy-placeholder") // "no"' "$CSTAGED")" != "no" ] \
+        || { echo "the placeholder key was not pre-approved"; return 1; }
+    rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
+}
+
+@test "proxy off for one backend is a deliberate downgrade, and says so" {
+    # The operator asked for the credential to be in the container. Stripping
+    # it anyway would leave the session with no credential and nothing to
+    # mount, because the staged file is a throwaway copy.
+    _console_launch '[backend.anthropic-api-key]' 'proxy = off'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(jq -r '.primaryApiKey' "$CSTAGED")" = "sk-ant-api03-REAL-CONSOLE-KEY" ] \
+        || { echo "the downgrade did not deliver the credential"; return 1; }
+    [[ "$output" == *"proxy is off"* ]] || { echo "$output"; return 1; }
+    # And no proxy was started for it.
+    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+        && { echo "a proxy ran for a backend with proxy = off"; return 1; }
+    rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
+}
+
+@test "proxy off for one backend leaves the others proxied" {
+    # The blast radius of the opt-out. [credentials] proxy = off disables
+    # withholding everywhere; this must not.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic' \
+                 '[backend.anthropic-api-key]' 'proxy = off'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$docker_log" \
+        && { echo "another backend's proxy = off disabled this one"; return 1; }
+    rm -rf "$workspace"
+}
+
+# A host whose only credential is a console login: the key in ~/.claude.json,
+# .credentials.json present but empty. This is the shape that produced three
+# dead-end refusals in a row.
+_console_host() {  # <backend name to select>
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' "backend = $1"
+    _rw_launch "$workspace"
+}
+
+@test "a refusal names the backend that fits the credential on this host" {
+    # Reported: an operator with a console login tried `anthropic`, then
+    # `anthropic-api-key`, and neither refusal named the one that fits. Each
+    # dead end has to point somewhere - and now that API billing is one
+    # backend, the console login IS anthropic-api-key.
+    _console_host anthropic
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-api-key"* ]] \
+        || { echo "the wrong-shape refusal names no fitting backend: $output"; return 1; }
+    [[ "$output" == *"backend = anthropic-api-key"* ]] \
+        || { echo "it does not show the line to write: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "an unset backend names the one whose credential is present" {
+    # Listing what exists is not the same as saying which one to pick.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    # No [harness.claude-code] backend, and nothing writable to migrate into.
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' '[harness.cline]' 'model = m'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"backend = anthropic-api-key"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a suggestion never names a backend this harness cannot talk to" {
+    # Trading one refusal for another. claude-code speaks only the Anthropic
+    # dialect, so an OpenAI-compatible backend is never the answer for it -
+    # even with its key sitting right there.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    printf 'sk-or-v1-key\n' > "$RW_HOME/openrouter-key"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic' \
+                 '[backend.openrouter]' "credential_file = $RW_HOME/openrouter-key"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-api-key"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"openrouter"* ]] \
+        && { echo "suggested a backend claude-code cannot speak to: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "credentials in ~/.gitconfig are left out of the copy the session gets" {
+    # Same class as the console key in ~/.claude.json: a host file copied
+    # wholesale, which can carry a credential nobody classified as one. A
+    # gitconfig holds them in three ordinary shapes, and none is part of what
+    # the sandbox is granted - the session gets the key and token dejima
+    # manages, and gh writes its own helper inside the container.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.gitconfig" <<'GC'
+[user]
+	name = Real Person
+[credential]
+	helper = !echo password=ghp_SECRETHELPERTOKEN
+[http "https://gitbox.example"]
+	extraHeader = Authorization: Bearer SECRETBEARERTOKEN
+[url "https://someone:SECRETPATTOKEN@github.com/"]
+	insteadOf = https://github.com/
+[url "https://mirror.example/"]
+	insteadOf = https://slow.example/
+[alias]
+	st = status
+GC
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp -d)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+[ -n "\$SANDBOX_GITCONFIG_DIR" ] && cp "\$SANDBOX_GITCONFIG_DIR/.gitconfig" "$staged/" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ -s "$staged/.gitconfig" ] || { echo "no staged gitconfig"; cat "$log"; return 1; }
+    local left
+    left="$(grep -cE 'SECRETHELPERTOKEN|SECRETBEARERTOKEN|SECRETPATTOKEN' "$staged/.gitconfig" || true)"
+    [ "$left" = 0 ] \
+        || { echo "credentials survived into the copy:"; cat "$staged/.gitconfig"; return 1; }
+    # And the copy still does its job.
+    [ "$(git config -f "$staged/.gitconfig" alias.st)" = "status" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ -n "$(git config -f "$staged/.gitconfig" 'url.https://mirror.example/.insteadOf')" ] \
+        || { echo "a rewrite with no credential in it was dropped"; return 1; }
+    [[ "$output" == *"~/.gitconfig were left out"* ]] \
+        || { echo "the operator was not told: $output"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}
+
+# A host with an unrecognised credential in ~/.claude.json: a field no
+# denylist knows about, which is the case #291 exists for.
+_scan_host() {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"someNewField":{"authToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"},"mcpServers":{"ok":{"command":"x"}}}\n' \
+        > "$RW_HOME/.claude.json"
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    SCAN_STUB="$(mktemp -d)"; SCAN_STAGED="$(mktemp)"
+    cat > "$SCAN_STUB/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$SCAN_STAGED"
+exit 0
+EOF
+    chmod +x "$SCAN_STUB/docker"
+}
+
+# Answers the prompt on a real pty. The scan only asks when stdin is a
+# terminal, so a piped stdin exercises the other branch entirely.
+_scan_answer() {  # <answer>
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run python3 "$BATS_TEST_DIRNAME/fixtures/answer-prompt.py" "$1" -- \
+            "$REPO_ROOT/bin/dejima" "$workspace"
+}
+
+_scan_staged_has_token() {
+    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('yes' if d.get('someNewField',{}).get('authToken') else 'no')" \
+        "$SCAN_STAGED"
+}
+
+@test "an unrecognised credential names the field, the harness and the backend" {
+    # Everything an operator needs to report it, and nothing that would make
+    # the report itself worth intercepting.
+    _scan_host
+    _scan_answer r
+    [[ "$output" == *"someNewField.authToken"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"jwt"* ]] || { echo "no shape named: $output"; return 1; }
+    [[ "$output" == *"claude-code"* ]] || { echo "no harness named: $output"; return 1; }
+    [[ "$output" == *"anthropic"* ]] || { echo "no backend named: $output"; return 1; }
+    # And never the value.
+    [[ "$output" == *"eyJhbGciOiJIUzI1NiJ9"* ]] \
+        && { echo "the credential value was printed"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "refusing at the prompt stops the launch before anything is copied" {
+    _scan_host
+    _scan_answer r
+    [ "$status" -ne 0 ] || { echo "launched anyway: $output"; return 1; }
+    [ ! -s "$SCAN_STAGED" ] || { echo "a copy reached docker"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "scrubbing at the prompt keeps it out, for this launch only" {
+    # One launch, deliberately. Removing a field the harness turns out to need
+    # would otherwise break every launch after, with the cause several layers
+    # from the symptom - so the safe answer must not also be the sticky one.
+    _scan_host
+    _scan_answer s
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = no ] \
+        || { echo "the credential reached the container"; return 1; }
+    # The rest of the file still does its job.
+    [ "$(jq -r '.mcpServers.ok.command' "$SCAN_STAGED")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ ! -f "$CONFIG_DIR/credential-scan.decisions" ] \
+        || { echo "a one-launch answer was recorded"; \
+             cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a standing scrub written by hand is honoured, and holds no value" {
+    # Not offered at the prompt, but available to someone who has read what it
+    # does - and it is the only way a scrubbed field survives an unattended
+    # launch.
+    _scan_host
+    _scan_answer r
+    local fid; fid="$(tr -d '\r' <<< "$output" | awk '/^  id /{print $2}')"
+    [ -n "$fid" ] || { echo "no id in the report: $output"; return 1; }
+    printf 'scrub\t%s\t# by hand\n' "$fid" > "$CONFIG_DIR/credential-scan.decisions"
+    : > "$SCAN_STAGED"
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -eq 0 ] || { echo "a standing scrub did not apply: $output"; return 1; }
+    [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
+    [ "$(_scan_staged_has_token)" = no ] || { echo "scrub was not applied"; return 1; }
+    # Keyed on the field, never the value.
+    grep -q 'eyJhbGciOiJIUzI1NiJ9' "$CONFIG_DIR/credential-scan.decisions" \
+        && { echo "the decisions file holds a credential value"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a value split across gitconfig continuation lines is found and fully removed" {
+    # Reading line by line finds the credential under a key that does not
+    # exist, and removing one line of it leaves the rest behind as an orphan
+    # with a dangling backslash - which changes what git parses next.
+    local d; d="$(mktemp -d)"
+    printf '[credential]\n\thelper = !echo \\\n\t\tpassword=ghp_SPLITCANARY123456\n[alias]\n\tst = status\n' \
+        > "$d/gc"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # One finding, under the real key.
+    [ "$(wc -l <<< "$output")" = 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"credential.helper"* ]] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' <<< "$output" && { echo "the value leaked"; return 1; }
+    cut -f2 <<< "$output" > "$d/ids"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gc" --format ini --label g --scrub "$d/ids"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'SPLITCANARY' "$d/gc" && { echo "the value survived"; cat "$d/gc"; return 1; }
+    grep -qE '\\$' "$d/gc" && { echo "a dangling continuation was left"; cat "$d/gc"; return 1; }
+    [ "$(git config -f "$d/gc" alias.st)" = "status" ] || { echo "took too much"; return 1; }
+    rm -rf "$d"
+}
+
+@test "allowing at the prompt carries it in, and is remembered" {
+    _scan_host
+    _scan_answer a
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] \
+        || { echo "allow did not carry the value in"; return 1; }
+    grep -q '^allow' "$CONFIG_DIR/credential-scan.decisions" \
+        || { echo "the decision was not recorded"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "allowing once carries it in and records nothing" {
+    _scan_host
+    _scan_answer o
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] || { echo "once did not carry it in"; return 1; }
+    [ ! -f "$CONFIG_DIR/credential-scan.decisions" ] \
+        || { echo "a one-off answer was recorded"; cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "with nothing attached to answer, the launch stops rather than carrying it" {
+    # An unattended run must not block on a question nobody will see, and must
+    # not answer it by carrying the credential in either.
+    _scan_host
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -ne 0 ] || { echo "launched unattended: $output"; return 1; }
+    [[ "$output" == *"Nothing is attached to answer"* ]] || { echo "$output"; return 1; }
+    # And it says how to answer without a terminal.
+    [[ "$output" == *"scrub"* ]] && [[ "$output" == *"allow"* ]] \
+        || { echo "no way forward given: $output"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "an allow recorded at the prompt applies without asking again" {
+    # The only answer that persists from the prompt, and the one that makes an
+    # unattended launch possible afterwards.
+    _scan_host
+    _scan_answer a
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    : > "$SCAN_STAGED"
+    # Second launch, nothing attached: the standing decision has to carry it.
+    HOME="$RW_HOME" PATH="$SCAN_STUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace" < /dev/null
+    [ "$status" -eq 0 ] || { echo "a recorded decision did not apply: $output"; return 1; }
+    [[ "$output" == *"credential-shaped"* ]] && { echo "asked again"; return 1; }
+    [ "$(_scan_staged_has_token)" = yes ] || { echo "allow was not applied"; return 1; }
+    rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "the scanner never emits a credential, even when the path is one" {
+    # In a gitconfig the userinfo sits in the SECTION HEADER, so
+    # `url.https://me:PAT@github.com/` is a path that IS a credential.
+    # Reporting paths verbatim would leak one in the finding itself.
+    local d; d="$(mktemp -d)"
+    cat > "$d/gitconfig" <<'GC'
+[credential]
+	helper = !echo password=ghp_LEAKCANARY123456
+[http "https://gitbox.example"]
+	extraHeader = Authorization: Bearer LEAKCANARY234567
+[url "https://someone:LEAKCANARY345678@github.com/"]
+	insteadOf = https://github.com/
+GC
+    printf '{"a":{"tok":"sk-ant-api03-LEAKCANARY456789"}}\n' > "$d/claude.json"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/gitconfig" --format ini --label g
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local ini_out="$output"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/claude.json" --format json --label c
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'LEAKCANARY' <<< "$ini_out$output" \
+        && { echo "a credential appeared in a finding:"; echo "$ini_out$output"; return 1; }
+    # It still identifies the field well enough to act on and report.
+    [[ "$ini_out" == *"credential.helper"* ]] || { echo "$ini_out"; return 1; }
+    [[ "$ini_out" == *"url-userinfo"* ]] || { echo "$ini_out"; return 1; }
+    rm -rf "$d"
+}
+
+@test "a judged-safe path is not reported, and the list gives a reason for each" {
+    # The allowlist half: it is what makes the scanner quiet about one thing,
+    # so a line with no reason above it is a line nobody reviewed.
+    local d; d="$(mktemp -d)"
+    printf '{"customApiKeyResponses":{"approved":["al-proxy-placeholder"]},"userID":"%s"}\n' \
+        "$(printf 'a%.0s' {1..40})" > "$d/claude.json"
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/claude.json" --format json \
+        --label '~/.claude.json' --known-safe "$REPO_ROOT/bin/dejima-credential-scan-known-safe"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ] || { echo "judged-safe paths were reported: $output"; return 1; }
+    # Every entry has a comment above it somewhere in the file.
+    local entries comments
+    entries="$(grep -cvE '^\s*(#|$)' "$REPO_ROOT/bin/dejima-credential-scan-known-safe")"
+    comments="$(grep -cE '^#' "$REPO_ROOT/bin/dejima-credential-scan-known-safe")"
+    [ "$entries" -gt 0 ] || { echo "the judged-safe list is empty"; return 1; }
+    [ "$comments" -ge 3 ] || { echo "the judged-safe list carries no reasons"; return 1; }
+    rm -rf "$d"
+}
+
+@test "the scanner catches secrets without flagging prose or plain identifiers" {
+    # Measured against a real ~/.claude.json, the first version produced 22
+    # findings and none of them was a credential: entropy alone flags every
+    # sentence in a config file, because English scores 4.0-4.5 bits per
+    # character by that measure. Both halves of the fix are pinned here.
+    local d; d="$(mktemp -d)"
+    cat > "$d/t.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-CANARY1",
+ "a":{"authToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.CANARY2"},
+ "b":{"sessionSecret":"9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c"},
+ "c":{"apiKey":"CANARY3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+ "d":{"blob":"aGVsbG8td29ybGQtdGhpcy1pcy1iYXNlNjQtaXNoLXNlY3JldC1DQU5BUlk0"},
+ "g":{"ghToken":"ghp_CANARY5abcdefghijklmno"},
+ "e":{"note":"This is a perfectly ordinary sentence of prose that is quite long."},
+ "f":{"authDescription":"Authentication is handled by the provider you select."},
+ "oauthAccount":{"billingType":"subscription","organizationType":"enterprise"},
+ "flags":{"tengu_mcp_local_oauth_blocked_hosts":{"hosts":["example.com"]}},
+ "h":{"slug":"claude-plugins-official"},
+ "i":{"path":"~/.claude/statusline.sh"},
+ "j":{"model":"claude-haiku-4-5-20251001"}}
+JSON
+    run "$REPO_ROOT/bin/dejima-credential-scan" --file "$d/t.json" --format json --label t
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local want
+    for want in primaryApiKey a.authToken b.sessionSecret c.apiKey d.blob g.ghToken; do
+        [[ "$output" == *"$want"* ]] || { echo "missed $want:"; echo "$output"; return 1; }
+    done
+    # Prose, identifiers, paths and model names are not credentials. The
+    # oauthAccount and oauth-named-flag entries are the substring bug: `auth`
+    # inside `oauthAccount` flagged every field of the account description.
+    local quiet
+    for quiet in e.note f.authDescription billingType organizationType hosts \
+                 h.slug i.path j.model; do
+        [[ "$output" == *"$quiet"* ]] \
+            && { echo "false positive on $quiet:"; echo "$output"; return 1; }
+    done
+    [ "$(wc -l <<< "$output")" = 6 ] || { echo "unexpected count:"; echo "$output"; return 1; }
+    grep -q 'CANARY' <<< "$output" && { echo "a value leaked"; return 1; }
+    rm -rf "$d"
+}

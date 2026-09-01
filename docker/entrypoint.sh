@@ -473,6 +473,7 @@ fi
 # behavior byte-for-byte.
 [ -n "${ANTHROPIC_BASE_URL:-}" ] || unset ANTHROPIC_BASE_URL
 [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || unset ANTHROPIC_AUTH_TOKEN
+[ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
 
 # Unset is the ordinary case (remote access is opt-in) and says nothing.
 # Set-but-unusable is worth a startup line because of how it presents: the

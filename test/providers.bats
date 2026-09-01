@@ -1535,6 +1535,14 @@ assert_remedy_forges_exist() {
     for p in $(lib provider_list backend); do
         row="$(grep -E "^\| \`$p\` \|" <<< "$rows")" \
             || { echo "no row for backend '$p'"; return 1; }
+        # Column count first. A row with a doubled separator still answers
+        # the cells this asks for by index, so without this a malformed row
+        # passes - which is how one got in.
+        local want_cols cols
+        want_cols="$(awk -F'|' 'NR==1 {print NF}' <<< "$rows")"
+        cols="$(awk -F'|' '{print NF}' <<< "$row")"
+        [ "$cols" = "$want_cols" ] \
+            || { echo "$p's row has $cols columns, the header has $want_cols"; return 1; }
         local i=0
         for h in claude-code cline; do
             i=$((i + 1))
@@ -1556,4 +1564,93 @@ assert_remedy_forges_exist() {
         grep -q "\`$h\`" <<< "$rows" || { echo "no column for harness '$h' in $doc"; return 1; }
     done
     done
+}
+
+@test "an Anthropic API key is a backend, so it stays on the host too" {
+    # The setup most organisations use: a console key on API billing, rather
+    # than a subscription login. Without a backend to declare it, dejima has
+    # no claudeAiOauth block to protect, skips the proxy, and mounts the
+    # operator's real key into the container - so the common arrangement
+    # would be the one where a long-lived, account-wide credential sits where
+    # a compromised session can read it.
+    lib manifest_validate backend anthropic-api-key
+    [ "$(lib manifest_get backend anthropic-api-key credential)" = "static" ]
+    [ "$(lib manifest_get backend anthropic-api-key upstream)" = "https://api.anthropic.com" ]
+    [ "$(lib manifest_get backend anthropic-api-key api_style)" = "anthropic" ]
+    # Anthropic's own header, bare - no scheme prefix. That pair is the whole
+    # difference from the subscription backend: a token is a Bearer, a key is
+    # x-api-key.
+    [ "$(lib manifest_get backend anthropic-api-key auth_header)" = "x-api-key" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_format)" = "{token}" ]
+    [ "$(lib manifest_get backend anthropic auth_header)" = "Authorization" ]
+    # And the other slot stripped, so a placeholder cannot travel beside the
+    # injected key and be the one the API reads.
+    [ "$(lib manifest_get backend anthropic-api-key strip_headers)" = "authorization" ]
+    [ "$(lib manifest_get backend anthropic-api-key requires)" = "credential_file" ]
+}
+
+@test "one API-billing backend serves both places the key can live" {
+    # Claude Code's console login keeps its key as primaryApiKey in
+    # ~/.claude.json; a key you hold yourself is a file that is nothing but
+    # the key. Same endpoint, same header, same static credential - one
+    # backend, with WHERE the key sits left to the operator.
+    lib manifest_validate backend anthropic-api-key
+    [ "$(lib manifest_get backend anthropic-api-key credential)" = "static" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_header)" = "x-api-key" ]
+    [ "$(lib manifest_get backend anthropic-api-key auth_format)" = "{token}" ]
+    [ "$(lib manifest_get backend anthropic-api-key strip_headers)" = "authorization" ]
+    # Defaulted to the console login, so the common case needs no config.
+    [ "$(lib config_default backend.anthropic-api-key.credential_file)" = "~/.claude.json" ]
+    [ "$(lib config_default backend.anthropic-api-key.credential_field)" = "primaryApiKey" ]
+    # And clearable, which is what serves a bare key file.
+    [ "$(lib config_type backend.anthropic-api-key.credential_field)" = "?jsonfield" ]
+    # Two backends for Anthropic, not three: the split is the wire
+    # arrangement, not where a file happens to be.
+    run lib provider_dir backend anthropic-console
+    [ "$status" -ne 0 ] || { echo "anthropic-console is back"; return 1; }
+    [ "$(lib manifest_get backend anthropic credential)" = "anthropic-oauth" ]
+}
+
+@test "the endpoint is identical across the anthropic backends" {
+    # Three values describe Anthropic's API rather than any credential, so
+    # they must not drift between the two backends that reach it. This is what
+    # the duplication costs, and it is cheaper to test than to deduplicate.
+    local field a b
+    for field in upstream proxied_domain api_style; do
+        a="$(lib manifest_get backend anthropic "$field")"
+        b="$(lib manifest_get backend anthropic-api-key "$field")"
+        [ -n "$a" ] || { echo "anthropic declares no $field"; return 1; }
+        [ "$a" = "$b" ] \
+            || { echo "$field differs: anthropic=$a anthropic-api-key=$b"; return 1; }
+    done
+}
+
+@test "a credential_field is dot-separated names, not an expression" {
+    # The proxy walks these segments itself, so a value that could name an
+    # expression would be one that could name a computation. It is a config
+    # type now, because where a key sits in a file is the operator's.
+    local good bad
+    for good in primaryApiKey a.b.c _x1; do
+        lib _config_valid_value jsonfield "$good" \
+            || { echo "refused '$good'"; return 1; }
+    done
+    for bad in '.leading' 'trailing.' 'a..b' 'a[0]' 'a|keys' '$env' 'a b' '1abc'; do
+        run lib _config_valid_value jsonfield "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad'"; return 1; }
+    done
+}
+
+@test "every backend section takes a proxy key, whatever its manifest says" {
+    # Whether to withhold a credential is dejima's question, not the backend
+    # author's, so core appends it rather than each manifest declaring it - a
+    # backend that forgot would silently lose the setting.
+    local b
+    for b in $(lib provider_list backend); do
+        [ "$(lib config_type "backend.$b.proxy")" = "?bool" ] \
+            || { echo "backend '$b' has no proxy key"; return 1; }
+    done
+    # No default, because unset is a third state: inherit [credentials] proxy.
+    # A default of either value would decide for every backend at once.
+    [ -z "$(lib config_default backend.anthropic.proxy)" ] \
+        || { echo "the per-backend proxy key ships a default"; return 1; }
 }
