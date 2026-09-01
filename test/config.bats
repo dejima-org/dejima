@@ -3478,3 +3478,61 @@ _console_host() {  # <backend name to select>
         && { echo "suggested a backend claude-code cannot speak to: $output"; return 1; }
     rm -rf "$workspace"
 }
+
+@test "credentials in ~/.gitconfig are left out of the copy the session gets" {
+    # Same class as the console key in ~/.claude.json: a host file copied
+    # wholesale, which can carry a credential nobody classified as one. A
+    # gitconfig holds them in three ordinary shapes, and none is part of what
+    # the sandbox is granted - the session gets the key and token dejima
+    # manages, and gh writes its own helper inside the container.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.gitconfig" <<'GC'
+[user]
+	name = Real Person
+[credential]
+	helper = !echo password=ghp_SECRETHELPERTOKEN
+[http "https://gitbox.example"]
+	extraHeader = Authorization: Bearer SECRETBEARERTOKEN
+[url "https://someone:SECRETPATTOKEN@github.com/"]
+	insteadOf = https://github.com/
+[url "https://mirror.example/"]
+	insteadOf = https://slow.example/
+[alias]
+	st = status
+GC
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp -d)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$log"
+printf '%s\n' "\$@" >> "$log"
+[ -n "\$SANDBOX_GITCONFIG_DIR" ] && cp "\$SANDBOX_GITCONFIG_DIR/.gitconfig" "$staged/" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ -s "$staged/.gitconfig" ] || { echo "no staged gitconfig"; cat "$log"; return 1; }
+    local left
+    left="$(grep -cE 'SECRETHELPERTOKEN|SECRETBEARERTOKEN|SECRETPATTOKEN' "$staged/.gitconfig" || true)"
+    [ "$left" = 0 ] \
+        || { echo "credentials survived into the copy:"; cat "$staged/.gitconfig"; return 1; }
+    # And the copy still does its job.
+    [ "$(git config -f "$staged/.gitconfig" alias.st)" = "status" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    [ -n "$(git config -f "$staged/.gitconfig" 'url.https://mirror.example/.insteadOf')" ] \
+        || { echo "a rewrite with no credential in it was dropped"; return 1; }
+    [[ "$output" == *"~/.gitconfig were left out"* ]] \
+        || { echo "the operator was not told: $output"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}

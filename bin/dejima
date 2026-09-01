@@ -1261,6 +1261,32 @@ trap cleanup EXIT
 SANDBOX_GITCONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-gitconfig.XXXXXX")"
 if [ -f "$HOME/.gitconfig" ]; then
     cp "$HOME/.gitconfig" "$SANDBOX_GITCONFIG_DIR/.gitconfig"
+    # A gitconfig can hold credentials, so the copy does not carry them.
+    #
+    # Three shapes, all ordinary rather than exotic: a `credential.helper`
+    # that prints a token (or is a `!` command that fetches one), an
+    # `http.<url>.extraHeader` holding an Authorization line, and userinfo
+    # embedded in a `url.<...>.insteadOf` key - where the secret is in the key
+    # name itself. None of them is part of what the sandbox is granted: the
+    # session gets the ssh key and forge token dejima manages, and
+    # `gh auth setup-git` writes its own helper inside the container.
+    #
+    # Dropped by name from the copy rather than by editing the operator's
+    # file, which is never touched.
+    while IFS= read -r _gc_key; do
+        case "${_gc_key,,}" in
+            credential.*|*.extraheader) ;;
+            url.*insteadof) case "$_gc_key" in *@*) ;; *) continue ;; esac ;;
+            *) continue ;;
+        esac
+        git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" --unset-all "$_gc_key" 2>/dev/null || true
+        _gc_dropped=1
+    done < <(git config -f "$SANDBOX_GITCONFIG_DIR/.gitconfig" --list --name-only 2>/dev/null || true)
+    if [ -n "${_gc_dropped:-}" ]; then
+        echo "dejima: credential settings in ~/.gitconfig were left out of the copy" >&2
+        echo "the session gets. Its git access is the key and token dejima manages." >&2
+    fi
+    unset _gc_key _gc_dropped
 else
     touch "$SANDBOX_GITCONFIG_DIR/.gitconfig"
 fi
@@ -1443,10 +1469,32 @@ _backends_that_fit() {
     done
 }
 
+# Claude Code can sign in with no stored credential at all, through workload
+# identity federation: ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID
+# name the rule, an OIDC identity token comes from ANTHROPIC_IDENTITY_TOKEN or
+# ANTHROPIC_IDENTITY_TOKEN_FILE, and it exchanges that for an access token by
+# itself. No backend serves it yet.
+#
+# Detected only to explain a refusal. On such a host there is no credential
+# file for any backend to find, so "no backend fits" is true and useless -
+# it reads as dejima not seeing a login that is plainly working.
+_federation_configured() {
+    [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] \
+        || [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ] \
+        || [ -n "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ]
+}
+
 # Prints the "use this one" paragraph, or nothing when nothing fits.
 _suggest_backends() {  # <harness-section-name>
     local fits
     fits="$(_backends_that_fit)"
+    if [ -z "$fits" ] && _federation_configured; then
+        echo "" >&2
+        echo "This host is set up for workload identity federation, which signs in" >&2
+        echo "without storing a credential - so there is nothing for a backend to" >&2
+        echo "read, and no backend serves it yet. See issue #290." >&2
+        return 0
+    fi
     [ -n "$fits" ] || return 0
     echo "" >&2
     if [ "$(printf '%s\n' "$fits" | wc -l)" = 1 ]; then

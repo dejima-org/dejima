@@ -613,6 +613,14 @@ reason to stop withholding credentials from the ones it serves. Turning it off
 for a backend prints what the session is being given, because it is a
 downgrade the operator chose rather than a setting that happens to be off.
 
+**Two host files are copied into a container, and both are filtered.**
+`~/.gitconfig` can hold a `credential.helper` that prints a token, an
+`http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
+`url.<...>.insteadOf` key; none of that is part of what the sandbox is
+granted, so the copy drops it and says so. The general problem - that these
+filters are denylists, and a harness's authentication is not a stable
+interface - is [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
 **`~/.claude.json` is staged, not mounted, and the staging strips a
 credential.** That file mixes app state with configuration the copy exists to
 carry, and a Claude Code signed in with a console API token keeps its key
