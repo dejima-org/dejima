@@ -6987,8 +6987,8 @@ _emit_mount_at() {
     [ "$runs" -ge 1 ] || { echo "no compose run names the service"; return 1; }
 }
 
-@test "the TLS terminator answers for the provider's declared domain, not a literal" {
-    # The provider manifest declares proxied_domain; the entrypoint used the
+@test "the TLS terminator answers for the backend's declared domain, not a literal" {
+    # The backend manifest declares proxied_domain; the entrypoint used the
     # name of one API in the cert, the SAN and the /etc/hosts pin.
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
