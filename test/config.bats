@@ -3328,3 +3328,80 @@ EOF
     [ "$(jq -r '.numStartups' "$staged")" = "7" ] || { echo "lost app state"; return 1; }
     rm -rf "$workspace" "$stub" "$log" "$staged"
 }
+
+# Stages a console-login host: the key in ~/.claude.json, .credentials.json
+# empty, and a stub that reads the staged copy out of compose's environment
+# before the EXIT trap removes it.
+_console_launch() {  # <extra write_config args...>
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<'JSON'
+{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY","mcpServers":{"keepme":{"command":"x"}}}
+JSON
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-console' "$@"
+    CSTUB="$(mktemp -d)"; CLOG="$(mktemp)"; CSTAGED="$(mktemp)"
+    cat > "$CSTUB/docker" <<EOF
+#!/bin/sh
+env | grep -E '^SANDBOX_' >> "$CLOG"
+printf '%s\n' "\$@" >> "$CLOG"
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$CSTAGED" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$CSTUB/docker"
+    HOME="$RW_HOME" PATH="$CSTUB:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+}
+
+@test "a console login is served by the proxy, with the key never in the container" {
+    # The whole point: Claude Code's own console login, working, with the key
+    # on the host. It authenticates from ~/.claude.json, which dejima stages
+    # as a copy - so the copy has to lose the key while the proxy gains it.
+    _console_launch
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+        || { echo "the proxy did not start:"; cat "$CLOG"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$CSTAGED")" = "absent" ] \
+        || { echo "the real key reached the container"; return 1; }
+    grep -q 'REAL-CONSOLE-KEY' "$CLOG" \
+        && { echo "the real key reached docker"; return 1; }
+    [ "$(jq -r '.mcpServers.keepme.command' "$CSTAGED")" = "x" ] \
+        || { echo "the copy lost the config it exists to carry"; return 1; }
+    rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
+}
+
+@test "proxy off for one backend is a deliberate downgrade, and says so" {
+    # The operator asked for the credential to be in the container. Stripping
+    # it anyway would leave the session with no credential and nothing to
+    # mount, because the staged file is a throwaway copy.
+    _console_launch '[backend.anthropic-console]' 'proxy = off'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(jq -r '.primaryApiKey' "$CSTAGED")" = "sk-ant-api03-REAL-CONSOLE-KEY" ] \
+        || { echo "the downgrade did not deliver the credential"; return 1; }
+    [[ "$output" == *"proxy is off"* ]] || { echo "$output"; return 1; }
+    # And no proxy was started for it.
+    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+        && { echo "a proxy ran for a backend with proxy = off"; return 1; }
+    rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
+}
+
+@test "proxy off for one backend leaves the others proxied" {
+    # The blast radius of the opt-out. [credentials] proxy = off disables
+    # withholding everywhere; this must not.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude/.credentials.json" <<EOF
+{"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
+EOF
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic' \
+                 '[backend.anthropic-console]' 'proxy = off'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$docker_log" \
+        && { echo "another backend's proxy = off disabled this one"; return 1; }
+    rm -rf "$workspace"
+}

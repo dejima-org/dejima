@@ -1588,3 +1588,55 @@ assert_remedy_forges_exist() {
     [ "$(lib manifest_get backend anthropic-api-key strip_headers)" = "authorization" ]
     [ "$(lib manifest_get backend anthropic-api-key requires)" = "credential_file" ]
 }
+
+@test "the console-login backend reads a field, not the whole file" {
+    # Claude Code's console login keeps its key as primaryApiKey in
+    # ~/.claude.json, beside unrelated app state, and leaves
+    # .credentials.json as `{}`. A backend that read the whole file would
+    # send the entire document as the key.
+    lib manifest_validate backend anthropic-console
+    [ "$(lib manifest_get backend anthropic-console credential)" = "static" ]
+    [ "$(lib manifest_get backend anthropic-console credential_field)" = "primaryApiKey" ]
+    [ "$(lib manifest_get backend anthropic-console auth_header)" = "x-api-key" ]
+    # Defaulted, unlike anthropic-api-key's: this is not a path an operator
+    # chose, it is where Claude Code puts it.
+    [ "$(lib config_default backend.anthropic-console.credential_file)" = "~/.claude.json" ]
+    # And the key-in-a-file backend stays field-less, or the two would be the
+    # same backend wearing two names.
+    [ -z "$(lib manifest_get backend anthropic-api-key credential_field)" ]
+}
+
+@test "a credential_field is dot-separated names, not an expression" {
+    # The proxy walks these segments itself. A manifest that could name an
+    # expression would be a manifest that could name a computation.
+    local d; d="$(mktemp -d)"
+    mkdir -p "$d/backends/probe"
+    _probe() {
+        printf 'upstream = https://x.example\nproxied_domain = x.example\napi_style = anthropic\ncredential = static\ncredential_field = %s\n' \
+            "$1" > "$d/backends/probe/backend.conf"
+        DEJIMA_PROVIDER_ROOT="$d" run env DEJIMA_PROVIDER_ROOT="$d" \
+            bash -c 'source "$1"; manifest_validate backend probe' _ "$LIB"
+    }
+    _probe 'primaryApiKey';   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    _probe 'a.b.c';           [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    for bad in '.leading' 'trailing.' 'a..b' 'a[0]' 'a|keys' '$env' 'a b'; do
+        _probe "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad'"; return 1; }
+    done
+    rm -rf "$d"
+}
+
+@test "every backend section takes a proxy key, whatever its manifest says" {
+    # Whether to withhold a credential is dejima's question, not the backend
+    # author's, so core appends it rather than each manifest declaring it - a
+    # backend that forgot would silently lose the setting.
+    local b
+    for b in $(lib provider_list backend); do
+        [ "$(lib config_type "backend.$b.proxy")" = "?bool" ] \
+            || { echo "backend '$b' has no proxy key"; return 1; }
+    done
+    # No default, because unset is a third state: inherit [credentials] proxy.
+    # A default of either value would decide for every backend at once.
+    [ -z "$(lib config_default backend.anthropic.proxy)" ] \
+        || { echo "the per-backend proxy key ships a default"; return 1; }
+}

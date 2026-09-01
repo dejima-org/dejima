@@ -3650,9 +3650,24 @@ registered_commands() {
     grep -q 'return 0' <<< "$output"
 }
 
-@test "credential proxy is on by default, gated only by credentials.proxy" {
-    grep -q 'config_get_bool credentials proxy' "$REPO_ROOT/bin/dejima"
+@test "credential proxy is on by default, and unset per backend means inherit" {
     grep -Pq 'credentials\.proxy\tbool\ton' "$REPO_ROOT/bin/dejima-config-lib.sh"
+    # Every gate goes through the helper. A raw config_get_bool read here
+    # would ignore [backend.<name>] proxy and re-widen the switch to every
+    # backend at once.
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/dejima"
+    grep -q 'backend_proxy_enabled' "$REPO_ROOT/bin/harness/cline.sh"
+    run grep -rn 'config_get_bool credentials proxy' "$REPO_ROOT/bin" "$REPO_ROOT/docker"
+    [ -z "$output" ] || { echo "an ungated read of the global switch: $output"; return 1; }
+    # And the helper must not be config_get_bool underneath, which reports an
+    # unset optional key as off - that would turn the proxy off for every
+    # backend the moment the per-backend key existed.
+    run sed -n '/^backend_proxy_enabled() {/,/^}/p' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+    [ -n "$output" ] || { echo "backend_proxy_enabled is not defined"; return 1; }
+    grep -q 'config_get_bool' <<< "$output" \
+        && { echo "the helper reads an unset key as off"; return 1; }
+    grep -q 'config_get credentials proxy' <<< "$output" \
+        || { echo "the helper does not fall back to the global switch"; return 1; }
 }
 
 @test "bin/dejima mounts the proxy socket dir and masks nothing" {

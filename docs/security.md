@@ -606,11 +606,19 @@ at all.
 What lands in the fourth row is `proxy = off`, and a login whose shape no
 selected backend serves.
 
+**The proxy is switched per backend, not globally.** `[backend.<name>] proxy`
+falls back to `[credentials] proxy` when unset. One backend whose credential
+the proxy cannot serve is then an opt-out for that backend, rather than a
+reason to stop withholding credentials from the ones it serves. Turning it off
+for a backend prints what the session is being given, because it is a
+downgrade the operator chose rather than a setting that happens to be off.
+
 **`~/.claude.json` is staged, not mounted, and the staging strips a
 credential.** That file mixes app state with configuration the copy exists to
 carry, and a Claude Code signed in with a console API token keeps its key
 there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
-`{}` for that login. The copy drops that key. Without it the proxy would
+`{}` for that login. The copy drops that key, and `backends/anthropic-console`
+reads it host-side per request instead. Without it the proxy would
 withhold one file while dejima copied another, on every launch and whatever
 backend was selected.
 

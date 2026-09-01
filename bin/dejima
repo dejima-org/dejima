@@ -1413,6 +1413,7 @@ DEJIMA_BACKEND_NAME=""
 SANDBOX_BACKEND_PROXIED_DOMAIN=""
 DEJIMA_BACKEND_CREDENTIAL_KIND=""
 DEJIMA_BACKEND_CREDENTIAL_FILE=""
+DEJIMA_BACKEND_CREDENTIAL_FIELD=""
 if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
     DEJIMA_BACKEND_NAME="$(config_get "harness.$DEJIMA_HARNESS_NAME" backend)"
     # Unset, and the harness says what it used to talk to: write that down.
@@ -1539,8 +1540,31 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     unset _p_style _h_styles _need _p_required
     SANDBOX_BACKEND_PROXIED_DOMAIN="$(manifest_get backend "$DEJIMA_BACKEND_NAME" proxied_domain)"
     DEJIMA_BACKEND_CREDENTIAL_KIND="$(manifest_get backend "$DEJIMA_BACKEND_NAME" credential)"
+    DEJIMA_BACKEND_CREDENTIAL_FIELD="$(manifest_get backend "$DEJIMA_BACKEND_NAME" credential_field)"
     if config_type "backend.$DEJIMA_BACKEND_NAME.credential_file" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FILE="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_file)"
+    fi
+
+    # The deliberate downgrade, for a backend whose credential lives IN the
+    # file dejima stages.
+    #
+    # ~/.claude.json is copied in with its credential field stripped, which is
+    # what keeps a console login's key on the host. With the proxy turned off
+    # for this backend the operator has asked for the opposite, and stripping
+    # anyway would leave the session with no credential and no way to supply
+    # one - the file is a throwaway copy, so there is nothing else to mount.
+    #
+    # Re-seeded rather than never stripped, so the safe form is what every
+    # other path gets and this is one explicit step away from it.
+    if [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+        && [ -n "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
+        && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+        && [ -f "$HOME/.claude.json" ] \
+        && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
+             = "$(readlink -m "$HOME/.claude.json")" ]; then
+        cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+        echo "[backend.$DEJIMA_BACKEND_NAME] proxy is off, so this session gets your real" >&2
+        echo "$DEJIMA_BACKEND_CREDENTIAL_FIELD from $HOME/.claude.json." >&2
     fi
 fi
 # The two ways a briefing reaches a harness that is not handed it by a
@@ -1878,10 +1902,22 @@ SANDBOX_ANTHROPIC_PROXY_PID=""
 # own startup check, which fails the launch loudly rather than falling back -
 # a fallback for a malformed key would be a session running with the
 # operator's real credential mounted in.
-_credential_usable() {  # <kind> <path>
+_credential_usable() {  # <kind> <path> [field]
     case "$1" in
         anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
-        static)          [ -s "$2" ] ;;
+        static)
+            if [ -n "${3:-}" ]; then
+                # A named field has to actually be there. Without this a
+                # ~/.claude.json with no primaryApiKey passes the gate, the
+                # proxy starts, and the first request fails with an
+                # authentication error several layers from the cause.
+                jq -e --arg f "$3" \
+                    'getpath($f | split(".")) | strings | length > 0' \
+                    "$2" >/dev/null 2>&1
+            else
+                [ -s "$2" ]
+            fi
+            ;;
         *)               return 1 ;;
     esac
 }
@@ -1907,9 +1943,9 @@ _credential_usable() {  # <kind> <path>
 # someone who has not logged in on the host yet.
 if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
-    && [ "$(config_get_bool credentials proxy)" != "0" ] \
+    && backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
     && [ -s "$DEJIMA_BACKEND_CREDENTIAL_FILE" ] \
-    && ! _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE"; then
+    && ! _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
     echo "backend '$DEJIMA_BACKEND_NAME' cannot serve the credential in" >&2
     echo "$DEJIMA_BACKEND_CREDENTIAL_FILE." >&2
     echo "" >&2
@@ -1927,7 +1963,14 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     echo "Launching anyway would mount that file into the container, which is" >&2
     echo "the one arrangement where your real credential leaves the host. Pick a" >&2
     echo "backend that fits the credential, or ask for that arrangement" >&2
-    echo "deliberately with [credentials] proxy = off." >&2
+    echo "deliberately:" >&2
+    echo "" >&2
+    echo "    [backend.$DEJIMA_BACKEND_NAME]" >&2
+    echo "    proxy = off" >&2
+    echo "" >&2
+    echo "which turns the proxy off for this backend only. [credentials]" >&2
+    echo "proxy = off turns it off for every backend, including ones it" >&2
+    echo "serves." >&2
     exit 1
 fi
 
@@ -1936,8 +1979,8 @@ fi
 # arrangement with nothing in the container to steal.
 if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
-    && [ "$(config_get_bool credentials proxy)" != "0" ] \
-    && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE"; then
+    && backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+    && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
     SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
     # Every value comes from backends/<name>/backend.conf. Nothing about a
@@ -1948,6 +1991,10 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         --credentials "$DEJIMA_BACKEND_CREDENTIAL_FILE"
         --upstream "$(manifest_get backend "$DEJIMA_BACKEND_NAME" upstream)"
         --credential-kind "$DEJIMA_BACKEND_CREDENTIAL_KIND"
+    )
+    [ -z "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
+        || _proxy_args+=(--credential-field "$DEJIMA_BACKEND_CREDENTIAL_FIELD")
+    _proxy_args+=(
         --auth-header "$(manifest_get backend "$DEJIMA_BACKEND_NAME" auth_header)"
         --auth-format "$(manifest_get backend "$DEJIMA_BACKEND_NAME" auth_format)"
     )
