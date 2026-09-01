@@ -1321,6 +1321,124 @@ SANDBOX_GID="$(id -g)"; export SANDBOX_GID
 export SANDBOX_SHARE_DIR
 export SANDBOX_SETTINGS_FILE
 export SANDBOX_CLAUDE_JSON_FILE
+
+# Everything dejima copies into a container, checked for credential-shaped
+# values it does not already know about.
+#
+# The two leaks found by hand (#291) were both this: a host file copied
+# wholesale, holding a credential nobody had classified as one. The fixes for
+# those are denylists, which encode last week's knowledge - so this looks for
+# the shape instead, and asks rather than assuming.
+#
+# The scanner never receives a decision and never sees this function's
+# answers; it classifies, and reports redacted paths with opaque ids. Real
+# paths stay inside it, which matters because a gitconfig can carry userinfo
+# in a section header - a path that IS a credential.
+DEJIMA_SCAN_DECISIONS="$(config_root)/credential-scan.decisions"
+
+_scan_record() {  # <decision> <id> <label> <redacted path> <shape>
+    mkdir -p "$(dirname "$DEJIMA_SCAN_DECISIONS")" || return 1
+    # The id is what matches; the rest is so the file can be read and revised
+    # by hand. Keyed on the field rather than the value, so rotating a
+    # credential does not re-ask a question already answered.
+    printf '%s\t%s\t# %s %s (%s)\n' \
+        "$1" "$2" "$3" "$4" "$5" >> "$DEJIMA_SCAN_DECISIONS"
+}
+
+# Applies the operator's standing decisions, asks about the rest, and returns
+# nonzero to stop the launch.
+_scan_staged_file() {  # <path> <format> <label>
+    local file="$1" fmt="$2" label="$3"
+    local findings ids_allow ids_scrub verdict fid flabel fpath shape answer
+    [ -f "$file" ] || return 0
+    [ -x "$SCRIPT_DIR/dejima-credential-scan" ] || return 0
+
+    ids_allow="$(mktemp)"; ids_scrub="$(mktemp)"
+    # Standing decisions are ids in the first two fields; feed the allow ones
+    # in as "already answered" so the scanner does not report them at all.
+    if [ -f "$DEJIMA_SCAN_DECISIONS" ]; then
+        awk -F'\t' '$1 == "allow" { print $2 }' "$DEJIMA_SCAN_DECISIONS" > "$ids_allow"
+        awk -F'\t' '$1 == "scrub" { print $2 }' "$DEJIMA_SCAN_DECISIONS" > "$ids_scrub"
+    fi
+
+    findings="$("$SCRIPT_DIR/dejima-credential-scan" --file "$file" --format "$fmt" \
+        --label "$label" --known-safe "$SCRIPT_DIR/dejima-credential-scan-known-safe" \
+        --decided "$ids_allow" 2>/dev/null)" || {
+        # An unparseable file is not a finding, and not a reason to stop: it
+        # is copied as-is today and the scanner simply cannot speak for it.
+        rm -f "$ids_allow" "$ids_scrub"
+        echo "dejima: could not scan $label for credentials; it is copied unchecked." >&2
+        return 0
+    }
+
+    # Decided BEFORE the loop below, which redirects stdin from a here-string
+    # to read the findings - inside it `[ -t 0 ]` is false however the launch
+    # was started, so asking there would mean never asking at all.
+    local interactive=0
+    [ -t 0 ] && interactive=1
+    local pending=0
+    while IFS=$'\t' read -r verdict fid flabel fpath shape; do
+        [ -n "$fid" ] || continue
+        # Already told to scrub this one: do it and say nothing.
+        if grep -qxF "$fid" "$ids_scrub" 2>/dev/null; then continue; fi
+        pending=1
+        echo "" >&2
+        echo "dejima found something credential-shaped in a file it is about to" >&2
+        echo "copy into the container." >&2
+        echo "" >&2
+        echo "  file      $flabel" >&2
+        echo "  field     $fpath" >&2
+        echo "  looks like $shape ($verdict)" >&2
+        echo "  harness   $DEJIMA_HARNESS_NAME" >&2
+        echo "  backend   ${DEJIMA_BACKEND_NAME:-(none)}" >&2
+        echo "  id        $fid" >&2
+        echo "" >&2
+        echo "The value itself is not shown, and dejima has not looked at what it" >&2
+        echo "means - only at its shape. If this is a credential dejima should" >&2
+        echo "know about, that report is what to send: file, field, shape," >&2
+        echo "harness, backend. Never the value." >&2
+        echo "" >&2
+        if [ "$interactive" = 0 ]; then
+            echo "Nothing is attached to answer, so this launch stops rather than" >&2
+            echo "carrying it in. Record a decision by running dejima from a" >&2
+            echo "terminal once, or add a line to" >&2
+            echo "$DEJIMA_SCAN_DECISIONS:" >&2
+            echo "" >&2
+            # Real tabs: the file is tab-separated, and a line written
+            # with spaces silently fails to match.
+            printf '    scrub\t%s\n' "$fid" >&2
+            printf '    allow\t%s\n' "$fid" >&2
+            rm -f "$ids_allow" "$ids_scrub"
+            return 1
+        fi
+        echo "  s) scrub it from the copy, every time (best effort)" >&2
+        echo "  a) allow it into the container, every time" >&2
+        echo "  o) allow it this once, ask again next launch" >&2
+        echo "  r) refuse - stop this launch" >&2
+        echo "" >&2
+        printf 'Which? [s/a/o/r] ' >&2
+        read -r answer </dev/tty || answer=r
+        case "$answer" in
+            s|S) printf '%s\n' "$fid" >> "$ids_scrub"
+                 _scan_record scrub "$fid" "$flabel" "$fpath" "$shape" ;;
+            a|A) _scan_record allow "$fid" "$flabel" "$fpath" "$shape" ;;
+            o|O) echo "Allowed for this launch only; nothing recorded." >&2 ;;
+            *)   echo "Refused. Nothing was copied." >&2
+                 rm -f "$ids_allow" "$ids_scrub"
+                 return 1 ;;
+        esac
+    done <<< "$findings"
+
+    if [ -s "$ids_scrub" ]; then
+        "$SCRIPT_DIR/dejima-credential-scan" --file "$file" --format "$fmt" \
+            --label "$label" --scrub "$ids_scrub" \
+            || echo "dejima: could not scrub $label; it is copied as it is." >&2
+    fi
+    [ "$pending" = 0 ] || true
+    rm -f "$ids_allow" "$ids_scrub"
+    return 0
+}
+
 export SANDBOX_GITCONFIG_DIR
 # Rule 4's other half: a workflow that never pushes gets no agent socket
 # forwarded either - left empty here, docker-compose.yml's
@@ -1679,6 +1797,24 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
         DEJIMA_BACKEND_CREDENTIAL_FIELD="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_field)"
     fi
 
+fi
+# Everything staged for the container, checked before anything is put back
+# into it. Placed here rather than beside the copies so a finding can name
+# the harness and backend it belongs to, which is most of a useful report.
+# The tildes are deliberate and must not expand: this argument is the name to
+# SHOW an operator and to key their decisions on, not a path to open. Keyed on
+# the label rather than the temp path so a decision survives the next launch,
+# which stages the same file somewhere else entirely.
+# shellcheck disable=SC2088
+_scan_staged_file "$SANDBOX_CLAUDE_JSON_FILE" json '~/.claude.json' || exit 1
+# shellcheck disable=SC2088
+_scan_staged_file "$SANDBOX_GITCONFIG_DIR/.gitconfig" ini '~/.gitconfig' || exit 1
+
+# Runs after the scan above, deliberately. The scan reads the safe copy and
+# asks about anything credential-shaped in it; this then puts a credential
+# back, because the operator asked for exactly that. Re-seeding first would
+# have the scanner ask about the thing they just chose.
+if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     # The deliberate downgrade, for a backend whose credential lives IN the
     # file dejima stages.
     #
@@ -1701,6 +1837,7 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
         echo "$DEJIMA_BACKEND_CREDENTIAL_FIELD from $HOME/.claude.json." >&2
     fi
 fi
+
 # The two ways a briefing reaches a harness that is not handed it by a
 # session-start hook. A hook cannot carry a large one: Claude Code persists a
 # big payload to a file and injects a short preview in its place - measured in

@@ -614,6 +614,20 @@ reason to stop withholding credentials from the ones it serves. Turning it off
 for a backend prints what the session is being given, because it is a
 downgrade the operator chose rather than a setting that happens to be off.
 
+**Everything dejima copies in is scanned for credential-shaped values it does
+not recognise, and an unknown one is a question rather than a surprise.** The
+scanner reports a redacted path, a shape name, the harness and the backend -
+never the value, and never a real path, since a gitconfig can carry userinfo
+in a section header. The choice is yours: scrub it from the copy, allow it,
+allow it once, or stop. Answers are recorded by field rather than by value, in
+`credential-scan.decisions` beside your config, so rotating a credential does
+not re-ask a question you already answered. With nothing attached to answer,
+the launch stops rather than carrying it in.
+
+This is the general form of the two fixes below, which are denylists and so
+only know what was already found. See
+[#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
 **Two host files are copied into a container, and both are filtered.**
 `~/.gitconfig` can hold a `credential.helper` that prints a token, an
 `http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
