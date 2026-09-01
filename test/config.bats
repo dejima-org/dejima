@@ -3369,6 +3369,11 @@ EOF
         && { echo "the real key reached docker"; return 1; }
     [ "$(jq -r '.mcpServers.keepme.command' "$CSTAGED")" = "x" ] \
         || { echo "the copy lost the config it exists to carry"; return 1; }
+    # The placeholder is pre-approved, so the session does not open on
+    # "Do you want to use this API key?" - whose recommended answer is No,
+    # and answering it leaves an unattended session with no credential.
+    [ "$(jq -r '.customApiKeyResponses.approved | index("al-proxy-placeholder") // "no"' "$CSTAGED")" != "no" ] \
+        || { echo "the placeholder key was not pre-approved"; return 1; }
     rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
 }
 
@@ -3403,5 +3408,73 @@ EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$docker_log" \
         && { echo "another backend's proxy = off disabled this one"; return 1; }
+    rm -rf "$workspace"
+}
+
+# A host whose only credential is a console login: the key in ~/.claude.json,
+# .credentials.json present but empty. This is the shape that produced three
+# dead-end refusals in a row.
+_console_host() {  # <backend name to select>
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' "backend = $1"
+    _rw_launch "$workspace"
+}
+
+@test "a refusal names the backend that fits the credential on this host" {
+    # Reported: an operator with a console login tried `anthropic`, then
+    # `anthropic-api-key`, and neither refusal mentioned `anthropic-console`.
+    # Each dead end has to point somewhere.
+    _console_host anthropic
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-console"* ]] \
+        || { echo "the wrong-shape refusal names no fitting backend: $output"; return 1; }
+    [[ "$output" == *"backend = anthropic-console"* ]] \
+        || { echo "it does not show the line to write: $output"; return 1; }
+    rm -rf "$workspace"
+
+    # The other dead end: a backend that fits nothing here and wants a path.
+    _console_host anthropic-api-key
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-console"* ]] \
+        || { echo "the requires refusal names no fitting backend: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "an unset backend names the one whose credential is present" {
+    # Listing what exists is not the same as saying which one to pick.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    # No [harness.claude-code] backend, and nothing writable to migrate into.
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' '[harness.cline]' 'model = m'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"backend = anthropic-console"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a suggestion never names a backend this harness cannot talk to" {
+    # Trading one refusal for another. claude-code speaks only the Anthropic
+    # dialect, so an OpenAI-compatible backend is never the answer for it -
+    # even with its key sitting right there.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"primaryApiKey":"sk-ant-api03-REAL-CONSOLE-KEY"}\n' > "$RW_HOME/.claude.json"
+    echo '{}' > "$RW_HOME/.claude/.credentials.json"
+    printf 'sk-or-v1-key\n' > "$RW_HOME/openrouter-key"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic' \
+                 '[backend.openrouter]' "credential_file = $RW_HOME/openrouter-key"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"anthropic-console"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"openrouter"* ]] \
+        && { echo "suggested a backend claude-code cannot speak to: $output"; return 1; }
     rm -rf "$workspace"
 }

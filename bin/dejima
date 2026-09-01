@@ -1386,6 +1386,82 @@ fi
 # fixed_hosts already has, and since #142 the provider directories are in
 # the audit's TCB list, so widening this unseen is a CRITICAL finding.
 SANDBOX_HARNESS_DOMAINS="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_domains)"
+
+# Only a skippable answer. Whether the credential is WELL FORMED is the proxy's
+# own startup check, which fails the launch loudly rather than falling back -
+# a fallback for a malformed key would be a session running with the
+# operator's real credential mounted in.
+_credential_usable() {  # <kind> <path> [field]
+    case "$1" in
+        anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
+        static)
+            if [ -n "${3:-}" ]; then
+                # A named field has to actually be there. Without this a
+                # ~/.claude.json with no primaryApiKey passes the gate, the
+                # proxy starts, and the first request fails with an
+                # authentication error several layers from the cause.
+                jq -e --arg f "$3" \
+                    'getpath($f | split(".")) | strings | length > 0' \
+                    "$2" >/dev/null 2>&1
+            else
+                [ -s "$2" ]
+            fi
+            ;;
+        *)               return 1 ;;
+    esac
+}
+
+# Which shipped backends could serve a credential that is actually on this
+# host, for the harness this launch selected.
+#
+# Refusing without this leaves an operator guessing between backends by name,
+# which is exactly the report that produced it: an "anthropic" that wanted a
+# subscription login, an "anthropic-api-key" that wanted a file they did not
+# have, and no sign that "anthropic-console" was the one for the login they
+# had. Derived rather than listed, so a backend added later is suggested the
+# day it lands.
+#
+# Only ones the harness can talk to, since naming a backend it has no client
+# for trades one refusal for another. And only ones whose credential_file
+# resolves to something: a backend whose key has no conventional location
+# cannot be confirmed present, and guessing would be the same unhelpful
+# advice in the other direction.
+_backends_that_fit() {
+    local b kind file field styles
+    styles="$(manifest_get harness "$DEJIMA_HARNESS_NAME" api_styles)"
+    for b in $(provider_list backend); do
+        kind="$(manifest_get backend "$b" credential)"
+        [ -n "$kind" ] && [ "$kind" != none ] || continue
+        if [ -n "$styles" ]; then
+            _set_contains "$styles" "$(manifest_get backend "$b" api_style)" || continue
+        fi
+        config_type "backend.$b.credential_file" >/dev/null 2>&1 || continue
+        file="$(config_get "backend.$b" credential_file)" || continue
+        [ -n "$file" ] || continue
+        field="$(manifest_get backend "$b" credential_field)"
+        _credential_usable "$kind" "$file" "$field" && printf '%s\n' "$b"
+    done
+}
+
+# Prints the "use this one" paragraph, or nothing when nothing fits.
+_suggest_backends() {  # <harness-section-name>
+    local fits
+    fits="$(_backends_that_fit)"
+    [ -n "$fits" ] || return 0
+    echo "" >&2
+    if [ "$(printf '%s\n' "$fits" | wc -l)" = 1 ]; then
+        echo "A credential for '$fits' is on this host. To use it:" >&2
+    else
+        echo "Credentials for these are on this host:" >&2
+        printf '%s\n' "$fits" | sed 's/^/    /' >&2
+        echo "" >&2
+        echo "To use one:" >&2
+    fi
+    echo "" >&2
+    echo "    [harness.$1]" >&2
+    echo "    backend = $(printf '%s\n' "$fits" | head -1)" >&2
+}
+
 # The selected backend - the model API this session talks to - and the name the
 # in-container terminator has to answer for.
 #
@@ -1470,6 +1546,7 @@ if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
         printf 'Available:' >&2
         for _p in $(provider_list backend); do printf ' %s' "$_p" >&2; done
         printf '\n' >&2
+        _suggest_backends "$DEJIMA_HARNESS_NAME"
         exit 1
     fi
 fi
@@ -1534,6 +1611,11 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
                     ;;
                 *)  echo "    $_need = ..." >&2 ;;
             esac
+            # A backend asking to be pointed at a key is the other half of the
+            # report: an operator who picked this one by its name, when the
+            # login they actually have is served by a different backend whose
+            # credential is already where dejima can see it.
+            _suggest_backends "$DEJIMA_HARNESS_NAME"
             exit 1
         fi
     done
@@ -1898,29 +1980,6 @@ SANDBOX_ANTHROPIC_PROXY_PID=""
 #
 # For a static key it is whether the file has anything in it.
 #
-# Only a skippable answer. Whether the credential is WELL FORMED is the proxy's
-# own startup check, which fails the launch loudly rather than falling back -
-# a fallback for a malformed key would be a session running with the
-# operator's real credential mounted in.
-_credential_usable() {  # <kind> <path> [field]
-    case "$1" in
-        anthropic-oauth) jq -e '.claudeAiOauth.accessToken' "$2" >/dev/null 2>&1 ;;
-        static)
-            if [ -n "${3:-}" ]; then
-                # A named field has to actually be there. Without this a
-                # ~/.claude.json with no primaryApiKey passes the gate, the
-                # proxy starts, and the first request fails with an
-                # authentication error several layers from the cause.
-                jq -e --arg f "$3" \
-                    'getpath($f | split(".")) | strings | length > 0' \
-                    "$2" >/dev/null 2>&1
-            else
-                [ -s "$2" ]
-            fi
-            ;;
-        *)               return 1 ;;
-    esac
-}
 
 # Asked for the proxy, selected a backend, and the credential is not one that
 # backend can serve: refuse.
@@ -1959,11 +2018,11 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
             echo "It expects a key, and that file is empty or unreadable." >&2
             ;;
     esac
+    _suggest_backends "$DEJIMA_HARNESS_NAME"
     echo "" >&2
-    echo "Launching anyway would mount that file into the container, which is" >&2
-    echo "the one arrangement where your real credential leaves the host. Pick a" >&2
-    echo "backend that fits the credential, or ask for that arrangement" >&2
-    echo "deliberately:" >&2
+    echo "Launching as configured would mount that file into the container," >&2
+    echo "which is the one arrangement where your real credential leaves the" >&2
+    echo "host. If you want that deliberately:" >&2
     echo "" >&2
     echo "    [backend.$DEJIMA_BACKEND_NAME]" >&2
     echo "    proxy = off" >&2
@@ -2043,6 +2102,32 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         # second backend wanting a different variable is the point at which
         # this becomes a declaration rather than a branch.
         SANDBOX_ANTHROPIC_API_KEY="sandbox-credential-proxy-placeholder"
+        # Pre-approve it, so the session does not open on a prompt whose
+        # recommended answer breaks it.
+        #
+        # Claude Code asks about any ANTHROPIC_API_KEY it did not put there
+        # itself - "Do you want to use this API key?", defaulting to "No
+        # (recommended)" - and records the answer as the last 20 characters
+        # of the key in customApiKeyResponses.approved. Answering the
+        # recommended way leaves an unattended session with no credential,
+        # which is a worse failure than the prompt it avoids.
+        #
+        # Derived from the value rather than written as a literal, so it
+        # follows if the placeholder ever changes. If Claude Code changes how
+        # it records approvals this stops suppressing the prompt and nothing
+        # else - it is a courtesy, not a control.
+        if [ -n "$SANDBOX_CLAUDE_JSON_FILE" ] && [ -f "$SANDBOX_CLAUDE_JSON_FILE" ]; then
+            _ak_seen="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
+            if jq --arg t "${SANDBOX_ANTHROPIC_API_KEY: -20}" \
+                '.customApiKeyResponses.approved =
+                    (((.customApiKeyResponses.approved // []) + [$t]) | unique)' \
+                "$SANDBOX_CLAUDE_JSON_FILE" > "$_ak_seen"; then
+                mv "$_ak_seen" "$SANDBOX_CLAUDE_JSON_FILE"
+            else
+                rm -f "$_ak_seen"
+            fi
+            unset _ak_seen
+        fi
     else
         # With no ANTHROPIC_AUTH_TOKEN set, Claude Code authenticates from
         # .credentials.json directly, so the container needs a well-formed
