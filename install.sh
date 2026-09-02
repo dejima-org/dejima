@@ -202,8 +202,11 @@ fi
 # Registering before reading it would mean writing one harness's config for
 # an operator who has chosen another.
 #
-# Delegated to the harness's plugin, which is also what gates each guard on
-# the harness having declared it (see `guards` in its manifest).
+# Nothing to register: the sandbox's hooks are baked into the image and
+# registered per launch into its own settings overlay. What is delegated to
+# the plugin is the host-side cleanup an upgrade needs - taking back what
+# older versions wrote into the harness's config - which still has to know
+# which harness is selected.
 echo
 source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # A config that does not parse leaves config_get empty for EVERY key, so
@@ -212,12 +215,12 @@ source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # fault, on stderr, which is the answer to a question this cannot answer.
 _harness=""
 if config_exists && ! config_validate; then
-    echo "$CONFIG_FILE could not be read, so no guard hooks were registered."
+    echo "$CONFIG_FILE could not be read, so no harness host-side setup was checked."
     echo "Fix what is reported above and re-run ./install.sh."
 elif ! _harness="$(config_get core harness 2>/dev/null)" || [ -z "$_harness" ]; then
     _harness=""
-    echo "No [core] harness is set in $CONFIG_FILE, so no guard hooks were"
-    echo "registered. Set one and re-run ./install.sh."
+    echo "No [core] harness is set in $CONFIG_FILE, so no harness host-side"
+    echo "setup was checked. Set one and re-run ./install.sh."
 else
     DEJIMA_HARNESS_NAME="$_harness"
     harness_plugin_load "$_harness"

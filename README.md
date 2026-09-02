@@ -166,11 +166,12 @@ ones you want.
    entirely for a harness pointed at a model you serve yourself, which needs
    no credential.
 2. **`./install.sh`**, which symlinks the CLIs into `~/.local/bin` and writes
-   a starter `~/.config/dejima/config` if none exists. The only thing it puts
-   in your harness's own config is the one hook meant to apply to your
-   unsandboxed sessions too; the sandbox's guards are baked into the image and
-   registered per launch into a settings layer of dejima's own. Idempotent, so
-   re-run it after pulling; it never overwrites an existing config.
+   a starter `~/.config/dejima/config` if none exists. It writes nothing to
+   your harness's own config: the sandbox's guards are baked into the image and
+   registered per launch into a settings layer of dejima's own, so installing
+   dejima does not change how your harness behaves outside a sandbox.
+   Idempotent, so re-run it after pulling; it never overwrites an existing
+   config.
 3. **Put `~/.local/bin` on your `PATH`** if it isn't already.
 4. **Set `[core] harness`.** It has no default and a launch is refused without
    it, which is what stops a later release changing your selection for you.
