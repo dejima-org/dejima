@@ -619,6 +619,69 @@ SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
 SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
     ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
 
+# What the selected harness keeps on the host, for the read_write refusal
+# below.
+#
+# Derived from what the plugin declares rather than written out here, because
+# a literal list is one nobody extends when a second harness arrives: this
+# guard named ~/.claude and nothing of Cline's, so an operator could hand a
+# session write access to the hooks and skills their own machine runs next -
+# the persistence this whole refusal exists to stop.
+#
+# All three declaration tiers count, whatever a session may do to the copy
+# inside the container. A read-only mount protects the host's file from the
+# session that has it; it says nothing about a writable mount an operator
+# points at the same file. What matters here is only that the harness reads
+# it on the host.
+#
+# A staged or seeded entry contributes both the host path it is read from and
+# $HOME/<rel>, the path it is installed at. Those differ when the operator
+# keeps the file somewhere else, and the rel is named whether or not the file
+# exists yet - which the source is not, since a plugin skips a source that is
+# absent. An absent path is exactly the one worth refusing: nothing stops a
+# session creating it.
+#
+# The loads happen here, before anything is mounted, because a guard that
+# runs after the mount it would refuse is not a guard. Their consumers
+# further down read these same arrays rather than re-running the hooks.
+harness_config_dirs_load
+harness_staged_config_load
+harness_seed_load
+
+HARNESS_HOST_CONFIG=()
+_harness_host_config() {
+    local rec src rel spec name type
+    for rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
+        HARNESS_HOST_CONFIG+=("${rec%%$'\t'*}")
+    done
+    # Three fields, the third being the ensure flag, which is nothing to this
+    # loop - but read into a name of its own so a rel does not silently absorb
+    # it and guard a path with a tab in the middle of it.
+    for rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
+        IFS=$'\t' read -r src rel _ <<< "$rec"
+        HARNESS_HOST_CONFIG+=("$src" "$HOME/$rel")
+    done
+    for rec in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
+        IFS=$'\t' read -r rel src <<< "$rec"
+        HARNESS_HOST_CONFIG+=("$HOME/$rel")
+        [ -n "$src" ] && HARNESS_HOST_CONFIG+=("$src")
+    done
+    # The state and host-executed paths a harness declares as its own config
+    # keys - transcripts and an edit-undo tree for one, a whole state
+    # directory for another. Selected by TYPE, so nothing here has to know
+    # what a given harness calls them, and a `path` key added to a manifest
+    # later is guarded without this being touched. Read through
+    # harness_config_get so an operator who moved one is guarded where it
+    # actually is rather than where the default says.
+    for spec in $(_provider_keys_field harness "$DEJIMA_HARNESS_NAME"); do
+        IFS=$'\t' read -r name type _ <<< "$(_provider_keyspec_parse "$spec")"
+        [ "${type#\?}" = path ] || continue
+        src="$(harness_config_get "$name")"
+        [ -n "$src" ] && HARNESS_HOST_CONFIG+=("$src")
+    done
+}
+_harness_host_config
+
 # Read-write host mounts. Distinct from [core] share_dir, which is mounted at
 # ~/shared - a well-known handoff point the agent is told about by name -
 # while these are mounted at their own absolute path, so a path that works on
@@ -711,7 +774,8 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
         # paths without anyone remembering to do it twice.
         _guarded_stores
         for guarded in ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"} \
-            "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
+            ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"} \
+            "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
             guarded_real="$(readlink -m "$guarded")"
             _paths_overlap "$rw_real" "$guarded_real" || continue
             echo "Refusing $(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path"): $path" >&2
@@ -1050,8 +1114,8 @@ unset share_loose _entry
 # the read-only config dirs, a writable gap instead of an overlay. Pre-create
 # them all: empty is fine, existence is what matters.
 # Which directories those are is the harness's (harness_config_dirs); that
-# they must exist before the mount is set up is dejima's.
-harness_config_dirs_load
+# they must exist before the mount is set up is dejima's. Already loaded, up
+# where the read_write refusal needed them.
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r _cdir _cmode _cscan <<< "$_rec"
     mkdir -p "$_cdir"
@@ -2162,7 +2226,6 @@ harness_hook harness_state_mounts "$WORKSPACE_DIR"
 # root-owned directory at the target. A dangling symlink is neither
 # mountable nor "exists", so it refuses rather than skipping the mount
 # (reopening the gap) or failing later with an opaque "mkdir: file exists".
-harness_staged_config_load
 SANDBOX_HARNESS_STAGED_EMPTY=""
 for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
     IFS=$'\t' read -r _ssrc _srel _sensure <<< "$_rec"
@@ -2198,7 +2261,6 @@ export SANDBOX_HARNESS_STAGED_EMPTY
 # rediscovered by walking the staging tree, because some of them have no
 # source: a directory whose contents are mounted individually needs to exist
 # and be owned by the session, and there is nothing to copy into it.
-harness_seed_load
 SANDBOX_HARNESS_SEED=""
 for _rec in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
     IFS=$'\t' read -r _seedrel _seedsrc <<< "$_rec"

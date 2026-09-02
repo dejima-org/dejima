@@ -1870,6 +1870,65 @@ EOF
     rm -rf "$workspace" "$RW_HOME"
 }
 
+# The guard named ~/.claude literally, so a Cline operator could hand a
+# session write access to the hooks and skills their own machine runs next.
+# Every path here comes from the plugin or its manifest rather than from a
+# list in bin/dejima, which is what makes the second harness covered without
+# anyone having remembered it.
+@test "the selected harness's own host config is guarded, whichever harness" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # Created first: a missing directory is refused for being missing, which
+    # would pass this test without the overlap rule ever running.
+    mkdir -p "$RW_HOME/.agents/skills" "$RW_HOME/.cline/hooks" \
+             "$RW_HOME/.local/share/dejima/cline" \
+             "$RW_HOME/.claude/projects" "$RW_HOME/.claude/plugins"
+    # A config dir the plugin mounts, a seeded file's directory, and the
+    # state root the manifest declares as a `path` key - one of each way a
+    # path reaches the list.
+    for guarded in "$RW_HOME/.agents" "$RW_HOME/.cline" \
+                   "$RW_HOME/.local/share/dejima/cline"; do
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                     'harness = cline' \
+                     '[harness.cline]' 'backend = anthropic' 'model = m' \
+                     '[mounts]' "read_write = $guarded"
+        _rw_launch "$workspace"
+        [ "$status" -ne 0 ] || { echo "accepted a writable mount over $guarded"; return 1; }
+        [[ "$output" == *"Refusing"* ]] \
+            || { echo "wrong failure for $guarded: $output"; return 1; }
+    done
+    # Claude Code's, which the literal used to cover. projects/ is a manifest
+    # `path` key and plugins/ is reached only through a seed destination, so
+    # both would be missed by a list built from mounted directories alone.
+    for guarded in "$RW_HOME/.claude" "$RW_HOME/.claude/projects" \
+                   "$RW_HOME/.claude/plugins"; do
+        write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                     '[mounts]' "read_write = $guarded"
+        _rw_launch "$workspace"
+        [ "$status" -ne 0 ] || { echo "accepted a writable mount over $guarded"; return 1; }
+        [[ "$output" == *"Refusing"* ]] \
+            || { echo "wrong failure for $guarded: $output"; return 1; }
+    done
+    rm -rf "$workspace" "$RW_HOME"
+}
+
+# Refusing everything would pass the test above, and a read_write mount is a
+# supported feature rather than a thing to break in the course of guarding it.
+@test "a read_write entry outside the harness's config is still accepted" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    rw="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' \
+                 '[harness.cline]' 'backend = anthropic' 'model = m' \
+                 '[mounts]' "read_write = $rw"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF "$rw:$rw" "$docker_log" \
+        || { echo "not mounted read-write:"; cat "$docker_log"; return 1; }
+    rm -rf "$workspace" "$rw" "$RW_HOME"
+}
+
 @test "the audit and baseline stores are guarded, not just the obvious paths" {
     # Named explicitly because a regression that dropped them from the guarded
     # list would otherwise pass every other test here.
