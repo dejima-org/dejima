@@ -19,6 +19,7 @@ import signal
 import re
 import select
 import sys
+import time
 
 # The default is the credential scan's prompt. --marker takes another, so a
 # test for a different prompt does not need a second copy of this.
@@ -87,17 +88,29 @@ def main():
         elif AMBIENT in text and AMBIENT != MARKER:
             os.write(fd, b"\n")
 
-    # The child may still be sitting at a prompt nobody answered - an
-    # unanswered question is the likeliest way for this to end, and waiting on
-    # it turns a failing test into a hung suite. Killed rather than waited on,
-    # and the caller is told which it was.
+    # The read loop ends when the child stops WRITING, which is not when it
+    # stops running: dejima does its exit audit and stops its shipper after
+    # the last thing it prints. So give it a grace period to finish before
+    # concluding anything - killing it there reported a child that was merely
+    # busy as a hang, and left it taking SIGPIPE on a pty nobody was reading.
+    #
+    # Only then kill, because an unanswered prompt is the other way this ends
+    # and waiting on that turns a failing test into a hung suite. The caller
+    # is told which it was.
     stuck = False
+    status = 0
+    grace = time.time() + 60.0
     try:
-        done, status = os.waitpid(pid, os.WNOHANG)
-        if done == 0:
-            stuck = True
-            os.kill(pid, signal.SIGKILL)
-            _, status = os.waitpid(pid, 0)
+        while True:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done != 0:
+                break
+            if time.time() >= grace:
+                stuck = True
+                os.kill(pid, signal.SIGKILL)
+                _, status = os.waitpid(pid, 0)
+                break
+            time.sleep(0.1)
     except OSError:
         status = 0
     sys.stdout.write("".join(out))
