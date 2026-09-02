@@ -1576,10 +1576,9 @@ _credential_usable() {  # <kind> <path> [field]
 #
 # Refusing without this leaves an operator guessing between backends by name,
 # which is exactly the report that produced it: an "anthropic" that wanted a
-# subscription login, an "anthropic-api-key" that wanted a file they did not
-# have, and no sign that "anthropic-console" was the one for the login they
-# had. Derived rather than listed, so a backend added later is suggested the
-# day it lands.
+# subscription login, and no sign of which backend served the login they
+# actually had. Derived rather than listed, so a backend added later is
+# suggested the day it lands.
 #
 # Only ones the harness can talk to, since naming a backend it has no client
 # for trades one refusal for another. And only ones whose credential_file
