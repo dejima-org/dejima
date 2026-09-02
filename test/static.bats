@@ -5890,7 +5890,12 @@ startup_warning_slug() { printf '%s' "$DEJIMA_T/ws" | sed 's/[^a-zA-Z0-9]/-/g'; 
 # `script` rather than a pipe.
 startup_warning_launch_tty() {
     local keys="$1"
-    printf '%s' "$keys" | HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
+    # A leading newline for the pause dejima takes before the build when it
+    # printed a notice worth reading. This fixture sets [core] ssh_key, which
+    # is a deprecation, so that pause fires on every launch here - and it is
+    # ambient rather than the thing any of these tests is about. Answered in
+    # the helper so each caller's keys still mean what they say.
+    printf '\n%s' "$keys" | HOME="$DEJIMA_T/home" PATH="$DEJIMA_T:$PATH" \
         DEJIMA_CONFIG_DIR="$DEJIMA_T/config" \
         SANDBOX_TEST_DOCKER_LOG="$DEJIMA_T/docker-log" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= TERM=xterm-256color \
