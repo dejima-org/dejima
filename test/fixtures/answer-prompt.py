@@ -6,7 +6,7 @@ point - an unattended launch must not block on a question nobody will see. So
 a test that drives the interactive path needs a pty rather than a pipe, or it
 exercises the non-interactive branch while claiming to test the other one.
 
-Usage: answer-prompt.py <answer-per-prompt>... -- <command> [args...]
+Usage: answer-prompt.py [--marker TEXT] <answer-per-prompt>... -- <command> [args...]
 
 Each answer is sent when the child writes a line ending in the prompt marker.
 Everything the child wrote is printed on exit, and the child's exit status is
@@ -19,6 +19,8 @@ import re
 import select
 import sys
 
+# The default is the credential scan's prompt. --marker takes another, so a
+# test for a different prompt does not need a second copy of this.
 MARKER = "[s/a/o/r]"
 TIMEOUT = 60.0
 
@@ -28,7 +30,13 @@ def main():
         print("usage: answer-prompt.py <answer>... -- <command>...", file=sys.stderr)
         return 2
     split = sys.argv.index("--")
-    answers = list(sys.argv[1:split])
+    args = list(sys.argv[1:split])
+    global MARKER
+    if "--marker" in args:
+        i = args.index("--marker")
+        MARKER = args[i + 1]
+        del args[i:i + 2]
+    answers = args
     command = sys.argv[split + 1:]
     if not command:
         print("no command given", file=sys.stderr)

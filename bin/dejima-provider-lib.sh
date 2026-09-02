@@ -1125,6 +1125,8 @@ identity_validate() {
         # touch.
         printf '      [identity.default]\n      ssh_key = %s\n' \
             "$(_config_get_from_file core ssh_key)" >&2
+        # Worth a pause before the build scrolls it away - see bin/dejima.
+        DEJIMA_STARTUP_NOTICE=1
     fi
 
     [ -n "$name" ] || return 0
