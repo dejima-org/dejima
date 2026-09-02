@@ -392,9 +392,26 @@ harness_config_dirs_load() {
 DEJIMA_STAGED_CONFIG=()
 
 # host path, and the path under $HOME it is installed at.
+# `ensure` asks for a placeholder at that path in the container when the host
+# has none, so a harness that needs a file to exist gets one without dejima
+# creating it on the operator's machine.
+#
+# Two kinds, because empty is not always a valid file. `ensure` writes nothing;
+# `ensure-json` writes `{}`, and settings.json needs that one - an empty file
+# is not valid JSON, and Claude Code discards a settings.json it cannot parse
+# wholesale, taking every permission, hook and plugin the operator configured
+# with it.
+#
+# Opt-in per file rather than implied: an empty statusline.sh would be
+# installed executable and run as the status line, so that one stays absent.
 emit_staged_config() {
-    local src="$1" rel="$2"
+    local src="$1" rel="$2" ensure="${3:-}"
     [ -n "$src" ] && [ -n "$rel" ] || return 0
+    case "$ensure" in
+        ''|ensure|ensure-json) ;;
+        *) echo "Harness plugin emitted an invalid staged-config flag: $ensure" >&2
+           exit 1 ;;
+    esac
     # The relative path becomes a location under $HOME inside the container.
     # Anything that could climb out of it, or that is not relative at all, is
     # a plugin bug rather than something to normalise quietly.
@@ -403,7 +420,7 @@ emit_staged_config() {
             echo "Harness plugin emitted an invalid staged-config path: $rel" >&2
             exit 1 ;;
     esac
-    DEJIMA_STAGED_CONFIG+=("$src"$'\t'"$rel")
+    DEJIMA_STAGED_CONFIG+=("$src"$'\t'"$rel"$'\t'"$ensure")
 }
 
 harness_staged_config_load() {

@@ -847,10 +847,10 @@ session, where the credential deliberately never goes.
     approval step, skills can ship executable scripts, and
     commands/agents/output-styles are prompt text loaded into a later host
     session, so without this a compromised session could plant a backdoored
-    hook - including by unlinking one of `install.sh`'s hook symlinks and
-    dropping a plain file in its place, since the dynamic per-target mounts
-    only protect symlink targets that resolve *outside* `~/.claude`, never
-    this directory itself - tamper with plugin code, or drop a malicious
+    hook - including by unlinking one of your own hook symlinks and dropping a
+    plain file in its place, since the dynamic per-target mounts only protect
+    symlink targets that resolve *outside* `~/.claude`, never this directory
+    itself - tamper with plugin code, or drop a malicious
     skill/command/agent/output-style file. Any of those would then run or
     load **unsandboxed on the host** the next time Claude Code starts
     there, turning a single compromised sandbox session into persistent

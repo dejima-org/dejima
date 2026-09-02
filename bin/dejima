@@ -2163,8 +2163,17 @@ harness_hook harness_state_mounts "$WORKSPACE_DIR"
 # mountable nor "exists", so it refuses rather than skipping the mount
 # (reopening the gap) or failing later with an opaque "mkdir: file exists".
 harness_staged_config_load
+SANDBOX_HARNESS_STAGED_EMPTY=""
 for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
-    IFS=$'\t' read -r _ssrc _srel <<< "$_rec"
+    IFS=$'\t' read -r _ssrc _srel _sensure <<< "$_rec"
+    # Asked to exist whatever the host has. Named for the entrypoint to create
+    # empty when nothing was staged for it, rather than created here: a file
+    # the operator does not have is not one dejima should make on their
+    # machine to have something to copy.
+    # Carried as "<kind>:<rel>" so the entrypoint knows what to write. A
+    # space-separated list because that is how every other list crosses.
+    [ -z "$_sensure" ] || \
+        SANDBOX_HARNESS_STAGED_EMPTY="${SANDBOX_HARNESS_STAGED_EMPTY:+$SANDBOX_HARNESS_STAGED_EMPTY }$_sensure:$_srel"
     # A dangling symlink is neither mountable nor "exists", so it refuses
     # rather than skipping the mount - which would reopen the gap staging
     # closes - or failing later with an opaque "mkdir: file exists".
@@ -2178,6 +2187,7 @@ for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
     [ -e "$_ssrc" ] || continue
     extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")
 done
+export SANDBOX_HARNESS_STAGED_EMPTY
 
 # The harness's own writable state, seeded from the host. Mounted read-only
 # into a staging tree the same way staged config is - entrypoint.sh installs a

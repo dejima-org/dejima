@@ -696,7 +696,7 @@ _declared_config_dirs() {
     ')"
     local f
     for f in settings.json CLAUDE.md statusline.sh; do
-        grep -qxF "/h/.claude/$f"$'\t'".claude/$f" <<< "$staged" \
+        grep -qE "^/h/\.claude/$f"$'\t'"\.claude/$f("$'\t'"|$)" <<< "$staged" \
             || { echo "$f is not staged: $staged"; return 1; }
     done
     # And never mounted at their real paths, which is the property staging
@@ -1583,12 +1583,13 @@ _cli_tools() {
     grep -qE -- '\$\{settings\[@\]\+"\$\{settings\[@\]\}"\}' "$SANDBOX_DIR/harness-wrapper.sh"
 }
 
-@test "the harness's config files are created if absent, so neither is staged missing" {
-    # A host that has never run install.sh has no settings.json, and many have
-    # no CLAUDE.md at all. Core skips staging a file that does not exist, so
-    # without this the session starts with neither - silently.
-    local home overlay
-    home="$(_settings_home)"
+@test "the harness's config files are created in the container, not on the host" {
+    # dejima used to create an empty settings.json and CLAUDE.md in the
+    # operator's ~/.claude so that staging had something to copy. The file is
+    # needed in the container, so that is where it is made - and a file the
+    # operator does not have is not one dejima should put on their machine.
+    local home overlay staged
+    home="$(mktemp -d)"
     overlay="$(mktemp)"
     run bash -c '
         source "$1"
@@ -1596,19 +1597,27 @@ _cli_tools() {
         HOME="$3" harness_prepare_config "$2"' _ \
         "$REPO_ROOT/bin/dejima-harness-lib.sh" "$overlay" "$home"
     rm -f "$overlay"
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ -f "$home/.claude/settings.json" ] || { echo "settings.json was not created"; return 1; }
-    [ -f "$home/.claude/CLAUDE.md" ] || { echo "CLAUDE.md was not created"; return 1; }
-    # Valid JSON, not an empty file: an empty settings.json is one Claude Code
-    # would refuse to parse, which is the condition the check exists for.
-    run jq -e . "$home/.claude/settings.json"
-    [ "$status" -eq 0 ] || { echo "the seeded settings.json does not parse"; return 1; }
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$home"; return 1; }
+    [ -z "$(find "$home" -mindepth 1 2>/dev/null)" ] \
+        || { echo "created on the host: $(find "$home" -mindepth 1)"; rm -rf "$home"; return 1; }
+
+    staged="$(_declared_for_home "$home" claude-code harness_staged_config_load DEJIMA_STAGED_CONFIG)"
+    # settings.json asks for `{}` rather than an empty file: an empty one is
+    # not valid JSON, and Claude Code discards a settings.json it cannot parse
+    # wholesale - which is the condition this exists to avoid, not cause.
+    grep -qE "\.claude/settings\.json"$'\t'"ensure-json$" <<< "$staged" \
+        || { echo "settings.json is not asked for as JSON: $staged"; rm -rf "$home"; return 1; }
+    grep -qE "\.claude/CLAUDE\.md"$'\t'"ensure$" <<< "$staged" \
+        || { echo "CLAUDE.md is not asked for: $staged"; rm -rf "$home"; return 1; }
     # statusline.sh is deliberately NOT among them. It is staged executable
-    # and named by settings.json's statusLine.command, so an empty one
-    # created here would be a status line that runs and does nothing, in
-    # place of the harness simply having none.
-    [ ! -e "$home/.claude/statusline.sh" ] \
-        || { echo "an empty statusline.sh was created and would be staged"; return 1; }
+    # and named by settings.json's statusLine.command, so a placeholder would
+    # be a status line that runs and does nothing, in place of none.
+    grep -qE "statusline\.sh"$'\t'"ensure" <<< "$staged" \
+        && { echo "a placeholder statusline.sh would be run"; rm -rf "$home"; return 1; }
+    # And the entrypoint writes the JSON one as JSON.
+    grep -q "printf '{}" "$REPO_ROOT/docker/entrypoint.sh" \
+        || { echo "the entrypoint does not write a parseable placeholder"; rm -rf "$home"; return 1; }
+    rm -rf "$home"
 }
 
 @test "an existing config file is left exactly as the operator wrote it" {
@@ -3317,13 +3326,37 @@ comment forge-cli issue comment"
     [ "$status" -eq 0 ]
 }
 
-@test "the merge guard is linked and registered" {
-    # In the harness plugin now: which file a guard is and where a harness
-    # reads it from is the harness's, while whether it is installed at all
-    # is gated on the manifest declaring the guard.
+@test "the merge guard is registered into the sandbox's own settings overlay" {
+    # In the harness plugin, gated on the manifest declaring the guard - and
+    # into the overlay rather than the operator's ~/.claude/settings.json, so
+    # installing dejima does not edit a config that is not dejima's.
     local p="$REPO_ROOT/bin/harness/claude-code.sh"
-    grep -q 'harness_has_guard merge-guard && _link_hook merge-guard.sh' "$p"
-    grep -q '_register PreToolUse Bash merge-guard.sh' "$p"
+    grep -q 'harness_has_guard merge-guard && _register_overlay_hook PreToolUse Bash merge-guard.sh' "$p" \
+        || { echo "the merge guard is not registered in the overlay"; return 1; }
+    # And no longer written to the host at all.
+    grep -q '_register PreToolUse Bash merge-guard.sh' "$p" \
+        && { echo "the merge guard is still registered on the host"; return 1; }
+    grep -q '_link_hook' "$p" \
+        && { echo "hooks are still symlinked into ~/.claude/hooks"; return 1; }
+    return 0
+}
+
+@test "the sandbox's hooks are baked into the image, not read from a host mount" {
+    # A guard whose script can be replaced under a running session is not one.
+    # Baked, so it is root-owned and outside anything the session can write -
+    # the property the read-only ~/.claude/hooks mount used to provide.
+    local h
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh \
+             deny-dangerous-bash.sh; do
+        grep -q "COPY hooks/$h /usr/local/lib/dejima/hooks/$h" "$REPO_ROOT/docker/Dockerfile" \
+            || { echo "$h is not baked into the image"; return 1; }
+    done
+    # Every one of them, with nothing left registered on the host: the point
+    # is that installing dejima does not change how the harness behaves
+    # outside a sandbox, and one exception would undo that.
+    grep -q '_register PreToolUse' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        && { echo "something is still registered on the host"; return 1; }
+    return 0
 }
 
 # Runs install.sh against a throwaway HOME, with a stub `docker` on PATH so
@@ -3362,8 +3395,11 @@ registered_commands() {
 
     run registered_commands "$home"
     [[ "$output" != *"gitea-merge-guard.sh"* ]]
-    [ "$(registered_commands "$home" | grep -c '/merge-guard\.sh$')" -eq 1 ]
     [ ! -e "$home/.claude/hooks/gitea-merge-guard.sh" ]
+    # And no merge-guard registration replaces it on the host: the sandbox
+    # registers its own into the settings overlay now.
+    [ "$(registered_commands "$home" | grep -c '/merge-guard\.sh$')" -eq 0 ] \
+        || { echo "merge-guard.sh was registered on the host"; return 1; }
 }
 
 @test "install.sh registers each hook exactly once across repeated runs" {
@@ -3377,7 +3413,11 @@ registered_commands() {
     while read -r cmd; do
         [ "$(registered_commands "$home" | grep -cxF "$cmd")" -eq 1 ]
     done < <(registered_commands "$home")
-    [ "$(registered_commands "$home" | wc -l)" -eq 4 ]
+    # None. Every hook is registered per launch into the settings overlay, so
+    # a re-run after a git pull has nothing to duplicate - which is the
+    # strongest form of what this test was checking.
+    [ "$(registered_commands "$home" | wc -l)" -eq 0 ] \
+        || { echo "host registrations: $(registered_commands "$home")"; return 1; }
 }
 
 @test "the push guard names no forge, and blocks everything when no host is allowed" {
@@ -3949,7 +3989,7 @@ sandbox_context() {
     # the target instead.
     # Declared by the harness with the rest of its staged config, and mounted
     # into the staging tree by core.
-    grep -q 'emit_staged_config "$HOME/.claude/$f" ".claude/$f"' \
+    grep -q 'emit_staged_config "$HOME/.claude/statusline.sh" ".claude/statusline.sh"' \
         "$REPO_ROOT/bin/harness/claude-code.sh"
     grep -q 'extra_mounts+=(-v "$_ssrc:/etc/dejima-harness/$_srel:ro")' "$REPO_ROOT/bin/dejima"
     # Executable staged files land executable; that distinction is what the
@@ -7930,4 +7970,135 @@ _cline_providers_json() {
     grep -q 'CLINE_DATA_DIR' <<< "$cl" \
         && { echo "cline's briefing still tells the operator to run cline on the host"; return 1; }
     return 0
+}
+
+@test "the sandbox's hooks reach a session through the overlay, by their baked path" {
+    # The registration that replaces the host one. Claude Code merges this
+    # layer with ~/.claude/settings.json, so the operator's own hooks still
+    # run - which is why dejima no longer needs to write to theirs.
+    local h ov; h="$(mktemp -d)"; ov="$(mktemp)"
+    mkdir -p "$h/.claude"; echo '{}' > "$h/.claude/settings.json"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME="$1"; DEJIMA_HARNESS_NAME=claude-code
+        harness_plugin_load claude-code
+        harness_hook harness_prepare_config "$2"
+    ' _ "$h" "$ov" >/dev/null 2>&1
+
+    # R3 first: a session that is not told it is sandboxed is the worst
+    # failure here, so it is registered whether or not a guard is declared.
+    [ "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ov")" \
+        = "/usr/local/lib/dejima/hooks/sandbox-context.sh" ] \
+        || { echo "sandbox-context is not registered: $(cat "$ov")"; rm -rf "$h" "$ov"; return 1; }
+    local cmds; cmds="$(jq -r '.hooks.PreToolUse[]?.hooks[]?.command' "$ov")"
+    grep -q '/usr/local/lib/dejima/hooks/git-push-guard.sh' <<< "$cmds" \
+        || { echo "push guard missing: $cmds"; rm -rf "$h" "$ov"; return 1; }
+    grep -q '/usr/local/lib/dejima/hooks/merge-guard.sh' <<< "$cmds" \
+        || { echo "merge guard missing: $cmds"; rm -rf "$h" "$ov"; return 1; }
+    # Never the host path, which is what this change is about.
+    grep -q '.claude/hooks' "$ov" \
+        && { echo "the overlay still points into ~/.claude/hooks"; rm -rf "$h" "$ov"; return 1; }
+    # And the sandbox override it already carried is still there.
+    [ "$(jq -r '.sandbox.enabled' "$ov")" = "false" ] \
+        || { echo "the sandbox override was lost"; rm -rf "$h" "$ov"; return 1; }
+    rm -rf "$h" "$ov"
+}
+
+@test "upgrading takes back the hooks an older install.sh wrote to the host" {
+    # Otherwise "dejima does not write to your Claude Code config" is true
+    # only of a fresh install, and an operator who has run the old one keeps
+    # symlinks and registrations nothing removes.
+    local home="$BATS_TEST_TMPDIR/upg" h
+    mkdir -p "$home/.claude/hooks"
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        ln -s "$REPO_ROOT/hooks/$h" "$home/.claude/hooks/$h"
+    done
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/git-push-guard.sh"}]}]}}' \
+        > "$home/.claude/settings.json"
+
+    run_install "$home"
+
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        [ ! -e "$home/.claude/hooks/$h" ] \
+            || { echo "$h is still linked into ~/.claude/hooks"; return 1; }
+        [[ "$(registered_commands "$home")" != *"/$h"* ]] \
+            || { echo "$h is still registered: $(registered_commands "$home")"; return 1; }
+    done
+    # An operator's own file at one of those names is theirs, not dejima's.
+    printf '#!/bin/sh\nexit 0\n' > "$home/.claude/hooks/merge-guard.sh"
+    chmod +x "$home/.claude/hooks/merge-guard.sh"
+    run_install "$home"
+    [ -f "$home/.claude/hooks/merge-guard.sh" ] \
+        || { echo "an operator's own hook was removed"; return 1; }
+}
+
+@test "a launch creates nothing in the operator's ~/.claude" {
+    # dejima used to create an empty settings.json and CLAUDE.md there so that
+    # staging had something to copy. That is a write to someone else's
+    # configuration for dejima's own convenience, and the file it needs is
+    # needed in the container rather than on the host.
+    local h ov; h="$(mktemp -d)"; ov="$(mktemp)"
+    HOME="$h" bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        DEJIMA_HARNESS_NAME=claude-code
+        harness_plugin_load claude-code
+        harness_hook harness_prepare_config "$1"
+    ' _ "$ov" >/dev/null 2>&1 \
+        || { echo "a launch on a host with no ~/.claude failed"; rm -rf "$h" "$ov"; return 1; }
+    [ -z "$(find "$h" -mindepth 1 2>/dev/null)" ] \
+        || { echo "created on the host: $(find "$h" -mindepth 1)"; rm -rf "$h" "$ov"; return 1; }
+    rm -rf "$h" "$ov"
+}
+
+@test "a placeholder the entrypoint writes cannot be reached from the session" {
+    # WHICH files are asked for is covered where they are declared. This is
+    # about what the entrypoint does with them: a file dejima creates inside
+    # the container must not become a channel back, or somewhere a session can
+    # plant something the harness then reads as configuration.
+    local e="$REPO_ROOT/docker/entrypoint.sh" blk
+    blk="$(sed -n '/for _spec in ${SANDBOX_HARNESS_STAGED_EMPTY/,/^done$/p' "$e")"
+    [ -n "$blk" ] || { echo "the entrypoint does not create them at all"; return 1; }
+    grep -q 'chown root:root' <<< "$blk" || { echo "not root-owned: $blk"; return 1; }
+    grep -q 'chmod 444' <<< "$blk" || { echo "not read-only: $blk"; return 1; }
+    # A path that could climb out of $HOME is refused, as with every other
+    # container path a manifest or plugin can name.
+    grep -q '\*\.\.\*' <<< "$blk" || { echo "traversal is not refused: $blk"; return 1; }
+    # An existing file is left alone, or a second launch would blank whatever
+    # was staged from the operator's own.
+    grep -q '\[ -e "$_dest" \] && continue' <<< "$blk" \
+        || { echo "an existing file is not left alone: $blk"; return 1; }
+}
+
+@test "every shipped backend is placed in the maturity section" {
+    # Two backends in a table read as equally exercised. The harnesses and
+    # forges each get a section saying otherwise; the backends had none, so a
+    # reader had nothing telling them which of four has actually been used.
+    local doc="$REPO_ROOT/docs/providers.md" prose b
+    prose="$(flat_prose "$doc")"
+    [[ "$prose" == *"Model backend maturity"* ]] \
+        || { echo "the backend maturity section is gone"; return 1; }
+    # Only that section: every backend is named elsewhere in this document, so
+    # searching the whole of it would pass whatever the section said.
+    local sect
+    sect="$(sed -n '/^### Model backend maturity/,/^### /p' "$doc" | tr -d '*`')"
+    [ -n "$sect" ] || { echo "the section is empty"; return 1; }
+    # Derived from what ships, so a backend added later fails this until
+    # someone says how much it has been used.
+    for b in $(bash -c 'source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"; provider_list backend'); do
+        # flat_prose strips backticks, so the name is matched bare - and
+        # bounded, or `anthropic` would match inside `anthropic-api-key` and
+        # a backend with no entry would pass on another's.
+        grep -qE "(^| )$b[ ,.]" <<< "$sect" \
+            || { echo "backend '$b' is not placed in the maturity section"; return 1; }
+    done
+    # And it says which one has the miles on it, which is the only part a
+    # reader choosing between them actually needs.
+    [[ "$prose" == *"most miles on it"* ]] \
+        || { echo "it does not say which to choose absent another reason"; return 1; }
 }

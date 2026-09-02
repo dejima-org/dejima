@@ -1,6 +1,9 @@
 #!/bin/bash
-# Idempotent installer for dejima. Registers the selected harness's guard
-# hooks wherever that harness reads them from, and puts
+# Idempotent installer for dejima. Writes NOTHING to the harness's own
+# configuration: every hook dejima uses is baked into the image and registered
+# per launch into a settings layer of dejima's own, so installing this does not
+# change how the harness behaves outside a sandbox. What it still does is take
+# back what older versions put there. It puts
 # bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
 # bin/dejima-audit, bin/dejima-share and the opt-in remote-access scripts on
 # PATH. Safe to re-run - every step is a no-op if already done, and every
@@ -199,8 +202,11 @@ fi
 # Registering before reading it would mean writing one harness's config for
 # an operator who has chosen another.
 #
-# Delegated to the harness's plugin, which is also what gates each guard on
-# the harness having declared it (see `guards` in its manifest).
+# Nothing to register: the sandbox's hooks are baked into the image and
+# registered per launch into its own settings overlay. What is delegated to
+# the plugin is the host-side cleanup an upgrade needs - taking back what
+# older versions wrote into the harness's config - which still has to know
+# which harness is selected.
 echo
 source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # A config that does not parse leaves config_get empty for EVERY key, so
@@ -209,20 +215,20 @@ source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # fault, on stderr, which is the answer to a question this cannot answer.
 _harness=""
 if config_exists && ! config_validate; then
-    echo "$CONFIG_FILE could not be read, so no guard hooks were registered."
+    echo "$CONFIG_FILE could not be read, so no harness host-side setup was checked."
     echo "Fix what is reported above and re-run ./install.sh."
 elif ! _harness="$(config_get core harness 2>/dev/null)" || [ -z "$_harness" ]; then
     _harness=""
-    echo "No [core] harness is set in $CONFIG_FILE, so no guard hooks were"
-    echo "registered. Set one and re-run ./install.sh."
+    echo "No [core] harness is set in $CONFIG_FILE, so no harness host-side"
+    echo "setup was checked. Set one and re-run ./install.sh."
 else
     DEJIMA_HARNESS_NAME="$_harness"
     harness_plugin_load "$_harness"
     if declare -F harness_register_guards >/dev/null 2>&1; then
-        echo "Registering $_harness's guard hooks"
+        echo "Checking $_harness's host-side setup"
         harness_register_guards "$SCRIPT_DIR" "$BACKUP_DIR"
     else
-        echo "Harness '$_harness' installs no guard hooks."
+        echo "Harness '$_harness' needs nothing on the host."
         echo
     fi
 fi

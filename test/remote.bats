@@ -2734,10 +2734,14 @@ nginx_blocks() {
 }
 
 @test "install.sh links the remote scripts and the notify hook, registers neither, and enables nothing" {
-    # The hook is linked by the harness plugin now - which file it is, and
-    # where the harness reads it from, is the harness's business - while the
-    # CLIs stay install.sh's, being dejima's own.
-    grep -q '_link_hook dejima-notify.sh' "$REPO_ROOT/bin/harness/claude-code.sh"
+    # The hook is baked into the image and registered by absolute path, so
+    # install.sh puts nothing of it on the host - which file it is, and where
+    # a session reads it from, is the harness plugin's business. The CLIs stay
+    # install.sh's, being dejima's own.
+    grep -q 'COPY hooks/dejima-notify.sh /usr/local/lib/dejima/hooks/dejima-notify.sh' \
+        "$REPO_ROOT/docker/Dockerfile"
+    grep -q '_link_hook' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        && { echo "install.sh still links hooks into ~/.claude/hooks"; return 1; }
     grep -q '^link_bin dejima-attach$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-ttyd$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-notify-watch$' "$REPO_ROOT/install.sh"
@@ -2769,13 +2773,25 @@ nginx_blocks() {
     # $output, and this is a statement about what THIS run printed.
     [[ "$output" == *"nothing is listening"* ]]
 
-    # bin/dejima registers $HOME/.claude/hooks/dejima-notify.sh per session,
-    # and ~/.claude/hooks is what gets mounted read-only into the container.
-    # Without this link every notification hook is an exit-127.
-    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
-    [ "$(readlink -f "$FAKE_HOME/.claude/hooks/dejima-notify.sh")" \
-      = "$(readlink -f "$REPO_ROOT/hooks/dejima-notify.sh")" ]
-    [ -x "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    # The notify hook is baked into the image and registered per session by
+    # its absolute path there, so nothing about it lands on the host. Without
+    # the baked copy every notification hook would be an exit-127.
+    [ ! -e "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ] \
+        || { echo "install.sh still puts the notify hook on the host"; return 1; }
+    # Asserted on what the registration PRODUCES rather than on the source
+    # text: the path is a variable there, and a grep for the literal passes or
+    # fails on how it happens to be spelled rather than on where it points.
+    local st; st="$(mktemp)"; echo '{}' > "$st"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        harness_plugin_load claude-code
+        harness_hook harness_register_notify "$1"
+    ' _ "$st" >/dev/null 2>&1
+    [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$st")" \
+        = "/usr/local/lib/dejima/hooks/dejima-notify.sh done" ] \
+        || { echo "notify is not registered at its baked path: $(cat "$st")"; rm -f "$st"; return 1; }
+    rm -f "$st"
     local b
     for b in dejima-attach dejima-ttyd dejima-notify-watch; do
         [ -L "$FAKE_HOME/.local/bin/$b" ]
@@ -2783,14 +2799,15 @@ nginx_blocks() {
         [ -x "$FAKE_HOME/.local/bin/$b" ]
     done
 
-    # Positive first: an absence assertion against a settings.json that did
-    # not get written would pass on its own.
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("sandbox-context.sh"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -eq 0 ]
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -ne 0 ]
+    # install.sh registers nothing in the harness's config now, so there is
+    # nothing positive to check there - the settings file may not exist at
+    # all. The positive assertion that matters moved above: the notify hook IS
+    # registered, at its baked path, in the sandbox's own overlay.
+    if [ -f "$FAKE_HOME/.claude/settings.json" ]; then
+        run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
+            "$FAKE_HOME/.claude/settings.json"
+        [ "$status" -ne 0 ]
+    fi
 
     # Nothing was enabled, and nothing under the runtime dir was created: the
     # feature stays off until the operator sets [remote-access] enabled = on.
@@ -2801,7 +2818,7 @@ nginx_blocks() {
     run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
     [ "$status" -eq 0 ]
     [ ! -e "$FAKE_HOME/.dejima-backup" ]
-    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
 
     # And with one, it may not: re-running the installer after a git pull is
     # exactly what an operator with a front door already up does, and telling
