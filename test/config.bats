@@ -3880,6 +3880,37 @@ JSON
     rm -rf "$workspace" "$STUB_DIR"
 }
 
+@test "--no-pause reaches the prompt without a keypress, and still says it" {
+    # Starting eight sessions from a tmuxinator layout: every one has a
+    # terminal, so the pause fires on every one, and the operator wants them
+    # all at a prompt rather than eight keys to press. The notices still
+    # print - skipping the wait is not skipping the telling.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nbackend = anthropic\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    STUB_DIR="$(mktemp -d)"
+    printf '#!/bin/sh\necho BUILD-OUTPUT-STARTS\nexit 0\n' > "$STUB_DIR/docker"
+    chmod +x "$STUB_DIR/docker"
+    # A real terminal and NO answer: without the flag this would sit at the
+    # prompt until the fixture gave up and killed it.
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        run python3 "$BATS_TEST_DIRNAME/fixtures/answer-prompt.py" \
+            --marker "nothing-matches-this" -- \
+            "$REPO_ROOT/bin/dejima" --no-pause "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Press Enter"* ]] \
+        || { echo "--no-pause still waited: $output"; return 1; }
+    [[ "$output" == *"BUILD-OUTPUT-STARTS"* ]] \
+        || { echo "it never reached the build: $output"; return 1; }
+    # The notice is still printed; only the wait is skipped.
+    [[ "$output" == *"ssh_key is deprecated"* ]] \
+        || { echo "--no-pause silenced the notice: $output"; return 1; }
+    # And it did not merely get killed for hanging.
+    [[ "$output" != *"never exited"* ]] || { echo "it hung: $output"; return 1; }
+    rm -rf "$workspace" "$STUB_DIR"
+}
+
 @test "an unattended launch never waits for a keystroke nobody will press" {
     # The pause before the build exists so a notice can be read. With no
     # terminal there is nobody to read it, and blocking would hang every

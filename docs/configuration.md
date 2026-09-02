@@ -415,6 +415,27 @@ editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
 
+## What dejima says before it starts
+
+Some launches print a notice first: an environment variable that is no longer
+read, a deprecated key, a guard that is not registered, a line dejima wrote
+into your config. Everything after that is the image build, which on a cold
+cache is thousands of lines - so when a notice was printed, dejima waits for
+Enter before starting it.
+
+The wait happens only when there was something to read, and only when a
+terminal is attached. An unattended launch never blocks on it.
+
+`--no-pause` skips the wait and still prints the notice. It is for starting
+several sessions at once - a tmuxinator layout, a script - where every one of
+them has a terminal and none of them wants a keypress. It is a flag rather
+than a config key on purpose: it describes the terminal in front of one
+launch, not a standing preference.
+
+A long list of entries left in the shared directory is sampled rather than
+printed whole, for the same reason: it is a standing condition you clear once,
+and it should not push the things about this run off the screen.
+
 ## Identities
 
 **Several accounts on one machine, and none of them yours.** An

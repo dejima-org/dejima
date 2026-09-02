@@ -37,10 +37,9 @@ Options (each overrides the config file for one launch only):
   --identity <name>       which [identity.<name>] supplies the credentials
   -i, --include <tool>    add an optional tool to this launch (repeatable);
                           see docs/tools.md for what dejima ships
-  --backend <name>        the selected harness's model API, model, endpoint
-  --model <id>            and context budget, each refused for a harness with
-  --base-url <url>        no such setting
-  --context-window <n>
+  --backend <name>        the selected harness's model API, model and context
+  --model <id>            budget, each refused for a harness with no such
+  --context-window <n>    setting
   --ro <path>             mount read-only; --rw read-write. Repeatable, long
                           forms --extra-readonly/--extra-read-write, and both
                           refuse a path overlapping dejima's own stores
@@ -50,6 +49,7 @@ Options (each overrides the config file for one launch only):
   --no-conversation       keep this session's transcript out of the log
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
+  --no-pause              do not wait for a keypress before the image build
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
@@ -233,6 +233,9 @@ ALLOW_GITHUB_PUSH_FLAG=0
 # project already agreed on, not a replacement for them. Repeatable.
 TOOL_FLAGS=()
 NO_LOG=0
+# Launch-scoped, like NO_LOG: initialised here so an inherited environment
+# variable of the same name cannot decide it.
+NO_PAUSE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
@@ -246,6 +249,12 @@ while [ $# -gt 0 ]; do
         --strict-audit)      _set_override audit.strict on; shift ;;
         --no-epitaph)        _set_override epitaph.enabled off; shift ;;
         --no-conversation)   _set_override logging.conversation off; shift ;;
+        # Not a config override: this is about the terminal in front of THIS
+        # launch, not about what dejima should do generally. Someone starting
+        # eight sessions from a tmuxinator layout wants every one of them to
+        # reach its prompt, and does not want that recorded as a preference
+        # for the launch they run by hand tomorrow.
+        --no-pause)          NO_PAUSE=1; shift ;;
         --no-log)            _set_override logging.loki_url ""
                              _set_override logging.conversation off
                              NO_LOG=1; shift ;;
@@ -2673,7 +2682,8 @@ fi
 # condition rather than something about this run, and pausing every launch
 # until it is cleared would teach the operator to press Enter without looking,
 # which is the failure this exists to avoid.
-if [ "${DEJIMA_STARTUP_NOTICE:-0}" = 1 ] && [ -t 0 ] && [ -t 2 ]; then
+if [ "${DEJIMA_STARTUP_NOTICE:-0}" = 1 ] && [ "${NO_PAUSE:-0}" != 1 ] \
+    && [ -t 0 ] && [ -t 2 ]; then
     printf '\n  %sThe build output below will scroll that away.%s ' \
         "${C_DIM:-}" "${C_RESET:-}" >&2
     printf '%sPress Enter to continue.%s ' "${C_KEY:-}" "${C_RESET:-}" >&2

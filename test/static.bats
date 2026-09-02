@@ -7744,3 +7744,25 @@ _cline_providers_json() {
     [[ "$prose" == *"read-write mounts"* ]] \
         || { echo "read-write mounts are not named as unscanned"; return 1; }
 }
+
+@test "every flag --help offers is one bin/dejima actually parses" {
+    # --base-url outlived the setting it fed: the provider axis moved the
+    # model's address onto the backend and deleted the flag, and the help page
+    # kept advertising it. Passing it answered "unknown option", which is the
+    # worst kind of documentation - it is read as a bug in dejima rather than
+    # in the text.
+    local flag missing=""
+    while IFS= read -r flag; do
+        [ -n "$flag" ] || continue
+        # A flag can be any alternative in a case pattern - `--ro` is the
+        # second of `--extra-readonly|--ro)` - so match it wherever it sits in
+        # the list rather than only at the start.
+        grep -qE "(^|[[:space:]|])${flag}[)|]" "$REPO_ROOT/bin/dejima" \
+            || missing="$missing $flag"
+    done < <(sed -n '/^Options (each overrides/,/^$/p' <<< "$(bin/dejima --help 2>&1)" \
+             | grep -oE '^\s+--[a-z-]+' | tr -d ' ' | sort -u)
+    [ -z "$missing" ] || {
+        echo "--help offers flags bin/dejima does not parse:$missing" >&2
+        false
+    }
+}
