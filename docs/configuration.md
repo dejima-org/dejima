@@ -415,6 +415,75 @@ editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
 
+
+#### Sessions, and where they live
+
+This project's Cline state - sessions, transcripts, tasks - is kept on the host
+in `~/.local/share/dejima/cline/<project>` and mounted at `~/.cline/data`. It
+survives the container being replaced, so **launching dejima again on the same
+project picks up where the last session left off.**
+
+A directory per project rather than one shared: Cline indexes every session it
+has ever run in a single database, so sharing one would put every project's
+history in every project's context - the same boundary `~/.claude/projects`
+gets, for the same reason.
+
+**Cline sessions are not importable or exportable.** A session started by
+running `cline` on your own machine is in `~/.cline/data` and is not visible
+inside dejima; a session started inside dejima is in the per-project directory
+and is not offered back to a host-side Cline. There is no import, no export,
+and no merge - see
+[#301](https://gitbox.branderson.io/dejima/dejima/issues/301) for why that was
+looked at and not built.
+
+The session briefing tells a Cline agent this, so it will not offer to hand
+you a session to resume outside the sandbox. Claude Code can be resumed on the
+host and its briefing says so; the claim lives in each harness's own briefing
+fragment rather than in the shared preamble, because only one of them can make
+it.
+
+#### What comes in from your host
+
+The same shape as Claude Code's, and for the same reason: your own
+configuration should reach a session, and nothing the session writes should
+reach your machine.
+
+| Host path | How it arrives | Why |
+| --- | --- | --- |
+| `~/.agents/skills/` | read-only mount | skills are instructions the agent follows |
+| `~/.agents/hooks/`, `~/.cline/hooks/` | read-only mount | hooks are programs cline runs |
+| `~/.agents/AGENTS.md` | read-only copy | instructions; a copy also survives it being a symlink into a dotfiles checkout |
+| `~/.agents/rules/*.md`, `*.txt` | read-only copy, into `Documents/Cline/Rules/` | see below |
+| `~/Documents/Cline/Rules/*.md`, `*.txt` | read-only copy | the location cline actually reads |
+| `~/.cline/settings.json`, `~/.cline/cline_mcp_settings.json` | writable copy, discarded | cline rewrites both as it runs |
+| `~/.cline/data/` | this project's own state directory | see above |
+
+Read-only is the point rather than caution. A session that could rewrite a
+hook, a skill or an MCP server definition would be choosing what happens on
+**your** machine the next time you start cline outside a container - which is
+persistence for a prompt injection, in files nobody re-reads before the next
+run. The two settings files are copies rather than read-only mounts because
+cline rewrites them itself; the copy is discarded with the container.
+
+The read-only directories are scanned for symlinks, so a `skills/` that is a
+link into a dotfiles checkout brings its target too. dejima refuses a target
+that overlaps one of its own guarded stores.
+
+**Global rules come from two places and land in one.** cline loads them from
+`~/Documents/Cline/Rules` and nowhere else - `~/.agents/rules` reads like the
+obvious companion to `~/.agents/skills` and is not loaded, which you can see
+by planting a file in each and opening `cline config`. So dejima copies the
+files from *both* host locations into the one directory cline reads, rather
+than mounting `~/.agents/rules` where nothing would look at it.
+
+They are copied file by file rather than mounted as a directory, because
+dejima writes its own briefing into that same directory and a read-only mount
+over it would leave nowhere to put it.
+
+Two collisions have fixed answers. A name present in **both** host locations
+is taken from `Documents/Cline/Rules`, since that is cline's own location for
+rules and where it writes when you edit them through cline. A host file named
+`00-dejima.md` is skipped: that is the briefing's name, and dejima's wins.
 ## What dejima says before it starts
 
 Some launches print a notice first: an environment variable that is no longer

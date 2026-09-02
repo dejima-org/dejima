@@ -675,16 +675,23 @@ _identity_fixture() {
 @test "--harness changes what the session is actually told, not just the printed config" {
     # The flag has to reach the composed briefing, or it would select a harness
     # for the container while the session was briefed about a different one.
-    # Cline's fragment names its own resume command, which Claude Code's does
-    # not, so the two are distinguishable.
+    # What distinguishes them is what each says about resuming: Claude Code
+    # offers a command, Cline rules it out. Checked in both directions, so a
+    # briefing that somehow carried both would not pass either.
     write_config '[core]' 'harness = claude-code' 'forge = none' 'workflow = local-only' \
                  '[harness.cline]' 'model = m'
     run "$REPO_ROOT/bin/dejima" --print-briefing
-    [[ "$output" != *"CLINE_DATA_DIR"* ]] || { echo "default briefed as cline"; return 1; }
+    [[ "$output" == *"claude --resume"* ]] \
+        || { echo "the default is not briefed as claude-code: $output"; return 1; }
+    [[ "$output" != *"cannot be continued outside dejima"* ]] \
+        || { echo "default briefed as cline"; return 1; }
+
     run "$REPO_ROOT/bin/dejima" --harness cline --print-briefing
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"CLINE_DATA_DIR"* ]] \
+    [[ "$output" == *"cannot be continued outside dejima"* ]] \
         || { echo "the briefing is still the default harness's: $output"; return 1; }
+    [[ "$output" != *"claude --resume"* ]] \
+        || { echo "the cline briefing still offers Claude Code's resume: $output"; return 1; }
 }
 
 @test "--print-config refuses an invalid config rather than printing defaults" {

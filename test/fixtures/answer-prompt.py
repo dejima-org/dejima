@@ -29,7 +29,12 @@ MARKER = "[s/a/o/r]"
 # launch fixture that sets [core] ssh_key raises it - so it is answered
 # automatically rather than costing every caller an extra argument.
 AMBIENT = "Press Enter to continue"
-TIMEOUT = 60.0
+# An IDLE timeout: how long to wait with no output before giving up. Generous
+# because the thing it guards against is a command that never finishes, and
+# any finite bound catches that - while a tight one just times the machine.
+# Sixty seconds was enough on an idle box and not enough under the full gate,
+# where every suite runs at once (#295).
+TIMEOUT = 240.0
 
 
 def main():
