@@ -7815,12 +7815,48 @@ _cline_providers_json() {
     done
 }
 
+@test "cline's global rules reach the one directory it reads, from both places" {
+    # cline loads global rules from Documents/Cline/Rules and nowhere else -
+    # ~/.agents/rules reads like its companion and is not read, checked by
+    # planting a file in each and asking `cline config` which it had. So
+    # ~/.agents/rules is supported by staging INTO the directory that is read.
+    local h staged
+    h="$(mktemp -d)"
+    mkdir -p "$h/.agents/rules" "$h/Documents/Cline/Rules"
+    printf 'a\n' > "$h/.agents/rules/aa-only-in-agents.md"
+    printf 'b\n' > "$h/Documents/Cline/Rules/bb-only-in-docs.md"
+    printf 'from-agents\n' > "$h/.agents/rules/cc-in-both.md"
+    printf 'from-docs\n'   > "$h/Documents/Cline/Rules/cc-in-both.md"
+    printf 'host\n' > "$h/.agents/rules/00-dejima.md"
+    printf '{}\n' > "$h/.agents/rules/dd-not-a-rule.json"
+    staged="$(_declared_for_home "$h" cline harness_staged_config_load DEJIMA_STAGED_CONFIG)"
+
+    local f
+    for f in aa-only-in-agents bb-only-in-docs; do
+        grep -q "Documents/Cline/Rules/$f.md" <<< "$staged" \
+            || { echo "$f did not reach the rules directory: $staged"; rm -rf "$h"; return 1; }
+    done
+    # One entry for a name in both, or it is two bind mounts at one container
+    # path. Documents wins: it is cline's own location for this.
+    [ "$(grep -c "Documents/Cline/Rules/cc-in-both.md" <<< "$staged")" -eq 1 ] \
+        || { echo "a colliding name was staged twice: $staged"; rm -rf "$h"; return 1; }
+    grep -q "$h/Documents/Cline/Rules/cc-in-both.md" <<< "$staged" \
+        || { echo "the .agents copy won the collision: $staged"; rm -rf "$h"; return 1; }
+    # dejima's briefing wins its own name, and entrypoint.sh writes it after
+    # the staged files - so staging a host file it overwrites is only noise.
+    grep -q "00-dejima.md" <<< "$staged" \
+        && { echo "a host 00-dejima.md was staged: $staged"; rm -rf "$h"; return 1; }
+    # Only what cline reads out of a rules directory.
+    grep -q "dd-not-a-rule.json" <<< "$staged" \
+        && { echo "a non-rule file was staged: $staged"; rm -rf "$h"; return 1; }
+    rm -rf "$h"
+}
+
 @test "cline's rules directory under ~/.agents is deliberately not mounted" {
-    # It reads like the obvious companion to ~/.agents/skills, and cline does
-    # not load it: planting a file there and one in ~/Documents/Cline/Rules
-    # and asking `cline config` which it had returned only the second.
-    # Mounting a directory the harness never reads is a promise dejima cannot
-    # keep, so its absence is the assertion.
+    # Not mounted where it sits, because cline does not read it there - it is
+    # staged into Documents/Cline/Rules instead, which the test above covers.
+    # A mount here would put the operator's rules somewhere nothing loads
+    # them, which looks like support and is not.
     local dirs
     dirs="$(_declared_for cline harness_config_dirs_load DEJIMA_CONFIG_DIRS)"
     grep -q "^/h/.agents/rules"$'\t' <<< "$dirs" \

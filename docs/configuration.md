@@ -427,6 +427,8 @@ reach your machine.
 | `~/.agents/skills/` | read-only mount | skills are instructions the agent follows |
 | `~/.agents/hooks/`, `~/.cline/hooks/` | read-only mount | hooks are programs cline runs |
 | `~/.agents/AGENTS.md` | read-only copy | instructions; a copy also survives it being a symlink into a dotfiles checkout |
+| `~/.agents/rules/*.md`, `*.txt` | read-only copy, into `Documents/Cline/Rules/` | see below |
+| `~/Documents/Cline/Rules/*.md`, `*.txt` | read-only copy | the location cline actually reads |
 | `~/.cline/settings.json`, `~/.cline/cline_mcp_settings.json` | writable copy, discarded | cline rewrites both as it runs |
 | `~/.cline/data/` | this project's own state directory | see above |
 
@@ -441,11 +443,21 @@ The read-only directories are scanned for symlinks, so a `skills/` that is a
 link into a dotfiles checkout brings its target too. dejima refuses a target
 that overlaps one of its own guarded stores.
 
-**`~/.agents/rules/` is deliberately not mounted.** It reads like the obvious
-companion to `~/.agents/skills/`, and cline does not load it: a file planted
-there does not appear in `cline config`, while one in `~/Documents/Cline/Rules`
-does. Mounting a directory the harness never reads would be a promise dejima
-cannot keep.
+**Global rules come from two places and land in one.** cline loads them from
+`~/Documents/Cline/Rules` and nowhere else - `~/.agents/rules` reads like the
+obvious companion to `~/.agents/skills` and is not loaded, which you can see
+by planting a file in each and opening `cline config`. So dejima copies the
+files from *both* host locations into the one directory cline reads, rather
+than mounting `~/.agents/rules` where nothing would look at it.
+
+They are copied file by file rather than mounted as a directory, because
+dejima writes its own briefing into that same directory and a read-only mount
+over it would leave nowhere to put it.
+
+Two collisions have fixed answers. A name present in **both** host locations
+is taken from `Documents/Cline/Rules`, since that is cline's own location for
+rules and where it writes when you edit them through cline. A host file named
+`00-dejima.md` is skipped: that is the briefing's name, and dejima's wins.
 ## What dejima says before it starts
 
 Some launches print a notice first: an environment variable that is no longer

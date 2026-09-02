@@ -367,6 +367,42 @@ harness_config_dirs() {
 # rather than as a link the host can still swap.
 harness_staged_config() {
     emit_staged_config "$HOME/.agents/AGENTS.md" ".agents/AGENTS.md"
+
+    # Global rules, from both host locations into the one directory cline
+    # actually reads.
+    #
+    # cline loads global rules from Documents/Cline/Rules and nowhere else -
+    # ~/.agents/rules reads like its companion and is not read, checked by
+    # planting a file in each and asking `cline config` which it had. So
+    # ~/.agents/rules is supported by staging its files INTO the directory
+    # that is read, rather than by mounting it where it sits and having
+    # nothing load it.
+    #
+    # File by file rather than as a directory mount, because dejima writes its
+    # own briefing into that same directory: a read-only mount over it would
+    # leave nowhere to put the briefing.
+    local d f base briefing seen=" "
+    # The briefing's own name, from the manifest rather than repeated here.
+    # dejima wins that collision, and entrypoint.sh already delivers it after
+    # the staged files - so staging a host file it is about to overwrite would
+    # only add a mount nobody reads.
+    briefing="$(basename "$(manifest_get harness cline briefing_path)")"
+    # Documents first, so a name present in both wins there: it is cline's own
+    # location for this, and where an operator editing rules through cline is
+    # writing. Two sources staged to one destination would otherwise be two
+    # bind mounts at the same container path.
+    for d in "$HOME/Documents/Cline/Rules" "$HOME/.agents/rules"; do
+        [ -d "$d" ] || continue
+        # .md and .txt are what cline reads out of a rules directory.
+        for f in "$d"/*.md "$d"/*.txt; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            [ "$base" = "$briefing" ] && continue
+            case "$seen" in *" $base "*) continue ;; esac
+            seen="$seen$base "
+            emit_staged_config "$f" "Documents/Cline/Rules/$base"
+        done
+    done
 }
 
 # Writable copies, discarded with the container.
