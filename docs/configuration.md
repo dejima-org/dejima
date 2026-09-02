@@ -808,6 +808,15 @@ dejima-share adopt           # move files left loose in share_dir into this proj
 launching. That is what makes the inbound direction work without a mount that
 every project can read.
 
+**From another machine,** `sshfs` puts a project's share in your own file
+manager over the SSH access you already have. Read
+[Mounting the box's files](remote-access.md#mounting-the-boxs-files) before
+setting that up: every byte and every filename in there was written by a
+sandboxed session, and a desktop that mounts the directory indexes,
+thumbnails and previews what it finds without waiting to be asked. Nothing
+dejima runs is in that path, so the sanitising it does for its own output does
+not reach there.
+
 Treat it as a handoff point, not as general-purpose storage. If your own
 project instructions tell agents to write somewhere at a fixed host path -
 design docs, scratch notes, anything meant to outlive the session but stay out
