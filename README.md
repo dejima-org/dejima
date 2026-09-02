@@ -45,18 +45,18 @@ starts.
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
   list does not connect, and the agent is told so.
-- **Credentials that stay on the host.** Your Anthropic OAuth credential
-  never enters the container: a host-side proxy holds it and the container
-  gets a placeholder. Your SSH key doesn't either; the container sees an
-  agent socket, never the key.
+- **Credentials that stay on the host.** Your model credential never enters
+  the container, whichever backend you selected: a host-side proxy holds it
+  and injects it per request, and the container gets a placeholder. Your SSH
+  key doesn't either; the container sees an agent socket, never the key.
 - **Per-project declaration and approval.** A project declares the domains
   and dependencies it needs in `.dejima/`. Declaring is not granting: the
   approval is a separate decision you make on the host, and the approval
   store is never mounted where a session could reach it.
-- **One project's session cannot reach another's.** `~/.claude` is not
-  mounted whole. A session gets its own project's transcripts, memory and edit
-  history and nothing else, so it cannot read what you did elsewhere or write
-  into another project's memory.
+- **One project's session cannot reach another's.** Your harness's state
+  directory is not mounted whole. A session gets its own project's
+  transcripts, memory and edit history and nothing else, so it cannot read
+  what you did elsewhere or write into another project's memory.
 - **CI hardening, because push access is code execution elsewhere.** A session
   opens a pull request, the workflow fires, and your runner executes that
   commit before you've read a line of it. The container bounds what a session
@@ -64,12 +64,17 @@ starts.
   [docs/ci.md](docs/ci.md) for what hardening a runner takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
   for a tool that does it.
-- **Guard rails inside the session.** Hooks refuse obviously destructive
-  commands, pushes to anywhere but the allowed remote, and merging a PR from
-  inside the sandbox. These are fast-fail guards against an overeager agent,
-  not a boundary against a hostile one: the container is the boundary.
+- **Guard rails inside the session.** Pushes to anywhere but the allowed
+  remote, and merging a PR from inside the sandbox, are refused whichever
+  harness is selected - they shadow `git` and the forge CLI on `PATH`. Refusing
+  an obviously destructive command needs a hook the harness can host, so a
+  harness without one goes without it, and the launch says so rather than
+  leaving you to assume. All of these are fast-fail guards against an
+  overeager agent, not a boundary against a hostile one: the container is the
+  boundary.
 - **An exit-time audit** of the host surfaces a session could have written to,
-  so a change to your git config or `~/.claude` does not go unnoticed.
+  so a change to your git config, to the workspace's own agent configuration,
+  or to a file your harness runs on the host does not go unnoticed.
 
 **What it gives an agent to work with:**
 
@@ -83,9 +88,10 @@ starts.
   name - and dejima loads it alongside a briefing on where the session is and
   why the limits are there. An agent that knows it is in a sandbox asks for a
   domain rather than working around the firewall.
-- **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins and
-  git identity carry over; uid, home directory and project path match on both
-  sides, so a session's transcript is readable from the host afterward.
+- **Config parity with your host.** Your harness's own global instructions,
+  settings, hooks, skills, rules and plugins carry over, and so does your git
+  identity; uid, home directory and project path match on both sides, so a
+  session's transcript is readable from the host afterward.
 - **Remote access, opt-in and off by default.** Attach to a live session from
   a terminal or a browser, with a push notification when it wants you.
 - **What a long session worked out, kept.** Each time the agent compacts, the
@@ -296,8 +302,8 @@ works if the host has a credential to hold. Authenticating from inside is not
 the fix: the container is where the credential deliberately never goes, and the
 egress allowlist is not built around completing a sign-in flow there. The same
 applies to the account state your harness keeps alongside the credential, read
-fresh from the host at every launch (see "Throwaway ~/.claude.json" in
-[docs/security.md](docs/security.md)).
+fresh from the host at every launch (Claude Code's is "Throwaway
+~/.claude.json" in [docs/security.md](docs/security.md)).
 
 So: run your harness once on the host, sign in, confirm it answers, and then
 point dejima at a project. When a credential expires, refresh it the same way,
@@ -390,9 +396,11 @@ equivalent for it.
 
 The allowlist covers what the sandbox needs to function - DNS, the Docker host,
 GitHub on port 443 for read access whichever forge is selected, whatever the
-selected forge needs, the harness's own update and model endpoints, and
-`api.anthropic.com` when the credential proxy is off - plus whatever a project
-has declared and had approved.
+selected forge needs, the harness's own update endpoints, and the selected
+backend's API endpoint when the credential proxy is off - plus whatever a
+project has declared and had approved. With the proxy on that last name is
+deliberately absent: the session reaches the API through the in-container
+terminator rather than by resolving it.
 
 DNS is allowlisted as well as IPs: a local resolver only forwards lookups for
 names already on that same allowlist, so an unapproved domain does not resolve
@@ -441,17 +449,22 @@ exact command to hand you.
 tarball dependencies, the symlink refusal that protects the approval store,
 and the complete `dejima-allow`/`dejima-dep`/`dejima-project` reference.
 
-## Config parity with your host Claude Code setup
+## Config parity with your host harness setup
 
-Global `CLAUDE.md`, settings, hooks, skills, plugins and git identity all carry
-over, and your existing login stays effective, with the credential itself never
-entering the container. `~/.claude` is not shared as a whole - only an
-enumerated subset does, so a session transcript is readable from the host
-afterward but a credential or cache isn't. The container's own user matches
-yours exactly, so `$HOME`-relative paths resolve the same on both sides.
+Your harness's own global instructions, settings, hooks, skills, rules and
+plugins carry over, along with your git identity, and your existing login stays
+effective with the credential itself never entering the container. The
+harness's config directory is not shared as a whole - only an enumerated subset
+is, so a session transcript is readable from the host afterward but a
+credential or cache isn't. The container's own user matches yours exactly, so
+`$HOME`-relative paths resolve the same on both sides.
+
+Which files those are is each harness's own question, answered in its plugin:
+`~/.claude` for Claude Code, `~/.agents` and `~/.cline` for Cline.
 
 **→ [docs/configuration.md](docs/configuration.md)** - exactly what carries
-over and what doesn't, and why single-file mounts couldn't be trusted here.
+over and what doesn't, per harness, and why single-file mounts couldn't be
+trusted here.
 
 ## Shared scratch space
 
@@ -528,9 +541,9 @@ what a forwarded personal agent changes, and the persistent alternative.
 
 Before each run, dejima snapshots the host surfaces a session could write to
 and persist through: `.git/config` keys that run a command on the next `git`,
-`.git/hooks/`, the workspace's `.claude/`, `.mcp.json`, `.envrc`, and writes
-under `~/.claude/projects`. After the container exits it diffs them and tells
-you what changed.
+`.git/hooks/`, the workspace's `.claude/` and `.vscode/`, `.mcp.json`, `.envrc`,
+and any host-side file the selected harness declares as one it runs by itself.
+After the container exits it diffs them and tells you what changed.
 
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in

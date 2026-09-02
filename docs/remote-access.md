@@ -798,13 +798,20 @@ what the outer proxy sends.
 
 ## Notifications
 
-`dejima` registers `hooks/dejima-notify.sh` as a `Stop` hook for a
-remote-enabled session, into the throwaway settings override layer it already
-generates - never into your real `~/.claude/settings.json`. Your own hooks
-keep running alongside it, since Claude Code merges hooks across layers rather
-than replacing. The layer is mounted read-only, so a session cannot
-unregister its own hook. The hook writes one empty file named `done` into
-this run's marker directory: no content, no stdin, no network.
+**Only for a harness that declares the `notify` guard**, because a
+notification needs a session-lifecycle signal to hang off and not every
+harness has one. Claude Code does; Cline does not, and a remote-enabled Cline
+session gets attach and the web terminal but no push. The launch says which
+guards a harness is going without, so that is visible rather than a
+notification that silently never arrives.
+
+Where it is declared, `dejima` registers `hooks/dejima-notify.sh` as a `Stop`
+hook for a remote-enabled session, into the throwaway settings override layer
+it already generates - never into your real `~/.claude/settings.json`. Your
+own hooks keep running alongside it, since Claude Code merges hooks across
+layers rather than replacing. The layer is mounted read-only, so a session
+cannot unregister its own hook. The hook writes one empty file named `done`
+into this run's marker directory: no content, no stdin, no network.
 
 **One push per stop, and not a second one a minute later.** The hook and the
 watcher both understand a `waiting` event as well, and Claude Code's

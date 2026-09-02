@@ -38,7 +38,7 @@ config file behind them.
 | `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
 | `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
 | `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[harness.cline] backend` | *(none - must be set)* | as above, and the risk is concrete here: Cline supports many backends and has one of its own. Nothing is written for you either, because what this harness talked to before the key existed depends on `base_url`. Also settable per launch with `--backend` |
+| `[harness.cline] backend` | *(none - must be set)* | as above, and the risk is concrete here: Cline supports many backends and has one of its own. Nothing is written into your config for you either, unlike Claude Code: there is no one endpoint every existing Cline session was already using, so any value dejima recorded would be a guess. Also settable per launch with `--backend` |
 | `[backend.anthropic] credential_file` | `~/.claude/.credentials.json` | the host file this backend's credential is read from, per request. A path, never a secret, and never mounted into the container |
 | `[backend.self-hosted] base_url` | *(none - must be set)* | where you serve the model. A loopback or RFC 1918 address, or a host you have allowlisted - it has to be an endpoint needing no credential, since there is none to withhold. On the backend rather than the harness, so a local endpoint stays configured while a hosted API is selected |
 | `[backend.anthropic-api-key] credential_file` | `~/.claude.json` | where your Anthropic API key is. Defaulted to where Claude Code's console login puts it, so the common case needs nothing set; point it at a file of your own if you hold the key yourself. Read host-side per request and never mounted, and the key is stripped from the copy of `~/.claude.json` dejima stages |
@@ -340,7 +340,9 @@ you don't have one.
 
 ### Cline
 
-Almost nothing carries over, and that is the design rather than a gap.
+Your own configuration carries over the same way Claude Code's does - the
+table under [What comes in from your host](#what-comes-in-from-your-host) is
+the list. Your *sessions* do not, and that is the design rather than a gap.
 
 Cline keeps one `sessions.db` indexing every session it has ever run, with
 the project a session belonged to as a field inside the record rather than a
@@ -351,20 +353,32 @@ under `[harness.cline] state_dir` (default `~/.local/share/dejima/cline`),
 mounted at `~/.cline/data` in the container. Sessions persist across runs of
 the same project and are invisible to every other project.
 
-Because that directory is dejima's rather than yours, resuming on the host
-needs `CLINE_DATA_DIR` set to it. The exact command is at the end of every
-session's briefing.
+Because that directory is dejima's rather than yours, resuming on the host is
+not a supported path - see
+[Sessions, and where they live](#sessions-and-where-they-live) below. Relaunch
+dejima on the same project instead, which is what the briefing tells the
+session to offer.
 
-The model configuration is written fresh by dejima at each launch and is
-not yours either. Two shapes are supported:
+The model configuration is written fresh by dejima at each launch and is not
+yours either. Where the model is comes from `[harness.cline] backend` and
+nowhere else, so there is no second setting for it to disagree with, and two
+shapes are supported:
 
-- **`base_url` unset** - Anthropic, reached through dejima's own credential
-  proxy exactly as Claude Code is. What is written into the container is the
-  placeholder `sandbox-credential-proxy-placeholder`; the real credential
-  stays on the host.
-- **`base_url` set to a model you serve yourself** - either a loopback or
-  RFC 1918 address, or a host you have allowlisted with `dejima-allow`.
+- **A backend the proxy serves** (`anthropic`, `anthropic-api-key`,
+  `openrouter`) - reached through dejima's own credential proxy exactly as
+  Claude Code is. What is written into the container is the placeholder
+  `sandbox-credential-proxy-placeholder` and the endpoint's real hostname; the
+  credential stays on the host. Which of Cline's own provider types dejima
+  writes comes from the backend's `api_style`: its native Anthropic client for
+  one, its OpenAI-compatible client for the other.
+- **A backend with no credential** (`self-hosted`, carrying its own
+  `[backend.self-hosted] base_url`) - a model you serve, at either a loopback
+  or RFC 1918 address or a host you have allowlisted with `dejima-allow`.
   Nothing needs a credential, so there is nothing to withhold.
+
+Keeping the address on the backend rather than on the harness is what lets you
+have a local model and a hosted API both configured and switch between them by
+changing one word.
 
 A name qualifies through the allowlist rather than through how it is spelled,
 because that is the same store deciding whether the container can reach the
@@ -373,13 +387,13 @@ connected to anyway. A model server on your own network normally has a name,
 so requiring a literal address would have made this path unusable for the
 ordinary case.
 
-Anything else is refused at launch - a hosted backend's API key would have to
-go inside the container, and dejima has no proxy that could hold one back on
-its behalf. Note what the check is *not* doing: dejima writes a placeholder
-into the container on this path whatever the endpoint is, so no real
-credential enters it either way. What the check decides is whether the
-configuration can work at all, which is worth saying at launch rather than as
-an auth error three layers down. See
+Anything else is refused at launch - a hosted API pointed at through a
+no-credential backend would want its key inside the container, and dejima has
+no proxy that could hold one back on its behalf. Note what the check is *not*
+doing: dejima writes a placeholder into the container on the proxied path
+whatever the endpoint is, so no real credential enters it either way. What the
+check decides is whether the configuration can work at all, which is worth
+saying at launch rather than as an auth error three layers down. See
 [development.md](development.md#worked-example-cline).
 
 If the endpoint serves a model Cline has no catalogue entry for - which is every
@@ -910,14 +924,21 @@ session can run.
 
 ### The session briefing
 
-A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
-reminder when `DEJIMA` is set: the session is running in a
-disposable, firewalled container and should stay within the task at hand -
-if something genuinely needs to break out (broader network, host changes,
-GUI/hardware), stop and ask rather than trying to work around the firewall,
-since the same session can be resumed unrestricted on the host via
-`claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
-(`PreToolUse`) also applies here, since `~/.claude/hooks` is mounted in.
+Every session is told where it is running: a disposable, firewalled container
+it should stay within, and if something genuinely needs to break out - broader
+network, host changes, GUI/hardware - it should stop and ask rather than work
+around the firewall. Whether the session can be resumed unrestricted on the
+host afterwards is the harness's own answer, and each harness's briefing
+fragment gives it: Claude Code's names `claude --resume`, Cline's says plainly
+that its sessions do not leave the sandbox.
+
+*How* the briefing reaches a session is per harness too, because they do not
+agree on a mechanism. Claude Code takes it as a system prompt through the flag
+its manifest names; Cline takes no such flag and registers no hook, so
+`entrypoint.sh` renders it into a file the harness reads, root-owned and
+read-only. A harness doing neither gets it through a `SessionStart` hook. What
+the briefing *says* is none of theirs - one script composes it for all three
+routes. See [development.md](development.md).
 
 When GitHub is a push destination this session - `--allow-github-push`, or
 `forge = github` under a pushing workflow - the briefing also tells the
