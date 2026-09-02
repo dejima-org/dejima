@@ -1672,8 +1672,6 @@ If a task genuinely needs something else the sandbox can't provide -
 broader network access than a domain or two, host-level or system changes,
 GUI/hardware access - stop and explain clearly to the user what you need
 and why, instead of trying to work around the firewall or sandbox yourself.
-They can continue this exact session outside the container by running on
-the host:
 BRIEFING_EOF
 }
 
@@ -2027,9 +2025,11 @@ briefing_compose() {
     # The harness fragment closes the briefing: it supplies both the resume
     # command closing_a has just promised and the sentence about where the
     # session history it resumes from actually lives. Both are the harness's
-    # own facts - Claude Code resumes from a bind-mounted ~/.claude, Cline
-    # from a per-project state directory named in the command itself - and
-    # core stating either one meant stating Claude Code's.
+    # own facts, INCLUDING whether there is anything to say. Claude Code
+    # resumes from a bind-mounted ~/.claude and says so; Cline cannot be
+    # resumed outside dejima at all, and a core sentence promising it could
+    # was Claude Code's fact stated as everyone's - which left a Cline session
+    # able to send its operator somewhere that does not work.
     #
     # $requirements and $project_doc (the missing-dependency report and
     # .dejima.md) stay hook-computed and hook-appended after this - they read

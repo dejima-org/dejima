@@ -7894,3 +7894,40 @@ _cline_providers_json() {
         && { echo "~/.cline is mounted read-write wholesale: $dirs"; return 1; }
     return 0
 }
+
+@test "only a harness that can be resumed outside dejima says so" {
+    # The sentence promising it lived in the core briefing, where it was
+    # Claude Code's fact stated as everyone's - and a Cline session reading it
+    # would send its operator somewhere that does not work. Core says nothing
+    # about resuming now; each harness fragment says what is true of it.
+    local core
+    core="$(bash -c 'source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"; _briefing_core_closing_a')"
+    grep -qi 'outside the container' <<< "$core" \
+        && { echo "core still promises a resume: $core"; return 1; }
+
+    # claude-code can, and offers the command.
+    local cc
+    cc="$(bash -c 'source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        WORKSPACE_DIR=/w briefing_compose none local-only claude-code')"
+    grep -qi 'continue this exact session outside the container' <<< "$cc" \
+        || { echo "claude-code no longer offers a resume"; return 1; }
+    grep -q 'claude --resume' <<< "$cc" \
+        || { echo "claude-code's resume command is gone"; return 1; }
+
+    # cline cannot, and says so rather than staying silent: an agent told
+    # nothing will offer it anyway.
+    local cl
+    cl="$(bash -c 'source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        WORKSPACE_DIR=/w briefing_compose none local-only cline')"
+    grep -qi 'cannot be continued outside dejima' <<< "$cl" \
+        || { echo "cline's briefing does not rule out resuming outside: $cl"; return 1; }
+    grep -qi 'do not offer that' <<< "$cl" \
+        || { echo "cline's briefing does not tell the agent not to offer it"; return 1; }
+    # And it does say what DOES work, or the agent has nothing to tell anyone.
+    grep -qi 'launching dejima again' <<< "$cl" \
+        || { echo "cline's briefing does not say what continuing looks like"; return 1; }
+    # No stale instructions for driving cline on the host.
+    grep -q 'CLINE_DATA_DIR' <<< "$cl" \
+        && { echo "cline's briefing still tells the operator to run cline on the host"; return 1; }
+    return 0
+}

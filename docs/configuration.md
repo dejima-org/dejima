@@ -416,6 +416,32 @@ approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
 
 
+#### Sessions, and where they live
+
+This project's Cline state - sessions, transcripts, tasks - is kept on the host
+in `~/.local/share/dejima/cline/<project>` and mounted at `~/.cline/data`. It
+survives the container being replaced, so **launching dejima again on the same
+project picks up where the last session left off.**
+
+A directory per project rather than one shared: Cline indexes every session it
+has ever run in a single database, so sharing one would put every project's
+history in every project's context - the same boundary `~/.claude/projects`
+gets, for the same reason.
+
+**Cline sessions are not importable or exportable.** A session started by
+running `cline` on your own machine is in `~/.cline/data` and is not visible
+inside dejima; a session started inside dejima is in the per-project directory
+and is not offered back to a host-side Cline. There is no import, no export,
+and no merge - see
+[#301](https://gitbox.branderson.io/dejima/dejima/issues/301) for why that was
+looked at and not built.
+
+The session briefing tells a Cline agent this, so it will not offer to hand
+you a session to resume outside the sandbox. Claude Code can be resumed on the
+host and its briefing says so; the claim lives in each harness's own briefing
+fragment rather than in the shared preamble, because only one of them can make
+it.
+
 #### What comes in from your host
 
 The same shape as Claude Code's, and for the same reason: your own
