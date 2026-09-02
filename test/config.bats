@@ -2388,38 +2388,47 @@ _epitaph_three() {
        "$REPO_ROOT/backends" "$proot/"
     sed -i 's/^guards .*/guards          = bash-deny/' \
         "$proot/harnesses/claude-code/harness.conf"
-    run_install DEJIMA_PROVIDER_ROOT="$proot"
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    run jq -r '[.hooks.PreToolUse[]?.hooks[]?.command] | join(" ")' \
-        "$CONFIG_DIR/.claude/settings.json"
-    [[ "$output" == *"deny-dangerous-bash.sh"* ]] || { echo "$output"; return 1; }
-    [[ "$output" != *"git-push-guard.sh"* ]] \
-        || { echo "registered an undeclared guard: $output"; return 1; }
-    [[ "$output" != *"merge-guard.sh"* ]] \
-        || { echo "registered an undeclared guard: $output"; return 1; }
-    rm -rf "$proot"
+    # The gating moved to the settings overlay with the registration itself,
+    # so this asks the overlay what it registered rather than the host.
+    local ov; ov="$(mktemp)"
+    DEJIMA_PROVIDER_ROOT="$proot" HOME="$CONFIG_DIR" bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        DEJIMA_HARNESS_NAME=claude-code
+        harness_plugin_load claude-code
+        harness_hook harness_prepare_config "$1"
+    ' _ "$ov" >/dev/null 2>&1
+    local cmds; cmds="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command] | join(" ")' "$ov")"
+    [[ "$cmds" == *"deny-dangerous-bash.sh"* ]] \
+        || { echo "the declared guard was not registered: $cmds"; rm -rf "$proot" "$ov"; return 1; }
+    [[ "$cmds" != *"git-push-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $cmds"; rm -rf "$proot" "$ov"; return 1; }
+    [[ "$cmds" != *"merge-guard.sh"* ]] \
+        || { echo "registered an undeclared guard: $cmds"; rm -rf "$proot" "$ov"; return 1; }
+    rm -rf "$proot" "$ov"
 }
 
-@test "install.sh writes only the host-facing hook to the operator's config" {
-    # The shipped harness, unmodified. Every guard still reaches a session -
-    # through the sandbox's own settings overlay - and exactly one of them is
-    # written to a config that is not dejima's, because that one is meant to
-    # apply to the operator's unsandboxed sessions as well.
+@test "install.sh writes nothing to the operator's harness config" {
+    # The shipped harness, unmodified. Every guard reaches a session through
+    # the sandbox's own settings overlay, so installing dejima changes nothing
+    # about how the harness behaves outside a sandbox - including the one hook
+    # that used to be registered there deliberately.
     run_install
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    local cmds
-    cmds="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command,
-                    .hooks.SessionStart[]?.hooks[]?.command] | join(" ")' \
-        "$CONFIG_DIR/.claude/settings.json")"
-    [[ "$cmds" == *"deny-dangerous-bash.sh"* ]] \
-        || { echo "the host-facing hook is not registered: $cmds"; return 1; }
     local h
-    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
-        [[ "$cmds" != *"$h"* ]] \
-            || { echo "$h was registered on the host: $cmds"; return 1; }
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh \
+             deny-dangerous-bash.sh; do
         [ ! -e "$CONFIG_DIR/.claude/hooks/$h" ] \
             || { echo "$h was linked into the operator's hooks directory"; return 1; }
     done
+    # And no registration either. The file may not exist at all, which is the
+    # strongest form of this - so its absence counts as passing.
+    if [ -f "$CONFIG_DIR/.claude/settings.json" ]; then
+        local cmds
+        cmds="$(jq -r '[.hooks[]?[]?.hooks[]?.command] | join(" ")' \
+            "$CONFIG_DIR/.claude/settings.json")"
+        [ -z "$cmds" ] || { echo "install.sh registered hooks on the host: $cmds"; return 1; }
+    fi
 }
 
 @test "install.sh registers no guards when no harness is selected" {

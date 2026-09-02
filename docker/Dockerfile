@@ -293,9 +293,7 @@ COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/dejima-briefing-rende
 # make the sandbox work. Baked rather than mounted from the checkout because a
 # guard whose script can change under a running session is not one.
 #
-# deny-dangerous-bash.sh is absent on purpose: it is the one hook meant to
-# apply to the operator's own host sessions, so install.sh still puts it there
-# and this does not duplicate it.
+COPY hooks/deny-dangerous-bash.sh /usr/local/lib/dejima/hooks/deny-dangerous-bash.sh
 COPY hooks/sandbox-context.sh /usr/local/lib/dejima/hooks/sandbox-context.sh
 COPY hooks/git-push-guard.sh /usr/local/lib/dejima/hooks/git-push-guard.sh
 COPY hooks/merge-guard.sh /usr/local/lib/dejima/hooks/merge-guard.sh

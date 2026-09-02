@@ -2799,16 +2799,15 @@ nginx_blocks() {
         [ -x "$FAKE_HOME/.local/bin/$b" ]
     done
 
-    # Positive first: an absence assertion against a settings.json that did
-    # not get written would pass on its own. deny-dangerous-bash.sh is the one
-    # hook install.sh still registers there, so it is what proves the file was
-    # written at all.
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("deny-dangerous-bash.sh"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -eq 0 ]
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -ne 0 ]
+    # install.sh registers nothing in the harness's config now, so there is
+    # nothing positive to check there - the settings file may not exist at
+    # all. The positive assertion that matters moved above: the notify hook IS
+    # registered, at its baked path, in the sandbox's own overlay.
+    if [ -f "$FAKE_HOME/.claude/settings.json" ]; then
+        run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
+            "$FAKE_HOME/.claude/settings.json"
+        [ "$status" -ne 0 ]
+    fi
 
     # Nothing was enabled, and nothing under the runtime dir was created: the
     # feature stays off until the operator sets [remote-access] enabled = on.

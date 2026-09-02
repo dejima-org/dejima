@@ -3337,18 +3337,16 @@ comment forge-cli issue comment"
     # Baked, so it is root-owned and outside anything the session can write -
     # the property the read-only ~/.claude/hooks mount used to provide.
     local h
-    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh \
+             deny-dangerous-bash.sh; do
         grep -q "COPY hooks/$h /usr/local/lib/dejima/hooks/$h" "$REPO_ROOT/docker/Dockerfile" \
             || { echo "$h is not baked into the image"; return 1; }
     done
-    # deny-dangerous-bash.sh is not, on purpose: it is the one hook meant to
-    # run on the operator's own host sessions, and install.sh still puts it
-    # there.
-    grep -q 'COPY hooks/deny-dangerous-bash.sh' "$REPO_ROOT/docker/Dockerfile" \
-        && { echo "the host-facing hook was baked in too"; return 1; }
-    grep -q 'harness_has_guard bash-deny && _register PreToolUse Bash deny-dangerous-bash.sh' \
-        "$REPO_ROOT/bin/harness/claude-code.sh" \
-        || { echo "deny-dangerous-bash.sh is no longer registered on the host"; return 1; }
+    # Every one of them, with nothing left registered on the host: the point
+    # is that installing dejima does not change how the harness behaves
+    # outside a sandbox, and one exception would undo that.
+    grep -q '_register PreToolUse' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        && { echo "something is still registered on the host"; return 1; }
     return 0
 }
 
@@ -3406,12 +3404,11 @@ registered_commands() {
     while read -r cmd; do
         [ "$(registered_commands "$home" | grep -cxF "$cmd")" -eq 1 ]
     done < <(registered_commands "$home")
-    # One: deny-dangerous-bash.sh, the only hook meant to run outside a
-    # sandbox. The rest are registered per launch into the settings overlay.
-    [ "$(registered_commands "$home" | wc -l)" -eq 1 ] \
+    # None. Every hook is registered per launch into the settings overlay, so
+    # a re-run after a git pull has nothing to duplicate - which is the
+    # strongest form of what this test was checking.
+    [ "$(registered_commands "$home" | wc -l)" -eq 0 ] \
         || { echo "host registrations: $(registered_commands "$home")"; return 1; }
-    [[ "$(registered_commands "$home")" == *"deny-dangerous-bash.sh"* ]] \
-        || { echo "the wrong hook is registered on the host"; return 1; }
 }
 
 @test "the push guard names no forge, and blocks everything when no host is allowed" {

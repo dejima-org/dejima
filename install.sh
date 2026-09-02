@@ -1,6 +1,9 @@
 #!/bin/bash
-# Idempotent installer for dejima. Registers the selected harness's guard
-# hooks wherever that harness reads them from, and puts
+# Idempotent installer for dejima. Writes NOTHING to the harness's own
+# configuration: every hook dejima uses is baked into the image and registered
+# per launch into a settings layer of dejima's own, so installing this does not
+# change how the harness behaves outside a sandbox. What it still does is take
+# back what older versions put there. It puts
 # bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
 # bin/dejima-audit, bin/dejima-share and the opt-in remote-access scripts on
 # PATH. Safe to re-run - every step is a no-op if already done, and every
@@ -219,10 +222,10 @@ else
     DEJIMA_HARNESS_NAME="$_harness"
     harness_plugin_load "$_harness"
     if declare -F harness_register_guards >/dev/null 2>&1; then
-        echo "Registering $_harness's guard hooks"
+        echo "Checking $_harness's host-side setup"
         harness_register_guards "$SCRIPT_DIR" "$BACKUP_DIR"
     else
-        echo "Harness '$_harness' installs no guard hooks."
+        echo "Harness '$_harness' needs nothing on the host."
         echo
     fi
 fi

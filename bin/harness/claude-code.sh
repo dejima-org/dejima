@@ -113,18 +113,16 @@ harness_state_mounts() {
 # what it can host (see `guards` in its manifest), and registering something
 # it did not declare would contradict the launch message that says so.
 harness_register_guards() {
-    local repo="$1" backup="$2" settings="$HOME/.claude/settings.json"
+    local repo="$1" settings="$HOME/.claude/settings.json"
 
-    # Still created: deny-dangerous-bash.sh goes here, and Claude Code reads
-    # the directory whether or not dejima put anything in it.
-    mkdir -p "$HOME/.claude/hooks"
-
-    # sandbox-context.sh, git-push-guard.sh, merge-guard.sh and
-    # dejima-notify.sh are NOT linked here any more. They are baked into the
-    # image and registered into the sandbox's own --settings overlay, so they
-    # reach a session without anything being written to the operator's Claude
-    # Code config. $backup is unused for the same reason: nothing of theirs is
-    # being moved aside.
+    # Registers nothing. Every hook dejima uses is baked into the image and
+    # registered per launch into the sandbox's own --settings overlay, so
+    # installing dejima writes nothing to the operator's Claude Code config.
+    #
+    # What is left is taking back what older versions of this function put
+    # there. The hook is kept rather than deleted because "what a harness
+    # needs on the host" is a real question a future one may answer
+    # differently; for Claude Code the answer is now nothing.
 
     # Symlink from before the gitea-merge-guard.sh -> merge-guard.sh rename
     # points at a hooks/ path that no longer exists. Only remove it if it is
@@ -136,34 +134,17 @@ harness_register_guards() {
     fi
 
 
-    # deny-dangerous-bash.sh is the one hook that is NOT sandbox-gated: it
-    # has no DEJIMA check, so it applies to the operator's own host sessions
-    # as well. That is deliberate, and it is why it may already be owned by
-    # another install (dotfiles, say) - only claim it if nothing else
-    # provides it, so this repo works standalone without clobbering an
-    # existing setup.
-    if harness_has_guard bash-deny; then
-        local deny_dest="$HOME/.claude/hooks/deny-dangerous-bash.sh"
-        if [ -e "$deny_dest" ] || [ -L "$deny_dest" ]; then
-            echo "Skipping: deny-dangerous-bash.sh already present at $deny_dest (leaving it as-is)"
-        else
-            echo "Linking: deny-dangerous-bash.sh ($repo/hooks/deny-dangerous-bash.sh -> $deny_dest)"
-            ln -s "$repo/hooks/deny-dangerous-bash.sh" "$deny_dest"
-        fi
-    fi
-    echo
 
-    if [ ! -f "$settings" ]; then
-        echo "Creating $settings"
-        echo '{}' > "$settings"
-    fi
+    # No settings.json is created here either: a file dejima writes nothing
+    # into is a file it has no business bringing into existence.
+    [ -f "$settings" ] || return 0
 
     # The registration that went with the symlink removed above. Two things
     # depend on it going: Claude Code reports a missing hook command on every
     # session start while it points at a path that no longer exists, and -
     # until the dedupe below stopped matching it - it also stood in for the
-    # registration it was renamed from, so `_register merge-guard.sh` skipped
-    # and the merge guard was registered nowhere at all. Dropped only when
+    # registration it was renamed from, so the merge guard's own registration
+    # was skipped and it was registered nowhere at all. Dropped only when
     # the path it names is gone, so an operator's own file at that name keeps
     # its registration, matching the symlink check above.
     if [ ! -e "$old_merge_guard" ] && jq -e --arg s "/gitea-merge-guard.sh" \
@@ -178,39 +159,13 @@ harness_register_guards() {
             "$settings" > "$stale_tmp" && mv "$stale_tmp" "$settings"
     fi
 
-    _register() {
-        local event="$1" matcher="$2" script_name="$3" description="$4"
-        # endswith on the leading slash, not test(): test() is an unanchored
-        # regex, so a hook whose name merely ends in another's - which is what
-        # a rename like gitea-merge-guard.sh -> merge-guard.sh produces - read
-        # as already registered, and the new hook was silently never added.
-        if jq -e --arg s "/$script_name" \
-            "[.hooks.${event}[]?.hooks[]?.command // empty] | any(endswith(\$s))" \
-            "$settings" >/dev/null 2>&1; then
-            echo "Skipping: $script_name already registered as a $event hook"
-            return
-        fi
-        echo "Registering $script_name as a $event hook in $settings ($description)"
-        local tmp
-        tmp=$(mktemp)
-        jq --arg matcher "$matcher" --arg cmd "\$HOME/.claude/hooks/$script_name" \
-            ".hooks.${event} = ((.hooks.${event} // []) + [{\"matcher\": \$matcher, \"hooks\": [{\"type\": \"command\", \"command\": \$cmd}]}])" \
-            "$settings" > "$tmp" && mv "$tmp" "$settings"
-    }
-
-    # Only the hook that is MEANT to apply to the operator's own sessions.
-    # The sandbox's own hooks are registered per launch into the --settings
-    # overlay instead (harness_prepare_config), so installing dejima no longer
-    # edits a config that is not dejima's to make the sandbox work.
-    harness_has_guard bash-deny && _register PreToolUse Bash deny-dangerous-bash.sh \
-        "blocks obviously destructive Bash commands"
-
     # An upgrade has to take back what an older install.sh put here, or the
     # claim above is only true of a fresh one. Removed by name and only when
     # the symlink points into THIS repo: an operator's own file at one of
     # these names is theirs.
     local moved dest
-    for moved in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+    for moved in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh \
+                 deny-dangerous-bash.sh; do
         dest="$HOME/.claude/hooks/$moved"
         if [ -L "$dest" ] && [ "$(readlink -f "$dest")" = "$(readlink -f "$repo/hooks/$moved")" ]; then
             echo "Removing: $moved from ~/.claude/hooks (the sandbox registers its own now)"
@@ -399,6 +354,11 @@ harness_prepare_config() {
     # staging a file that does not exist - so without this the session would
     # silently start without them. statusline.sh is deliberately NOT created:
     # an empty one would be staged executable and run as the status line.
+    # The directory too: install.sh no longer creates it, because it no longer
+    # writes anything into it - and on a host where Claude Code has never run
+    # there is nothing to write these beside. Without this the launch fails
+    # here, reporting an unreadable settings.json that was never created.
+    mkdir -p "$HOME/.claude" || return 1
     [ -f "$settings" ] || echo '{}' > "$settings"
     [ -f "$HOME/.claude/CLAUDE.md" ] || : > "$HOME/.claude/CLAUDE.md"
 
@@ -454,6 +414,7 @@ harness_prepare_config() {
     _register_overlay_hook SessionStart "startup|resume|clear|compact" sandbox-context.sh
     harness_has_guard push-guard  && _register_overlay_hook PreToolUse Bash git-push-guard.sh
     harness_has_guard merge-guard && _register_overlay_hook PreToolUse Bash merge-guard.sh
+    harness_has_guard bash-deny   && _register_overlay_hook PreToolUse Bash deny-dangerous-bash.sh
     return 0
 }
 
