@@ -5031,6 +5031,11 @@ EOF
     # Reached from the research agenda, which is what re-asks it.
     grep -q 'why-a-container-and-not-a-microvm' "$REPO_ROOT/docs/research-review.md" \
         || { echo "the standing question does not point at the written answer"; return 1; }
+    # And from the stack section of the README, which is where someone holding
+    # the question is standing when it occurs to them. An answer nobody finds
+    # gets asked as a question instead.
+    grep -q 'why-a-container-and-not-a-microvm' "$REPO_ROOT/README.md" \
+        || { echo "the README does not surface the answer where the question arises"; return 1; }
 }
 
 @test "the README lists the whole stack, so it is not a threat-model discovery" {

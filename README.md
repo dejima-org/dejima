@@ -145,6 +145,10 @@ what each one buys, what goes wrong without it, and where each one's boundary
 ends. None of them is required to run dejima; what they change is what the
 layer below the container costs, and whether anyone finds out.
 
+**→ [Why a container, and not a microVM?](docs/threat-model.md#why-a-container-and-not-a-microvm)** -
+the most common question about this design, and why the effort went into the
+layers below the container rather than into a harder one.
+
 ## Setup
 
 This repo only holds the tooling; no project lives here. Point it at a project
@@ -662,7 +666,7 @@ and how to run them.
 | --- | --- |
 | [responsible-use.md](docs/responsible-use.md) | How to use this without making things worse |
 | [security.md](docs/security.md) | Provider trust, the egress firewall, identity, and logging |
-| [threat-model.md](docs/threat-model.md) | What is assumed hostile, where each layer's compromise stops, and [why this is a container rather than a microVM](docs/threat-model.md#why-a-container-and-not-a-microvm) |
+| [threat-model.md](docs/threat-model.md) | What is assumed hostile, and where each layer's compromise stops |
 | [research-review.md](docs/research-review.md) | Checking the threat model against the field's, and the standing questions that are the agenda |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [tools.md](docs/tools.md) | The optional tools a session can be given, and what hardening each one carries |

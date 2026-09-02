@@ -265,120 +265,77 @@ this section. Nothing in dejima can bound its own host.
 
 ## Why a container, and not a microVM
 
-The most frequent question about this project, and the section above answers
-only half of it.
+The most frequent question about this project.
+
+The short answer is that a microVM is the stronger boundary and nothing here
+disputes it. Container escape is the least likely of the six threats above and
+the only one that needs an exploit at all, and the layer it lands on is already
+bounded by a control enforced from outside the guest. The effort went there
+rather than into a harder container.
+
+**There is already a VM here**, which is what the usual framing misses. It is
+put as container versus microVM, as though the alternative were a container
+with nothing underneath. On the deployment this document describes, dejima runs
+inside a devbox VM whose rule set is enforced from the hypervisor. So the choice
+is not one boundary against two. It is an outer VM enforced from outside the
+guest, against that plus an inner one managed by software running on the box it
+is protecting - inside the blast radius of the row it is meant to bound. A
+boundary enforced from outside is worth more than one enforced by the thing
+inside it, and that is most of the answer.
 
 **The field's ordering is not in dispute.** gVisor's syscall interposition and
-a per-workload VM kernel are both stronger boundaries than a namespaced
-container. Firecracker is what AWS runs Lambda on, for the reason that applies
-here too: untrusted code, multi-tenant, on shared hardware. Nothing below
-argues that a container is the better isolation primitive. The question is
-where marginal effort goes, and that comes from the ranked list above rather
-than from a preference about primitives.
+a per-workload VM kernel are both stronger than a namespaced container.
+Firecracker is what AWS runs Lambda on, for the reason that applies here too:
+untrusted code, multi-tenant, on shared hardware. The disagreement is about
+where marginal effort goes, not about which primitive is stronger.
 
-### It addresses the last item on the list
+### What a stronger runtime would and would not change
 
-Container escape is sixth of six, and the only one of the six that needs an
-exploit at all. A stronger runtime does nothing for the five above it, and two
-of those five get *harder* under a VM:
+It would not touch the five threats ranked above escape. Two of them would get
+*harder*, because both are enforced by how the container is configured rather
+than by what isolates it:
 
-- **Cross-project poisoning is bounded by how `~/.claude` is mounted**, not by
-  the container. Each path crossing the boundary is named individually, the
-  workspace's own project slugs and nothing else, with `file-history` scoped by
-  session id. Under a VM those become virtiofs shares with a daemon apiece, and
-  the control that closed #104 turns into the hardest part of the port.
-- **The agent socket is a live host socket.** `${SSH_AUTH_SOCK}:/ssh-agent` has
-  no VM equivalent. It becomes a vsock forwarder written for this, which is a
-  new component on the credential path and a new thing to argue about.
+- **One project's session cannot reach another's**, because each path crossing
+  the boundary is named individually rather than mounting a tree
+  ([#104](https://gitbox.branderson.io/dejima/dejima/issues/104)). Under a VM
+  each becomes a filesystem daemon.
+- **The container sees an agent socket, never your key.** That is a live host
+  socket, and a VM has no equivalent to hand it one.
 
-One gets easier, and it should be said: **egress enforcement.** A tap device
-puts the rules on the host where the guest holds no capability to touch them.
-That is a real gain, and it is available without changing the runtime at all -
-see #305, which moves the packet filter to a per-launch bridge and drops
-`NET_ADMIN` and `NET_RAW` from the container.
+One would get easier: egress rules on a tap device sit where the guest holds no
+capability to touch them. That is available without changing the runtime, which
+is what [#305](https://gitbox.branderson.io/dejima/dejima/issues/305) does.
 
-### Escape moves a layer, and here the layer exists
-
-A stronger runtime makes it rarer to reach the row below the container. It does
-not change what that row costs, which the section above has already bounded in
-one dimension and left open in the other. Worth something, and less than it
-first looks.
-
-**And there is already a VM in the stack.** The comparison is usually put as
-container versus microVM, as though the alternative were a container with
-nothing under it. On the deployment this document describes, dejima runs inside
-a devbox VM whose rule set is enforced from the hypervisor. So the choice is
-not one boundary against two. It is an outer VM boundary enforced from outside
-the guest, against that plus an inner one managed by software running on the
-box it is protecting - by something inside the blast radius of the row it is
-meant to bound. A boundary enforced from outside is worth more than one
-enforced by the thing inside it, and that asymmetry is most of why the effort
-went below the container rather than into it.
-
-### What Docker is doing here, concretely
-
-"Swap the runtime" understates the work, because several controls are
-implemented *in* Docker rather than merely hosted by it:
-
-- **The dependency approval is `docker build`.** An approved `.dejima/`
-  declaration becomes a derived image `FROM` the base. Building a microVM
-  rootfs in practice means `docker build`, then export, then a filesystem
-  image. Docker does not leave; it demotes from runtime to build tool, and the
-  "one fewer dependency" argument mostly evaporates.
-- **`dejima-allow --container` reaches a running session over `docker exec`.**
-  There is no exec into a microVM. It becomes an agent in the guest listening
-  on vsock, which is a new privileged surface *inside* the sandbox - the
-  direction this repository spends its effort removing.
-- **`dejima-attach` finds live sessions by container label.** That becomes a
-  registry dejima maintains, with its own staleness and its own failure mode.
-- **The capability floor is an argument about Docker's model.** `cap_drop: ALL`
-  and a short list added back, each with its reason recorded. Under a VM that
-  argument does not transfer; an equivalent one has to be made from scratch.
-
-None of these is a reason by itself. Together they are why this is a rewrite of
-the parts that *are* the security argument, in a project whose threat model
-opens by saying none of it has been reviewed by anyone else. Doubling the
-number of boundaries to argue for, while halving the attention available for
-each, is not obviously a gain.
+**And "swap the runtime" understates the work**, because several controls are
+implemented *in* Docker rather than merely hosted by it. The dependency
+approval is a derived image build; the tooling reaches live sessions through
+it; the capability floor is an argument about Docker's model. Porting them is a
+rewrite of the parts that *are* the security argument, in a project that says
+at the top that none of it has been reviewed by anyone else.
 
 ### What would change the answer
 
-Stated so the answer can be shown to be wrong rather than defended:
+The decision is a judgement about effort, not a door held shut, and these are
+the things that would reopen it:
 
-- **Kata Containers is the cheap path, and a per-launch switch rather than a
-  fork.** It is an OCI runtime, so the compose file, the individually named
-  mounts, `docker exec` and label discovery all survive, and it can use
-  Firecracker underneath. What needs proving is whether the firewall still
-  comes up inside a Kata guest, and what the mount count costs at boot. If the
-  escape-surface argument wins, this is the version to try.
-- **gVisor is cheaper still and likelier to break.** `runsc` is a smaller
-  grant, and the image carries a browser, which is where syscall-compatibility
-  gaps show first. Worth a spike, not worth a plan.
-- **Dropping the assumption that the project is one you already trust.** If
-  dejima were pointed at repositories chosen by someone else, the ranked list
-  reorders and this section should be rewritten rather than argued.
-- **A container escape in the wild that clears this configuration's floor.**
-  Non-root session user, `no-new-privileges`, `cap_drop: ALL` and a short list
-  back. The class recurs; whether a live one clears that floor is the question,
-  and [research-review.md](research-review.md#the-standing-questions) is where
-  it gets asked rather than assumed either way.
+- **Kata Containers is the cheap path if this reasoning is wrong.** It is an
+  OCI runtime, so the compose file, the mounts and the tooling survive, and it
+  can use Firecracker underneath. A per-launch switch rather than a fork.
+- **Pointing dejima at projects chosen by someone else.** That contradicts an
+  assumption stated at the top of this document, and reorders the ranked list.
+- **A container escape in the wild that clears this configuration's floor**:
+  non-root session user, `no-new-privileges`, `cap_drop: ALL` and a short list
+  added back. The class recurs, and whether a live one clears that floor is
+  asked on a schedule in
+  [research-review.md](research-review.md#the-standing-questions) rather than
+  assumed either way.
 
-### What is done instead
-
-Depth below the container rather than a harder container, which is
-[the stack](#the-stack-and-what-each-piece-buys). Two of the three layers under
-dejima are enforced where the guest cannot reach them: the devbox rule set from
-the hypervisor, and the guard from a different machine. The third, the
-scheduled rebuild, bounds a compromise in time rather than in reach, which no
-in-guest control can do.
-
-That is the difference from the field's usual answer, and it is a difference
-rather than a rebuttal: a sandbox reaching for a microVM and stopping there has
+What is done instead is depth below the container, which is
+[the stack](#the-stack-and-what-each-piece-buys): two of the three layers under
+dejima are enforced where the guest cannot reach them, and the third bounds a
+compromise in time. A sandbox that reaches for a microVM and stops there has
 nothing underneath it, so an escape from the VM ends its argument. Here it is a
-row with controls of its own. Neither arrangement dominates. This one was
-chosen because the layers below are where the remaining risk actually sits, and
-because they keep working on the day the isolation primitive turns out to have
-a bug.
+row with controls of its own.
 
 ## What this repository does not claim
 
