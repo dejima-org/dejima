@@ -553,6 +553,41 @@ can be pointed at any endpoint, including a model you serve yourself - and
 expect to be the person who finds the next crack.
 
 
+### Model backend maturity
+
+The same caveat the harnesses and forges get, and for the same reason: four
+backends in one table invites the reading that each got the same amount of
+use, and they did not.
+
+**`anthropic` is the one dejima was built around.** The credential proxy, the
+in-container terminator, the refresh-and-write-back - all of it was designed
+against a subscription login and generalised afterwards. It has been used for
+real work continuously, which is the coverage no test substitutes for.
+
+**`anthropic-api-key` works and has not been leaned on.** It was verified end
+to end on a real machine: the model answers, billing shows as API usage, the
+key stays on the host and the container holds only a placeholder. That is one
+confirmed launch rather than months of use, and the difference matters for the
+same reason it does above.
+
+**`openrouter` is at the same level.** Built from the same manifest shape,
+exercised against a fake upstream and through a full launch, and confirmed
+against the real endpoint. What has not happened yet is a long tail of
+sessions through it, so expect the rough edges that only volume finds.
+
+**`self-hosted` runs no proxy at all**, which makes it the simplest of the
+four and the one with least to go wrong in dejima: there is no credential to
+withhold, so the session reaches the endpoint directly and dejima's only job
+is refusing an address that is not host-local. It has been run against a local
+model. What it does not get is any of the credential machinery's protection,
+because there is nothing to protect.
+
+If you are choosing with no other reason to prefer one, and you have a
+subscription, `anthropic` is the path with the most miles on it. The other
+three are supported in the same sense the second harness is: built
+deliberately, tested, and newer than the thing they sit beside.
+
+
 ### Forge integration maturity
 
 The same caveat the harnesses get, for the same reason: two forges listed in

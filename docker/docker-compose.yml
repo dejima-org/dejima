@@ -141,6 +141,7 @@ services:
       SANDBOX_HARNESS_BRIEFING_ARGS: ${SANDBOX_HARNESS_BRIEFING_ARGS:-}
       SANDBOX_HARNESS_BRIEFING_PATH: ${SANDBOX_HARNESS_BRIEFING_PATH:-}
       SANDBOX_HARNESS_SEED: ${SANDBOX_HARNESS_SEED:-}
+      SANDBOX_HARNESS_STAGED_EMPTY: ${SANDBOX_HARNESS_STAGED_EMPTY:-}
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}

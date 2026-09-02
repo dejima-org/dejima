@@ -348,19 +348,10 @@ harness_prepare_config() {
     local overlay="$1" settings="$HOME/.claude/settings.json" settings_error
 
 
-    # install.sh normally creates settings.json, and many hosts have no
-    # CLAUDE.md at all. Created empty rather than left absent because
-    # harness_staged_config below emits both unconditionally and core skips
-    # staging a file that does not exist - so without this the session would
-    # silently start without them. statusline.sh is deliberately NOT created:
-    # an empty one would be staged executable and run as the status line.
-    # The directory too: install.sh no longer creates it, because it no longer
-    # writes anything into it - and on a host where Claude Code has never run
-    # there is nothing to write these beside. Without this the launch fails
-    # here, reporting an unreadable settings.json that was never created.
-    mkdir -p "$HOME/.claude" || return 1
-    [ -f "$settings" ] || echo '{}' > "$settings"
-    [ -f "$HOME/.claude/CLAUDE.md" ] || : > "$HOME/.claude/CLAUDE.md"
+    # Nothing is created on the host. A settings.json or CLAUDE.md the
+    # operator does not have is not one dejima should make on their machine so
+    # that it has something to copy - harness_staged_config asks for an empty
+    # one in the CONTAINER instead, which is where it is needed.
 
     # Claude Code ignores a settings.json it cannot parse, wholesale and with
     # only a startup warning, so a stray edit on the host costs the sandbox
@@ -369,7 +360,8 @@ harness_prepare_config() {
     # symptom is an unexpected bypass-mode warning rather than anything
     # mentioning settings. The file is staged verbatim, so nothing else parses
     # it before the session reads it - check here, where the fix is at hand.
-    if ! settings_error="$(jq . "$settings" 2>&1 >/dev/null)"; then
+    # Absent is not unparseable: there is simply nothing to stage.
+    if [ -f "$settings" ] && ! settings_error="$(jq . "$settings" 2>&1 >/dev/null)"; then
         echo "$settings is not valid JSON:" >&2
         echo "  $settings_error" >&2
         echo "Claude Code would ignore it entirely and the sandbox would start with" >&2
@@ -423,10 +415,13 @@ harness_staged_config() {
     # and what a dangling symlink means, are core's to decide - filtering
     # here would skip a dangling one silently, which is the case that must
     # refuse rather than quietly leave the session without the file.
-    local f
-    for f in settings.json CLAUDE.md statusline.sh; do
-        emit_staged_config "$HOME/.claude/$f" ".claude/$f"
-    done
+    # settings.json and CLAUDE.md are asked to exist even when the host has
+    # none: Claude Code reads both, and an empty one reads the same as a file
+    # the operator never made. statusline.sh is not - an empty one would be
+    # installed executable and run as the status line.
+    emit_staged_config "$HOME/.claude/settings.json" ".claude/settings.json" ensure-json
+    emit_staged_config "$HOME/.claude/CLAUDE.md" ".claude/CLAUDE.md" ensure
+    emit_staged_config "$HOME/.claude/statusline.sh" ".claude/statusline.sh"
 }
 
 # Where this workspace's transcripts are, and which store key each belongs

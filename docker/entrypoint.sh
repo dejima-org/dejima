@@ -235,6 +235,36 @@ if [ -d /etc/dejima-harness ]; then
     done < <(find /etc/dejima-harness -type f -print0)
 fi
 
+# Files the harness needs to exist whether or not the operator has one.
+#
+# Created HERE rather than on the host. A harness that reads a settings file
+# still reads one when it is empty, and dejima creating that file on the
+# operator's machine - so there is something to copy - is a write to their
+# configuration for dejima's own convenience. Root-owned and read-only, the
+# same as anything else staged, so the container's copy is not a channel back.
+for _spec in ${SANDBOX_HARNESS_STAGED_EMPTY:-}; do
+    _kind="${_spec%%:*}"
+    _rel="${_spec#*:}"
+    case "$_rel" in
+        /*|*..*)
+            echo "entrypoint: refusing staged-config path '$_rel': it must be" >&2
+            echo "relative to the sandbox user's home and must not contain '..'." >&2
+            exit 1 ;;
+    esac
+    _dest="$SANDBOX_HOME/$_rel"
+    [ -e "$_dest" ] && continue
+    mkdir -p "$(dirname "$_dest")"
+    # An empty file is not valid JSON, and a harness that discards a config it
+    # cannot parse would lose everything in it rather than nothing.
+    if [ "$_kind" = ensure-json ]; then
+        printf '{}\n' > "$_dest"
+    else
+        : > "$_dest"
+    fi
+    chown root:root "$_dest"
+    chmod 444 "$_dest"
+done
+
 # The harness's own writable state. Unlike the staged config above, these are
 # owned by the sandbox user and stay writable: they are what the harness
 # rewrites as it runs - a plugin registry, a catalogue, an install marker -
