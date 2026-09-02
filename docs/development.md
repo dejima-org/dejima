@@ -201,10 +201,12 @@ it has to argue about.
 
 ### What a harness must be able to do
 
-Support is per harness and deliberate. A supported harness gets the same
-depth of integration Claude Code has - the same mounts, the same guards, the
-same audit surfaces - so a harness is not a manifest someone drops in. That
-is only possible if the harness can host what those protections need.
+Support is per harness and deliberate. A supported harness gets everything
+dejima has to give: its state scoped per project, its config carried in
+read-only, its audit surfaces watched, and its guards installed wherever it
+can host one. So a harness is not a manifest someone drops in - and where it
+cannot host a protection, the launch says so rather than leaving the gap
+unnamed.
 
 These are the requirements. A harness that fails one of the first four cannot
 be supported, and that is a decision about the harness rather than a gap in
@@ -354,20 +356,22 @@ that command lives in the harness's briefing fragment rather than in
 `resume_command`: briefing substitution is one pass, so a placeholder inside
 a substituted value is never resolved.
 
-*Provider-agnostic is not the same as endpoint-agnostic.* Cline can be pointed
-anywhere; dejima cannot follow it everywhere. With `base_url` unset it runs
-against Anthropic through dejima's own credential proxy and the key never
-enters the container. Pointed at someone else's hosted API there is no proxy
-that could hold a key back, so the key would have to go in - which is R5
-failing, not a network restriction. The plugin therefore accepts `base_url`
-only for a model the operator serves themselves - a loopback or RFC 1918
-address, or a host they have allowlisted - where an open-weight model needs no
-credential at all and R5 has nothing to protect. The allowlist is what
-qualifies a name, because it is the same store deciding what the container can
-reach: an endpoint failing the check is one the session could not have
-connected to anyway, and a model server on someone's own network normally has
-a name rather than a literal address. A provider-generic proxy would widen
-this to hosted providers; nobody has written one (#171).
+*Backend-agnostic is not the same as endpoint-agnostic.* Cline can be pointed
+anywhere; dejima cannot follow it everywhere. A backend the proxy serves is
+fine whatever its dialect - the proxy takes the credential's kind and header
+names as arguments, so `openrouter` works the way `anthropic` does and the key
+never enters the container either way. What dejima cannot follow is a hosted
+API reached *without* a backend: there is no proxy holding a key back on its
+behalf, so the key would have to go in, which is R5 failing rather than a
+network restriction.
+
+So the `credential = none` path is only accepted for a model the operator
+serves themselves - a loopback or RFC 1918 address, or a host they have
+allowlisted - where the endpoint needs no credential at all and R5 has nothing
+to protect. The allowlist is what qualifies a name, because it is the same
+store deciding what the container can reach: an endpoint failing the check is
+one the session could not have connected to anyway, and a model server on
+someone's own network normally has a name rather than a literal address.
 
 *Conversation logging works; epitaphs do not, and only one of those is
 Cline's fault.* Cline's transcripts are
@@ -501,7 +505,7 @@ harness-specific path resolving to nothing is the honest answer.
 | Command | there is no default anywhere shared. `SANDBOX_CMD` comes from the manifest's `command` via `bin/dejima`, and `entrypoint.sh` refuses an empty one rather than naming a harness a given image may not contain | `harnesses/<name>/harness.conf`, `docker/entrypoint.sh` |
 | Proxied endpoint | which name the in-container TLS terminator answers for, and what `/etc/hosts` pins to loopback. The BACKEND's `proxied_domain`, not the harness's: a harness reaches whichever endpoint it is configured for, so the name belongs to the endpoint. A proxied backend with no domain declared is refused rather than started answering for nothing | `backends/<name>/backend.conf`, `docker/entrypoint.sh` |
 | Egress allowlist | `platform.claude.com` always, `api.anthropic.com` only when no credential proxy is in front of it. `api_domains` on the harness, `proxied_domain` on the backend | `harnesses/<name>/harness.conf`, `backends/<name>/backend.conf` |
-| Credentials | the whole proxy exists because Claude Code authenticates from `~/.claude/.credentials.json` rather than an env var; the entrypoint seeds a well-formed fake so it has something to read | `bin/dejima-credential-proxy`, `docker/credential-proxy-forwarder.js`, `docker/entrypoint.sh` |
+| Credentials | which substitute the harness accepts, and where it reads it from: a well-formed fake `~/.claude/.credentials.json` the entrypoint seeds for Claude Code, a placeholder key in `settings/providers.json` for Cline, a placeholder in an environment variable on the API-key path. The proxy itself is neither harness's - what the credential is, which header carries it and whether it refreshes are the backend's, passed as arguments | `bin/dejima-credential-proxy`, `docker/credential-proxy-forwarder.js`, `docker/entrypoint.sh` |
 | Hook protocol | the event payload arrives on stdin; `SessionStart` returns `hookSpecificOutput.hookEventName`/`additionalContext` as JSON, while a `PreToolUse` hook blocks by exiting 2 with its reason on stderr | `hooks/*.sh` |
 | Hook registration | four hooks written into `~/.claude/settings.json` in Claude Code's schema, one `SessionStart` with a `startup\|resume\|clear\|compact` matcher and three `PreToolUse` matching `Bash`. In the plugin, gated per declared guard | `bin/harness/claude-code.sh` |
 | Briefing delivery | **by which of three routes**, not whether. Claude Code takes the briefing as a system prompt, through the flag its manifest names in `briefing_args`, because a `SessionStart` payload past roughly nine kilobytes is persisted and replaced with a preview - so the hook route silently under-delivered a briefing carrying a project's `.dejima.md`. Cline takes no such flag and registers no hook, so it declares a `briefing_path` and reads a file `entrypoint.sh` writes root-owned and read-only. A harness doing neither still gets it through the hook. What the briefing *says* is none of theirs: composing it host-side is core's, and the container-side part - this container's id, the declared-versus-installed gap, the project's `.dejima.md` - is one script every route calls | `hooks/dejima-briefing-render.sh`, `hooks/sandbox-context.sh`, `docker/entrypoint.sh` |
@@ -551,13 +555,19 @@ because absent is visible to the operator and broken is not.
 `claude-code` is no exception to that: it is declared by its own manifest and
 built into its own layer like any other. The base image carries nothing of any
 harness's - not its package, not the directories it keeps state in, not its
-environment, and not its name as a default command. What is left on the
-harness axis is the credential proxy, which is Claude Code's shape throughout
-and is the R5 row above.
+environment, and not its name as a default command.
+
+The credential proxy is no longer on that list either. Which header carries
+the credential, what shape it takes, what must not travel beside it and
+whether it can be refreshed are all arguments the selected backend supplies,
+so a second harness reaches a proxied backend without a branch of its own -
+which is the R5 row above, and is confirmed rather than argued: Cline runs a
+real completion through the same terminator and the same host-side proxy.
 
 `providers.bats` covers the manifest contract itself and is where a new
-`harness.conf` gets its parsing and validation tests. The suites that assert
-on Claude Code paths by name - `config.bats`, `audit.bats`, `static.bats`,
-`runtime.bats` - are the ones that will need a second set, and a green run
-against the existing harness proves nothing about a new one. Nothing in
-`test/` currently runs a second harness end to end.
+`harness.conf` gets its parsing and validation tests. `config.bats`,
+`static.bats`, `project.bats` and `conversation.bats` each carry a second
+harness's cases beside Claude Code's, which is the shape a third one should
+follow. What is still missing is the end of the ladder: `runtime.bats` boots
+only `claude-code`, so nothing in `test/` runs a second harness end to end in
+a real container, and a green confined run says nothing about that.

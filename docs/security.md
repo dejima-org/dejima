@@ -291,29 +291,31 @@ can make; it is one the audit reports. See
 
 - Running the harness with its permission prompts off removes your chance to
   review tool calls before they run. Only point this at trusted repositories.
-- The mounted project itself has **no write protection**. `deny-dangerous-
-  bash.sh`, `git-push-guard.sh` and `merge-guard.sh` are regex
-  pattern-matching on the literal Bash command string - a fast-fail guard
-  against an overeager agent doing something obviously destructive, not a
-  boundary against one that's actively trying to get around them (a
-  different scripting language, an encoded command, editing `.git/config`
-  directly all sail right through).
-  Nothing here stops a compromised or badly-instructed session from
-  modifying or deleting the real working copy it's mounted against.
+- The mounted project itself has **no write protection**. The guards are
+  fast-fail checks against an overeager agent doing something obviously
+  destructive, not a boundary against one actively trying to get around them.
+  `deny-dangerous-bash.sh` is regex pattern-matching on the literal Bash
+  command string, so a different scripting language, an encoded command or
+  editing `.git/config` directly all sail right through. The push and merge
+  guards shadow `git` and the forge CLI on `PATH` and read argv, so quoting
+  and pipelines stop mattering - but a session that means to get round one can
+  call `/usr/bin/git` directly. Nothing here stops a compromised or
+  badly-instructed session from modifying or deleting the real working copy
+  it's mounted against.
 - That same read-write access to the mounted project is also a
   host-code-execution vector, not just a data-destruction one: a
   compromised session could plant `.git/hooks/post-commit` (or
   `pre-push`), set `core.hooksPath`, or write a
   `.claude/settings.local.json` with a malicious hook command, into the
   project. Any of those run unsandboxed on the host the next time you run
-  `git` or open Claude Code in that repo - no network egress required, so
+  `git` or open your harness in that repo - no network egress required, so
   the firewall doesn't see it either. Same underlying persistence pattern
-  as the `~/.claude/hooks` and `~/.claude.json` risks above, just through
+  as the harness config risks above, just through
   the project mount instead of the config mount. "Only point this at
   trusted repositories" (above) covers input trust; this is about the
   sandbox writing a persistence payload into an otherwise-trusted repo.
   The workspace's own `.git/hooks` directory is mounted read-only
-  (same pattern as the `~/.claude` code directories below), so planting a hook
+  (same pattern as the harness's own code directories below), so planting a hook
   file directly is closed - accepted breakage: installing hooks
   *in-session* (`husky`, `pre-commit install`) fails, which is the
   point. `core.hooksPath` and `.claude/settings.local.json` aren't
@@ -498,6 +500,16 @@ approximation of its name.
 
 ## One project's session cannot reach another's
 
+The property is the same for every harness; the mechanism is not, because it
+depends on how the harness keys its own state. Claude Code stores a directory
+per project and dejima mounts a slice of it. Cline stores one flat database
+indexing every session it has ever run, with the project as a field inside the
+record, so there is no slice to take - dejima gives each workspace a data
+directory of its own instead. Both reach the same place: a session sees its
+own project's history and no other's.
+
+### Claude Code: a slice of your own tree
+
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted as a tree. A session gets the workspace's own slug
   directory plus one for each live git worktree nested under it,
@@ -551,6 +563,31 @@ approximation of its name.
   That costs undo history for that session if it is later resumed on the
   host, and it is the reason this cannot be scoped as completely as
   `projects/`, where the workspace's own slug is known at launch.
+
+### Cline: a directory dejima owns, one per workspace
+
+- `~/.cline/data` is **not** mounted. Cline indexes every session it has ever
+  run in one `sessions.db`, with the project a session belonged to as a field
+  inside the record rather than a directory above it, so there is no
+  per-project subtree to slice: mounting your data directory would put every
+  project's transcripts in every session, which is this section's whole
+  subject.
+
+  A launch instead creates `<[harness.cline] state_dir>/<workspace slug>` on
+  the host and mounts *that* at `~/.cline/data`. Every session under it belongs
+  to this project by construction rather than by a filter that could be wrong,
+  which is why Cline clears this requirement more cleanly than Claude Code
+  rather than less.
+
+  The cost is that the directory is dejima's rather than yours: a session
+  started inside the sandbox is not offered back to a host-side Cline, and one
+  you started on the host is not visible inside. There is no import or export
+  ([#301](https://gitbox.branderson.io/dejima/dejima/issues/301)), and the
+  briefing tells the session so, so it will not offer you a resume command that
+  cannot work.
+
+### Whichever harness is selected
+
 - Epitaphs - the summary a session leaves when its context is compacted away -
   are kept host-side in `[epitaph] dir`, and that directory is never mounted. A session can neither read what earlier
   sessions concluded nor edit what this one is about to record, which is the
@@ -739,6 +776,14 @@ prerequisite. Sign in on the host first; see the README's
 Refreshing an expired credential is the same: on the host, not from inside a
 session, where the credential deliberately never goes.
 
+### The refreshing OAuth path, in detail
+
+The `backends/anthropic` arrangement, at the level of what the proxy actually
+does. The machinery is not Anthropic's - the credential's kind, which header
+carries it, what must not travel beside it are all arguments a backend
+supplies - but it is worth reading through one backend rather than in the
+abstract, and this is the one with the most miles on it.
+
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
@@ -824,7 +869,13 @@ session, where the credential deliberately never goes.
   real credential into the container. Rung one is a supported, tested mode,
   not an improvised workaround; if you reach the third, treat it as a
   temporary state rather than a new baseline.
-## What the container sees of `~/.claude`
+## What the container sees of Claude Code's `~/.claude`
+
+One harness's inventory, because there is no shared one to give: what a
+harness keeps where, and which of it is safe to mount, is the harness's own
+answer and each plugin gives it. Cline's is the table in
+[configuration.md](configuration.md#what-comes-in-from-your-host); the
+reasoning below is what both are built on.
 
 - `~/.claude` is **not** shared with the container as a whole. Its contents
   are enumerated in `docker-compose.yml`, in three classes, and anything not
@@ -1095,11 +1146,13 @@ default:
 - DNS resolution via a local proxy (see "DNS is allowlisted too")
 - the Docker host itself (not its whole subnet)
 - GitHub's published IP ranges, port 443 only (see "GitHub push" below)
-- `registry.npmjs.org` and `platform.claude.com` (the harness and its
-  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
-  separate CDN from github.com's own IPs, and where a good deal of tooling
-  fetches its binaries); `api.anthropic.com` when the credential proxy is off
-  (kill switch or API-key auth)
+- `registry.npmjs.org`, plus whatever the selected harness declares as its own
+  (`platform.claude.com` for Claude Code; Cline declares none, so a session
+  falling back to Cline's hosted endpoints fails to connect, which is the
+  right outcome); `release-assets.githubusercontent.com` (GitHub release
+  assets, a separate CDN from github.com's own IPs, and where a good deal of
+  tooling fetches its binaries); and the selected backend's API endpoint when
+  the credential proxy is off for it
 
   That is the whole built-in list, and it is meant to stay that way: it covers
   what the sandbox itself cannot run without, not what a project might want.
@@ -1213,9 +1266,9 @@ Internal hosts named before the container starts (`[forge.gitea] ssh_host`,
 `api`, `[logging] loki_url`, and any globally or per-project approved domain)
 are already exempted and unaffected by this.
 
-The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
-by name when a task is blocked on a single missing domain, rather than
-stopping the whole session over it.
+The session briefing tells the agent to ask for this by name when a task is
+blocked on a single missing domain, rather than stopping the whole session
+over it.
 
 ### The firewall bounds the container, not the harness
 
