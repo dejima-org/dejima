@@ -57,7 +57,11 @@ doing any work.
    hostile?** The field says no for untrusted code, and tiers gVisor and
    per-workload VM kernels above it. dejima's answer is that escape moves a
    layer - true where the layer exists. See
-   [Which deployment this describes](threat-model.md#which-deployment-this-describes).
+   [Which deployment this describes](threat-model.md#which-deployment-this-describes)
+   and [Why a container, and not a microVM](threat-model.md#why-a-container-and-not-a-microvm),
+   which is where the reasoning is written down so a sweep can contradict it.
+   The live half of this question is question 5: whether a current escape
+   clears this configuration's floor.
 2. **Does a name-based egress allowlist hold?** It holds against an agent that
    must resolve a name. It does not hold against exfiltration through an
    allowed domain or against DNS query-name channels, both of which are listed

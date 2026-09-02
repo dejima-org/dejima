@@ -5006,6 +5006,33 @@ EOF
         || { echo "the not-sandboxed list does not point at the explanation"; return 1; }
 }
 
+@test "the microVM answer concedes the field's ordering rather than disputing it" {
+    # The most frequently asked question about this project, and the one whose
+    # answer is easiest to rewrite into something weaker than it should be. A
+    # revision that starts claiming a container is as strong a primitive as a
+    # per-workload VM kernel is the failure mode, because it turns a statement
+    # about where effort went into a statement about isolation that is not
+    # true. Pin the concession, not the prose around it.
+    local tm="$REPO_ROOT/docs/threat-model.md" flat
+    grep -q '^## Why a container, and not a microVM' "$tm" \
+        || { echo "the microVM question is unanswered again"; return 1; }
+    flat="$(flat_prose "$tm")"
+    grep -q "field's ordering is not in dispute" <<< "$flat" \
+        || { echo "the section no longer concedes that a VM is the stronger boundary"; return 1; }
+    # Named, because "why not a VM" is three different questions and answering
+    # one of them reads as answering all three.
+    local name
+    for name in gVisor Firecracker Kata; do
+        grep -q "$name" <<< "$flat" || { echo "the answer does not mention $name"; return 1; }
+    done
+    # The falsifiable half. Without it this is a position rather than a claim.
+    grep -q 'What would change the answer' "$tm" \
+        || { echo "nothing says what would overturn this"; return 1; }
+    # Reached from the research agenda, which is what re-asks it.
+    grep -q 'why-a-container-and-not-a-microvm' "$REPO_ROOT/docs/research-review.md" \
+        || { echo "the standing question does not point at the written answer"; return 1; }
+}
+
 @test "the README lists the whole stack, so it is not a threat-model discovery" {
     # Someone deciding what to stand up reads the README and may never open
     # docs/threat-model.md at all. The detail belongs there and the list
