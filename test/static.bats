@@ -3317,13 +3317,39 @@ comment forge-cli issue comment"
     [ "$status" -eq 0 ]
 }
 
-@test "the merge guard is linked and registered" {
-    # In the harness plugin now: which file a guard is and where a harness
-    # reads it from is the harness's, while whether it is installed at all
-    # is gated on the manifest declaring the guard.
+@test "the merge guard is registered into the sandbox's own settings overlay" {
+    # In the harness plugin, gated on the manifest declaring the guard - and
+    # into the overlay rather than the operator's ~/.claude/settings.json, so
+    # installing dejima does not edit a config that is not dejima's.
     local p="$REPO_ROOT/bin/harness/claude-code.sh"
-    grep -q 'harness_has_guard merge-guard && _link_hook merge-guard.sh' "$p"
-    grep -q '_register PreToolUse Bash merge-guard.sh' "$p"
+    grep -q 'harness_has_guard merge-guard && _register_overlay_hook PreToolUse Bash merge-guard.sh' "$p" \
+        || { echo "the merge guard is not registered in the overlay"; return 1; }
+    # And no longer written to the host at all.
+    grep -q '_register PreToolUse Bash merge-guard.sh' "$p" \
+        && { echo "the merge guard is still registered on the host"; return 1; }
+    grep -q '_link_hook' "$p" \
+        && { echo "hooks are still symlinked into ~/.claude/hooks"; return 1; }
+    return 0
+}
+
+@test "the sandbox's hooks are baked into the image, not read from a host mount" {
+    # A guard whose script can be replaced under a running session is not one.
+    # Baked, so it is root-owned and outside anything the session can write -
+    # the property the read-only ~/.claude/hooks mount used to provide.
+    local h
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        grep -q "COPY hooks/$h /usr/local/lib/dejima/hooks/$h" "$REPO_ROOT/docker/Dockerfile" \
+            || { echo "$h is not baked into the image"; return 1; }
+    done
+    # deny-dangerous-bash.sh is not, on purpose: it is the one hook meant to
+    # run on the operator's own host sessions, and install.sh still puts it
+    # there.
+    grep -q 'COPY hooks/deny-dangerous-bash.sh' "$REPO_ROOT/docker/Dockerfile" \
+        && { echo "the host-facing hook was baked in too"; return 1; }
+    grep -q 'harness_has_guard bash-deny && _register PreToolUse Bash deny-dangerous-bash.sh' \
+        "$REPO_ROOT/bin/harness/claude-code.sh" \
+        || { echo "deny-dangerous-bash.sh is no longer registered on the host"; return 1; }
+    return 0
 }
 
 # Runs install.sh against a throwaway HOME, with a stub `docker` on PATH so
@@ -3362,8 +3388,11 @@ registered_commands() {
 
     run registered_commands "$home"
     [[ "$output" != *"gitea-merge-guard.sh"* ]]
-    [ "$(registered_commands "$home" | grep -c '/merge-guard\.sh$')" -eq 1 ]
     [ ! -e "$home/.claude/hooks/gitea-merge-guard.sh" ]
+    # And no merge-guard registration replaces it on the host: the sandbox
+    # registers its own into the settings overlay now.
+    [ "$(registered_commands "$home" | grep -c '/merge-guard\.sh$')" -eq 0 ] \
+        || { echo "merge-guard.sh was registered on the host"; return 1; }
 }
 
 @test "install.sh registers each hook exactly once across repeated runs" {
@@ -3377,7 +3406,12 @@ registered_commands() {
     while read -r cmd; do
         [ "$(registered_commands "$home" | grep -cxF "$cmd")" -eq 1 ]
     done < <(registered_commands "$home")
-    [ "$(registered_commands "$home" | wc -l)" -eq 4 ]
+    # One: deny-dangerous-bash.sh, the only hook meant to run outside a
+    # sandbox. The rest are registered per launch into the settings overlay.
+    [ "$(registered_commands "$home" | wc -l)" -eq 1 ] \
+        || { echo "host registrations: $(registered_commands "$home")"; return 1; }
+    [[ "$(registered_commands "$home")" == *"deny-dangerous-bash.sh"* ]] \
+        || { echo "the wrong hook is registered on the host"; return 1; }
 }
 
 @test "the push guard names no forge, and blocks everything when no host is allowed" {
@@ -7930,4 +7964,69 @@ _cline_providers_json() {
     grep -q 'CLINE_DATA_DIR' <<< "$cl" \
         && { echo "cline's briefing still tells the operator to run cline on the host"; return 1; }
     return 0
+}
+
+@test "the sandbox's hooks reach a session through the overlay, by their baked path" {
+    # The registration that replaces the host one. Claude Code merges this
+    # layer with ~/.claude/settings.json, so the operator's own hooks still
+    # run - which is why dejima no longer needs to write to theirs.
+    local h ov; h="$(mktemp -d)"; ov="$(mktemp)"
+    mkdir -p "$h/.claude"; echo '{}' > "$h/.claude/settings.json"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME="$1"; DEJIMA_HARNESS_NAME=claude-code
+        harness_plugin_load claude-code
+        harness_hook harness_prepare_config "$2"
+    ' _ "$h" "$ov" >/dev/null 2>&1
+
+    # R3 first: a session that is not told it is sandboxed is the worst
+    # failure here, so it is registered whether or not a guard is declared.
+    [ "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ov")" \
+        = "/usr/local/lib/dejima/hooks/sandbox-context.sh" ] \
+        || { echo "sandbox-context is not registered: $(cat "$ov")"; rm -rf "$h" "$ov"; return 1; }
+    local cmds; cmds="$(jq -r '.hooks.PreToolUse[]?.hooks[]?.command' "$ov")"
+    grep -q '/usr/local/lib/dejima/hooks/git-push-guard.sh' <<< "$cmds" \
+        || { echo "push guard missing: $cmds"; rm -rf "$h" "$ov"; return 1; }
+    grep -q '/usr/local/lib/dejima/hooks/merge-guard.sh' <<< "$cmds" \
+        || { echo "merge guard missing: $cmds"; rm -rf "$h" "$ov"; return 1; }
+    # Never the host path, which is what this change is about.
+    grep -q '.claude/hooks' "$ov" \
+        && { echo "the overlay still points into ~/.claude/hooks"; rm -rf "$h" "$ov"; return 1; }
+    # And the sandbox override it already carried is still there.
+    [ "$(jq -r '.sandbox.enabled' "$ov")" = "false" ] \
+        || { echo "the sandbox override was lost"; rm -rf "$h" "$ov"; return 1; }
+    rm -rf "$h" "$ov"
+}
+
+@test "upgrading takes back the hooks an older install.sh wrote to the host" {
+    # Otherwise "dejima does not write to your Claude Code config" is true
+    # only of a fresh install, and an operator who has run the old one keeps
+    # symlinks and registrations nothing removes.
+    local home="$BATS_TEST_TMPDIR/upg" h
+    mkdir -p "$home/.claude/hooks"
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        ln -s "$REPO_ROOT/hooks/$h" "$home/.claude/hooks/$h"
+    done
+    jq -n '{hooks: {
+        SessionStart: [{matcher: "startup", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
+        PreToolUse: [{matcher: "Bash", hooks: [{type: "command",
+            command: "$HOME/.claude/hooks/git-push-guard.sh"}]}]}}' \
+        > "$home/.claude/settings.json"
+
+    run_install "$home"
+
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        [ ! -e "$home/.claude/hooks/$h" ] \
+            || { echo "$h is still linked into ~/.claude/hooks"; return 1; }
+        [[ "$(registered_commands "$home")" != *"/$h"* ]] \
+            || { echo "$h is still registered: $(registered_commands "$home")"; return 1; }
+    done
+    # An operator's own file at one of those names is theirs, not dejima's.
+    printf '#!/bin/sh\nexit 0\n' > "$home/.claude/hooks/merge-guard.sh"
+    chmod +x "$home/.claude/hooks/merge-guard.sh"
+    run_install "$home"
+    [ -f "$home/.claude/hooks/merge-guard.sh" ] \
+        || { echo "an operator's own hook was removed"; return 1; }
 }

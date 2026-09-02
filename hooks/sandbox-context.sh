@@ -41,11 +41,11 @@ if [ "${DEJIMA_BRIEFING_VIA_ARGS:-0}" = "1" ]; then
 fi
 
 # The image's copy first, because that is the one that exists in a real
-# session: this file reaches the container through the ~/.claude/hooks mount,
-# and install.sh links it there one file at a time, so its sibling in the repo
-# is not alongside it. The sibling is the fallback so the hook can be run
+# session: this file is baked in beside it and registered by absolute path
+# into the sandbox's --settings overlay, so nothing about it depends on the
+# operator's ~/.claude. The sibling is the fallback so the hook can be run
 # against a checkout - which is what the test suite does - and readlink -f is
-# what turns the linked path back into the repo one.
+# what turns a linked path back into the repo one.
 #
 # Missing or unreadable degrades to no briefing rather than failing the hook:
 # a SessionStart hook that exits non-zero drops the whole session's context,

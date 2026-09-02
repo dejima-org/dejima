@@ -31,10 +31,16 @@
 # Written through a temp file and renamed: the destination is the settings
 # layer bin/dejima is about to mount, and a jq that failed partway would
 # otherwise leave the session with a truncated one.
+# Where dejima's own hooks live inside the container. Baked into the image
+# (see docker/Dockerfile) rather than reached through the ~/.claude/hooks
+# mount, because that mount is the operator's configuration and dejima should
+# not have to write to it to make its own sandbox work.
+DEJIMA_HOOK_DIR=/usr/local/lib/dejima/hooks
+
 harness_register_notify() {
     local settings="$1" tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/dejima-settings-remote.XXXXXX.json")"
-    if jq '.hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.claude/hooks/dejima-notify.sh done"}]}])' \
+    if jq '.hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": "'"$DEJIMA_HOOK_DIR"'/dejima-notify.sh done"}]}])' \
         "$settings" > "$tmp"; then
         mv "$tmp" "$settings"
     else
@@ -109,28 +115,16 @@ harness_state_mounts() {
 harness_register_guards() {
     local repo="$1" backup="$2" settings="$HOME/.claude/settings.json"
 
+    # Still created: deny-dangerous-bash.sh goes here, and Claude Code reads
+    # the directory whether or not dejima put anything in it.
     mkdir -p "$HOME/.claude/hooks"
 
-    _link_hook() {
-        local name="$1" src="$repo/hooks/$1" dest="$HOME/.claude/hooks/$1"
-        if [ -L "$dest" ] && [ "$(readlink -f "$dest")" = "$(readlink -f "$src")" ]; then
-            echo "Skipping: $name already linked to this repo's copy"
-            return
-        fi
-        if [ -e "$dest" ] || [ -L "$dest" ]; then
-            mkdir -p "$backup"
-            echo "Moving: existing ~/.claude/hooks/$name to $backup/$name"
-            mv "$dest" "$backup/$name"
-        fi
-        echo "Linking: $name ($src -> $dest)"
-        ln -s "$src" "$dest"
-    }
-
-    # Not a guard: this is R3, the briefing's delivery mechanism, and a
-    # session without it does not know it is in a sandbox.
-    _link_hook sandbox-context.sh
-    harness_has_guard push-guard  && _link_hook git-push-guard.sh
-    harness_has_guard merge-guard && _link_hook merge-guard.sh
+    # sandbox-context.sh, git-push-guard.sh, merge-guard.sh and
+    # dejima-notify.sh are NOT linked here any more. They are baked into the
+    # image and registered into the sandbox's own --settings overlay, so they
+    # reach a session without anything being written to the operator's Claude
+    # Code config. $backup is unused for the same reason: nothing of theirs is
+    # being moved aside.
 
     # Symlink from before the gitea-merge-guard.sh -> merge-guard.sh rename
     # points at a hooks/ path that no longer exists. Only remove it if it is
@@ -141,13 +135,6 @@ harness_register_guards() {
         rm -f "$old_merge_guard"
     fi
 
-    # Linked so it exists at a stable path for the read-only ~/.claude/hooks
-    # mount, but deliberately NOT registered below: bin/dejima registers it
-    # per session, into a throwaway settings copy, and only when remote
-    # access is configured. Registering it here would fire it for every
-    # unsandboxed host session too, where it has no marker directory to
-    # write to.
-    harness_has_guard notify && _link_hook dejima-notify.sh
 
     # deny-dangerous-bash.sh is the one hook that is NOT sandbox-gated: it
     # has no DEJIMA check, so it applies to the operator's own host sessions
@@ -211,14 +198,40 @@ harness_register_guards() {
             "$settings" > "$tmp" && mv "$tmp" "$settings"
     }
 
-    _register SessionStart "startup|resume|clear|compact" sandbox-context.sh \
-        "injects sandbox context on session start"
-    harness_has_guard push-guard && _register PreToolUse Bash git-push-guard.sh \
-        "blocks pushes outside the allowed host(s)/branches"
-    harness_has_guard merge-guard && _register PreToolUse Bash merge-guard.sh \
-        "blocks the configured forge's merge command inside the sandbox"
+    # Only the hook that is MEANT to apply to the operator's own sessions.
+    # The sandbox's own hooks are registered per launch into the --settings
+    # overlay instead (harness_prepare_config), so installing dejima no longer
+    # edits a config that is not dejima's to make the sandbox work.
     harness_has_guard bash-deny && _register PreToolUse Bash deny-dangerous-bash.sh \
         "blocks obviously destructive Bash commands"
+
+    # An upgrade has to take back what an older install.sh put here, or the
+    # claim above is only true of a fresh one. Removed by name and only when
+    # the symlink points into THIS repo: an operator's own file at one of
+    # these names is theirs.
+    local moved dest
+    for moved in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        dest="$HOME/.claude/hooks/$moved"
+        if [ -L "$dest" ] && [ "$(readlink -f "$dest")" = "$(readlink -f "$repo/hooks/$moved")" ]; then
+            echo "Removing: $moved from ~/.claude/hooks (the sandbox registers its own now)"
+            rm -f "$dest"
+        fi
+        # And its registration, matched the same endswith way _register does.
+        local ev
+        for ev in SessionStart PreToolUse Stop; do
+            if jq -e --arg s "/$moved" \
+                "[.hooks.${ev}[]?.hooks[]?.command // empty] | any(endswith(\$s))" \
+                "$settings" >/dev/null 2>&1; then
+                echo "Removing: $moved's $ev registration from $settings"
+                local mv_tmp; mv_tmp=$(mktemp)
+                jq --arg s "/$moved" \
+                    ".hooks.${ev} = ((.hooks.${ev} // [])
+                        | map(.hooks = ((.hooks // []) | map(select((.command // \"\") | endswith(\$s) | not))))
+                        | map(select((.hooks | length) > 0)))" \
+                    "$settings" > "$mv_tmp" && mv "$mv_tmp" "$settings"
+            fi
+        done
+    done
     echo
     return 0
 }
@@ -411,7 +424,37 @@ harness_prepare_config() {
     # --settings layer (the manifest's settings_args) above
     # ~/.claude/settings.json, which holds only what the sandbox overrides;
     # the operator's hooks, permissions and plugins still apply from there.
+    #
+    # And dejima's own hooks, registered HERE rather than in the operator's
+    # ~/.claude/settings.json. Claude Code merges this layer with theirs, so
+    # their hooks still run - proven by the one dejima deliberately leaves on
+    # the host, deny-dangerous-bash.sh, which fires inside a container while
+    # being registered only there.
+    #
+    # Registering them here is what lets install.sh stop writing to a config
+    # that is not dejima's. The scripts are baked into the image, so a session
+    # cannot unlink a guard the way it could one staged into a directory it
+    # owns.
     jq -n '{sandbox: {enabled: false}}' > "$overlay"
+    _register_overlay_hook() {  # <event> <matcher> <script>
+        local event="$1" matcher="$2" script="$3" tmp
+        tmp="$(mktemp "${TMPDIR:-/tmp}/dejima-overlay.XXXXXX.json")" || return 1
+        if jq --arg m "$matcher" --arg c "$DEJIMA_HOOK_DIR/$script" \
+            ".hooks.${event} = ((.hooks.${event} // []) +
+                [{\"matcher\": \$m, \"hooks\": [{\"type\": \"command\", \"command\": \$c}]}])" \
+            "$overlay" > "$tmp"; then
+            mv "$tmp" "$overlay"
+        else
+            rm -f "$tmp"
+            echo "warning: could not register $script; it will not run this session." >&2
+        fi
+    }
+    # R3: without this a session is not told it is in a sandbox at all, which
+    # is why it is registered whether or not any guard is declared.
+    _register_overlay_hook SessionStart "startup|resume|clear|compact" sandbox-context.sh
+    harness_has_guard push-guard  && _register_overlay_hook PreToolUse Bash git-push-guard.sh
+    harness_has_guard merge-guard && _register_overlay_hook PreToolUse Bash merge-guard.sh
+    return 0
 }
 
 harness_staged_config() {

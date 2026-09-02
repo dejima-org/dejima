@@ -2400,23 +2400,26 @@ _epitaph_three() {
     rm -rf "$proot"
 }
 
-@test "install.sh registers every guard when the harness declares them all" {
-    # The shipped harness, unmodified: the behaviour this replaced, kept.
+@test "install.sh writes only the host-facing hook to the operator's config" {
+    # The shipped harness, unmodified. Every guard still reaches a session -
+    # through the sandbox's own settings overlay - and exactly one of them is
+    # written to a config that is not dejima's, because that one is meant to
+    # apply to the operator's unsandboxed sessions as well.
     run_install
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local cmds
     cmds="$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command,
                     .hooks.SessionStart[]?.hooks[]?.command] | join(" ")' \
         "$CONFIG_DIR/.claude/settings.json")"
+    [[ "$cmds" == *"deny-dangerous-bash.sh"* ]] \
+        || { echo "the host-facing hook is not registered: $cmds"; return 1; }
     local h
-    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh deny-dangerous-bash.sh; do
-        [[ "$cmds" == *"$h"* ]] || { echo "$h not registered: $cmds"; return 1; }
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh dejima-notify.sh; do
+        [[ "$cmds" != *"$h"* ]] \
+            || { echo "$h was registered on the host: $cmds"; return 1; }
+        [ ! -e "$CONFIG_DIR/.claude/hooks/$h" ] \
+            || { echo "$h was linked into the operator's hooks directory"; return 1; }
     done
-    # Linked for the read-only hooks mount, but registered per session by
-    # bin/dejima rather than here, where it would fire for host sessions too.
-    [ -L "$CONFIG_DIR/.claude/hooks/dejima-notify.sh" ]
-    [[ "$cmds" != *"dejima-notify.sh"* ]] \
-        || { echo "notify registered host-wide: $cmds"; return 1; }
 }
 
 @test "install.sh registers no guards when no harness is selected" {
