@@ -20,6 +20,7 @@ setup() {
     unset GITEA_SSH_HOST GITEA_API GITEA_TOKEN_FILE GITEA_TOKEN GH_TOKEN_FILE \
         GH_TOKEN SANDBOX_CMD SANDBOX_SSH_KEY SANDBOX_SHARE_DIR SANDBOX_EXTRA_MOUNTS \
         SANDBOX_NVIM_CONFIG SANDBOX_CREDENTIAL_PROXY SANDBOX_ANTHROPIC_TRANSPORT \
+        SANDBOX_CREDENTIAL_TRANSPORT \
         SANDBOX_LOG_CONVERSATION LOKI_URL ENABLE_FIREWALL SSH_KNOWN_HOSTS \
         ALLOW_GITHUB_PUSH DEJIMA_AUDIT_DIR DEJIMA_AUDIT_BASELINE_DIR \
         DEJIMA_AUDIT_KEEP DEJIMA_AUDIT_STRICT DEJIMA_AUDIT_STATUSLINE \
@@ -3266,7 +3267,7 @@ EOF
     stub="$(mktemp -d)"; log="$(mktemp)"
     cat > "$stub/docker" <<EOF
 #!/bin/sh
-env | grep '^SANDBOX_ANTHROPIC' >> "$log"
+env | grep -E '^SANDBOX_(ANTHROPIC|CREDENTIAL)' >> "$log"
 printf '%s\n' "\$@" >> "$log"
 exit 0
 EOF
@@ -3275,7 +3276,7 @@ EOF
         run "$REPO_ROOT/bin/dejima" "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 
-    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$log" \
+    grep -qE '^SANDBOX_CREDENTIAL_PROXY_SOCKET=.+' "$log" \
         || { echo "the proxy did not start:"; cat "$log"; return 1; }
     grep -q -- "-v $RW_HOME/.claude/.credentials.json:" "$log" \
         && { echo "the real credential file was mounted"; return 1; }
@@ -3308,7 +3309,7 @@ EOF
     stub="$(mktemp -d)"; log="$(mktemp)"
     cat > "$stub/docker" <<EOF
 #!/bin/sh
-env | grep '^SANDBOX_ANTHROPIC' >> "$log"
+env | grep -E '^SANDBOX_(ANTHROPIC|CREDENTIAL)' >> "$log"
 printf '%s\n' "\$@" >> "$log"
 exit 0
 EOF
@@ -3432,7 +3433,7 @@ EOF
     # as a copy - so the copy has to lose the key while the proxy gains it.
     _console_launch
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+    grep -qE '^SANDBOX_CREDENTIAL_PROXY_SOCKET=.+' "$CLOG" \
         || { echo "the proxy did not start:"; cat "$CLOG"; return 1; }
     [ "$(jq -r '.primaryApiKey // "absent"' "$CSTAGED")" = "absent" ] \
         || { echo "the real key reached the container"; return 1; }
@@ -3458,7 +3459,7 @@ EOF
         || { echo "the downgrade did not deliver the credential"; return 1; }
     [[ "$output" == *"proxy is off"* ]] || { echo "$output"; return 1; }
     # And no proxy was started for it.
-    grep -qE '^SANDBOX_ANTHROPIC_PROXY_SOCKET=.+' "$CLOG" \
+    grep -qE '^SANDBOX_CREDENTIAL_PROXY_SOCKET=.+' "$CLOG" \
         && { echo "a proxy ran for a backend with proxy = off"; return 1; }
     rm -rf "$workspace" "$CSTUB" "$CLOG" "$CSTAGED"
 }

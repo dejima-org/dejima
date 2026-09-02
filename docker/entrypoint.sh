@@ -390,25 +390,25 @@ fi
 # extra_hosts: under [credentials] proxy = off nothing listens on :443, and
 # an unconditional entry would black-hole the real API on exactly the path
 # that has to keep working.
-SANDBOX_ANTHROPIC_TRANSPORT="${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"
-export SANDBOX_ANTHROPIC_TRANSPORT
+SANDBOX_CREDENTIAL_TRANSPORT="${SANDBOX_CREDENTIAL_TRANSPORT:-tls}"
+export SANDBOX_CREDENTIAL_TRANSPORT
 # Checked here rather than in bin/dejima because every launch reaches this
 # script, including a bare `docker run` (see test/runtime.bats). The two halves
 # branch on opposite polarity - bin/dejima treats anything but `loopback` as
 # tls, this script and the forwarder treat anything but `tls` as loopback - so
 # a typo would configure them for different transports and fail every API call
 # with nothing pointing back at the cause.
-case "$SANDBOX_ANTHROPIC_TRANSPORT" in
+case "$SANDBOX_CREDENTIAL_TRANSPORT" in
     tls|loopback) ;;
     *)
-        echo "FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to '$SANDBOX_ANTHROPIC_TRANSPORT'." >&2
+        echo "FATAL: SANDBOX_CREDENTIAL_TRANSPORT is set to '$SANDBOX_CREDENTIAL_TRANSPORT'." >&2
         echo "The only valid values are 'tls' (the default) and 'loopback'; they are" >&2
         echo "case-sensitive. Not starting the session - an unrecognised value would" >&2
         echo "otherwise be read as one transport here and the other by bin/dejima." >&2
         exit 1
         ;;
 esac
-if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
+if [ -n "${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" ]; then
     forwarder_port=18300
     # Which name the terminator answers for is the selected harness's, from
     # `proxied_domain` in its manifest - this image is shared by every
@@ -423,7 +423,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         echo "Not starting the session - traffic would reach the API unintercepted." >&2
         exit 1
     fi
-    if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "tls" ]; then
+    if [ "$SANDBOX_CREDENTIAL_TRANSPORT" = "tls" ]; then
         forwarder_port=443
         # Generated here, in the container, rather than on the host: the key
         # never touches host disk and there is no host state to clean up. It
@@ -431,7 +431,7 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         # unprivileged - and worthless to anyone else, since the only thing
         # that trusts this anchor is this container, which is already reading
         # that traffic in the clear.
-        tls_dir=/etc/dejima-anthropic-tls
+        tls_dir=/etc/dejima-credential-tls
         mkdir -p "$tls_dir"
         # set -e aborts the script on openssl's nonzero exit either way, so a
         # failure here never proceeds to chown/export a missing cert - but
@@ -457,8 +457,8 @@ if [ -n "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ]; then
         chown "$SANDBOX_USER" "$tls_dir/key.pem" "$tls_dir/cert.pem"
         chmod 600 "$tls_dir/key.pem"
         chmod 644 "$tls_dir/cert.pem"
-        export SANDBOX_ANTHROPIC_TLS_CERT="$tls_dir/cert.pem"
-        export SANDBOX_ANTHROPIC_TLS_KEY="$tls_dir/key.pem"
+        export SANDBOX_CREDENTIAL_TLS_CERT="$tls_dir/cert.pem"
+        export SANDBOX_CREDENTIAL_TLS_KEY="$tls_dir/key.pem"
         # /etc/hosts wins over DNS in getaddrinfo, so this bypasses the DNS
         # proxy entirely - which is why fixed-domains.sh leaves the name off
         # the allowlist whenever there is a proxy socket.

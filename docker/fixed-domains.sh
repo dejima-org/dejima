@@ -53,7 +53,7 @@ fi
 #
 # Which name this is comes from the provider (proxied_domain); the rule
 # about when to allowlist it is dejima's, and stays here.
-if [ -z "${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" ] \
+if [ -z "${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" ] \
     && [ -n "${SANDBOX_BACKEND_PROXIED_DOMAIN:-}" ]; then
     FIXED_DOMAINS+=("$SANDBOX_BACKEND_PROXIED_DOMAIN")
 fi

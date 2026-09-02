@@ -173,8 +173,8 @@ services:
       # never enters the container; the host-side proxy swaps this for it per
       # request, exactly as it does for a subscription login's token.
       ANTHROPIC_API_KEY: ${SANDBOX_ANTHROPIC_API_KEY:-}
-      SANDBOX_ANTHROPIC_PROXY_SOCKET: ${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}
-      SANDBOX_ANTHROPIC_TRANSPORT: ${SANDBOX_ANTHROPIC_TRANSPORT:-}
+      SANDBOX_CREDENTIAL_PROXY_SOCKET: ${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}
+      SANDBOX_CREDENTIAL_TRANSPORT: ${SANDBOX_CREDENTIAL_TRANSPORT:-}
     volumes:
       # Mounted at the same absolute path as on the host (rather than a
       # fixed /workspace) so Claude Code's project/session-history keying

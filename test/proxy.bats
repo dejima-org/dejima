@@ -292,8 +292,8 @@ teardown() {
 
 @test "forwarder bridges TCP to the proxy's unix socket" {
     start_proxy
-    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
-        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_PROXY_PORT=18399 \
+        SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
@@ -358,11 +358,11 @@ PYEOF
 # ANTHROPIC_BASE_URL at all, then pipes raw bytes into the same unix socket
 # the loopback mode uses - the host proxy cannot tell the two apart.
 start_forwarder() {  # start_forwarder <transport> <port>; extra env passes through
-    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" \
-    SANDBOX_ANTHROPIC_TRANSPORT="$1" \
-    SANDBOX_ANTHROPIC_PROXY_PORT="$2" \
-    SANDBOX_ANTHROPIC_TLS_CERT="$TD/cert.pem" \
-    SANDBOX_ANTHROPIC_TLS_KEY="$TD/key.pem" \
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" \
+    SANDBOX_CREDENTIAL_TRANSPORT="$1" \
+    SANDBOX_CREDENTIAL_PROXY_PORT="$2" \
+    SANDBOX_CREDENTIAL_TLS_CERT="$TD/cert.pem" \
+    SANDBOX_CREDENTIAL_TLS_KEY="$TD/key.pem" \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js" 2>"$TD/fwd-stderr" &
     FWD_PID=$!
     for _ in $(seq 1 50); do
@@ -435,12 +435,12 @@ make_cert() {
     #
     # The port override is belt-and-braces: the cert check precedes the listen
     # today, so a fall-through lands on an unused port if that ever changes.
-    run env -u SANDBOX_ANTHROPIC_TLS_CERT -u SANDBOX_ANTHROPIC_TLS_KEY \
-        SANDBOX_ANTHROPIC_PROXY_SOCKET="$SOCK" SANDBOX_ANTHROPIC_TRANSPORT=tls \
-        SANDBOX_ANTHROPIC_PROXY_PORT=18398 \
+    run env -u SANDBOX_CREDENTIAL_TLS_CERT -u SANDBOX_CREDENTIAL_TLS_KEY \
+        SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_TRANSPORT=tls \
+        SANDBOX_CREDENTIAL_PROXY_PORT=18398 \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"SANDBOX_ANTHROPIC_TLS_CERT"* ]]
+    [[ "$output" == *"SANDBOX_CREDENTIAL_TLS_CERT"* ]]
 }
 
 @test "an oversized request body is refused rather than read into host RAM" {

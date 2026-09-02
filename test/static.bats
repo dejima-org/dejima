@@ -3666,12 +3666,12 @@ registered_commands() {
 @test "compose carries the credential-proxy env plumbing, empty by default" {
     grep -qE '^\s*ANTHROPIC_BASE_URL:\s*\$\{SANDBOX_ANTHROPIC_BASE_URL:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*ANTHROPIC_AUTH_TOKEN:\s*\$\{SANDBOX_ANTHROPIC_AUTH_TOKEN:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -qE '^\s*SANDBOX_ANTHROPIC_PROXY_SOCKET:\s*\$\{SANDBOX_ANTHROPIC_PROXY_SOCKET:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*SANDBOX_CREDENTIAL_PROXY_SOCKET:\s*\$\{SANDBOX_CREDENTIAL_PROXY_SOCKET:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
 }
 
 @test "the forwarder is baked into the image and started by the entrypoint when a socket is set" {
     grep -q 'COPY docker/credential-proxy-forwarder.js /usr/local/bin/credential-proxy-forwarder.js' "$SANDBOX_DIR/Dockerfile"
-    grep -q 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'if \[ -n "\${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'gosu "\$SANDBOX_USER" node /usr/local/bin/credential-proxy-forwarder.js' "$SANDBOX_DIR/entrypoint.sh"
 }
 
@@ -3796,7 +3796,7 @@ registered_commands() {
     # Neither path is mounted at all now, so there is nothing left to mask -
     # the fake credential the tls transport mounts (see below) is a file the
     # container would otherwise not have, not a mask over the operator's.
-    grep -q 'extra_mounts+=(-v "\$SANDBOX_ANTHROPIC_PROXY_DIR:\$SANDBOX_ANTHROPIC_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
+    grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIAL_PROXY_DIR:\$SANDBOX_CREDENTIAL_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
     run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
 }
@@ -3840,8 +3840,8 @@ registered_commands() {
 }
 
 @test "cleanup reaps the proxy and its socket dir" {
-    grep -q 'kill "\$SANDBOX_ANTHROPIC_PROXY_PID"' "$REPO_ROOT/bin/dejima"
-    grep -q '"\${SANDBOX_ANTHROPIC_PROXY_DIR:-}"' "$REPO_ROOT/bin/dejima"
+    grep -q 'kill "\$SANDBOX_CREDENTIAL_PROXY_PID"' "$REPO_ROOT/bin/dejima"
+    grep -q '"\${SANDBOX_CREDENTIAL_PROXY_DIR:-}"' "$REPO_ROOT/bin/dejima"
 }
 
 @test "bin/dejima warns if the proxy died before the session ended" {
@@ -6114,7 +6114,7 @@ q
     # The transport is normalized in exactly one place so the forwarder, the
     # cert generation, and the readiness probe cannot disagree about which
     # mode this session is in.
-    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\${SANDBOX_ANTHROPIC_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'SANDBOX_CREDENTIAL_TRANSPORT="\${SANDBOX_CREDENTIAL_TRANSPORT:-tls}"' "$SANDBOX_DIR/entrypoint.sh"
     # Which name it answers for is the selected harness's, so these assert the
     # shape rather than one harness's API hostname - see "the TLS terminator
     # answers for the harness's declared domain".
@@ -6138,7 +6138,7 @@ q
     # hosts entry would black-hole the real API - which is why this cannot be
     # a compose extra_hosts entry. It must sit inside the proxy-socket guard.
     local guard body
-    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ -n "$guard" ]
     body=$(grep -n '127.0.0.1 \$proxied_domain' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ -n "$body" ] || { echo "no hosts entry at all"; return 1; }
@@ -6163,7 +6163,7 @@ q
 }
 
 @test "compose passes the transport through and lets an unprivileged process bind :443" {
-    grep -qE '^\s*SANDBOX_ANTHROPIC_TRANSPORT:\s*\$\{SANDBOX_ANTHROPIC_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    grep -qE '^\s*SANDBOX_CREDENTIAL_TRANSPORT:\s*\$\{SANDBOX_CREDENTIAL_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     # Docker already defaults this to 0, but the terminator runs as the
     # unprivileged sandbox user: pinning it means a future default change
     # fails at launch instead of silently breaking the credential path.
@@ -6178,9 +6178,9 @@ q
 }
 
 @test "bin/dejima defaults to the tls transport and exports it" {
-    grep -q 'SANDBOX_ANTHROPIC_TRANSPORT="\$(config_get credentials transport)"' "$REPO_ROOT/bin/dejima"
+    grep -q 'SANDBOX_CREDENTIAL_TRANSPORT="\$(config_get credentials transport)"' "$REPO_ROOT/bin/dejima"
     grep -Pq 'credentials\.transport\tenum:tls\|loopback\ttls' "$REPO_ROOT/bin/dejima-config-lib.sh"
-    grep -q 'export .*SANDBOX_ANTHROPIC_TRANSPORT' "$REPO_ROOT/bin/dejima"
+    grep -q 'export .*SANDBOX_CREDENTIAL_TRANSPORT' "$REPO_ROOT/bin/dejima"
 }
 
 @test "tls mode mounts a fake credential, never the real one, and sets no ANTHROPIC_* pair" {
@@ -6216,7 +6216,7 @@ q
 # .dejima/allowed-domains line. Adding one back here means arguing that the
 # sandbox itself needs it.
 @test "no language package host is built into the allowlist" {
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     for d in pypi.org files.pythonhosted.org proxy.golang.org sum.golang.org \
              crates.io static.crates.io rubygems.org gitlab.com; do
@@ -6249,11 +6249,11 @@ _provider_proxied_domain() {
     # to explain why they are not written in, which is prose, not a value.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/fixed-domains.sh' | grep -n 'platform\.claude\.com\|api\.anthropic\.com'"
     [ "$status" -ne 0 ] || { echo "a harness's domain is still built in:"; echo "$output"; return 1; }
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
     # And a harness declaring none gets none, rather than the last one's.
-    run bash -c "set -u; SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS=''; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS=''; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
 }
@@ -6269,18 +6269,18 @@ _provider_proxied_domain() {
     # non-fatal when it fails to resolve.
     local pd; pd="$(_provider_proxied_domain)"
     [ -n "$pd" ] || { echo "the harness declares no proxied_api_domain"; return 1; }
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'api.anthropic.com' <<< "$output"
 
-    run bash -c "SANDBOX_ANTHROPIC_PROXY_SOCKET=; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
     # Under `set -u`, as both consumers run, so that dropping the `:-` default
     # fails here rather than at container start.
-    run bash -c "set -u; unset SANDBOX_ANTHROPIC_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; unset SANDBOX_CREDENTIAL_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
@@ -6289,17 +6289,17 @@ _provider_proxied_domain() {
     ! grep -q 'extra_domains.*api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
 }
 
-@test "an unrecognised SANDBOX_ANTHROPIC_TRANSPORT is rejected, not silently treated as loopback" {
+@test "an unrecognised SANDBOX_CREDENTIAL_TRANSPORT is rejected, not silently treated as loopback" {
     # bin/dejima branches on `loopback`, entrypoint.sh and the forwarder on
     # `tls` - so a typo configures the two halves for different transports and
     # every API call fails with nothing naming the cause.
-    grep -q 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q 'FATAL: SANDBOX_CREDENTIAL_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh"
     grep -q "The only valid values are 'tls' (the default) and 'loopback'" "$SANDBOX_DIR/entrypoint.sh"
     # Ahead of the proxy-socket guard, so it catches the typo whatever else
     # this session is configured for.
     local check guard
-    check=$(grep -n 'FATAL: SANDBOX_ANTHROPIC_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
-    guard=$(grep -n 'if \[ -n "\${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    check=$(grep -n 'FATAL: SANDBOX_CREDENTIAL_TRANSPORT is set to' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
+    guard=$(grep -n 'if \[ -n "\${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" \]' "$SANDBOX_DIR/entrypoint.sh" | cut -d: -f1)
     [ "$check" -lt "$guard" ]
 }
 
@@ -7281,7 +7281,7 @@ _emit_mount_at() {
     # domain is not testing the proxy, it is testing that refusal - which is
     # how two of these failed.
     local rt="$REPO_ROOT/test/runtime.bats" sock dom
-    sock=$(grep -c 'SANDBOX_ANTHROPIC_PROXY_SOCKET=.*proxy\.sock' "$rt")
+    sock=$(grep -c 'SANDBOX_CREDENTIAL_PROXY_SOCKET=.*proxy\.sock' "$rt")
     dom=$(grep -c 'SANDBOX_BACKEND_PROXIED_DOMAIN=' "$rt")
     [ "$sock" -gt 0 ] || { echo "no proxy fixtures found - has this moved?"; return 1; }
     # One of the domain lines is the file-wide fixture, which mounts no

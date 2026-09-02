@@ -666,7 +666,7 @@ dexec_node() {
     # on, so a bypass of the /etc/hosts pin that resolves the name by DNS gets
     # no address. When the proxy is off (kill switch or API-key auth), DNS is
     # the only path to the API and fixed-domains.sh allowlists it. This file's
-    # shared container runs with no SANDBOX_ANTHROPIC_PROXY_SOCKET, so it is
+    # shared container runs with no SANDBOX_CREDENTIAL_PROXY_SOCKET, so it is
     # in proxy-off mode and the name must resolve.
     run dexec dig +short api.anthropic.com
     [ -n "$output" ]
@@ -1341,9 +1341,9 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
         -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
-        -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
+        -e SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -1603,8 +1603,8 @@ EOF
         "https://api.anthropic.com" \
         "https://platform.claude.com/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
-    SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
-        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_CREDENTIAL_PROXY_PORT=18399 \
+        SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         node "$BATS_TEST_DIRNAME/../docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     sleep 0.5
@@ -1708,7 +1708,7 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
         -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -1719,7 +1719,7 @@ EOF
     # the image's ENV, not from the entrypoint process's exported environment.
     # The session command itself is a child of the entrypoint and does inherit
     # it - which is what the /proc/1/environ check below confirms.
-    run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-anthropic-tls/cert.pem \
+    run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-credential-tls/cert.pem \
         "$container" node -e '
         fetch("https://api.anthropic.com/v1/messages", {method: "POST", body: "{}"})
           .then(r => r.text()).then(t => { console.log(t); })
@@ -1813,7 +1813,7 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
+        -e SANDBOX_CREDENTIAL_TRANSPORT=Loopback \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE"
     exit_code=$status
@@ -1844,7 +1844,7 @@ EOF
     }
 
     [ "$exit_code" = "1" ] || dump "expected the container to exit 1"
-    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]] \
+    [[ "$logs" == *"SANDBOX_CREDENTIAL_TRANSPORT is set to 'Loopback'"* ]] \
         || dump "the transport check never ran - something aborted the entrypoint before it"
     [[ "$logs" == *"'tls'"* ]] || dump "the refusal did not name the valid values"
     [[ "$logs" == *"'loopback'"* ]] || dump "the refusal did not name the valid values"

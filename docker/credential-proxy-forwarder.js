@@ -22,14 +22,14 @@ const net = require("net");
 const tls = require("tls");
 const fs = require("fs");
 
-const socketPath = process.env.SANDBOX_ANTHROPIC_PROXY_SOCKET;
-const transport = process.env.SANDBOX_ANTHROPIC_TRANSPORT || "tls";
+const socketPath = process.env.SANDBOX_CREDENTIAL_PROXY_SOCKET;
+const transport = process.env.SANDBOX_CREDENTIAL_TRANSPORT || "tls";
 const port = parseInt(
-  process.env.SANDBOX_ANTHROPIC_PROXY_PORT || (transport === "tls" ? "443" : "18300"),
+  process.env.SANDBOX_CREDENTIAL_PROXY_PORT || (transport === "tls" ? "443" : "18300"),
   10,
 );
 if (!socketPath) {
-  console.error("credential-proxy-forwarder: SANDBOX_ANTHROPIC_PROXY_SOCKET not set");
+  console.error("credential-proxy-forwarder: SANDBOX_CREDENTIAL_PROXY_SOCKET not set");
   process.exit(1);
 }
 
@@ -43,11 +43,11 @@ const pipe = (client) => {
 
 let server;
 if (transport === "tls") {
-  const certPath = process.env.SANDBOX_ANTHROPIC_TLS_CERT;
-  const keyPath = process.env.SANDBOX_ANTHROPIC_TLS_KEY;
+  const certPath = process.env.SANDBOX_CREDENTIAL_TLS_CERT;
+  const keyPath = process.env.SANDBOX_CREDENTIAL_TLS_KEY;
   if (!certPath || !keyPath) {
     console.error(
-      "credential-proxy-forwarder: SANDBOX_ANTHROPIC_TLS_CERT/SANDBOX_ANTHROPIC_TLS_KEY not set",
+      "credential-proxy-forwarder: SANDBOX_CREDENTIAL_TLS_CERT/SANDBOX_CREDENTIAL_TLS_KEY not set",
     );
     process.exit(1);
   }
