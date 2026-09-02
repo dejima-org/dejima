@@ -149,6 +149,7 @@ approvals):
 | `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to *every* client, phone and desktop alike - see "Reading it on a phone". Unset passes no option at all and leaves `ttyd` on its own default |
 | `ttyd_button_colors` | unset | whether the toolbar is colour-coded by what each button does, in the same gruvbox palette the session picker uses. Unset means yes; `off` restores the grey every key had before. See "Reading it on a phone" |
 | `ttyd_focus_on_tap` | unset | whether tapping the terminal raises the soft keyboard. Unset means no on a touch device and yes on a desktop, which is almost always what you want; `on` or `off` forces it. Overridable per client with `?focus=1` / `?focus=0` |
+| `ttyd_scroll_step` | `5` | how far a finger travels, in terminal rows, to send one scroll notch. Only bites where the *application* is reading the mouse, since a notch is worth several rows there. Overridable per client with `?scroll=N`. See "How far one scroll notch goes" |
 | `ttyd_tmux_prefix` | unset | the tmux prefix the terminal page's `PREFIX`, `◀W`, `W▶` and `ZOOM` buttons send, written as a control chord: `C-a`, `C-b`, `C-Space`, `C-@`, `C-_`, `C-?`. Unset leaves the page on stock tmux's `C-b`. See "Reading it on a phone" |
 
 ```
@@ -185,8 +186,8 @@ looks healthy, and the phone simply never buzzes.
 validated on every read, not just the key being asked for, so an unknown key or
 an unparseable line makes `dejima-ttyd` and `dejima-notify-watch` refuse to
 start and say which line was wrong. So does an out-of-range `ttyd_port`
-(1-65535) or `ttyd_font_size` (8-72), or a `ttyd_tmux_prefix` that is not a
-control chord - refused here rather than on the phone, hours later, by whoever
+(1-65535), `ttyd_font_size` (8-72) or `ttyd_scroll_step` (1-40), or a
+`ttyd_tmux_prefix` that is not a control chord - refused here rather than on the phone, hours later, by whoever
 presses `PREFIX` and gets nothing.
 
 `ntfy_url` and `base_url` must carry an explicit `http://` or `https://` scheme
@@ -541,6 +542,24 @@ With `DRAG` on, dragging a tmux pane border resizes the pane and dragging an
 nvim split separator resizes the split. Neither needs any server-side
 configuration - they are stock tmux and nvim behaviour; the page's only
 contribution is delivering the drag.
+
+### How far one scroll notch goes
+
+A scroll gesture is sent as wheel notches, and who receives one decides what it
+is worth. When the page is scrolling its own scrollback it moves a single row,
+so one notch per row of finger travel tracks your finger exactly. When an
+application is reading the mouse it does not: stock tmux scrolls five rows for
+one notch in copy mode, and a full-screen application picks its own figure.
+
+So `ttyd_scroll_step` is how many rows the finger travels per notch, and it
+applies only on that second path - `5` by default, which is roughly what a
+notch buys there. At `1` a small movement of the thumb threw the screen several
+rows and putting a particular line at the bottom took several tries.
+
+Raise it if your session still outruns your finger, lower it if scrolling feels
+heavy. `?scroll=N` on the page's URL overrides it for one client, which is
+worth having because the right number depends on what is running in the
+session rather than on the host.
 
 ### Toolbar
 
