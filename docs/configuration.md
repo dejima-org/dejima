@@ -716,12 +716,20 @@ is to be a well-known handoff point.
 
 An entry is **refused, not warned about**, if it overlaps anything dejima
 relies on being out of a session's reach: the approval store, either audit
-store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
-(already read-write, so listing it again is a mistake worth surfacing). A
-writable mount over any of those would let a session approve its own domains,
-delete the audit findings naming it, or plant code that runs unsandboxed on the
-host next time you start an agent. Overlap is checked in both directions after
-resolving symlinks, so `read_write = ~` is caught too.
+store, the epitaph store, every project's share, `~/.local/bin`, dejima's own
+checkout, the project mount (already read-write, so listing it again is a
+mistake worth surfacing), and **everything the selected harness keeps on the
+host** - its config directories, the files staged and seeded from them, and
+the state directories its manifest declares. A writable mount over any of
+those would let a session approve its own domains, delete the audit findings
+naming it, read another project's transcripts, or plant code that runs
+unsandboxed on the host next time you start an agent. Overlap is checked in
+both directions after resolving symlinks, so `read_write = ~` is caught too.
+
+The harness half of that list is derived from what the harness declares, not
+written down in dejima, so it covers whichever one you selected - `~/.claude`
+for Claude Code, `~/.agents` and `~/.cline` for Cline - and covers a harness
+added later without anyone extending a list.
 
 Sessions are told which directories these are, so "everything else is
 disposable" stays true in the briefing rather than becoming a trap.
