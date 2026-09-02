@@ -1107,7 +1107,7 @@ identity_validate() {
     # "once" that a session could not reach, and a deprecation nobody sees
     # until removal is not a deprecation.
     if config_is_set core ssh_key; then
-        printf '  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
+        printf '\n  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
             "${C_WARN:-}" "${C_RESET:-}" >&2
         printf '  under its old name.\n' >&2
         if [ -n "$name" ]; then
@@ -1123,8 +1123,10 @@ identity_validate() {
         # force it answers with THAT identity's key - and printing it as the
         # thing to move would name a key the operator is not being asked to
         # touch.
-        printf '      [identity.default]\n      ssh_key = %s\n\n' \
+        printf '      [identity.default]\n      ssh_key = %s\n' \
             "$(_config_get_from_file core ssh_key)" >&2
+        # Worth a pause before the build scrolls it away - see bin/dejima.
+        DEJIMA_STARTUP_NOTICE=1
     fi
 
     [ -n "$name" ] || return 0

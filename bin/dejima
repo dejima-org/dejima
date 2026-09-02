@@ -37,10 +37,9 @@ Options (each overrides the config file for one launch only):
   --identity <name>       which [identity.<name>] supplies the credentials
   -i, --include <tool>    add an optional tool to this launch (repeatable);
                           see docs/tools.md for what dejima ships
-  --backend <name>        the selected harness's model API, model, endpoint
-  --model <id>            and context budget, each refused for a harness with
-  --base-url <url>        no such setting
-  --context-window <n>
+  --backend <name>        the selected harness's model API, model and context
+  --model <id>            budget, each refused for a harness with no such
+  --context-window <n>    setting
   --ro <path>             mount read-only; --rw read-write. Repeatable, long
                           forms --extra-readonly/--extra-read-write, and both
                           refuse a path overlapping dejima's own stores
@@ -50,6 +49,7 @@ Options (each overrides the config file for one launch only):
   --no-conversation       keep this session's transcript out of the log
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
+  --no-pause              do not wait for a keypress before the image build
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
@@ -104,7 +104,18 @@ color_init 2
 # and report, which costs one extra parse of a config that is about to be
 # refused anyway.
 if ! config_validate >/dev/null 2>&1; then
+    # Dropping the cache alone left the reporting to whoever parsed next, and
+    # that is usually a SUBSHELL - `$(config_get ...)` - whose cache dies with
+    # it. So the next parsing context reported it too, and an invalid config
+    # printed its reason once per context: twice for an ordinary launch, and
+    # ten lines each once a message grew a hint. Same shape as #284.
+    #
+    # Re-parsed here instead, unsuppressed, in this shell: the reason is
+    # printed exactly once and the failed status is cached where every
+    # subshell inherits it. Deliberately not an exit - flags are not parsed
+    # yet, and `--help` on a broken config should still answer.
     _CFG_PARSED_PATH=""
+    config_validate || true
 fi
 
 # Flags come first, then the optional workspace path, then "--" and
@@ -222,6 +233,9 @@ ALLOW_GITHUB_PUSH_FLAG=0
 # project already agreed on, not a replacement for them. Repeatable.
 TOOL_FLAGS=()
 NO_LOG=0
+# Launch-scoped, like NO_LOG: initialised here so an inherited environment
+# variable of the same name cannot decide it.
+NO_PAUSE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; break ;;
@@ -235,6 +249,12 @@ while [ $# -gt 0 ]; do
         --strict-audit)      _set_override audit.strict on; shift ;;
         --no-epitaph)        _set_override epitaph.enabled off; shift ;;
         --no-conversation)   _set_override logging.conversation off; shift ;;
+        # Not a config override: this is about the terminal in front of THIS
+        # launch, not about what dejima should do generally. Someone starting
+        # eight sessions from a tmuxinator layout wants every one of them to
+        # reach its prompt, and does not want that recorded as a preference
+        # for the launch they run by hand tomorrow.
+        --no-pause)          NO_PAUSE=1; shift ;;
         --no-log)            _set_override logging.loki_url ""
                              _set_override logging.conversation off
                              NO_LOG=1; shift ;;
@@ -364,7 +384,7 @@ _warn_legacy_env() {
     done
     if [ "$shown" = 1 ]; then
         echo "Set them in $(config_path) instead, then unset them in your shell profile." >&2
-        echo "" >&2
+        DEJIMA_STARTUP_NOTICE=1
     fi
 
     # GITEA_TOKEN/GITEA_SSH_HOST/GITEA_API are retired (named above) -
@@ -1007,10 +1027,17 @@ share_loose="$(find "$SANDBOX_SHARE_ROOT" -mindepth 1 -maxdepth 1 \
 if [ -n "$share_loose" ]; then
     echo "Note: $SANDBOX_SHARE_ROOT holds entries no session can see any more," >&2
     echo "      because ~/shared is now this project's own subdirectory of it:" >&2
-    while IFS= read -r _entry; do
+    # A sample, not an inventory. This is a standing condition an operator
+    # clears once, and printing ninety filenames on every launch pushes the
+    # notices that are about THIS run off the top of the screen.
+    _share_n="$(printf '%s\n' "$share_loose" | wc -l)"
+    printf '%s\n' "$share_loose" | head -8 | while IFS= read -r _entry; do
         [ -n "$_entry" ] || continue
         printf '        %s\n' "$_entry" >&2
-    done <<< "$share_loose"
+    done
+    [ "$_share_n" -le 8 ] || printf '        %s... and %d more%s\n' \
+        "${C_DIM:-}" "$(( _share_n - 8 ))" "${C_RESET:-}" >&2
+    unset _share_n
     echo "      Move them into a project's share with 'dejima-share adopt <path>'," >&2
     echo "      or delete them. 'dejima-share list' shows what each project holds." >&2
 fi
@@ -1683,19 +1710,48 @@ if config_type "harness.$DEJIMA_HARNESS_NAME.backend" >/dev/null 2>&1; then
     # not a guess - what every existing session of that harness already was -
     # so the launch it runs in behaves identically either way.
     #
-    # Appended as its own section rather than edited into an existing one: the
-    # parser takes the last assignment, and a rewrite of an operator's config
-    # is a much larger thing to get right than an append.
+    # Written INTO the operator's existing section for this harness when there
+    # is one, and appended as a new section only when there is not.
+    #
+    # Appending unconditionally is simpler and produces a config with the same
+    # section header twice, which parses correctly and reads as a mistake
+    # dejima made in the operator's own file. Reported as exactly that.
+    #
+    # Inserting immediately after the header is safe here specifically because
+    # the key is UNSET: there is no later assignment for a line near the top
+    # to lose to, which is the thing that makes editing a config file
+    # dangerous in general.
     if [ -z "$DEJIMA_BACKEND_NAME" ]; then
         _assumed="$(manifest_get harness "$DEJIMA_HARNESS_NAME" assumed_backend)"
         if [ -n "$_assumed" ] && [ -w "$(config_path)" ]; then
-            printf '\n[harness.%s]\nbackend = %s\n' \
-                "$DEJIMA_HARNESS_NAME" "$_assumed" >> "$(config_path)"
+            _cfg_tmp="$(mktemp "$(dirname "$(config_path)")/.config.XXXXXX")" || exit 1
+            awk -v sec="[harness.$DEJIMA_HARNESS_NAME]" \
+                -v line="backend = $_assumed" '
+                { print }
+                !done {
+                    t = $0
+                    gsub(/^[ \t]+|[ \t]+$/, "", t)
+                    if (t == sec) { print line; done = 1 }
+                }
+                END { if (!done) printf "\n%s\n%s\n", sec, line }
+            ' "$(config_path)" > "$_cfg_tmp" || exit 1
+            # The operator's file keeps its own permissions rather than a
+            # fresh mktemp's.
+            chmod --reference="$(config_path)" "$_cfg_tmp" 2>/dev/null || true
+            mv "$_cfg_tmp" "$(config_path)" || exit 1
+            unset _cfg_tmp
             DEJIMA_BACKEND_NAME="$_assumed"
-            echo "Recorded [harness.$DEJIMA_HARNESS_NAME] backend = $_assumed in $(config_path)." >&2
-            echo "That is what this harness was already talking to; it is written down now" >&2
-            echo "so a later change to dejima cannot move it. Nothing about this launch" >&2
-            echo "differs because of it." >&2
+            # Its own block, and the line that was written picked out: this
+            # is dejima editing the operator's config, which is the one
+            # startup notice they may want to go and look at.
+            printf '\n  %sdejima wrote a line into %s%s\n' \
+                "${C_WARN:-}" "$(config_path)" "${C_RESET:-}" >&2
+            printf '      [harness.%s]\n      %sbackend = %s%s\n\n' \
+                "$DEJIMA_HARNESS_NAME" "${C_KEY:-}" "$_assumed" "${C_RESET:-}" >&2
+            printf '  That is what this harness was already talking to, written down so a\n' >&2
+            printf '  later change to dejima cannot move it. Nothing about this launch\n' >&2
+            printf '  differs because of it.\n' >&2
+            DEJIMA_STARTUP_NOTICE=1
         fi
         unset _assumed
     fi
@@ -2589,7 +2645,7 @@ startup_banner() {
 }
 startup_banner
 
-printf '%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
+printf '\n%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
     "$C_DIM" "$C_RESET" >&2
 
@@ -2605,12 +2661,34 @@ harness_report_guards "$DEJIMA_HARNESS_NAME"
 # after it with no briefing and no guards, and nothing said so. The project's
 # own standard is that a silently narrower run is worse than a noisy one.
 if ! _unwired="$(harness_guards_wired)"; then
-    printf '  %snot registered for %s, so not in force this session:%s\n' \
+    printf '\n  %snot registered for %s, so not in force this session:%s\n' \
         "$C_WARN" "$DEJIMA_HARNESS_NAME" "$C_RESET" >&2
     printf '%s\n' "$_unwired" | while IFS= read -r _u; do
         [ -n "$_u" ] && printf '    %s%s%s\n' "$C_KEY" "$_u" "$C_RESET" >&2
     done
     printf '  Run %s./install.sh%s to register them.\n' "$C_KEY" "$C_RESET" >&2
+    DEJIMA_STARTUP_NOTICE=1
+fi
+
+# Everything said so far is about the operator's configuration and this
+# session; every line after this is the image build, which on a cold cache is
+# thousands of lines of Docker output. A notice that lands here scrolls away
+# before it can be read, which is the same reason the exit audit prints its
+# findings LAST.
+#
+# Only when something was actually said, and only with someone there to read
+# it: an unattended launch must not block on a keystroke nobody will press.
+# The orphaned-share list deliberately does not raise this - it is a standing
+# condition rather than something about this run, and pausing every launch
+# until it is cleared would teach the operator to press Enter without looking,
+# which is the failure this exists to avoid.
+if [ "${DEJIMA_STARTUP_NOTICE:-0}" = 1 ] && [ "${NO_PAUSE:-0}" != 1 ] \
+    && [ -t 0 ] && [ -t 2 ]; then
+    printf '\n  %sThe build output below will scroll that away.%s ' \
+        "${C_DIM:-}" "${C_RESET:-}" >&2
+    printf '%sPress Enter to continue.%s ' "${C_KEY:-}" "${C_RESET:-}" >&2
+    read -r _ </dev/tty || true
+    printf '\n' >&2
 fi
 
 # Before the image build, which is the long part: an operator who wants the

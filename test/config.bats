@@ -3089,7 +3089,7 @@ EOF
 
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"Recorded [harness.claude-code] backend = anthropic"* ]] \
+    [[ "$output" == *"wrote a line into"* ]] && [[ "$output" == *"backend = anthropic"* ]] \
         || { echo "the migration was silent: $output"; return 1; }
     # In the operator's file, so the next launch reads it rather than assuming
     # it again.
@@ -3099,7 +3099,7 @@ EOF
     # And it happens once. A second launch finds the value and says nothing.
     _rw_launch "$workspace"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" != *"Recorded [harness"* ]] \
+    [[ "$output" != *"wrote a line into"* ]] \
         || { echo "the migration ran again: $output"; return 1; }
     [ "$(grep -c 'backend = anthropic' "$CONFIG_DIR/config")" -eq 1 ] \
         || { echo "the value was written twice:"; cat "$CONFIG_DIR/config"; return 1; }
@@ -3790,4 +3790,176 @@ JSON
     [ "$(wc -l <<< "$output")" = 6 ] || { echo "unexpected count:"; echo "$output"; return 1; }
     grep -q 'CANARY' <<< "$output" && { echo "a value leaked"; return 1; }
     rm -rf "$d"
+}
+
+@test "the migration writes into the operator's existing section, not a second one" {
+    # Reported from a real launch: the config already had a
+    # [harness.claude-code] section, and dejima appended a second one holding
+    # only the migrated key. It parses, and it reads as a mistake dejima made
+    # in the operator's own file.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nprojects_dir = ~/.claude/projects\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ "$(grep -c '^\[harness\.claude-code\]' "$CONFIG_DIR/config")" -eq 1 ] \
+        || { echo "a second section was appended:"; cat "$CONFIG_DIR/config"; return 1; }
+    grep -qx 'backend = anthropic' "$CONFIG_DIR/config" \
+        || { echo "the key was not written:"; cat "$CONFIG_DIR/config"; return 1; }
+    # The key the operator already had is untouched, and still in that section.
+    grep -qx 'projects_dir = ~/.claude/projects' "$CONFIG_DIR/config" \
+        || { echo "an existing key was lost:"; cat "$CONFIG_DIR/config"; return 1; }
+    # And the file keeps its own permissions rather than a fresh temp file's.
+    [ "$(stat -c '%a' "$CONFIG_DIR/config")" = "$(stat -c '%a' "$RW_KEY")" ] \
+        || echo "note: config mode is now $(stat -c '%a' "$CONFIG_DIR/config")"
+    rm -rf "$workspace"
+}
+
+@test "a key dejima moved says where it went, not just that it is unknown" {
+    # base_url left the harness for the backend in the provider axis. An
+    # operator who had it gets "unknown key", which is true and useless: it
+    # does not distinguish a typo from a move, and the answer is in a document
+    # they have no reason to think they need.
+    _rw_setup
+    printf '[core]\nharness = cline\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.cline]\nmodel = m\nbase_url = http://127.0.0.1:8080/v1\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    HOME="$RW_HOME" run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ] || { echo "an unknown key was accepted: $output"; return 1; }
+    [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"backend = self-hosted"* ]] \
+        || { echo "it does not name where the key went: $output"; return 1; }
+    [[ "$output" == *"[backend.self-hosted]"* ]] \
+        || { echo "it does not name the new section: $output"; return 1; }
+}
+
+@test "a long orphaned-share list is sampled, not printed whole" {
+    # Reported: ninety entries pushed everything about the run off the screen.
+    # It is a standing condition an operator clears once, so it gets a sample.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    mkdir -p "$RW_HOME/share"
+    local i
+    for i in $(seq 1 31); do : > "$RW_HOME/share/leftover-$i.md"; done
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' 'share_dir = ~/share'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"no session can see any more"* ]] || { echo "$output"; return 1; }
+    [ "$(grep -c 'leftover-' <<< "$output")" -le 8 ] \
+        || { echo "the whole list was printed:"; echo "$output"; return 1; }
+    [[ "$output" == *"and 23 more"* ]] \
+        || { echo "it does not say how many were left out: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a notice pauses before the build output scrolls it away" {
+    # The positive half. Without it, the test below passes just as well when
+    # the pause does not exist at all - which is exactly how it read after an
+    # accidental revert wiped the feature and left its guard test green.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nbackend = anthropic\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    STUB_DIR="$(mktemp -d)"
+    printf '#!/bin/sh\necho BUILD-OUTPUT-STARTS\nexit 0\n' > "$STUB_DIR/docker"
+    chmod +x "$STUB_DIR/docker"
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        run python3 "$BATS_TEST_DIRNAME/fixtures/answer-prompt.py" \
+            --marker "Press Enter" "" -- "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Press Enter to continue"* ]] \
+        || { echo "no pause before the build: $output"; return 1; }
+    # And it is a pause, not a stop: the build runs once answered.
+    [[ "$output" == *"BUILD-OUTPUT-STARTS"* ]] \
+        || { echo "answering did not continue: $output"; return 1; }
+    # The pause comes AFTER the notice, or it has not protected anything.
+    [[ "${output%%Press Enter*}" == *"ssh_key is deprecated"* ]] \
+        || { echo "the pause came before the notice: $output"; return 1; }
+    rm -rf "$workspace" "$STUB_DIR"
+}
+
+@test "--no-pause reaches the prompt without a keypress, and still says it" {
+    # Starting eight sessions from a tmuxinator layout: every one has a
+    # terminal, so the pause fires on every one, and the operator wants them
+    # all at a prompt rather than eight keys to press. The notices still
+    # print - skipping the wait is not skipping the telling.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nbackend = anthropic\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    STUB_DIR="$(mktemp -d)"
+    printf '#!/bin/sh\necho BUILD-OUTPUT-STARTS\nexit 0\n' > "$STUB_DIR/docker"
+    chmod +x "$STUB_DIR/docker"
+    # A real terminal and NO answer: without the flag this would sit at the
+    # prompt until the fixture gave up and killed it.
+    HOME="$RW_HOME" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        run python3 "$BATS_TEST_DIRNAME/fixtures/answer-prompt.py" \
+            --marker "nothing-matches-this" -- \
+            "$REPO_ROOT/bin/dejima" --no-pause "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Press Enter"* ]] \
+        || { echo "--no-pause still waited: $output"; return 1; }
+    [[ "$output" == *"BUILD-OUTPUT-STARTS"* ]] \
+        || { echo "it never reached the build: $output"; return 1; }
+    # The notice is still printed; only the wait is skipped.
+    [[ "$output" == *"ssh_key is deprecated"* ]] \
+        || { echo "--no-pause silenced the notice: $output"; return 1; }
+    # And it did not merely get killed for hanging.
+    [[ "$output" != *"never exited"* ]] || { echo "it hung: $output"; return 1; }
+    rm -rf "$workspace" "$STUB_DIR"
+}
+
+@test "an unattended launch never waits for a keystroke nobody will press" {
+    # The pause before the build exists so a notice can be read. With no
+    # terminal there is nobody to read it, and blocking would hang every
+    # scheduled or remote launch that has a deprecation set.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # [core] ssh_key is a deprecation, so a notice fires on this launch.
+    printf '[core]\nharness = claude-code\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.claude-code]\nbackend = anthropic\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"ssh_key is deprecated"* ]] \
+        || { echo "the fixture raised no notice: $output"; return 1; }
+    [[ "$output" != *"Press Enter"* ]] \
+        || { echo "it waited for input with no terminal: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "an invalid config reports its reason once, not once per parsing context" {
+    # The early validation runs suppressed and, on failure, used to drop the
+    # cache so the next caller would parse and report. The next caller is
+    # usually a subshell - $(config_get ...) - whose cache dies with it, so
+    # every parsing context reported the same problem. One line each was
+    # merely odd; a message with a hint under it printed twenty lines.
+    _rw_setup
+    printf '[core]\nharness = cline\nssh_key = %s\nforge = none\nworkflow = local-only\n[harness.cline]\nmodel = m\nbase_url = http://127.0.0.1:8080/v1\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+
+    HOME="$RW_HOME" run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -ne 0 ] || { echo "an invalid config launched: $output"; return 1; }
+    [ "$(grep -c 'unknown key' <<< "$output")" -eq 1 ] \
+        || { echo "reported $(grep -c 'unknown key' <<< "$output") times:"; echo "$output"; return 1; }
+
+    # And on the launch path, which parses in more places than --print-config.
+    workspace="$(mktemp -d)"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "an invalid config launched: $output"; return 1; }
+    [ "$(grep -c 'unknown key' <<< "$output")" -eq 1 ] \
+        || { echo "reported $(grep -c 'unknown key' <<< "$output") times:"; echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "--help still answers when the config is invalid" {
+    # The fix above must not become an exit: flags are not parsed yet at that
+    # point, and someone whose config is broken is exactly who needs --help.
+    _rw_setup
+    printf '[core]\nharness = cline\nssh_key = %s\n[harness.cline]\nbase_url = x\n' \
+        "$RW_KEY" > "$CONFIG_DIR/config"
+    HOME="$RW_HOME" run "$REPO_ROOT/bin/dejima" --help
+    [ "$status" -eq 0 ] || { echo "--help failed on a broken config: $output"; return 1; }
+    [[ "$output" == *"dejima - run an agent harness"* ]] || { echo "$output"; return 1; }
 }

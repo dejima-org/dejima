@@ -6,7 +6,7 @@ point - an unattended launch must not block on a question nobody will see. So
 a test that drives the interactive path needs a pty rather than a pipe, or it
 exercises the non-interactive branch while claiming to test the other one.
 
-Usage: answer-prompt.py <answer-per-prompt>... -- <command> [args...]
+Usage: answer-prompt.py [--marker TEXT] <answer-per-prompt>... -- <command> [args...]
 
 Each answer is sent when the child writes a line ending in the prompt marker.
 Everything the child wrote is printed on exit, and the child's exit status is
@@ -15,11 +15,20 @@ this program's.
 
 import os
 import pty
+import signal
 import re
 import select
 import sys
 
+# The default is the credential scan's prompt. --marker takes another, so a
+# test for a different prompt does not need a second copy of this.
 MARKER = "[s/a/o/r]"
+
+# dejima pauses before the image build when it printed a notice worth reading.
+# That is not the prompt any test here is about - it is ambient, and every
+# launch fixture that sets [core] ssh_key raises it - so it is answered
+# automatically rather than costing every caller an extra argument.
+AMBIENT = "Press Enter to continue"
 TIMEOUT = 60.0
 
 
@@ -28,7 +37,13 @@ def main():
         print("usage: answer-prompt.py <answer>... -- <command>...", file=sys.stderr)
         return 2
     split = sys.argv.index("--")
-    answers = list(sys.argv[1:split])
+    args = list(sys.argv[1:split])
+    global MARKER
+    if "--marker" in args:
+        i = args.index("--marker")
+        MARKER = args[i + 1]
+        del args[i:i + 2]
+    answers = args
     command = sys.argv[split + 1:]
     if not command:
         print("no command given", file=sys.stderr)
@@ -64,11 +79,28 @@ def main():
         # marker appearing inside prose does not consume an answer.
         if pending and MARKER in text:
             os.write(fd, (pending.pop(0) + "\n").encode())
+        elif AMBIENT in text and AMBIENT != MARKER:
+            os.write(fd, b"\n")
 
-    _, status = os.waitpid(pid, 0)
+    # The child may still be sitting at a prompt nobody answered - an
+    # unanswered question is the likeliest way for this to end, and waiting on
+    # it turns a failing test into a hung suite. Killed rather than waited on,
+    # and the caller is told which it was.
+    stuck = False
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done == 0:
+            stuck = True
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+    except OSError:
+        status = 0
     sys.stdout.write("".join(out))
     if pending:
         sys.stdout.write("\n[answer-prompt: %d answer(s) never used]\n" % len(pending))
+    if stuck:
+        sys.stdout.write("\n[answer-prompt: the command never exited - killed. "
+                         "It was probably waiting at a prompt nothing answered.]\n")
     return os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") \
         else (status >> 8)
 
