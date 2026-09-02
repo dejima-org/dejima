@@ -415,6 +415,37 @@ editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
 
+
+#### What comes in from your host
+
+The same shape as Claude Code's, and for the same reason: your own
+configuration should reach a session, and nothing the session writes should
+reach your machine.
+
+| Host path | How it arrives | Why |
+| --- | --- | --- |
+| `~/.agents/skills/` | read-only mount | skills are instructions the agent follows |
+| `~/.agents/hooks/`, `~/.cline/hooks/` | read-only mount | hooks are programs cline runs |
+| `~/.agents/AGENTS.md` | read-only copy | instructions; a copy also survives it being a symlink into a dotfiles checkout |
+| `~/.cline/settings.json`, `~/.cline/cline_mcp_settings.json` | writable copy, discarded | cline rewrites both as it runs |
+| `~/.cline/data/` | this project's own state directory | see above |
+
+Read-only is the point rather than caution. A session that could rewrite a
+hook, a skill or an MCP server definition would be choosing what happens on
+**your** machine the next time you start cline outside a container - which is
+persistence for a prompt injection, in files nobody re-reads before the next
+run. The two settings files are copies rather than read-only mounts because
+cline rewrites them itself; the copy is discarded with the container.
+
+The read-only directories are scanned for symlinks, so a `skills/` that is a
+link into a dotfiles checkout brings its target too. dejima refuses a target
+that overlaps one of its own guarded stores.
+
+**`~/.agents/rules/` is deliberately not mounted.** It reads like the obvious
+companion to `~/.agents/skills/`, and cline does not load it: a file planted
+there does not appear in `cline config`, while one in `~/Documents/Cline/Rules`
+does. Mounting a directory the harness never reads would be a promise dejima
+cannot keep.
 ## What dejima says before it starts
 
 Some launches print a notice first: an environment variable that is no longer

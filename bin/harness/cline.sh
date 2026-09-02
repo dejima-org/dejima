@@ -332,6 +332,55 @@ harness_prepare_config() {
 # nothing inside the container has to be told where its state is - the source
 # is keyed by dejima's workspace slug and only the target follows the harness,
 # which is what emit_mount_at is for.
+# The operator's own configuration, brought in from the host.
+#
+# Read-only, and that is the whole point rather than caution: everything here
+# is either an instruction the agent follows or a program cline runs. A
+# session that could rewrite them would be choosing what happens on the HOST
+# the next time cline starts outside a container - persistence for a prompt
+# injection, in files nobody re-reads before the next run.
+#
+# `scan` for the same reason claude-code's directories are scanned: on a Linux
+# host these are routinely symlinks into a dotfiles checkout, and the target
+# has to be mounted for the link to resolve inside the container. Core refuses
+# a target that overlaps a guarded store.
+#
+# ~/.agents/rules is deliberately absent. It reads like the obvious companion
+# to ~/.agents/skills and cline does not load it - checked by planting a file
+# in it and one in ~/Documents/Cline/Rules and asking `cline config` which it
+# had: only the second appeared. Mounting a directory the harness never reads
+# would be a promise dejima cannot keep.
+harness_config_dirs() {
+    emit_config_dir "$HOME/.agents/skills" ro scan
+    # Not confirmed loaded by that same probe, unlike skills. Mounted because
+    # it is the documented default for --hooks-dir and because the cost of
+    # being wrong is an empty directory, where the cost of leaving it out is a
+    # hook that silently does not run.
+    emit_config_dir "$HOME/.agents/hooks" ro scan
+    emit_config_dir "$HOME/.cline/hooks" ro scan
+}
+
+# AGENTS.md is instructions the agent follows, so a session that could write
+# the host's copy would be choosing what the next session is told. Staged
+# rather than mounted: the copy lands root-owned and read-only, and a file
+# that is a symlink into a dotfiles checkout arrives as its real content
+# rather than as a link the host can still swap.
+harness_staged_config() {
+    emit_staged_config "$HOME/.agents/AGENTS.md" ".agents/AGENTS.md"
+}
+
+# Writable copies, discarded with the container.
+#
+# cline rewrites both of these as it runs - its settings TUI toggles them - so
+# a read-only copy would fail the write rather than the persistence, and the
+# persistence is the part that matters. cline_mcp_settings.json names MCP
+# servers, which are commands cline executes: a session that could write the
+# host's copy would be choosing what runs there next time.
+harness_seed() {
+    emit_seed_from "$HOME/.cline/settings.json" ".cline/settings.json"
+    emit_seed_from "$HOME/.cline/cline_mcp_settings.json" ".cline/cline_mcp_settings.json"
+}
+
 harness_state_mounts() {
     local dir
     dir="$(_cline_state_dir "$1")" || return 0

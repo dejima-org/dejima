@@ -538,6 +538,38 @@ _plugin_fixture() {
     printf '{}\n' > "$p/plugin-catalog-cache.json"
 }
 
+# The same three declarations, for whichever harness is asked about. cline's
+# are new and claude-code's are long-standing, and a helper per harness would
+# drift. A nameref rather than eval: the array name is the only thing that
+# varies, and quoting it through two shells is how the first version of this
+# printed a literal "n" for every newline.
+_declared_for() {  # <harness> <loader> <array-name>
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME=/h
+        harness_plugin_load "$1"
+        "$2"
+        declare -n _arr="$3"
+        printf "%s\n" ${_arr[@]+"${_arr[@]}"}
+    ' _ "$1" "$2" "$3"
+}
+
+# The same, against a real home. emit_seed_from skips a source that does not
+# exist - a fresh install has none of this state - so a seed assertion needs
+# files on disk rather than the /h placeholder above.
+_declared_for_home() {  # <home> <harness> <loader> <array-name>
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        HOME="$1"
+        harness_plugin_load "$2"
+        "$3"
+        declare -n _arr="$4"
+        printf "%s\n" ${_arr[@]+"${_arr[@]}"}
+    ' _ "$1" "$2" "$3" "$4"
+}
+
 _declared_config_dirs() {
     bash -c '
         source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
@@ -7765,4 +7797,64 @@ _cline_providers_json() {
         echo "--help offers flags bin/dejima does not parse:$missing" >&2
         false
     }
+}
+
+@test "cline brings the operator's own config in, and read-only" {
+    # Everything here is either an instruction the agent follows or a program
+    # cline runs. A session that could rewrite them would be choosing what
+    # happens on the HOST the next time cline starts outside a container.
+    local dirs d
+    dirs="$(_declared_for cline harness_config_dirs_load DEJIMA_CONFIG_DIRS)"
+    for d in /h/.agents/skills /h/.agents/hooks /h/.cline/hooks; do
+        grep -q "^$d"$'\t'"ro" <<< "$dirs" \
+            || { echo "$d is not mounted read-only: $dirs"; return 1; }
+        # scan, because on a Linux host these are routinely symlinks into a
+        # dotfiles checkout and the target has to come with them.
+        grep -q "^$d"$'\t'"ro"$'\t'"scan" <<< "$dirs" \
+            || { echo "$d is not scanned for symlink targets: $dirs"; return 1; }
+    done
+}
+
+@test "cline's rules directory under ~/.agents is deliberately not mounted" {
+    # It reads like the obvious companion to ~/.agents/skills, and cline does
+    # not load it: planting a file there and one in ~/Documents/Cline/Rules
+    # and asking `cline config` which it had returned only the second.
+    # Mounting a directory the harness never reads is a promise dejima cannot
+    # keep, so its absence is the assertion.
+    local dirs
+    dirs="$(_declared_for cline harness_config_dirs_load DEJIMA_CONFIG_DIRS)"
+    grep -q "^/h/.agents/rules"$'\t' <<< "$dirs" \
+        && { echo "~/.agents/rules is mounted, and cline does not read it"; return 1; }
+    return 0
+}
+
+@test "cline's AGENTS.md is staged, and its settings are seeded writable" {
+    # AGENTS.md is instructions the agent follows, so the session gets a
+    # root-owned read-only copy: writing the host's would choose what the next
+    # session is told.
+    local staged
+    staged="$(_declared_for cline harness_staged_config_load DEJIMA_STAGED_CONFIG)"
+    grep -q "^/h/.agents/AGENTS.md"$'\t'".agents/AGENTS.md" <<< "$staged" \
+        || { echo "AGENTS.md is not staged: $staged"; return 1; }
+
+    # The settings files cline rewrites as it runs. A read-only copy would
+    # fail the write rather than the persistence, and the persistence is the
+    # part that matters: cline_mcp_settings.json names commands cline runs.
+    local seed f h
+    h="$(mktemp -d)"; mkdir -p "$h/.cline"
+    printf '{}\n' > "$h/.cline/settings.json"
+    printf '{"mcpServers":{}}\n' > "$h/.cline/cline_mcp_settings.json"
+    seed="$(_declared_for_home "$h" cline harness_seed_load DEJIMA_SEED)"
+    for f in settings.json cline_mcp_settings.json; do
+        grep -q ".cline/$f" <<< "$seed" \
+            || { echo "$f is not seeded writable: $seed"; rm -rf "$h"; return 1; }
+    done
+    rm -rf "$h"
+    # And neither is a plain read-write mount of the host's file, which is the
+    # one shape that would let a session reach it.
+    local dirs
+    dirs="$(_declared_for cline harness_config_dirs_load DEJIMA_CONFIG_DIRS)"
+    grep -q "^/h/.cline"$'\t'"$" <<< "$dirs" \
+        && { echo "~/.cline is mounted read-write wholesale: $dirs"; return 1; }
+    return 0
 }
