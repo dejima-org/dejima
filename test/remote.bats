@@ -2001,6 +2001,11 @@ stub_ss_no_listeners() {
 # --index is unconditional: it is what replaces ttyd's stock frontend with the
 # touch-capable page in web/, and it is the whole feature rather than an
 # option, so an invocation without it is a regression and not a configuration.
+ttyd_scroll_step_default() {
+    awk -F'\t' '$1 == "remote-access.ttyd_scroll_step" { print $3 }' \
+        "$REPO_ROOT/bin/dejima-config-lib.sh"
+}
+
 expect_ttyd_argv() {
     printf '%s\n' --interface 127.0.0.1 --port "$1" --check-origin --url-arg --writable
     printf '%s\n' --index "$(dirname "$(readlink -f "$REPO_ROOT/bin")")/web/index.html"
@@ -2008,6 +2013,12 @@ expect_ttyd_argv() {
     [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
     [ -z "${4:-}" ] || printf '%s\n' -t "focusOnTap=$4"
     [ -z "${5:-}" ] || printf '%s\n' -t "buttonColors=$5"
+    # Always sent, unlike the four above, because there is no "leave it alone"
+    # state: the page picks some travel per notch either way, so the schema
+    # carries a real default rather than an empty one. Read out of the schema
+    # rather than transcribed, for the same reason as the theme below - what
+    # this asserts is that a step reaches ttyd, not what the number is.
+    printf '%s\n' -t "scrollStep=${6:-$(ttyd_scroll_step_default)}"
     # Always sent, unlike the four above: a browser has no theme to inherit,
     # so this is not an option an operator turns on. Read out of the script
     # rather than transcribed - this file asserts that ttyd is given a theme
@@ -2334,6 +2345,46 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345 20 C-a on off
+}
+
+@test "ttyd_scroll_step reaches ttyd, and is sent even when nothing set it" {
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+
+    # The odd one out among the -t knobs: unset does NOT mean "send nothing".
+    # A finger has to travel some distance per notch whatever the config says,
+    # so the schema carries a real default and the page is told it rather than
+    # being left to keep a second copy in step.
+    write_remote_config 'ttyd_port = 12345'
+    stub_ttyd
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    run grep -c 'scrollStep' "$STUB_DIR/ttyd-argv"
+    [ "$output" = "1" ] || { echo "unset sent $output scrollStep options" >&2; false; }
+
+    : > "$STUB_DIR/ttyd-argv"
+    write_remote_config 'ttyd_port = 12345' 'ttyd_scroll_step = 3'
+    run "$REPO_ROOT/bin/dejima-ttyd"
+    [ "$status" -eq 0 ]
+    assert_ttyd_argv 12345 '' '' '' '' 3
+}
+
+@test "dejima-ttyd refuses a ttyd_scroll_step outside its range rather than launching with one" {
+    # Zero is the one that matters: the page consumes accumulated travel in a
+    # while loop keyed on this, so a step of zero spins forever on the first
+    # drag. The page guards it too, and this is the half that never lets the
+    # value get there.
+    [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    stub_ttyd
+    local bad
+    for bad in 0 -1 41 lots; do
+        : > "$STUB_DIR/ttyd-argv"
+        write_remote_config 'ttyd_port = 12345' "ttyd_scroll_step = $bad"
+        run "$REPO_ROOT/bin/dejima-ttyd"
+        [ "$status" -ne 0 ] || { echo "accepted ttyd_scroll_step=$bad" >&2; false; }
+        [[ "$output" == *"ttyd_scroll_step"* ]] \
+            || { echo "refused ttyd_scroll_step=$bad without naming it: $output" >&2; false; }
+        [ -z "$(ttyd_log)" ] || { echo "launched ttyd despite ttyd_scroll_step=$bad" >&2; false; }
+    done
 }
 
 @test "ttyd_focus_on_tap reaches ttyd, and unset sends nothing so the page decides" {

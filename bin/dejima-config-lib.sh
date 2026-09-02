@@ -74,6 +74,7 @@ remote-access.ttyd_font_size	?int:8:72
 remote-access.ttyd_tmux_prefix	?chord
 remote-access.ttyd_focus_on_tap	?bool
 remote-access.ttyd_button_colors	?bool
+remote-access.ttyd_scroll_step	int:1:40	5
 remote-access.debounce	int:0:86400	60
 EOF
 }

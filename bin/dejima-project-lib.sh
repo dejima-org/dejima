@@ -677,3 +677,11 @@ remote_ttyd_focus_on_tap() {
 remote_ttyd_tmux_prefix() {
     config_get remote-access ttyd_tmux_prefix
 }
+
+# How far a finger travels, in terminal rows, to send one scroll notch on the
+# terminal page. Unlike the four above this has a real default rather than an
+# unset meaning "leave it alone", because there is no sensible behaviour to
+# fall back to: the page has to pick some travel per notch either way.
+remote_ttyd_scroll_step() {
+    config_get remote-access ttyd_scroll_step
+}

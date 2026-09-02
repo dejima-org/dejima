@@ -4,7 +4,8 @@ const assert = require('node:assert');
 require('../src/keys.js'); // config.js parses the tmux prefix through it
 require('../src/config.js');
 const { DEFAULT_TMUX_PREFIX, parsePrefix, splitPreferences, toolbarWanted,
-        focusOnTapWanted, pickerSearch, buttonColorsWanted } = globalThis.DEJIMA.config;
+        focusOnTapWanted, pickerSearch, buttonColorsWanted,
+        scrollStepRows, DEFAULT_SCROLL_STEP } = globalThis.DEJIMA.config;
 
 test('a tmux prefix is parsed into the byte tmux would receive', () => {
   assert.equal(parsePrefix('C-b'), '\x02');
@@ -144,4 +145,37 @@ test('buttonColors is a page option, not one xterm is handed', () => {
   assert.equal(split.page.buttonColors, 'off');
   assert.equal(split.terminal.buttonColors, undefined);
   assert.equal(split.terminal.fontSize, 14);
+});
+
+// How far a finger travels per scroll notch. A notch reaching an application
+// is worth several rows there - stock tmux scrolls five - so one row per notch
+// moved the screen several times faster than the finger.
+
+test('the scroll step defaults to what a notch is worth to an application', () => {
+  assert.equal(scrollStepRows('', undefined), DEFAULT_SCROLL_STEP);
+  assert.equal(scrollStepRows('', ''), DEFAULT_SCROLL_STEP);
+  assert.ok(DEFAULT_SCROLL_STEP > 1, 'one row per notch is the thing being fixed');
+});
+
+test('the operator config and a per-client query both set it', () => {
+  assert.equal(scrollStepRows('', '3'), 3);
+  assert.equal(scrollStepRows('', 3), 3);
+  // The query wins: what a notch is worth depends on what is running in the
+  // session, which one host-wide value cannot say for every tab.
+  assert.equal(scrollStepRows('?scroll=2', '8'), 2);
+});
+
+test('a step that is not a positive number falls back rather than being honoured', () => {
+  // Not tidiness: scrollBy consumes the accumulator in a while loop keyed on
+  // this, so zero or a negative spins forever on the first drag.
+  for (const bad of ['0', '-4', 'lots', 'NaN', 'Infinity']) {
+    assert.equal(scrollStepRows('?scroll=' + bad, undefined), DEFAULT_SCROLL_STEP, bad);
+    assert.equal(scrollStepRows('', bad), DEFAULT_SCROLL_STEP, bad);
+  }
+});
+
+test('scrollStep is a page option, not one xterm is handed', () => {
+  const split = splitPreferences({ scrollStep: 5, fontSize: 14 });
+  assert.equal(split.page.scrollStep, 5);
+  assert.equal(split.terminal.scrollStep, undefined);
 });
