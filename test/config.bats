@@ -2431,6 +2431,48 @@ _epitaph_three() {
     fi
 }
 
+# The half that was missing when the registrations moved into the overlay:
+# every test above asks what the overlay got, and none asked what the launch
+# then SAYS about it. So the check that reads the operator's file kept
+# reporting all four guards missing - correctly, since nothing writes there
+# any more - and told the operator to run ./install.sh, which strips the very
+# registrations it was looking for.
+@test "a launch with nothing in the operator's settings does not claim the guards are off" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # The state a correct install now leaves: settings.json present, dejima
+    # nowhere in it. An empty file would not do - that is unparseable to
+    # Claude Code and a different case.
+    printf '{}\n' > "$RW_HOME/.claude/settings.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"not in force this session"* ]] \
+        || { echo "claimed the guards were off: $output"; return 1; }
+    rm -rf "$workspace" "$RW_HOME"
+
+    # The positive half, or the assertion above passes just as well on a
+    # launch that registered nothing anywhere. Read from the overlay the
+    # plugin composes, which is where they now live.
+    local ov; ov="$(mktemp)"
+    HOME="$CONFIG_DIR" bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        DEJIMA_HARNESS_NAME=claude-code
+        harness_plugin_load claude-code
+        harness_hook harness_prepare_config "$1"
+    ' _ "$ov" >/dev/null 2>&1
+    local cmds
+    cmds="$(jq -r '[.hooks[]?[]?.hooks[]?.command] | join(" ")' "$ov")"
+    local h
+    for h in sandbox-context.sh git-push-guard.sh merge-guard.sh deny-dangerous-bash.sh; do
+        [[ "$cmds" == *"$h"* ]] \
+            || { echo "$h is in force nowhere: $cmds"; rm -f "$ov"; return 1; }
+    done
+    rm -f "$ov"
+}
+
 @test "install.sh registers no guards when no harness is selected" {
     # Writing one harness's config for an operator who has chosen another,
     # or none, is the coupling this removed.
@@ -2474,58 +2516,6 @@ _epitaph_three() {
     _rw_launch "$workspace"
     [ "$status" -ne 0 ] || { echo "launched anyway:"; echo "$output"; return 1; }
     [[ "$output" == *"Refusing [mounts] readonly entry"* ]] || { echo "$output"; return 1; }
-    rm -rf "$workspace"
-}
-
-@test "a launch says so when the harness's hooks were never registered" {
-    # install.sh registers them gated on [core] harness. An operator who set
-    # that key without re-running it gets no briefing and no guards, on every
-    # launch, with nothing saying why.
-    _rw_setup
-    workspace="$(mktemp -d)"
-    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
-    # _rw_setup writes a settings.json with no hooks in it at all.
-    _rw_launch "$workspace"
-    [[ "$output" == *"not in force this session"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"the session briefing"* ]] || { echo "$output"; return 1; }
-    rm -rf "$workspace"
-}
-
-@test "a launch names the one guard a hand-edited config dropped" {
-    # The realistic failure is all-or-nothing, so a check on the briefing
-    # alone would pass here - and a session would run without the merge
-    # guard, silently, which is what the report exists to prevent.
-    _rw_setup
-    workspace="$(mktemp -d)"
-    jq -n '{hooks: {
-        SessionStart: [{matcher: "startup", hooks: [{type: "command",
-            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
-        PreToolUse: [{matcher: "Bash", hooks: [
-            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
-            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
-        > "$RW_HOME/.claude/settings.json"
-    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
-    _rw_launch "$workspace"
-    [[ "$output" == *"merge-guard"* ]] || { echo "$output"; return 1; }
-    [[ "$output" != *"the session briefing"* ]] \
-        || { echo "named something that is registered: $output"; return 1; }
-    rm -rf "$workspace"
-}
-
-@test "a launch stays quiet when the harness's hooks are registered" {
-    _rw_setup
-    workspace="$(mktemp -d)"
-    jq -n '{hooks: {
-        SessionStart: [{matcher: "startup", hooks: [{type: "command",
-            command: "$HOME/.claude/hooks/sandbox-context.sh"}]}],
-        PreToolUse: [{matcher: "Bash", hooks: [
-            {type: "command", command: "$HOME/.claude/hooks/git-push-guard.sh"},
-            {type: "command", command: "$HOME/.claude/hooks/merge-guard.sh"},
-            {type: "command", command: "$HOME/.claude/hooks/deny-dangerous-bash.sh"}]}]}}' \
-        > "$RW_HOME/.claude/settings.json"
-    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
-    _rw_launch "$workspace"
-    [[ "$output" != *"not in force this session"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
 }
 
