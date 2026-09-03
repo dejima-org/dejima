@@ -4835,6 +4835,28 @@ EOF
 # The absence of a finding needs documenting as much as a finding does, so
 # that not detecting something stays a stated decision rather than something
 # a reader has to infer from silence.
+@test "docs/security.md does not describe the fallthrough the launch refuses" {
+    # Caught by a release pass, not by a test: bin/dejima made an unproxied
+    # credential a refusal, and the arrangements table went on listing it as
+    # the fourth row - the one where the real credential is mounted. A
+    # document promising the weakest posture for a launch that no longer
+    # happens is worse than one that says nothing, because it is the posture
+    # an operator plans around.
+    local doc="$REPO_ROOT/docs/security.md" row
+    row="$(grep -m1 '^| \*\*No proxy\*\*' "$doc")" \
+        || { echo "the arrangements table has no 'No proxy' row"; return 1; }
+    [[ "$row" == *"proxy = off"* ]] \
+        || { echo "the row does not name what puts a launch in it: $row"; return 1; }
+    [[ "$row" != *"cannot serve"* ]] \
+        || { echo "the row still claims an unservable credential is mounted: $row"; return 1; }
+
+    # And the refusal is the code's, so the two cannot drift apart silently.
+    grep -q "cannot serve the credential in" "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima no longer refuses it - the doc above is now wrong"; return 1; }
+    grep -q 'refusal' <<< "$(sed -n '/^\*\*Only .proxy = off. lands/,/^$/p' "$doc")" \
+        || { echo "the doc does not say what happens instead"; return 1; }
+}
+
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"

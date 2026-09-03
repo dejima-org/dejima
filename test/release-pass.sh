@@ -105,6 +105,9 @@ touches '^(harnesses/|bin/harness/|docker/harness-wrapper)' &&
     manual "Launch each affected harness against a real model."
 touches '^(bin/dejima-attach|bin/dejima-ttyd|systemd/)' &&
     manual "Attach over the web front door and detach again."
+touches '^tools/' &&
+    manual "Launch with the affected tool included and use it. A tool is
+       layered into the image and put on PATH; nothing here runs one."
 touches '^\.dejima/allowed-domains$' &&
     manual "A domain here is read from main by the CI hardener and widens every
        future CI job on that runner. Say in the PR what it is for."
@@ -133,10 +136,29 @@ added="$(comm -13 \
 # The singular is spelled out rather than derived: "harnesses" does not lose
 # an s to become "harness", and a manifest is named for the singular.
 #
-# Every axis, including backends: the newest one is exactly the one a stale
-# list would miss, because a list is only ever updated by whoever remembers.
+# Every axis there is, and the list is checked against the tree below rather
+# than trusted: the newest axis is exactly the one a hand-kept list misses,
+# because a list is only ever updated by whoever remembers. tools is an axis
+# like the rest - `[core] tools = rtk` on a dejima that does not ship rtk is
+# refused the same way an unknown harness is.
+DEJIMA_RELEASE_AXES="harnesses:harness forges:forge workflows:workflow backends:backend tools:tool"
+# The singular is spelled out above rather than derived - "harnesses" does not
+# lose an s to become "harness", and a manifest is named for the singular - so
+# this is the check that the spelling out has not fallen behind the tree.
+for _d in */; do
+    _d="${_d%/}"
+    case "$_d" in
+        harnesses|forges|workflows|backends|tools) ;;
+        *) continue ;;
+    esac
+    case " $DEJIMA_RELEASE_AXES " in
+        *" $_d:"*) ;;
+        *) fail "$_d/ is a provider axis this script does not check for rollback" ;;
+    esac
+done
+
 new_providers=""
-for pair in harnesses:harness forges:forge workflows:workflow backends:backend; do
+for pair in $DEJIMA_RELEASE_AXES; do
     axis="${pair%%:*}"
     one="${pair#*:}"
     [ -d "$axis" ] || continue
@@ -153,7 +175,7 @@ done
 # backend` is one: adopting it is what makes the rollback refuse, and nothing
 # said so.
 new_keys=""
-for pair in harnesses:harness forges:forge workflows:workflow backends:backend; do
+for pair in $DEJIMA_RELEASE_AXES; do
     axis="${pair%%:*}"
     one="${pair#*:}"
     [ -d "$axis" ] || continue
@@ -172,7 +194,15 @@ done
 
 if [ -n "$added" ] || [ -n "$new_providers" ] || [ -n "$new_keys" ]; then
     [ -z "$added" ] || printf '   %s\n' $added
-    [ -z "$new_providers" ] || printf '   [%s] as a config section\n' $new_providers
+    # How an older dejima refuses a new provider differs by axis, and saying
+    # "as a config section" for all of them was wrong for tools: a tool has no
+    # keys and so no section. It is refused through the value that names it.
+    for entry in $new_providers; do
+        case "$entry" in
+            tool.*) printf '   [core] tools = %s\n' "${entry#tool.}" ;;
+            *)      printf '   [%s] as a config section\n' "$entry" ;;
+        esac
+    done
     for entry in $new_keys; do
         printf '   %s %s\n' "${entry%%|*}" "${entry#*|}"
     done
