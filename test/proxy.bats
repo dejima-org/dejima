@@ -686,6 +686,15 @@ start_static() {
     [ "$status" -eq 0 ]
     grep -q 'retry-after=41' "$TD/proxy.log" \
         || { echo "$(cat "$TD/proxy.log")"; return 1; }
+    # The identifier Anthropic support asks for. A real rate-limited call came
+    # back with a body of {"message":"Error"} - the word Error and nothing
+    # else - so on that response this is the only actionable thing there is.
+    grep -q 'request-id=req_011CehAZUPXFbQGikXfM3Mp6' "$TD/proxy.log" \
+        || { echo "no request id: $(cat "$TD/proxy.log")"; return 1; }
+    # And not the ids that name the operator's org. This line gets pasted
+    # into bug reports.
+    grep -qi 'workspace\|organization' "$TD/proxy.log" \
+        && { echo "an account identifier reached the log"; return 1; }
     grep -q 'rate_limit_error' "$TD/proxy.log" \
         || { echo "the body did not reach the log: $(cat "$TD/proxy.log")"; return 1; }
     # And the client still gets both.

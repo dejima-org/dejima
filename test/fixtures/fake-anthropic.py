@@ -87,6 +87,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(429)
             self.send_header("Content-Type", "application/json")
             self.send_header("retry-after", "41")
+            self.send_header("request-id", "req_011CehAZUPXFbQGikXfM3Mp6")
+            # The ids a real response also carries, so the test that they stay
+            # out of the log has something to stay out of.
+            self.send_header("anthropic-organization-id", "e528bbab-dead-beef")
+            self.send_header("anthropic-workspace-id", "wrkspc_01MpMcAs9xg5")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             b = b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}'
