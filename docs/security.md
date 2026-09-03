@@ -840,7 +840,7 @@ abstract, and this is the one with the most miles on it.
   after an upgrade, as `UNABLE_TO_VERIFY_LEAF_SIGNATURE`,
   `ERR_TLS_CERT_ALTNAME_INVALID`, or a pin-specific error. What
   distinguishes pinning from a merely broken certificate is that
-  `curl --cacert /etc/dejima-anthropic-tls/cert.pem https://api.anthropic.com/v1/messages`
+  `curl --cacert /etc/dejima-credential-tls/cert.pem https://api.anthropic.com/v1/messages`
   still succeeds from inside the container while Claude Code does not: the
   certificate is fine, the client is refusing it. **This is not a reason to
   set `[credentials] proxy = off`.** That kill switch mounts the real,

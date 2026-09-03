@@ -716,12 +716,20 @@ is to be a well-known handoff point.
 
 An entry is **refused, not warned about**, if it overlaps anything dejima
 relies on being out of a session's reach: the approval store, either audit
-store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
-(already read-write, so listing it again is a mistake worth surfacing). A
-writable mount over any of those would let a session approve its own domains,
-delete the audit findings naming it, or plant code that runs unsandboxed on the
-host next time you start an agent. Overlap is checked in both directions after
-resolving symlinks, so `read_write = ~` is caught too.
+store, the epitaph store, every project's share, `~/.local/bin`, dejima's own
+checkout, the project mount (already read-write, so listing it again is a
+mistake worth surfacing), and **everything the selected harness keeps on the
+host** - its config directories, the files staged and seeded from them, and
+the state directories its manifest declares. A writable mount over any of
+those would let a session approve its own domains, delete the audit findings
+naming it, read another project's transcripts, or plant code that runs
+unsandboxed on the host next time you start an agent. Overlap is checked in
+both directions after resolving symlinks, so `read_write = ~` is caught too.
+
+The harness half of that list is derived from what the harness declares, not
+written down in dejima, so it covers whichever one you selected - `~/.claude`
+for Claude Code, `~/.agents` and `~/.cline` for Cline - and covers a harness
+added later without anyone extending a list.
 
 Sessions are told which directories these are, so "everything else is
 disposable" stays true in the briefing rather than becoming a trap.
@@ -799,6 +807,15 @@ dejima-share adopt           # move files left loose in share_dir into this proj
 **To hand a file *to* a session,** put it in `dejima-share path` before
 launching. That is what makes the inbound direction work without a mount that
 every project can read.
+
+**From another machine,** `sshfs` puts a project's share in your own file
+manager over the SSH access you already have. Read
+[Mounting the box's files](remote-access.md#mounting-the-boxs-files) before
+setting that up: every byte and every filename in there was written by a
+sandboxed session, and a desktop that mounts the directory indexes,
+thumbnails and previews what it finds without waiting to be asked. Nothing
+dejima runs is in that path, so the sanitising it does for its own output does
+not reach there.
 
 Treat it as a handoff point, not as general-purpose storage. If your own
 project instructions tell agents to write somewhere at a fixed host path -

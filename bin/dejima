@@ -619,6 +619,69 @@ SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
 SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
     ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
 
+# What the selected harness keeps on the host, for the read_write refusal
+# below.
+#
+# Derived from what the plugin declares rather than written out here, because
+# a literal list is one nobody extends when a second harness arrives: this
+# guard named ~/.claude and nothing of Cline's, so an operator could hand a
+# session write access to the hooks and skills their own machine runs next -
+# the persistence this whole refusal exists to stop.
+#
+# All three declaration tiers count, whatever a session may do to the copy
+# inside the container. A read-only mount protects the host's file from the
+# session that has it; it says nothing about a writable mount an operator
+# points at the same file. What matters here is only that the harness reads
+# it on the host.
+#
+# A staged or seeded entry contributes both the host path it is read from and
+# $HOME/<rel>, the path it is installed at. Those differ when the operator
+# keeps the file somewhere else, and the rel is named whether or not the file
+# exists yet - which the source is not, since a plugin skips a source that is
+# absent. An absent path is exactly the one worth refusing: nothing stops a
+# session creating it.
+#
+# The loads happen here, before anything is mounted, because a guard that
+# runs after the mount it would refuse is not a guard. Their consumers
+# further down read these same arrays rather than re-running the hooks.
+harness_config_dirs_load
+harness_staged_config_load
+harness_seed_load
+
+HARNESS_HOST_CONFIG=()
+_harness_host_config() {
+    local rec src rel spec name type
+    for rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
+        HARNESS_HOST_CONFIG+=("${rec%%$'\t'*}")
+    done
+    # Three fields, the third being the ensure flag, which is nothing to this
+    # loop - but read into a name of its own so a rel does not silently absorb
+    # it and guard a path with a tab in the middle of it.
+    for rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
+        IFS=$'\t' read -r src rel _ <<< "$rec"
+        HARNESS_HOST_CONFIG+=("$src" "$HOME/$rel")
+    done
+    for rec in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
+        IFS=$'\t' read -r rel src <<< "$rec"
+        HARNESS_HOST_CONFIG+=("$HOME/$rel")
+        [ -n "$src" ] && HARNESS_HOST_CONFIG+=("$src")
+    done
+    # The state and host-executed paths a harness declares as its own config
+    # keys - transcripts and an edit-undo tree for one, a whole state
+    # directory for another. Selected by TYPE, so nothing here has to know
+    # what a given harness calls them, and a `path` key added to a manifest
+    # later is guarded without this being touched. Read through
+    # harness_config_get so an operator who moved one is guarded where it
+    # actually is rather than where the default says.
+    for spec in $(_provider_keys_field harness "$DEJIMA_HARNESS_NAME"); do
+        IFS=$'\t' read -r name type _ <<< "$(_provider_keyspec_parse "$spec")"
+        [ "${type#\?}" = path ] || continue
+        src="$(harness_config_get "$name")"
+        [ -n "$src" ] && HARNESS_HOST_CONFIG+=("$src")
+    done
+}
+_harness_host_config
+
 # Read-write host mounts. Distinct from [core] share_dir, which is mounted at
 # ~/shared - a well-known handoff point the agent is told about by name -
 # while these are mounted at their own absolute path, so a path that works on
@@ -711,7 +774,8 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
         # paths without anyone remembering to do it twice.
         _guarded_stores
         for guarded in ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"} \
-            "$HOME/.claude" "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
+            ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"} \
+            "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
             guarded_real="$(readlink -m "$guarded")"
             _paths_overlap "$rw_real" "$guarded_real" || continue
             echo "Refusing $(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path"): $path" >&2
@@ -1050,8 +1114,8 @@ unset share_loose _entry
 # the read-only config dirs, a writable gap instead of an overlay. Pre-create
 # them all: empty is fine, existence is what matters.
 # Which directories those are is the harness's (harness_config_dirs); that
-# they must exist before the mount is set up is dejima's.
-harness_config_dirs_load
+# they must exist before the mount is set up is dejima's. Already loaded, up
+# where the read_write refusal needed them.
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r _cdir _cmode _cscan <<< "$_rec"
     mkdir -p "$_cdir"
@@ -1199,8 +1263,8 @@ cleanup() {
         kill "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
         wait "$SANDBOX_CONVERSATION_SHIP_PID" 2>/dev/null || true
     fi
-    if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ]; then
-        kill "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
+    if [ -n "${SANDBOX_CREDENTIAL_PROXY_PID:-}" ]; then
+        kill "$SANDBOX_CREDENTIAL_PROXY_PID" 2>/dev/null || true
         # Reaped, not just signalled. Without this the proxy stays a zombie
         # child until dejima itself exits, at which point it reparents to
         # PID 1 - and where PID 1 does not reap (a CI job container whose
@@ -1208,10 +1272,10 @@ cleanup() {
         # own containers) it stays a zombie for the life of that container,
         # holding a PID. One per launch is invisible interactively and
         # accumulates in a test suite that launches hundreds of times.
-        wait "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || true
+        wait "$SANDBOX_CREDENTIAL_PROXY_PID" 2>/dev/null || true
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
-    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_ANTHROPIC_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # dejima-notify-watch keys its debounce stamps by run id. Removed here,
     # with the registry entry, because this is the only exit both of them are
@@ -2162,7 +2226,6 @@ harness_hook harness_state_mounts "$WORKSPACE_DIR"
 # root-owned directory at the target. A dangling symlink is neither
 # mountable nor "exists", so it refuses rather than skipping the mount
 # (reopening the gap) or failing later with an opaque "mkdir: file exists".
-harness_staged_config_load
 SANDBOX_HARNESS_STAGED_EMPTY=""
 for _rec in ${DEJIMA_STAGED_CONFIG[@]+"${DEJIMA_STAGED_CONFIG[@]}"}; do
     IFS=$'\t' read -r _ssrc _srel _sensure <<< "$_rec"
@@ -2198,7 +2261,6 @@ export SANDBOX_HARNESS_STAGED_EMPTY
 # rediscovered by walking the staging tree, because some of them have no
 # source: a directory whose contents are mounted individually needs to exist
 # and be owned by the session, and there is nothing to copy into it.
-harness_seed_load
 SANDBOX_HARNESS_SEED=""
 for _rec in ${DEJIMA_SEED[@]+"${DEJIMA_SEED[@]}"}; do
     IFS=$'\t' read -r _seedrel _seedsrc <<< "$_rec"
@@ -2227,14 +2289,23 @@ export SANDBOX_HARNESS_SEED
 # or via the [credentials] proxy = off kill switch. Both then mount the real
 # credential in explicitly, which used to come free with the whole-directory
 # mount and now has to be stated.
-SANDBOX_ANTHROPIC_TRANSPORT="$(config_get credentials transport)"
+#
+# Two namings here, and the split is the point rather than an unfinished
+# rename. SANDBOX_CREDENTIAL_* is the proxy's own machinery, which knows
+# nothing about any endpoint: a socket, a transport, a terminator's cert.
+# SANDBOX_ANTHROPIC_* carries a value INTO an Anthropic environment variable -
+# docker-compose.yml puts each one in the ANTHROPIC_ name beside it, which is
+# what Claude Code reads. Renaming those would name them after the thing they
+# are not. A second harness wanting a differently-named variable is the point
+# at which this becomes a declaration rather than three assignments.
+SANDBOX_CREDENTIAL_TRANSPORT="$(config_get credentials transport)"
 SANDBOX_ANTHROPIC_BASE_URL=""
 SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_API_KEY=""
-SANDBOX_ANTHROPIC_PROXY_SOCKET=""
-SANDBOX_ANTHROPIC_PROXY_DIR=""
+SANDBOX_CREDENTIAL_PROXY_SOCKET=""
+SANDBOX_CREDENTIAL_PROXY_DIR=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
-SANDBOX_ANTHROPIC_PROXY_PID=""
+SANDBOX_CREDENTIAL_PROXY_PID=""
 # Whether this provider's credential is in a state the proxy can use.
 #
 # Not "does the file exist", and the answer belongs to the provider's kind
@@ -2310,13 +2381,13 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
     && backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
     && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
-    SANDBOX_ANTHROPIC_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
-    SANDBOX_ANTHROPIC_PROXY_SOCKET="$SANDBOX_ANTHROPIC_PROXY_DIR/proxy.sock"
+    SANDBOX_CREDENTIAL_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.sock"
     # Every value comes from backends/<name>/backend.conf. Nothing about a
     # backend is written here, which is what makes adding one a directory
     # rather than an edit to this file.
     _proxy_args=(
-        --socket "$SANDBOX_ANTHROPIC_PROXY_SOCKET"
+        --socket "$SANDBOX_CREDENTIAL_PROXY_SOCKET"
         --credentials "$DEJIMA_BACKEND_CREDENTIAL_FILE"
         --upstream "$(manifest_get backend "$DEJIMA_BACKEND_NAME" upstream)"
         --credential-kind "$DEJIMA_BACKEND_CREDENTIAL_KIND"
@@ -2341,13 +2412,13 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     [ -z "$_oauth_client_id" ] || _proxy_args+=(--oauth-client-id "$_oauth_client_id")
     unset _h _oauth_endpoint _oauth_client_id
     "$SCRIPT_DIR/dejima-credential-proxy" "${_proxy_args[@]}" &
-    SANDBOX_ANTHROPIC_PROXY_PID=$!
+    SANDBOX_CREDENTIAL_PROXY_PID=$!
     for _ in $(seq 1 50); do
-        [ -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ] && break
-        kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null || break
+        [ -S "$SANDBOX_CREDENTIAL_PROXY_SOCKET" ] && break
+        kill -0 "$SANDBOX_CREDENTIAL_PROXY_PID" 2>/dev/null || break
         sleep 0.1
     done
-    if [ ! -S "$SANDBOX_ANTHROPIC_PROXY_SOCKET" ]; then
+    if [ ! -S "$SANDBOX_CREDENTIAL_PROXY_SOCKET" ]; then
         # Falling back to a session with the real credential mounted would
         # be a silent security downgrade - stop loudly instead.
         echo "Credential proxy failed to start - not launching. Fix the error above," >&2
@@ -2355,8 +2426,8 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         echo "(the real OAuth credential is then mounted into the container, as before)." >&2
         exit 1
     fi
-    extra_mounts+=(-v "$SANDBOX_ANTHROPIC_PROXY_DIR:$SANDBOX_ANTHROPIC_PROXY_DIR:ro")
-    if [ "$SANDBOX_ANTHROPIC_TRANSPORT" = "loopback" ]; then
+    extra_mounts+=(-v "$SANDBOX_CREDENTIAL_PROXY_DIR:$SANDBOX_CREDENTIAL_PROXY_DIR:ro")
+    if [ "$SANDBOX_CREDENTIAL_TRANSPORT" = "loopback" ]; then
         SANDBOX_ANTHROPIC_BASE_URL="http://127.0.0.1:18300"
         SANDBOX_ANTHROPIC_AUTH_TOKEN="sandbox-credential-proxy-placeholder"
     elif [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" = static ]; then
@@ -2435,9 +2506,9 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
     # message above and docs/security.md.
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
-export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_ANTHROPIC_PROXY_SOCKET
+export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_CREDENTIAL_PROXY_SOCKET
 export SANDBOX_ANTHROPIC_API_KEY
-export SANDBOX_ANTHROPIC_TRANSPORT
+export SANDBOX_CREDENTIAL_TRANSPORT
 
 # Optional remote access (see docs/remote-access.md). Entirely skipped
 # unless [remote-access] enabled is on in the config file - with it absent
@@ -3041,7 +3112,7 @@ else
     # /dev/tty would not open.
     docker compose -f "$COMPOSE_FILE" run --rm ${extra_mounts[@]+"${extra_mounts[@]}"} sandbox "$@" || compose_status=$?
 fi
-if [ -n "${SANDBOX_ANTHROPIC_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_ANTHROPIC_PROXY_PID" 2>/dev/null; then
+if [ -n "${SANDBOX_CREDENTIAL_PROXY_PID:-}" ] && ! kill -0 "$SANDBOX_CREDENTIAL_PROXY_PID" 2>/dev/null; then
     echo "Warning: the credential proxy exited before the session ended - API calls in" >&2
     echo "the session may have been failing. Check for proxy errors in the output above." >&2
 fi
