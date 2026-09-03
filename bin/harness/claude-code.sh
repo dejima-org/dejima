@@ -601,35 +601,25 @@ harness_transform_transcript() {
     ' 2>/dev/null
 }
 
-# Which of the hooks install.sh registers are actually in the operator's
-# settings, and which are not. Prints the missing ones, one per line, and
-# returns 1 if there are any - so the launch can name what is not in force
-# rather than assert that nothing is.
+# harness_guards_registered is deliberately not defined.
 #
-# Every hook this harness would install is checked, not just the briefing:
-# the realistic failure (install.sh never run with a harness set) is
-# all-or-nothing, but a hand-edited settings.json missing one guard is a
-# session quietly running without it, which is the case worth catching.
+# It read the operator's own ~/.claude/settings.json and named any of dejima's
+# hooks missing from it, because that is where install.sh used to put them and
+# "install.sh never run with a harness set" was a real way to get a session
+# with no briefing and no guards.
 #
-# dejima-notify.sh is deliberately absent: bin/dejima registers it per
-# session into a throwaway layer, and it is never in the operator's file.
+# Nothing is written there now: the hooks are baked into the image and
+# registered per launch into dejima's own --settings overlay, so an absent
+# registration in the operator's file is the correct state rather than a
+# broken one. Left defined, it named all four as not in force on every launch
+# of a host that had never run the old installer - and told the operator to
+# run ./install.sh, which strips exactly those registrations, making the
+# message permanent.
 #
-# Reads the operator's real settings rather than dejima's own layer, which
-# is composed fresh each launch and always looks right.
-harness_guards_registered() {
-    local settings="$HOME/.claude/settings.json" missing=0
-    _registered() {
-        [ -f "$settings" ] || return 1
-        jq -e --arg s "/$2" "[.hooks.$1[]?.hooks[]?.command // empty]
-               | any(endswith(\$s))" "$settings" >/dev/null 2>&1
-    }
-    _registered SessionStart sandbox-context.sh \
-        || { printf 'the session briefing\n'; missing=1; }
-    harness_has_guard push-guard && { _registered PreToolUse git-push-guard.sh \
-        || { printf 'push-guard\n'; missing=1; }; }
-    harness_has_guard merge-guard && { _registered PreToolUse merge-guard.sh \
-        || { printf 'merge-guard\n'; missing=1; }; }
-    harness_has_guard bash-deny && { _registered PreToolUse deny-dangerous-bash.sh \
-        || { printf 'bash-deny\n'; missing=1; }; }
-    return "$missing"
-}
+# There is nothing to put in its place. What the overlay carries is composed
+# fresh each launch from the manifest, so reading it back would be asking
+# dejima whether it did what it just did; which guards the harness cannot host
+# at all is the manifest's, and harness_report_guards already says it.
+#
+# The hook itself stays in the plugin interface. What a harness needs wired on
+# the host is a real question, and a future one may answer it differently.
