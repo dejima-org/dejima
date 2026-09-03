@@ -626,7 +626,7 @@ it.
 | **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
 | **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
 | **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
-| **No proxy** (`[credentials] proxy = off`, or a Claude Code login the selected backend cannot serve) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+| **No proxy** (`[credentials] proxy = off`, or `[backend.<name>] proxy = off`) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
 
 **The first three keep the credential out; the fourth does not.** That is the
 whole of the difference, and it is why `proxy = off` is described here as a
@@ -641,8 +641,16 @@ the host and injected per request. On the API-key path the container gets
 `ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
 at all.
 
-What lands in the fourth row is `proxy = off`, and a login whose shape no
-selected backend serves.
+**Only `proxy = off` lands in the fourth row, and only where you wrote it.**
+A credential the selected backend cannot serve - a Claude Code signed in with
+a console API token, whose file holds no `claudeAiOauth` block, against
+`backends/anthropic` - is a refusal, naming the backend, the file, the shape
+it expected and the two ways forward. A kill switch that can engage itself is
+not one, which is why this row is a kill switch rather than an option.
+
+The refusal is scoped to a credential that *exists* and cannot be served. An
+absent one mounts nothing and downgrades nothing - that is a host where the
+harness has not been signed in yet, and it still launches.
 
 **The proxy is switched per backend, not globally.** `[backend.<name>] proxy`
 falls back to `[credentials] proxy` when unset. One backend whose credential

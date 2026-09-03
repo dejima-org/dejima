@@ -276,6 +276,28 @@ def received():
         return b""
 
 
+def await_received(predicate, timeout=15.0):
+    """Wait for what the container received to satisfy predicate.
+
+    The third instance of the same bug in this file - see await_raw and the
+    reclaim wait above. A byte written to the master pty has to reach the
+    client, cross into the container's stand-in and be appended to a file
+    before the check can see it, and pumping for a fixed 0.8s and then looking
+    was timing the machine rather than waiting for the thing. It failed in CI
+    exactly that way: the check for ^C saw the tail of the line typed before
+    it, because ^C had not arrived yet.
+
+    Returns the predicate's answer either way, so a real failure still fails
+    rather than hanging until the suite's own timeout.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate(received()):
+            return True
+        pump(0.05)
+    return predicate(received())
+
+
 def check(name, ok, detail=""):
     print(("PASS " + name) if ok else ("FAIL %s %s" % (name, detail)))
     if not ok:
@@ -332,13 +354,12 @@ try:
 
     before = received()
     send("typed\n")
-    pump(0.8)
-    check("input-reaches-the-resumed-session", received() != before)
+    check("input-reaches-the-resumed-session",
+          await_received(lambda got: got != before))
 
-    before = received()
     send("\x03")
-    pump(0.8)
-    check("ctrl-c-still-reaches-the-session", received().endswith(b"\x03"),
+    check("ctrl-c-still-reaches-the-session",
+          await_received(lambda got: got.endswith(b"\x03")),
           repr(received()[-4:]))
 
     # The finding, asserted: the client is stopped by SIGSTOP, which it cannot

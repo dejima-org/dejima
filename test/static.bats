@@ -986,10 +986,15 @@ _cline_prepare() {
     # with a colon, so not one OpenRouter id could be set - the backend this
     # harness exists to reach was unusable, and every test here said `model =
     # m`, which is a bare identifier and passes either way.
+    #
+    # The bracketed one is here because the first fix for that missed it:
+    # Anthropic spells a context variant `claude-opus-5[1m]`, and a set built
+    # from the ids in the report at hand refused it a release later. Real ids
+    # from every catalogue dejima can reach, not the ones that prompted a fix.
     local d ws
     ws="$BATS_TEST_TMPDIR/modelid-ws"; mkdir -p "$ws"
     local id
-    for id in z-ai/glm-5.3 deepseek/deepseek-r1:free llama3:8b plain-local-model; do
+    for id in z-ai/glm-5.3 deepseek/deepseek-r1:free llama3:8b 'claude-opus-5[1m]' plain-local-model; do
         d="$(_cline_cfg "model = $id" 'backend = self-hosted' \
              '[backend.self-hosted]' 'base_url = http://127.0.0.1:8080/v1')"
         run _cline_prepare "$d" "$ws"
@@ -4835,6 +4840,28 @@ EOF
 # The absence of a finding needs documenting as much as a finding does, so
 # that not detecting something stays a stated decision rather than something
 # a reader has to infer from silence.
+@test "docs/security.md does not describe the fallthrough the launch refuses" {
+    # Caught by a release pass, not by a test: bin/dejima made an unproxied
+    # credential a refusal, and the arrangements table went on listing it as
+    # the fourth row - the one where the real credential is mounted. A
+    # document promising the weakest posture for a launch that no longer
+    # happens is worse than one that says nothing, because it is the posture
+    # an operator plans around.
+    local doc="$REPO_ROOT/docs/security.md" row
+    row="$(grep -m1 '^| \*\*No proxy\*\*' "$doc")" \
+        || { echo "the arrangements table has no 'No proxy' row"; return 1; }
+    [[ "$row" == *"proxy = off"* ]] \
+        || { echo "the row does not name what puts a launch in it: $row"; return 1; }
+    [[ "$row" != *"cannot serve"* ]] \
+        || { echo "the row still claims an unservable credential is mounted: $row"; return 1; }
+
+    # And the refusal is the code's, so the two cannot drift apart silently.
+    grep -q "cannot serve the credential in" "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima no longer refuses it - the doc above is now wrong"; return 1; }
+    grep -q 'refusal' <<< "$(sed -n '/^\*\*Only .proxy = off. lands/,/^$/p' "$doc")" \
+        || { echo "the doc does not say what happens instead"; return 1; }
+}
+
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"

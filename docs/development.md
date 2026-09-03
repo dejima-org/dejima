@@ -563,12 +563,13 @@ built into its own layer like any other. The base image carries nothing of any
 harness's - not its package, not the directories it keeps state in, not its
 environment, and not its name as a default command.
 
-The credential proxy is no longer on that list either. Which header carries
-the credential, what shape it takes, what must not travel beside it and
-whether it can be refreshed are all arguments the selected backend supplies,
-so a second harness reaches a proxied backend without a branch of its own -
-which is the R5 row above, and is confirmed rather than argued: Cline runs a
-real completion through the same terminator and the same host-side proxy.
+Nor is the credential proxy harness-shaped. Which header carries the
+credential, what shape it takes, what must not travel beside it and whether it
+can be refreshed are all arguments the selected backend supplies, so a second
+harness reaches a proxied backend without a branch of its own - the R5 row
+above. Cline has run real completions through the same terminator
+and the same host-side proxy, against `anthropic` and against `openrouter`,
+which is a different api_style through the same code.
 
 `providers.bats` covers the manifest contract itself and is where a new
 `harness.conf` gets its parsing and validation tests. `config.bats`,
