@@ -542,30 +542,36 @@ nvim split separator resizes the split. Neither needs any server-side
 configuration - they are stock tmux and nvim behaviour; the page's only
 contribution is delivering the drag.
 
-### Scrolling jumps five lines at a time, and that is tmux's
+### A scroll gesture jumps too far, and the amount is tmux's
 
 A scroll gesture is sent as wheel notches, one per row of finger travel. What a
 notch is then worth belongs to whoever receives it, and this page is not it:
-when the pane is scrolling its own history, tmux is, and **stock tmux moves
-five lines per notch**:
+when the pane is scrolling its own history, tmux is.
 
-```
-bind-key -T copy-mode-vi WheelUpPane select-pane \; send-keys -X -N 5 scroll-up
+**Find out what yours does before changing anything:**
+
+```sh
+tmux list-keys -T copy-mode-vi | grep WheelUpPane
 ```
 
-Five lines is a fifth of a desktop terminal and better than half a phone one,
-so on a phone a small movement of the thumb throws the screen and placing a
-particular line takes several tries. Set it to one, in your own
-`~/.tmux.conf`, and the content tracks your finger:
+Stock tmux scrolls five lines (`send-keys -X -N 5 scroll-up`), which is a fifth
+of a desktop terminal and better than half a phone one. A configuration that
+binds `halfpage-up` instead - a common enough idiom that it is worth naming -
+scrolls half the pane, so twenty lines in a forty-line one. That is the case
+this section exists for: on a phone it throws the screen on the smallest
+movement of a thumb, and placing a particular line takes several tries.
+
+Set it to a few lines, in your own `~/.tmux.conf`:
 
 ```tmux
-bind -T copy-mode-vi WheelUpPane   select-pane \; send -X -N 1 scroll-up
-bind -T copy-mode-vi WheelDownPane select-pane \; send -X -N 1 scroll-down
-bind -T copy-mode    WheelUpPane   select-pane \; send -X -N 1 scroll-up
-bind -T copy-mode    WheelDownPane select-pane \; send -X -N 1 scroll-down
+bind -T copy-mode-vi WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode-vi WheelDownPane select-pane \; send -X -N 4 scroll-down
+bind -T copy-mode    WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode    WheelDownPane select-pane \; send -X -N 4 scroll-down
 ```
 
-Both tables, because which one is active follows `mode-keys`. It applies to
+Both tables, because which one is active follows `mode-keys`. `scroll-up` takes
+no amount of its own, so the `-N` repeat count is the amount. It applies to
 every client of that tmux server, phone and desktop alike - which is the reason
 it is not something dejima sets for you: `dejima-attach` joins the tmux session
 you launched from, and its configuration is yours.
