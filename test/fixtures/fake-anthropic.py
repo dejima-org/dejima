@@ -6,6 +6,8 @@
 #                           records the request body)
 #   GET  /oauth-hits     -> number of refresh calls so far (text/plain)
 #   GET  /oauth-last     -> JSON body of the most recent refresh request
+#   *    /status-429     -> 429, chunked, retry-after: 41 (a rate limiter's shape)
+#   *    /status-429-gzip -> the same, gzip-encoded (what a client asking for gzip gets)
 #   *    /status-503     -> 503, body "upstream-error"
 #   *    /echo-401-once  -> 401 on the first call ever, then echoes
 #   GET  /sse            -> two SSE events 2s apart, no Content-Length
@@ -62,6 +64,38 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, str(STATE["oauth_hits"]).encode(), "text/plain")
         elif self.path == "/oauth-last":
             self._send(200, json.dumps(STATE["oauth_last"]).encode())
+        elif self.path == "/status-429-gzip":
+            # gzip + chunked + retry-after: what a rate limiter answers a
+            # client that asked for gzip, which every Node harness does. The
+            # proxy forwards the client's Accept-Encoding verbatim, so this is
+            # the shape it actually meets - and the first version wrote those
+            # bytes to the operator's terminal.
+            import gzip as _gzip
+            b = _gzip.compress(
+                b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}')
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("retry-after", "41")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"%x\r\n" % len(b) + b + b"\r\n0\r\n\r\n")
+        elif self.path == "/status-429":
+            # Chunked, with no Content-Length, and a retry-after - the framing
+            # a rate limiter actually uses, and the one the proxy's first
+            # attempt at logging could not read a body out of.
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("retry-after", "41")
+            self.send_header("request-id", "req_011CehAZUPXFbQGikXfM3Mp6")
+            # The ids a real response also carries, so the test that they stay
+            # out of the log has something to stay out of.
+            self.send_header("anthropic-organization-id", "e528bbab-dead-beef")
+            self.send_header("anthropic-workspace-id", "wrkspc_01MpMcAs9xg5")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            b = b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}'
+            self.wfile.write(b"%x\r\n" % len(b) + b + b"\r\n0\r\n\r\n")
         elif self.path == "/status-503":
             self._send(503, b"upstream-error", "text/plain")
         elif self.path == "/echo-401-once":

@@ -641,6 +641,10 @@ start_static() {
     start_proxy --log "$TD/proxy.log"
     run pcurl -i "http://localhost/status-503"
     [ "$status" -eq 0 ]
+    # /status-503 answers without a Content-Length. The first version read the
+    # body only where upstream declared a small one, and the first real
+    # rejection it met - a rate limiter - recorded the status and nothing
+    # else, which is the half an operator cannot act on.
     # Byte for byte: what the session sees is what the API said, not the
     # proxy's summary of it.
     [[ "$output" == *"503"* ]] || { echo "$output"; return 1; }
@@ -672,4 +676,117 @@ start_static() {
     [ "$status" -eq 0 ]
     grep -q '503' "$TD/stderr" \
         || { echo "nothing on stderr: $(cat "$TD/stderr")"; return 1; }
+}
+
+@test "a rate limiter's retry-after is named, not left among the headers" {
+    # Three 429s four seconds apart is what a real launch produced, and the
+    # actionable part of one is not in the body.
+    start_proxy --log "$TD/proxy.log"
+    run pcurl -i "http://localhost/status-429"
+    [ "$status" -eq 0 ]
+    grep -q 'retry-after=41' "$TD/proxy.log" \
+        || { echo "$(cat "$TD/proxy.log")"; return 1; }
+    # The identifier Anthropic support asks for. A real rate-limited call came
+    # back with a body of {"message":"Error"} - the word Error and nothing
+    # else - so on that response this is the only actionable thing there is.
+    grep -q 'request-id=req_011CehAZUPXFbQGikXfM3Mp6' "$TD/proxy.log" \
+        || { echo "no request id: $(cat "$TD/proxy.log")"; return 1; }
+    # And not the ids that name the operator's org. This line gets pasted
+    # into bug reports.
+    grep -qi 'workspace\|organization' "$TD/proxy.log" \
+        && { echo "an account identifier reached the log"; return 1; }
+    grep -q 'rate_limit_error' "$TD/proxy.log" \
+        || { echo "the body did not reach the log: $(cat "$TD/proxy.log")"; return 1; }
+    # And the client still gets both.
+    [[ "$output" == *"retry-after: 41"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"rate_limit_error"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a compressed rejection is logged as text, not as bytes" {
+    # The client's own Accept-Encoding is forwarded verbatim, so a harness
+    # that asks for gzip gets a compressed error body - and the first version
+    # of this logging wrote those bytes out, which reached the operator as
+    # mojibake and a bash warning about a null byte in a command
+    # substitution. Reported from a real launch.
+    start_proxy --log "$TD/proxy.log"
+    run pcurl -i --compressed "http://localhost/status-429-gzip"
+    [ "$status" -eq 0 ]
+    grep -q 'slow down' "$TD/proxy.log" \
+        || { echo "the message did not survive decompression: $(cat "$TD/proxy.log")"; return 1; }
+    # Nothing unprintable reaches the file at all. This is the half that has
+    # to hold whatever the encoding: upstream text landing on the operator's
+    # terminal is what dejima-audit already refuses to do unescaped.
+    [ -z "$(tr -d '\11\12\15\40-\176' < "$TD/proxy.log")" ] \
+        || { echo "unprintable bytes reached the log"; od -c "$TD/proxy.log" | head -3; return 1; }
+    # And the client still received the compressed bytes untouched.
+    [[ "$output" == *"slow down"* ]] || { echo "$output"; return 1; }
+}
+
+@test "an encoding the stdlib cannot read says so rather than printing bytes" {
+    # br and zstd have no stdlib decoder. Naming the encoding is more use than
+    # the bytes, and the bytes are the thing this exists to keep off a
+    # terminal.
+    run python3 -c '
+import sys; sys.path.insert(0, "'"$REPO_ROOT"'/bin")
+import importlib.util, importlib.machinery
+# The proxy has no .py suffix, so the loader has to be named rather than
+# inferred from the extension.
+loader = importlib.machinery.SourceFileLoader("p", "'"$REPO_ROOT"'/bin/dejima-credential-proxy")
+spec = importlib.util.spec_from_loader("p", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+print(m._readable(b"\x1f\x8b\x00\x01\x02", "br"))
+print(m._readable(b"\x00\x01\x02not gzip at all", "gzip"))
+print(m._readable(b"plain \x00\x07text", ""))
+'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"br-encoded"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"undecodable"* ]] || { echo "$output"; return 1; }
+    # Control characters become spaces rather than being dropped, so a
+    # message is not silently re-joined into a different one. The exact run
+    # length is not the point; that none of them survives is.
+    [[ "$output" == *"plain"*"text"* ]] || { echo "$output"; return 1; }
+    [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
+        || { echo "unprintable output survived"; return 1; }
+}
+
+@test "brotli is read when the host can, and named when it cannot" {
+    # What a Node client actually negotiates. gzip was the first guess and
+    # the real one came back br - so the encoding this could not read was the
+    # common case, not an edge.
+    #
+    # Optional on purpose: this runs on the host as the operator, and a
+    # diagnostic is not worth a hard dependency. So the test asserts whichever
+    # half this host can demonstrate, and the note has to name the fix.
+    run python3 -c '
+import sys, importlib.util, importlib.machinery
+l = importlib.machinery.SourceFileLoader("p", "'"$REPO_ROOT"'/bin/dejima-credential-proxy")
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("p", l)); l.exec_module(m)
+try:
+    import brotli as b
+except ImportError:
+    try:
+        import brotlicffi as b
+    except ImportError:
+        b = None
+if b is None:
+    print("ABSENT " + m._readable(b"\x1b\x0e\x00\xf8\x25", "br"))
+else:
+    print("PRESENT " + m._readable(b.compress(b"slow down"), "br"))
+'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    case "$output" in
+        PRESENT*) [[ "$output" == *"slow down"* ]] \
+                      || { echo "a decoder was available and the message did not survive: $output"; return 1; } ;;
+        ABSENT*)  [[ "$output" == *"br-encoded"* ]] \
+                      || { echo "$output"; return 1; }
+                  # Naming the encoding is not enough on its own: the operator
+                  # is one install away from the message, and the line has to
+                  # say so.
+                  [[ "$output" == *"brotli"* ]] \
+                      || { echo "the note does not say what would fix it: $output"; return 1; } ;;
+        *) echo "unexpected: $output"; return 1 ;;
+    esac
+    # Either way, no bytes.
+    [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
+        || { echo "unprintable output survived"; return 1; }
 }
