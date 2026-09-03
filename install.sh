@@ -204,7 +204,9 @@ fi
 # only place that reports a shipped default having moved, because this is when
 # it moves - you pulled and re-ran this. A launch checking would be a standing
 # condition in front of every one.
-echo
+# The blank line is the rebuild's, not this script's: on a run with nothing to
+# add, drop or report it says nothing, and an unconditional `echo` here left a
+# second blank line between two paragraphs that were already separated.
 config_defaults_rebuild
 
 # Guard registration, after the starter config above rather than before it:

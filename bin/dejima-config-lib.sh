@@ -410,16 +410,20 @@ _config_valid_value() {
             # A model's name at whatever endpoint serves it, which is not an
             # identifier: every hosted catalogue namespaces by vendor with a
             # slash (`z-ai/glm-5.3`) and several qualify a variant with a colon
-            # (`deepseek/deepseek-r1:free`, `llama3:8b`). Typed `identifier`,
-            # not one OpenRouter id could be configured at all, so the backend
-            # this harness exists to reach was unusable.
+            # (`deepseek/deepseek-r1:free`, `llama3:8b`), and Anthropic
+            # brackets a context variant (`claude-opus-5[1m]`). Typed
+            # `identifier`, not one OpenRouter id could be configured at all,
+            # so the backend this harness exists to reach was unusable; the
+            # first fix for that missed the brackets, which is why the set
+            # below is the union of what real catalogues spell rather than
+            # what the last reported id needed.
             #
             # Still narrow, and for the same reason `path` is: this reaches an
             # agent's configuration file. It is written there with jq --arg, so
             # the JSON escaping is not what this is protecting - what it
             # protects is that a value carrying a newline or a tab would split
             # a record every reader of this config expects to be one line.
-            [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]]
+            [[ "$value" =~ ^[A-Za-z0-9][][A-Za-z0-9._:/-]*$ ]]
             ;;
         jsonfield)
             # Which value inside a credentials file is the key: dot-separated

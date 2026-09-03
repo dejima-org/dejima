@@ -986,10 +986,15 @@ _cline_prepare() {
     # with a colon, so not one OpenRouter id could be set - the backend this
     # harness exists to reach was unusable, and every test here said `model =
     # m`, which is a bare identifier and passes either way.
+    #
+    # The bracketed one is here because the first fix for that missed it:
+    # Anthropic spells a context variant `claude-opus-5[1m]`, and a set built
+    # from the ids in the report at hand refused it a release later. Real ids
+    # from every catalogue dejima can reach, not the ones that prompted a fix.
     local d ws
     ws="$BATS_TEST_TMPDIR/modelid-ws"; mkdir -p "$ws"
     local id
-    for id in z-ai/glm-5.3 deepseek/deepseek-r1:free llama3:8b plain-local-model; do
+    for id in z-ai/glm-5.3 deepseek/deepseek-r1:free llama3:8b 'claude-opus-5[1m]' plain-local-model; do
         d="$(_cline_cfg "model = $id" 'backend = self-hosted' \
              '[backend.self-hosted]' 'base_url = http://127.0.0.1:8080/v1')"
         run _cline_prepare "$d" "$ws"

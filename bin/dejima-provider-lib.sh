@@ -1016,13 +1016,15 @@ config_defaults_rebuild() {
 
     if [ ! -e "$path" ]; then
         mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-        printf 'Pinned this release'"'"'s defaults in %s.\n' "$path"
+        printf '\nPinned this release'"'"'s defaults in %s.\n' "$path"
         return 0
     fi
     mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 
-    [ "$added" -eq 0 ] || printf 'Pinned %s new default(s) in %s.\n' "$added" "$path"
-    [ "$dropped" -eq 0 ] || printf 'Dropped %s retired line(s) from %s.\n' "$dropped" "$path"
+    # Each line carries the blank one before it, so a rebuild with nothing to
+    # say prints nothing at all rather than a gap where a message would go.
+    [ "$added" -eq 0 ] || printf '\nPinned %s new default(s) in %s.\n' "$added" "$path"
+    [ "$dropped" -eq 0 ] || printf '\nDropped %s retired line(s) from %s.\n' "$dropped" "$path"
 
     # Drift, last, because it is the part that asks something of the operator.
     while IFS= read -r key; do
