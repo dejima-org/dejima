@@ -1361,9 +1361,31 @@ _cli_tools() {
     done < <(_cli_tools)
 }
 
+# The reference is one table per config section, so a row names its key alone
+# and the heading above it names the section. Accepts either that or a fully
+# qualified `[section] leaf`, which is what the tables covering several
+# sections at once (the backends, the forges) still use.
+#
+# A ROW in both cases, never a prose mention anywhere in the file. Matching
+# the key loosely is what let this pass with the key documented only in a
+# paragraph three sections away, which is the discoverability problem it
+# exists to catch rather than an acceptable answer to it.
+_reference_has_key() {  # <doc> <section> <leaf>
+    grep -qF "| \`[$2] $3\`" "$1" && return 0
+    awk -v sec="[$2]" -v leaf="$3" '
+        /^#/ {
+            cur = 0
+            if (match($0, /\[[a-z.<>-]+\]/) && substr($0, RSTART, RLENGTH) == sec) cur = 1
+            next
+        }
+        cur && index($0, "| `" leaf "`") == 1 { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+
 @test "every config key the schema knows is in the reference table" {
-    # docs/configuration.md's table is the operator-facing list of what can be
-    # set. A key in the schema and not in the table is settable and
+    # docs/configuration.md's tables are the operator-facing list of what can
+    # be set. A key in the schema and not in them is settable and
     # undiscoverable, which is how four of them ended up documented only in
     # docs/security.md, only in docs/remote-access.md, or nowhere.
     local doc="$REPO_ROOT/docs/configuration.md" key section leaf missing=""
@@ -1371,7 +1393,8 @@ _cli_tools() {
         [ -n "$key" ] || continue
         section="${key%.*}"
         leaf="${key##*.}"
-        grep -qF "\`[$section] $leaf\`" "$doc" || missing="$missing $section.$leaf"
+        _reference_has_key "$doc" "$section" "$leaf" \
+            || missing="$missing $section.$leaf"
     done < <(sed -n '/^_config_table()/,/^EOF$/p' "$REPO_ROOT/bin/dejima-config-lib.sh" \
         | grep -oE '^[a-z-]+\.[a-z_]+')
     # And the per-provider keys, which live in the manifests rather than the
@@ -1383,7 +1406,8 @@ _cli_tools() {
         name="$(basename "$(dirname "$conf")")"
         for spec in $(sed -n 's/^keys[[:space:]]*=[[:space:]]*//p' "$conf"); do
             leaf="${spec%%:*}"
-            grep -qF "\`[$axis.$name] $leaf\`" "$doc" || missing="$missing $axis.$name.$leaf"
+            _reference_has_key "$doc" "$axis.$name" "$leaf" \
+                || missing="$missing $axis.$name.$leaf"
         done
     done
     [ -z "$missing" ] || { echo "not in the reference table:$missing"; return 1; }
