@@ -474,6 +474,11 @@ if [ "$PRINT_CONFIG" = 1 ]; then
     # The forge is read here rather than taken from DEJIMA_FORGE_NAME, which
     # is resolved further down, past this early exit.
     identity_validate "$(config_get core forge)" || exit 1
+    # key=value, and deliberately nothing else. config_origin would answer
+    # which of the three layers gave each value, and appending it as a second
+    # column broke eleven callers in this repo alone - `grep -qx key=value` is
+    # the obvious way to read this output, and one every one of them used. A
+    # format that has callers is one to extend on purpose, not in passing.
     while IFS= read -r _key; do
         _section="${_key%.*}"
         _leaf="${_key##*.}"

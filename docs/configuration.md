@@ -9,19 +9,47 @@ scratch space, and what the sandbox knows about itself.
 
 ## Configuration reference
 
-Every key dejima reads, its default, and what it is for. All of it lives in one
-file, `~/.config/dejima/config`. `./install.sh` writes a starter copy with every
-key present and commented out at its default, so nothing here has to be set to
-get a working sandbox: uncomment what you need. `dejima --print-config` prints
-the resolved schema with real values, which is the fastest way to see what a
-given launch will actually use.
+Every key dejima reads, its default, and what it is for.
 
-**`required` in the Default column is what you have to set yourself.** Exactly
-one key is required unconditionally - `[core] harness`, because a default that
-could change later would move your selection for you. Every other `required`
-is conditional on a selection you made, and each table below says which; a
-section belonging to something you did not select is never read, so its
-required keys are not yours to fill in.
+### Two files, and only one of them is yours
+
+`~/.config/dejima/config` is **yours**. dejima reads it and never writes it.
+`./install.sh` creates it if you have none, carrying your selection and
+anything it could migrate from an older setup, and nothing else.
+
+`~/.config/dejima/defaults.conf` beside it is **dejima's**, and holds every
+defaulted key at the value dejima shipped *when this machine first saw that
+key*. Your file overrides it; it overrides what the current release would have
+chosen.
+
+That second file is why a release cannot move a setting you never chose.
+`[core] harness` has no default at all for this reason - a default that could
+change later is a config file that is not the source of truth - and this
+applies the same argument to every other key. It is not hypothetical: the
+`forge` and `workflow` defaults once changed from `gitea`+`worktree-pr` to
+`none`+`local-only`, which silently stopped existing sandboxes pushing.
+
+The first launch on a machine writes it and says so once. `./install.sh`
+rebuilds it: keys a release added are appended, keys it retired are dropped,
+and **every value already in it stays**. When a shipped default no longer
+matches your pinned one, `./install.sh` names both and the line that would
+take the new one. It does not take it - that is the whole point - and the line
+goes in *your* file, never in `defaults.conf`, which the next rebuild rewrites.
+
+Do not edit `defaults.conf`. Anything in it that dejima no longer understands
+is skipped rather than refused, since you are not the one who put it there, and
+a launch tells you to re-run `./install.sh`.
+
+`dejima --print-config` prints every key as it resolves. Which of the three
+answered is readable from the files themselves: in `config` it is yours, in
+`defaults.conf` it is pinned, in neither it is what this release ships.
+
+**`required` in the Default column is what you have to set yourself**, and it
+is exactly the set with no line in `defaults.conf`: a key with no default has
+nothing to pin. Exactly one is required unconditionally - `[core] harness`.
+Every other `required` is conditional on a selection you made, and each table
+below says which; a section belonging to something you did not select is never
+read, so its required keys are not yours to fill in.
 
 Every tool takes `--help`, which describes its own arguments and what they do.
 That is the fastest answer to "what does this flag mean"; this page is for the
