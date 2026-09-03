@@ -1314,9 +1314,30 @@ cleanup() {
     # below, since that is what removes the file.
     if [ -n "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" ] \
         && [ -s "$SANDBOX_CREDENTIAL_PROXY_LOG" ]; then
-        printf '\n%sThe model API refused something this session:%s\n' \
+        # Grouped by status rather than printed line by line. A client that
+        # retries turns one condition into several identical lines - three
+        # 429s four seconds apart was the first real instance - and a list of
+        # them says no more than the count does.
+        printf '\n%sThe model API answered with an error this session:%s\n' \
             "${C_WARN:-}" "${C_RESET:-}" >&2
-        tail -n 10 "$SANDBOX_CREDENTIAL_PROXY_LOG" | sed 's/^/  /' >&2
+        # match() on the whole line rather than a loop over fields. A loop
+        # needs an index, and an awk index dereferenced inside single quotes
+        # is indistinguishable to the test that every name cleanup() uses is
+        # bound before the EXIT trap can fire - it reads one and reports an
+        # unbound name. That test is right to be strict, so this stays out of
+        # its way rather than asking it to parse quoting.
+        awk '{ if (match($0, /answered [0-9]+/))
+                   n[substr($0, RSTART + 9, RLENGTH - 9)]++ }
+             END { for (s in n) printf "  %d x HTTP %s\n", n[s], s }' \
+            "$SANDBOX_CREDENTIAL_PROXY_LOG" >&2
+        printf '  most recent: %s\n' \
+            "$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')" >&2
+        # Said because the count above cannot distinguish them: a harness that
+        # retried a 429 or a 5xx may well have got its answer in the end, so
+        # this is not on its own a session that failed.
+        printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
+        printf '  not a verdict on the session.\n' >&2
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true

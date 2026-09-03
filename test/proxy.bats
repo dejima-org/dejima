@@ -641,6 +641,10 @@ start_static() {
     start_proxy --log "$TD/proxy.log"
     run pcurl -i "http://localhost/status-503"
     [ "$status" -eq 0 ]
+    # /status-503 answers without a Content-Length. The first version read the
+    # body only where upstream declared a small one, and the first real
+    # rejection it met - a rate limiter - recorded the status and nothing
+    # else, which is the half an operator cannot act on.
     # Byte for byte: what the session sees is what the API said, not the
     # proxy's summary of it.
     [[ "$output" == *"503"* ]] || { echo "$output"; return 1; }
@@ -672,4 +676,19 @@ start_static() {
     [ "$status" -eq 0 ]
     grep -q '503' "$TD/stderr" \
         || { echo "nothing on stderr: $(cat "$TD/stderr")"; return 1; }
+}
+
+@test "a rate limiter's retry-after is named, not left among the headers" {
+    # Three 429s four seconds apart is what a real launch produced, and the
+    # actionable part of one is not in the body.
+    start_proxy --log "$TD/proxy.log"
+    run pcurl -i "http://localhost/status-429"
+    [ "$status" -eq 0 ]
+    grep -q 'retry-after=41' "$TD/proxy.log" \
+        || { echo "$(cat "$TD/proxy.log")"; return 1; }
+    grep -q 'rate_limit_error' "$TD/proxy.log" \
+        || { echo "the body did not reach the log: $(cat "$TD/proxy.log")"; return 1; }
+    # And the client still gets both.
+    [[ "$output" == *"retry-after: 41"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"rate_limit_error"* ]] || { echo "$output"; return 1; }
 }
