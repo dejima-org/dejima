@@ -739,3 +739,45 @@ print(m._readable(b"plain \x00\x07text", ""))
     [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
         || { echo "unprintable output survived"; return 1; }
 }
+
+@test "brotli is read when the host can, and named when it cannot" {
+    # What a Node client actually negotiates. gzip was the first guess and
+    # the real one came back br - so the encoding this could not read was the
+    # common case, not an edge.
+    #
+    # Optional on purpose: this runs on the host as the operator, and a
+    # diagnostic is not worth a hard dependency. So the test asserts whichever
+    # half this host can demonstrate, and the note has to name the fix.
+    run python3 -c '
+import sys, importlib.util, importlib.machinery
+l = importlib.machinery.SourceFileLoader("p", "'"$REPO_ROOT"'/bin/dejima-credential-proxy")
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("p", l)); l.exec_module(m)
+try:
+    import brotli as b
+except ImportError:
+    try:
+        import brotlicffi as b
+    except ImportError:
+        b = None
+if b is None:
+    print("ABSENT " + m._readable(b"\x1b\x0e\x00\xf8\x25", "br"))
+else:
+    print("PRESENT " + m._readable(b.compress(b"slow down"), "br"))
+'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    case "$output" in
+        PRESENT*) [[ "$output" == *"slow down"* ]] \
+                      || { echo "a decoder was available and the message did not survive: $output"; return 1; } ;;
+        ABSENT*)  [[ "$output" == *"br-encoded"* ]] \
+                      || { echo "$output"; return 1; }
+                  # Naming the encoding is not enough on its own: the operator
+                  # is one install away from the message, and the line has to
+                  # say so.
+                  [[ "$output" == *"brotli"* ]] \
+                      || { echo "the note does not say what would fix it: $output"; return 1; } ;;
+        *) echo "unexpected: $output"; return 1 ;;
+    esac
+    # Either way, no bytes.
+    [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
+        || { echo "unprintable output survived"; return 1; }
+}
