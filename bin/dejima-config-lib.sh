@@ -197,6 +197,17 @@ config_path() {
     printf '%s/config' "$(config_root)"
 }
 
+# The pinned defaults, beside the operator's own file rather than under
+# ~/.local/share. It explains the file next to it, and the answer to "why is
+# this value what it is" belongs where someone would look for it.
+#
+# Machine-written, and the operator is told not to edit it - which is why the
+# layer it produces is parsed leniently (see _config_parse_defaults) where
+# theirs is not.
+config_defaults_path() {
+    printf '%s/defaults.conf' "$(config_root)"
+}
+
 # ---------------------------------------------------------------------------
 # Dependency specs
 #
@@ -508,12 +519,21 @@ _config_trim_into() {
 # place; nothing shipped does that today (install.sh writes the file but never
 # reads a value back).
 declare -gA _CFG_VAL=() _CFG_SEEN=()
+# The pinned layer, in arrays of its own rather than pre-seeded into the two
+# above. Keeping them apart is what lets config_is_set keep meaning "the
+# operator wrote this": a base file naming every key would otherwise answer
+# yes for all of them, and every caller of it means the operator.
+declare -gA _CFG_BASE_VAL=() _CFG_BASE_SEEN=()
+_CFG_BASE_STALE=0
 _CFG_PARSED_PATH=""
 _CFG_PARSE_STATUS=1
 
 config_reset() {
     _CFG_VAL=()
     _CFG_SEEN=()
+    _CFG_BASE_VAL=()
+    _CFG_BASE_SEEN=()
+    _CFG_BASE_STALE=0
     _CFG_PARSED_PATH=""
     _CFG_PARSE_STATUS=1
 }
@@ -524,6 +544,16 @@ config_validate() {
     if [ "$_CFG_PARSED_PATH" = "$conf" ]; then
         return "$_CFG_PARSE_STATUS"
     fi
+    # Cleared here rather than by each parser, so that neither one's
+    # correctness rests on the other having tidied up first. Seeding the
+    # pinned layer into the operator's arrays would then be a bug that
+    # SHOWS, instead of one the following parse happens to wipe.
+    _CFG_VAL=(); _CFG_SEEN=()
+    _CFG_BASE_VAL=(); _CFG_BASE_SEEN=(); _CFG_BASE_STALE=0
+    # The pinned layer first, so a value read during the operator's own parse
+    # resolves the same way one read afterwards does. It cannot fail the
+    # validation: nothing an operator can fix lives in it.
+    _config_parse_defaults "$(config_defaults_path)"
     # $? captured before anything else runs - an assignment would reset it to
     # 0 and cache every malformed config as valid.
     _config_parse "$conf"
@@ -534,8 +564,6 @@ config_validate() {
 
 _config_parse() {
     local conf="$1" line section="" key value type
-    _CFG_VAL=()
-    _CFG_SEEN=()
     if [ ! -f "$conf" ]; then
         echo "no dejima config at $conf" >&2
         return 1
@@ -600,6 +628,65 @@ _config_parse() {
 
 # Expands a leading "~" to $HOME, per element for a list type. Only for path
 # types: a tilde inside a URL is a legal path character and must survive.
+# The pinned layer. Same grammar as the operator's file and a different
+# answer to everything wrong with it: skip the line and carry on, rather than
+# refuse the launch.
+#
+# That is not leniency for its own sake. An unknown key here is a key dejima
+# RETIRED, on a machine whose defaults.conf predates the release that dropped
+# it - the operator did not write it and is told not to edit the file, so
+# refusing would leave them a launch that will not start and nothing to do
+# about it. The schema answers for anything skipped, and the count is reported
+# once with the command that rebuilds the file.
+#
+# Absent is not an error either. A checkout that has never been launched has
+# no pinned layer, and the schema is the right answer for every key until
+# there is one.
+_config_parse_defaults() {
+    local conf="$1" line section="" key value type skipped=0
+    [ -f "$conf" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        _config_trim_into line "$line"
+        case "$line" in
+            ''|'#'*|';'*) continue ;;
+            '['*']')
+                section="${line#\[}"
+                section="${section%\]}"
+                _config_trim_into section "$section"
+                if ! _config_section_known "$section"; then
+                    # Its keys are skipped with it: an unknown section is one
+                    # whose provider is gone, and every key under it names
+                    # something that no longer exists.
+                    section=""
+                    skipped=$((skipped + 1))
+                fi
+                continue ;;
+            *=*) ;;
+            *)   skipped=$((skipped + 1)); continue ;;
+        esac
+        [ -n "$section" ] || { skipped=$((skipped + 1)); continue; }
+        _config_trim_into key "${line%%=*}"
+        _config_trim_into value "${line#*=}"
+        if ! _config_type_into type "$section.$key"; then
+            skipped=$((skipped + 1)); continue
+        fi
+        if ! _config_valid_value "$type" "$value"; then
+            skipped=$((skipped + 1)); continue
+        fi
+        _CFG_BASE_VAL["$section.$key"]="$value"
+        _CFG_BASE_SEEN["$section.$key"]=1
+    done < "$conf"
+    _CFG_BASE_STALE="$skipped"
+    return 0
+}
+
+# How many lines of the pinned layer this process could not use. Read by the
+# launch, which says so once with the command that rebuilds it.
+config_defaults_stale() {
+    config_validate >/dev/null 2>&1 || true
+    printf '%s' "${_CFG_BASE_STALE:-0}"
+}
+
 _config_expand() {
     local type="$1" value="$2" element out=""
     case "$type" in
@@ -637,8 +724,14 @@ _config_get_from_file() {
         return 1
     fi
     config_validate || return 1
+    # Operator, then what this machine pinned, then the schema. The schema is
+    # reachable only for a key the pinned layer has no line for - a fresh
+    # install, or one added since the last ./install.sh - which is the one
+    # case where dejima's current answer is the right one.
     if [ -n "${_CFG_SEEN[$section.$want]+x}" ]; then
         found="${_CFG_VAL[$section.$want]}"
+    elif [ -n "${_CFG_BASE_SEEN[$section.$want]+x}" ]; then
+        found="${_CFG_BASE_VAL[$section.$want]}"
     else
         found="$(config_default "$section.$want")"
     fi
@@ -651,9 +744,18 @@ _config_get_from_file() {
 config_get() { _config_get_from_file "$@"; }
 
 # config_is_set <section> <key>
-# Whether the key APPEARS in the config file, as distinct from having a
-# value: a key with a schema default always has a value, so "has a value" is
-# the wrong question for anything asking what the operator configured.
+# Whether the key APPEARS in the OPERATOR'S config file, as distinct from
+# having a value: a key with a schema default always has a value, so "has a
+# value" is the wrong question for anything asking what the operator
+# configured.
+#
+# The pinned layer is deliberately not consulted, and this is the whole reason
+# it lives in arrays of its own. Every caller here means "did the operator
+# write this" - the [core] ssh_key / [identity.default] ssh_key refusal fires
+# only when both are present, identity settings take precedence over a forge's
+# only when the identity names one, and the ttyd knobs treat unset as "the
+# page decides from the pointer type", which no host-wide value can see. A
+# defaults.conf naming every key would answer yes to all of them.
 config_is_set() {
     local section="$1" want="$2" _t
     if ! _config_type_into _t "$section.$want"; then
@@ -663,6 +765,22 @@ config_is_set() {
     config_exists || return 1
     config_validate || return 1
     [ -n "${_CFG_SEEN[$section.$want]+x}" ]
+}
+
+# Which layer answered for a key: user, default (this machine's pinned value)
+# or schema (nothing has pinned it yet). What --print-config prints beside a
+# value, and the fastest answer to "why is this what it is".
+config_origin() {
+    local section="$1" want="$2" _t
+    _config_type_into _t "$section.$want" || return 1
+    config_validate || return 1
+    if [ -n "${_CFG_SEEN[$section.$want]+x}" ]; then
+        printf 'user'
+    elif [ -n "${_CFG_BASE_SEEN[$section.$want]+x}" ]; then
+        printf 'default'
+    else
+        printf 'schema'
+    fi
 }
 
 config_get_bool() {

@@ -219,6 +219,105 @@ write_config() {
     esac
 }
 
+# --- the pinned defaults layer ------------------------------------------------
+#
+# defaults.conf holds what dejima's defaults were when this machine first saw
+# each key, so a release that changes one cannot move a session whose config
+# never changed. The operator's file overrides it; the schema answers only for
+# a key it has no line for.
+
+write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
+
+@test "the operator's value beats the pinned one, which beats the schema" {
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'firewall = on' 'workflow = branch-push' \
+                   '[audit]' 'keep = 3'
+    # Theirs.
+    run lib config_get core firewall
+    [ "$output" = "off" ] || { echo "$output"; return 1; }
+    # Pinned, over a schema that says local-only and 10.
+    run lib config_get core workflow
+    [ "$output" = "branch-push" ] || { echo "$output"; return 1; }
+    run lib config_get audit keep
+    [ "$output" = "3" ] || { echo "$output"; return 1; }
+    # Schema, for a key nothing has pinned.
+    run lib config_get audit diffs
+    [ "$output" = "on" ] || { echo "$output"; return 1; }
+}
+
+@test "config_origin names which of the three answered" {
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'workflow = branch-push'
+    run lib config_origin core firewall
+    [ "$output" = "user" ] || { echo "firewall: $output"; return 1; }
+    run lib config_origin core workflow
+    [ "$output" = "default" ] || { echo "workflow: $output"; return 1; }
+    run lib config_origin audit diffs
+    [ "$output" = "schema" ] || { echo "diffs: $output"; return 1; }
+}
+
+@test "a pinned key is not one the operator set" {
+    # The trap the whole two-array split exists for. Ten callers of
+    # config_is_set mean "did the operator write this" - the ssh_key
+    # deprecation refusal, identity-over-forge precedence, and the ttyd knobs
+    # where unset means the page decides. A defaults.conf naming every key
+    # would answer yes to all of them.
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'workflow = branch-push' '[remote-access]' \
+                   'ttyd_button_colors = on'
+    run lib config_is_set core firewall
+    [ "$status" -eq 0 ] || { echo "the operator's own key read as unset"; return 1; }
+    run lib config_is_set core workflow
+    [ "$status" -ne 0 ] || { echo "a pinned key read as one the operator set"; return 1; }
+    run lib config_is_set remote-access ttyd_button_colors
+    [ "$status" -ne 0 ] || { echo "a pinned ttyd knob read as one the operator set"; return 1; }
+}
+
+@test "no pinned layer at all is not an error" {
+    # A checkout that has never been launched. The schema answers for
+    # everything until there is a file.
+    write_config '[core]' 'firewall = on'
+    [ ! -e "$CONFIG_DIR/defaults.conf" ]
+    run lib config_get audit keep
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "10" ]
+}
+
+@test "the pinned layer is skipped line by line where the operator's is refused" {
+    # An unknown key here is one dejima RETIRED, on a machine whose
+    # defaults.conf predates the release that dropped it. The operator did not
+    # write it and is told not to edit the file, so refusing would leave them a
+    # launch that will not start and nothing to do about it.
+    write_config '[core]' 'firewall = on'
+    write_defaults '[core]' 'workflow = branch-push' 'retired_key = whatever' \
+                   'share_dir = ' '[gone-axis]' 'something = 1' \
+                   '[audit]' 'keep = 3' 'this line is malformed'
+    # It still launches, and the good lines still count.
+    run lib config_get core workflow
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "branch-push" ]
+    # Including one after the unknown section, or a stale section would take
+    # the rest of the file with it.
+    run lib config_get audit keep
+    [ "$output" = "3" ] || { echo "keep: $output"; return 1; }
+    # A value the schema refuses falls through rather than being honoured:
+    # share_dir is not optional, so an empty one is not a value.
+    run lib config_origin core share_dir
+    [ "$output" = "schema" ] || { echo "share_dir origin: $output"; return 1; }
+    # And the count is available for the launch to name once.
+    run lib config_defaults_stale
+    [ "$output" -ge 4 ] || { echo "counted $output stale lines"; return 1; }
+}
+
+@test "the operator's own file is still refused line by line" {
+    # The leniency above is for the file they cannot edit. Theirs is theirs.
+    write_defaults '[core]' 'workflow = branch-push'
+    printf '[core]\nharness = claude-code\nnonsense = 1\n' > "$CONFIG_DIR/config"
+    run lib config_get core forge
+    [ "$status" -ne 0 ] || { echo "an unknown key in the operator's file was accepted"; return 1; }
+    [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+}
+
 @test "config_get returns the schema default when the key is absent" {
     write_config '[core]' 'firewall = on'
     run lib config_get audit keep
