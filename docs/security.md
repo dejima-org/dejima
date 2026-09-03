@@ -643,14 +643,10 @@ at all.
 
 **Only `proxy = off` lands in the fourth row, and only where you wrote it.**
 A credential the selected backend cannot serve - a Claude Code signed in with
-a console API token, whose file has no `claudeAiOauth` block, against
-`backends/anthropic` - used to fall through to it: the proxy was skipped, the
-real file was mounted, and the session worked, so nothing about the result
-said so. That is now a refusal naming the backend, the file, the shape it
-expected and the two ways forward.
-
-A kill switch that can engage itself is not one, which is the whole reason
-this row is described as a kill switch rather than an option.
+a console API token, whose file holds no `claudeAiOauth` block, against
+`backends/anthropic` - is a refusal, naming the backend, the file, the shape
+it expected and the two ways forward. A kill switch that can engage itself is
+not one, which is why this row is a kill switch rather than an option.
 
 The refusal is scoped to a credential that *exists* and cannot be served. An
 absent one mounts nothing and downgrades nothing - that is a host where the

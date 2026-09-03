@@ -445,8 +445,8 @@ known until the container is actually running.
 
 ### How the briefing reaches the session
 
-**A session-start hook is a size-limited channel, which is why it is no longer
-the only route.** Claude Code persists a large `SessionStart` payload to a file
+**A session-start hook is a size-limited channel, which is why it is not the
+only route.** Claude Code persists a large `SessionStart` payload to a file
 and injects a short preview in its place: measured in a dejima container, 9KB
 arrived whole and 21KB did not. A composed briefing plus a project's own
 `.dejima.md` runs well past that, so most of the briefing silently never
