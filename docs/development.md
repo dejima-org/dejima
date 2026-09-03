@@ -319,7 +319,7 @@ or better is the requirement.
 | **R3** | **Yes, by running it, and the documentation is wrong about how.** A rules file at `~/Documents/Cline/Rules/00-dejima.md` reached the model: asked for a codeword only that file contained, the session answered with it. `~/.agents/AGENTS.md` works too. `~/Cline/Rules`, which the documentation names, is **not** read on Linux, and `CLINE_RULES` pointing at a file did nothing. So the briefing is a file rather than a hook, which is what `briefing_path` in the manifest is for. |
 | **Network reach** | **In the container, unlike Claude Code's.** Not a requirement, but the thing [security.md](security.md#the-firewall-bounds-the-container-not-the-harness) says has to be established per harness rather than assumed. Asked to fetch a page the allowlist does not carry, Cline's web-fetch tool ran and returned "Unable to connect" - the same answer `curl` gives. So the egress allowlist bounds what reaches a Cline session, which is not true of Claude Code's `WebSearch`. |
 | **R4** | **Yes, by running it, and this is where Cline is strongest.** `--data-dir` relocates the whole store - `db/`, `settings/`, `logs/`, `cache/`. A full run against a chosen directory put everything there and left nothing in the default location. There are per-path environment variables too: `CLINE_DATA_DIR`, `CLINE_DB_DATA_DIR`, `CLINE_SESSION_DATA_DIR`, `CLINE_TEAM_DATA_DIR`, `CLINE_PROVIDER_SETTINGS_PATH`, `CLINE_HOOKS_LOG_PATH`. Per-project scoping is a flag rather than an inference. |
-| **R5** | **Yes, and confirmed end to end.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount the operator's. The substitute is the one that already exists: Cline configured for `anthropic` with the placeholder key `sandbox-credential-proxy-placeholder`, pointed at the real hostname, ran a real completion through dejima's in-container terminator and host-side proxy. No base-URL override and no new proxy work - the same arrangement as Claude Code's faked `.credentials.json`, and the session is indistinguishable from a stock install. |
+| **R5** | **Yes, and confirmed end to end.** Credentials are a plain file, `settings/providers.json`, whose path `CLINE_PROVIDER_SETTINGS_PATH` relocates - so dejima can decline to mount the operator's. The substitute is the one that already exists: Cline configured for `anthropic` with the placeholder key `sandbox-credential-proxy-placeholder`, pointed at the real hostname, ran a real completion through dejima's in-container terminator and host-side proxy. No base-URL override and no new proxy work - the same arrangement as Claude Code's faked `.credentials.json`, and the session is indistinguishable from a stock install. **What that completion did not establish is which models the subscription credential will serve a client that is not Claude Code**: Anthropic gates that per model and answers a refused one with a 429, so the arrangement is confirmed and the entitlement is not dejima's to give. See [providers.md](providers.md#a-subscription-credential-is-claude-codes-and-anthropic-enforces-that). |
 
 Two notes for whoever writes the integration. Cline's plugin manifest schema
 still carries a field described as "not read by Claude Code", so its plugin
@@ -362,7 +362,11 @@ a substituted value is never resolved.
 anywhere; dejima cannot follow it everywhere. A backend the proxy serves is
 fine whatever its dialect - the proxy takes the credential's kind and header
 names as arguments, so `openrouter` works the way `anthropic` does and the key
-never enters the container either way. What dejima cannot follow is a hosted
+never enters the container either way. Whether the ENDPOINT then serves the
+request is a separate question dejima does not answer: a Claude subscription
+credential is served to Claude Code and refused to other clients for the
+larger models, which is Anthropic's call and not one dejima works around
+(see [providers.md](providers.md#a-subscription-credential-is-claude-codes-and-anthropic-enforces-that)). What dejima cannot follow is a hosted
 API reached *without* a backend: there is no proxy holding a key back on its
 behalf, so the key would have to go in, which is R5 failing rather than a
 network restriction.

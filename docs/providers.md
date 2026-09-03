@@ -298,6 +298,13 @@ Compatibility is not a list anyone maintains: it is the backend's `api_style`
 against the harness's `api_styles`, checked at launch. This table is what those
 declarations currently work out to.
 
+It answers whether dejima will pair the two, which is a question about
+dialects. Whether the endpoint then serves the request is the endpoint's to
+answer, and for a Claude subscription credential the answer depends on the
+harness - see [A subscription credential is Claude
+Code's](#a-subscription-credential-is-claude-codes-and-anthropic-enforces-that)
+below.
+
 | Backend | `claude-code` | `cline` | Credential | You configure |
 | --- | --- | --- | --- | --- |
 | `anthropic` | yes | yes | OAuth, refreshed and written back | nothing, once you have logged in on the host |
@@ -314,6 +321,54 @@ backend-agnostic one.
 Adding a backend does not change this table by hand: a new directory whose
 `api_style` is one a harness already declares works with that harness the day
 it lands.
+
+### A subscription credential is Claude Code's, and Anthropic enforces that
+
+`backends/anthropic` reads the OAuth credential Claude Code writes when you
+sign in with a Claude subscription. **Anthropic serves that credential to
+Claude Code and refuses other clients, per model.** Observed on a Max
+subscription: `claude-haiku-4-5` is served, `claude-opus-5` and
+`claude-sonnet-5` are refused, while an otherwise identical request from
+Claude Code succeeds.
+
+The refusal arrives as **HTTP 429 `rate_limit_error`**, with a body whose
+message is the word `Error`. It is indistinguishable from a quota problem
+from the inside, which is worth knowing before you spend an afternoon on
+your usage graphs: the account can be nowhere near any limit and every
+request will still be refused.
+
+So with `[core] harness = cline` and `backend = anthropic`, expect Haiku to
+work and the larger models not to. For those, point cline at a backend whose
+credential is yours to spend rather than a subscription's:
+
+```
+[harness.cline]
+backend = anthropic-api-key    # console billing, key held on the host
+# or
+backend = openrouter
+```
+
+`claude-code` with `backend = anthropic` is unaffected - that pairing is the
+one Anthropic is serving.
+
+**dejima does not work around this**, and that is a limit on what dejima does
+rather than an opinion about the attempt.
+
+The credential proxy substitutes the credential and changes nothing else: the
+header block the API receives is the harness's own, down to not adding an
+`Accept-Encoding` the client did not send. Getting past this gate would mean
+sending a system prompt the harness never wrote, so that the request presents
+as a different product - which is the one thing the proxy is built not to do,
+and would put a second answer to "which client is this" inside the component
+whose whole job is to pass the first one through unchanged.
+
+It would also be brittle in a way that costs the operator rather than dejima:
+it works until the shape it copies changes, and the failure lands on their
+account.
+
+Which models are gated is Anthropic's to change, and the table above is an
+observation on one subscription rather than a documented policy - if it moves,
+this section moves with it.
 
 **Which backend a launch uses is the harness's setting**, `[harness.<name>]
 backend`, overridable for one launch with `--backend`. Per harness because
