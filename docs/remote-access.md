@@ -542,6 +542,46 @@ nvim split separator resizes the split. Neither needs any server-side
 configuration - they are stock tmux and nvim behaviour; the page's only
 contribution is delivering the drag.
 
+### A scroll gesture jumps too far, and the amount is tmux's
+
+A scroll gesture is sent as wheel notches, one per row of finger travel. What a
+notch is then worth belongs to whoever receives it, and this page is not it:
+when the pane is scrolling its own history, tmux is.
+
+**Find out what yours does before changing anything:**
+
+```sh
+tmux list-keys -T copy-mode-vi | grep WheelUpPane
+```
+
+Stock tmux scrolls five lines (`send-keys -X -N 5 scroll-up`), which is a fifth
+of a desktop terminal and better than half a phone one. A configuration that
+binds `halfpage-up` instead - a common enough idiom that it is worth naming -
+scrolls half the pane, so twenty lines in a forty-line one. That is the case
+this section exists for: on a phone it throws the screen on the smallest
+movement of a thumb, and placing a particular line takes several tries.
+
+Set it to a few lines, in your own `~/.tmux.conf`:
+
+```tmux
+bind -T copy-mode-vi WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode-vi WheelDownPane select-pane \; send -X -N 4 scroll-down
+bind -T copy-mode    WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode    WheelDownPane select-pane \; send -X -N 4 scroll-down
+```
+
+Both tables, because which one is active follows `mode-keys`. `scroll-up` takes
+no amount of its own, so the `-N` repeat count is the amount. It applies to
+every client of that tmux server, phone and desktop alike - which is the reason
+it is not something dejima sets for you: `dejima-attach` joins the tmux session
+you launched from, and its configuration is yours.
+
+Nothing in dejima can make the step smaller from this side. The page can only
+choose how many notches to send, and sending fewer means dragging further for
+each one - which trades a jumpy scroll for a stiff one rather than fixing
+either. An application reading the mouse directly, rather than through tmux,
+picks its own figure and there is no binding for that at all.
+
 ### Toolbar
 
 ```
