@@ -379,6 +379,14 @@ exist is your call.
   malware arrives through allowlisted sources. Keeping that out of `main` is
   your job, not the container's, and people reading your `main` will hold you
   to it whoever's name is on the commit.
+- **Your model subscription is a licence, not a keyring.** dejima keeps a
+  credential out of a container; it does not decide what that credential is
+  entitled to. A Claude subscription's credential is served to Claude Code and
+  refused to other harnesses for the larger models, as a `429` that reads like
+  a quota problem. dejima will not make one harness present itself as another
+  to get past that - see
+  [docs/providers.md](docs/providers.md#a-subscription-credential-is-claude-codes-and-anthropic-enforces-that)
+  for what is served, and use a credential that is yours to spend for the rest.
 - **Understand what you ship.** dejima makes development fast enough that not
   reading the diff gets tempting. A good model is not a substitute for
   engineering judgement or human review, and nothing here changes that.
