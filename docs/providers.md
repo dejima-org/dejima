@@ -351,19 +351,24 @@ backend = openrouter
 `claude-code` with `backend = anthropic` is unaffected - that pairing is the
 one Anthropic is serving.
 
-**dejima will not work around this, and that is a decision rather than an
-omission.** Making one harness present itself as another to obtain access a
-credential is being denied would mean forging the identity of a different
-product against the operator's own account. It is also exactly the thing this
-project spends its time arguing against: the credential proxy forwards the
-harness's own request precisely so that what the API sees is true, down to
-declining to send a header the client did not (see the `Accept-Encoding` note
-in `bin/dejima-credential-proxy`). A sandbox whose argument is that boundaries
-are honoured does not get to pick which ones.
+**dejima does not work around this**, and that is a limit on what dejima does
+rather than an opinion about the attempt.
 
-Which models are gated is Anthropic's to change, and this is an observation
-rather than a documented policy - if it moves, the table above moves with it.
-See [responsible-use.md](responsible-use.md).
+The credential proxy substitutes the credential and changes nothing else: the
+header block the API receives is the harness's own, down to not adding an
+`Accept-Encoding` the client did not send. Getting past this gate would mean
+sending a system prompt the harness never wrote, so that the request presents
+as a different product - which is the one thing the proxy is built not to do,
+and would put a second answer to "which client is this" inside the component
+whose whole job is to pass the first one through unchanged.
+
+It would also be brittle in a way that costs the operator rather than dejima:
+it works until the shape it copies changes, and the failure lands on their
+account.
+
+Which models are gated is Anthropic's to change, and the table above is an
+observation on one subscription rather than a documented policy - if it moves,
+this section moves with it.
 
 **Which backend a launch uses is the harness's setting**, `[harness.<name>]
 backend`, overridable for one launch with `--backend`. Per harness because

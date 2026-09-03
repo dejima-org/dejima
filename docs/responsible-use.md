@@ -131,38 +131,6 @@ shrinking it. Anyone reading your `main` later sees your name on the merge
 commit regardless of whose name is on the authored one, and will hold you to
 it accordingly.
 
-## Your model subscription is a licence, not a keyring.
-
-dejima keeps a credential out of a container. It does not decide what that
-credential is entitled to, and it does not help you widen it.
-
-The concrete case: `backends/anthropic` reads the OAuth credential Claude Code
-writes when you sign in with a Claude subscription. Anthropic serves that
-credential to Claude Code and refuses other clients for the larger models. A
-refused request comes back as a `429` whose message is the word `Error`, so
-from inside it reads like a quota problem rather than an entitlement one - see
-[providers.md](providers.md#a-subscription-credential-is-claude-codes-and-anthropic-enforces-that)
-for what is served and what is not.
-
-**dejima will not work around that.** Making one harness present itself as
-another - copying the system prompt or the headers that identify a different
-product - would forge that product's identity against your own account, on a
-control the provider put there deliberately. It would also be brittle in the
-worst way: it works until the day it does not, and the day it does not is a
-question about your account rather than a bug report.
-
-And it would contradict what the rest of this project spends its effort on.
-The credential proxy forwards the harness's own request so that what the API
-sees is true, down to declining to send a header the client did not. A
-sandbox whose whole argument is that boundaries are honoured does not get to
-choose which ones.
-
-If you want a different harness on a Claude model, use a credential that is
-yours to spend: console billing through `backends/anthropic-api-key`, or a
-key from another vendor. If you want the subscription, use the harness it was
-issued for. Both are supported, neither is a workaround, and the difference
-is whose terms you are operating under.
-
 ## Understand what you ship.
 
 The risk here is habituation, not a single lapse. dejima makes iterating cheap
