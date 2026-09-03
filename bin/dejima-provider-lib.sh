@@ -927,8 +927,12 @@ _identity_key_specs() {
 # harness in use would leave the next one an operator selects handing them
 # ITS current defaults - the same failure one axis over, a year later, when
 # nothing about their config changed.
+# $1: "keep" to take a value already pinned in defaults.conf over the shipped
+# one, which is what a rebuild does - it adds keys and drops retired ones
+# without moving anything already decided. Empty renders the shipped defaults,
+# which is what a first pin does.
 config_defaults_render() {
-    local key type default axis name spec section last=""
+    local keep="${1:-}" key type default axis name spec section last=""
     printf '# dejima'"'"'s own defaults, pinned when this machine first saw each key.\n'
     printf '#\n'
     printf '# NOT yours to edit - ./install.sh rewrites it, keeping the values already\n'
@@ -939,6 +943,8 @@ config_defaults_render() {
         [ -n "$key" ] || continue
         default="$(config_default "$key")" || continue
         [ -n "$default" ] || continue
+        [ "$keep" = keep ] && [ -n "${_CFG_BASE_SEEN[$key]+x}" ] \
+            && default="${_CFG_BASE_VAL[$key]}"
         section="${key%.*}"
         [ "$section" = "$last" ] || { printf '\n[%s]\n' "$section"; last="$section"; }
         printf '%s = %s\n' "${key##*.}" "$default"
@@ -950,6 +956,8 @@ config_defaults_render() {
             for spec in $(_provider_keys_field "$axis" "$name" 2>/dev/null); do
                 IFS=$'\t' read -r key type default <<< "$(_provider_keyspec_parse "$spec")"
                 [ -n "$default" ] || continue
+                [ "$keep" = keep ] && [ -n "${_CFG_BASE_SEEN[$axis.$name.$key]+x}" ] \
+                    && default="${_CFG_BASE_VAL[$axis.$name.$key]}"
                 [ -n "$last" ] || { printf '\n[%s.%s]\n' "$axis" "$name"; last=1; }
                 printf '%s = %s\n' "$key" "$default"
             done
@@ -975,6 +983,74 @@ _config_keys_core_sorted() {
             [ "${member%.*}" = "$sect" ] && printf '%s\n' "$member"
         done
     done
+}
+
+# Rebuild the pinned file: keys this release added appended, keys it retired
+# dropped, and every value already decided left exactly as it was.
+#
+# Both halves fall out of rendering with "keep" rather than being two rules
+# somebody has to remember, and pruning is not the tidier half: an unknown key
+# is one this dejima cannot read, so a file that only ever grew would collect
+# them until the notice about it became permanent.
+#
+# Prints what it did, and what has drifted - a shipped default that no longer
+# matches the pinned one - naming both values and the line that would adopt
+# it. It does not adopt it. That would be dejima writing a decision into a
+# session's behaviour on an upgrade, which is the thing this exists to stop.
+config_defaults_rebuild() {
+    local path tmp key section leaf pinned shipped
+    local added=0 dropped=0 drifted=0
+    path="$(config_defaults_path)"
+    _config_parse_defaults "$path"
+    dropped="$_CFG_BASE_STALE"
+    mkdir -p "$(dirname "$path")" || return 1
+    tmp="$(mktemp "$path.XXXXXX")" || return 1
+    config_defaults_render keep > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp"
+
+    # Counted from the rendered file rather than guessed at: a key with no
+    # line in the old one is a key this release added.
+    while IFS= read -r key; do
+        [ -n "${_CFG_BASE_SEEN[$key]+x}" ] || added=$((added + 1))
+    done < <(_config_defaults_keys "$tmp")
+
+    if [ ! -e "$path" ]; then
+        mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+        printf 'Pinned this release'"'"'s defaults in %s.\n' "$path"
+        return 0
+    fi
+    mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+
+    [ "$added" -eq 0 ] || printf 'Pinned %s new default(s) in %s.\n' "$added" "$path"
+    [ "$dropped" -eq 0 ] || printf 'Dropped %s retired line(s) from %s.\n' "$dropped" "$path"
+
+    # Drift, last, because it is the part that asks something of the operator.
+    while IFS= read -r key; do
+        [ -n "${_CFG_BASE_SEEN[$key]+x}" ] || continue
+        pinned="${_CFG_BASE_VAL[$key]}"
+        shipped="$(config_default "$key")" || continue
+        [ "$pinned" = "$shipped" ] && continue
+        [ "$drifted" -eq 0 ] && {
+            printf '\ndejima ships a different default now for %s:\n' "$path"
+        }
+        drifted=$((drifted + 1))
+        section="${key%.*}"; leaf="${key##*.}"
+        printf '  [%s] %s: yours stays %s, dejima now ships %s\n' \
+            "$section" "$leaf" "$pinned" "$shipped"
+    done < <(_config_defaults_keys "$path")
+    [ "$drifted" -eq 0 ] || {
+        printf '\nYours are kept, so nothing about your sandbox changed. To take one,\n'
+        printf 'write it in %s under its section - never in the file above.\n' "$(config_path)"
+    }
+    return 0
+}
+
+# "section.key" for each line of a rendered defaults file, in file order.
+_config_defaults_keys() {
+    awk '
+        /^\[/ { s = $0; gsub(/^\[|\]$/, "", s); next }
+        /^[a-z_]+ = / && s != "" { split($0, p, " = "); print s "." p[1] }
+    ' "$1"
 }
 
 # Write it if it is not there. dejima's own file, so dejima creating it is not

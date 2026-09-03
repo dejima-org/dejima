@@ -385,6 +385,66 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     rm -rf "$workspace"
 }
 
+@test "install.sh rebuilds the pinned file without moving what is in it" {
+    stub_docker
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f="$CONFIG_DIR/defaults.conf"
+    [ -f "$f" ] || { echo "install.sh pinned nothing"; return 1; }
+
+    # A value already decided, a key this release would add, and a key it has
+    # retired - the three things a rebuild has to get right at once.
+    sed -i 's/^keep = 10$/keep = 25/' "$f"
+    sed -i '/^diffs = on$/d' "$f"
+    printf '\n[core]\nretired_thing = 1\n' >> "$f"
+
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '^keep = 25$' "$f" || { echo "a rebuild moved a pinned value"; cat "$f"; return 1; }
+    grep -q '^diffs = on$' "$f" || { echo "a rebuild did not add a new key"; return 1; }
+    grep -q 'retired_thing' "$f" && { echo "a rebuild kept a retired key"; return 1; }
+
+    # Pruning is not the tidier half: an unknown key is one dejima cannot
+    # read, so a file that only grew would collect them.
+    run lib config_defaults_stale
+    [ "$output" = "0" ] || { echo "$output unreadable lines survived the rebuild"; return 1; }
+}
+
+@test "install.sh names a default that has moved, and does not take it" {
+    stub_docker
+    run_install
+    sed -i 's/^keep = 10$/keep = 25/' "$CONFIG_DIR/defaults.conf"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"yours stays 25"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"dejima now ships 10"* ]] || { echo "$output"; return 1; }
+    # Named, not adopted, and the file it points at for taking one is the
+    # operator's - never the pinned file, which the next rebuild rewrites.
+    grep -q '^keep = 25$' "$CONFIG_DIR/defaults.conf" \
+        || { echo "install.sh adopted the shipped default"; return 1; }
+    [[ "$output" == *"$CONFIG_DIR/config"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the starter config carries only what was seeded, not every key commented" {
+    # It used to write every key commented at its schema default, which was a
+    # second copy of the defaults in comments nothing regenerates.
+    # defaults.conf is that reference now.
+    stub_docker
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local c="$CONFIG_DIR/config"
+    grep -q '^harness = claude-code$' "$c" || { echo "the selection is not written"; cat "$c"; return 1; }
+    grep -qE '^# [a-z_]+ = ' "$c" && { echo "still writing commented defaults:"; cat "$c"; return 1; }
+    # And no stanza left behind by a section nothing seeded. Comments and
+    # blanks dropped first: the header prose names sections in prose.
+    grep -vE '^\s*(#|$)' "$c" | awk '
+        /^\[/ { if (open) { print "empty: " prev; bad = 1 } open = 1; prev = $0; next }
+        { open = 0 }
+        END { if (open) { print "empty: " prev; bad = 1 } exit bad }
+    ' || { echo "an empty section survived:"; cat "$c"; return 1; }
+    [ "$(grep -c . "$c")" -gt 0 ]
+}
+
 @test "config_get returns the schema default when the key is absent" {
     write_config '[core]' 'firewall = on'
     run lib config_get audit keep

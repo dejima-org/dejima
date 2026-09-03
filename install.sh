@@ -130,9 +130,14 @@ else
         _starter_extra_keys="$(_config_extra_keys_for forge gitea)"
     fi
     # Seeded from any legacy variables still exported, so the one-time
-    # migration is a review rather than a retyping. Everything else is
-    # written commented-out at its schema default, so the file doubles as
-    # the reference for what can be set.
+    # migration is a review rather than a retyping.
+    #
+    # Only what is seeded. This file used to carry every key commented out at
+    # its schema default, so it doubled as the reference - which meant a second
+    # copy of the defaults, in comments nothing regenerates, drifting against
+    # the schema as keys were added. defaults.conf beside it is that reference
+    # now, complete and rewritten by every ./install.sh, and this file holds
+    # only what the operator has actually decided.
     {
         printf '# dejima configuration. See README.md.\n'
         printf '# Every key below is shown at its default; uncomment to change one.\n'
@@ -154,11 +159,6 @@ else
             [ -n "$_key" ] || continue
             _leaf="${_key##*.}"
             _sec="${_key%.*}"
-            _default="$(config_default "$_key")"
-            if [ "$_sec" != "$_section" ]; then
-                printf '\n[%s]\n' "$_sec"
-                _section="$_sec"
-            fi
             _seed=""
             case "$_key" in
                 forge.gitea.ssh_host)      _seed="${GITEA_SSH_HOST:-}" ;;
@@ -186,15 +186,26 @@ else
                     [ -n "${XDG_DATA_HOME:-}" ] && _seed="$XDG_DATA_HOME/dejima/baselines"
                     ;;
             esac
-            if [ -n "$_seed" ]; then
-                printf '%s = %s\n' "$_leaf" "$_seed"
-            else
-                printf '# %s = %s\n' "$_leaf" "$_default"
+            [ -n "$_seed" ] || continue
+            # The header is written with the first key that lands under it, so
+            # a section nothing seeded leaves no empty stanza behind.
+            if [ "$_sec" != "$_section" ]; then
+                printf '\n[%s]\n' "$_sec"
+                _section="$_sec"
             fi
+            printf '%s = %s\n' "$_leaf" "$_seed"
         done < <(_config_keys; [ -z "$_starter_extra_keys" ] || printf '%s\n' "$_starter_extra_keys")
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 fi
+
+# The pinned defaults, rebuilt: keys this release added appended, keys it
+# retired dropped, everything already decided left where it is. This is the
+# only place that reports a shipped default having moved, because this is when
+# it moves - you pulled and re-ran this. A launch checking would be a standing
+# condition in front of every one.
+echo
+config_defaults_rebuild
 
 # Guard registration, after the starter config above rather than before it:
 # where dejima's guards go, and in what shape, is the selected harness's
