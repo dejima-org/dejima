@@ -692,3 +692,50 @@ start_static() {
     [[ "$output" == *"retry-after: 41"* ]] || { echo "$output"; return 1; }
     [[ "$output" == *"rate_limit_error"* ]] || { echo "$output"; return 1; }
 }
+
+@test "a compressed rejection is logged as text, not as bytes" {
+    # The client's own Accept-Encoding is forwarded verbatim, so a harness
+    # that asks for gzip gets a compressed error body - and the first version
+    # of this logging wrote those bytes out, which reached the operator as
+    # mojibake and a bash warning about a null byte in a command
+    # substitution. Reported from a real launch.
+    start_proxy --log "$TD/proxy.log"
+    run pcurl -i --compressed "http://localhost/status-429-gzip"
+    [ "$status" -eq 0 ]
+    grep -q 'slow down' "$TD/proxy.log" \
+        || { echo "the message did not survive decompression: $(cat "$TD/proxy.log")"; return 1; }
+    # Nothing unprintable reaches the file at all. This is the half that has
+    # to hold whatever the encoding: upstream text landing on the operator's
+    # terminal is what dejima-audit already refuses to do unescaped.
+    [ -z "$(tr -d '\11\12\15\40-\176' < "$TD/proxy.log")" ] \
+        || { echo "unprintable bytes reached the log"; od -c "$TD/proxy.log" | head -3; return 1; }
+    # And the client still received the compressed bytes untouched.
+    [[ "$output" == *"slow down"* ]] || { echo "$output"; return 1; }
+}
+
+@test "an encoding the stdlib cannot read says so rather than printing bytes" {
+    # br and zstd have no stdlib decoder. Naming the encoding is more use than
+    # the bytes, and the bytes are the thing this exists to keep off a
+    # terminal.
+    run python3 -c '
+import sys; sys.path.insert(0, "'"$REPO_ROOT"'/bin")
+import importlib.util, importlib.machinery
+# The proxy has no .py suffix, so the loader has to be named rather than
+# inferred from the extension.
+loader = importlib.machinery.SourceFileLoader("p", "'"$REPO_ROOT"'/bin/dejima-credential-proxy")
+spec = importlib.util.spec_from_loader("p", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+print(m._readable(b"\x1f\x8b\x00\x01\x02", "br"))
+print(m._readable(b"\x00\x01\x02not gzip at all", "gzip"))
+print(m._readable(b"plain \x00\x07text", ""))
+'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"br-encoded"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"undecodable"* ]] || { echo "$output"; return 1; }
+    # Control characters become spaces rather than being dropped, so a
+    # message is not silently re-joined into a different one. The exact run
+    # length is not the point; that none of them survives is.
+    [[ "$output" == *"plain"*"text"* ]] || { echo "$output"; return 1; }
+    [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
+        || { echo "unprintable output survived"; return 1; }
+}
