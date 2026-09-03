@@ -318,6 +318,73 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
 }
 
+@test "a launch pins the defaults once, and says so only that time" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    [ ! -e "$CONFIG_DIR/defaults.conf" ]
+
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$CONFIG_DIR/defaults.conf" ] || { echo "nothing was pinned"; return 1; }
+    [[ "$output" == *"Pinned dejima's current defaults"* ]] \
+        || { echo "created the file without saying so: $output"; return 1; }
+    # It is dejima's own, not the operator's: 0600 and a header saying so.
+    [ "$(stat -c '%a' "$CONFIG_DIR/defaults.conf")" = "600" ]
+    grep -q 'NOT yours to edit' "$CONFIG_DIR/defaults.conf"
+
+    # A second launch is silent about it, and does not rewrite it: a standing
+    # line on every launch is one an operator learns to scroll past.
+    local before; before="$(cat "$CONFIG_DIR/defaults.conf")"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Pinned dejima"* ]] \
+        || { echo "said it again: $output"; return 1; }
+    [ "$before" = "$(cat "$CONFIG_DIR/defaults.conf")" ] \
+        || { echo "a launch rewrote the pinned file"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "what a launch pins is every defaulted key, and no key without one" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f="$CONFIG_DIR/defaults.conf"
+
+    # A defaulted core key, a defaulted key of a harness that is NOT selected -
+    # pinning only the selected one leaves the next harness an operator picks
+    # handing them its current defaults - and one of a backend.
+    grep -q '^keep = 10$' "$f" || { echo "no [audit] keep"; cat "$f"; return 1; }
+    grep -q '^\[harness.cline\]$' "$f" || { echo "no unselected harness"; cat "$f"; return 1; }
+    grep -q '^\[backend.anthropic\]$' "$f" || { echo "no backend"; cat "$f"; return 1; }
+
+    # And nothing that has no default, because there is nothing to pin: those
+    # are exactly the keys docs/configuration.md marks required.
+    grep -q '^harness = ' "$f" && { echo "pinned a key with no default"; return 1; }
+    grep -q '^model = ' "$f" && { echo "pinned a key with no default"; return 1; }
+
+    # It reads back with nothing skipped, which a hand-kept renderer would
+    # drift out of.
+    run lib config_defaults_stale
+    [ "$output" = "0" ] || { echo "the file it wrote has $output unreadable lines"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch names a pinned key this dejima has retired, and carries on" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    printf '[core]\nworkflow = local-only\nretired_key = 1\n' > "$CONFIG_DIR/defaults.conf"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "a retired pinned key stopped the launch: $output"; return 1; }
+    [[ "$output" == *"no longer reads"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"./install.sh"* ]] \
+        || { echo "named the problem without the fix: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
 @test "config_get returns the schema default when the key is absent" {
     write_config '[core]' 'firewall = on'
     run lib config_get audit keep
@@ -583,6 +650,17 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     run "$REPO_ROOT/bin/dejima" --print-config
     expected="$(lib _config_keys | wc -l)"
     [ "$(printf '%s\n' "$output" | wc -l)" -eq "$expected" ]
+}
+
+@test "--print-config inspects without pinning anything" {
+    # A query that creates a file as a side effect is not a query. Nothing is
+    # lost by waiting: with nothing pinned every key resolves through the
+    # schema, which is what the first real launch then pins.
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$CONFIG_DIR/defaults.conf" ] \
+        || { echo "--print-config created the pinned file"; return 1; }
 }
 
 @test "warming the config cache does not swallow the reason it is invalid" {

@@ -914,6 +914,96 @@ _identity_key_specs() {
     done
 }
 
+# The pinned defaults file, rendered. Every key that HAS a default, at the
+# value this release ships, grouped by section.
+#
+# Keys with no default are deliberately absent, because there is nothing to
+# pin: they are the ones an operator must supply, and "has no line in
+# defaults.conf" is exactly what docs/configuration.md marks as required. The
+# document and the file agree by construction rather than by someone keeping
+# them in step.
+#
+# EVERY installed provider, not only the selected one. Pinning just the
+# harness in use would leave the next one an operator selects handing them
+# ITS current defaults - the same failure one axis over, a year later, when
+# nothing about their config changed.
+config_defaults_render() {
+    local key type default axis name spec section last=""
+    printf '# dejima'"'"'s own defaults, pinned when this machine first saw each key.\n'
+    printf '#\n'
+    printf '# NOT yours to edit - ./install.sh rewrites it, keeping the values already\n'
+    printf '# here so a release cannot move a setting you never chose. Put your own\n'
+    printf '# settings in %s, which overrides everything below and which\n' "$(config_path)"
+    printf '# dejima never writes.\n'
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        default="$(config_default "$key")" || continue
+        [ -n "$default" ] || continue
+        section="${key%.*}"
+        [ "$section" = "$last" ] || { printf '\n[%s]\n' "$section"; last="$section"; }
+        printf '%s = %s\n' "${key##*.}" "$default"
+    done < <(_config_keys_core_sorted)
+    for axis in forge harness backend; do
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            last=""
+            for spec in $(_provider_keys_field "$axis" "$name" 2>/dev/null); do
+                IFS=$'\t' read -r key type default <<< "$(_provider_keyspec_parse "$spec")"
+                [ -n "$default" ] || continue
+                [ -n "$last" ] || { printf '\n[%s.%s]\n' "$axis" "$name"; last=1; }
+                printf '%s = %s\n' "$key" "$default"
+            done
+        done < <(provider_list "$axis" 2>/dev/null)
+    done
+}
+
+# The core schema's keys with their sections kept together, so the rendered
+# file groups rather than repeating a header per key. The schema's own order
+# is otherwise preserved: it is the order docs/configuration.md follows.
+_config_keys_core_sorted() {
+    local key member seen=" " sect
+    local -a keys=()
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        keys+=("$key")
+    done < <(_config_table | cut -f1 | grep -E '^[a-z-]+\.[a-z_]+$')
+    for key in "${keys[@]}"; do
+        sect="${key%.*}"
+        case "$seen" in *" $sect "*) continue ;; esac
+        seen="$seen$sect "
+        for member in "${keys[@]}"; do
+            [ "${member%.*}" = "$sect" ] && printf '%s\n' "$member"
+        done
+    done
+}
+
+# Write it if it is not there. dejima's own file, so dejima creating it is not
+# the kind of write this whole arrangement removes - it is the opposite of
+# one. Without it the pin would exist only for operators who ran ./install.sh,
+# and dejima runs perfectly well from a checkout without it.
+#
+# Present is left alone: no rebuild, no prune, no drift check. Those belong to
+# ./install.sh, which is when the shipped defaults actually change. Doing them
+# per launch would put a standing condition in front of every one.
+#
+# Prints one line, and only when it creates the file.
+config_defaults_ensure() {
+    local path tmp
+    path="$(config_defaults_path)"
+    [ -e "$path" ] && return 0
+    mkdir -p "$(dirname "$path")" || return 0
+    tmp="$(mktemp "$path.XXXXXX")" || return 0
+    if config_defaults_render > "$tmp" 2>/dev/null; then
+        chmod 600 "$tmp"
+        mv "$tmp" "$path" || { rm -f "$tmp"; return 0; }
+        printf 'Pinned dejima'"'"'s current defaults in %s so a later release cannot move them.\n' \
+            "$path" >&2
+    else
+        rm -f "$tmp"
+    fi
+    return 0
+}
+
 # Looks up one [forge.<name>]/[harness.<name>] key's TYPE<TAB>DEFAULT in that
 # provider's `keys` manifest entry instead of a row hardcoded in core.
 _config_extra_spec() {

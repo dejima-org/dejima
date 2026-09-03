@@ -409,6 +409,7 @@ if ! config_exists; then
     exit 1
 fi
 
+
 # A forge's env_export can name a variable core also fills - today GH_TOKEN,
 # which core sets from [github] token_file for every session regardless of
 # forge. One variable carries one token, so the forge's wins. Warned rather
@@ -479,6 +480,30 @@ if [ "$PRINT_CONFIG" = 1 ]; then
         printf '%s=%s\n' "$_key" "$(config_get "$_section" "$_leaf")"
     done < <(_config_keys)
     exit 0
+fi
+
+# Pin this release's defaults if nothing has yet, so a later one cannot move a
+# setting the operator never chose. One line, and only on the launch that
+# creates the file - see config_defaults_ensure for why a launch does no more
+# than that.
+#
+# After --print-config's exit above, deliberately. That flag is the command an
+# operator runs to INSPECT their configuration, and a query that creates a file
+# as a side effect is not one. Nothing is lost by waiting: on a machine with no
+# pinned file every key resolves through the schema, which is exactly the value
+# the first real launch is about to pin.
+config_defaults_ensure
+
+# What the pinned file holds that this dejima no longer understands: keys it
+# has retired since the file was written. Said once, with the command that
+# rebuilds it - the values themselves still resolve, through the schema, so
+# this is a thing to tidy rather than a launch to stop.
+if [ "$(config_defaults_stale)" -gt 0 ]; then
+    printf '\n  %s%s has %s line(s) this dejima no longer reads.%s\n' \
+        "${C_WARN:-}" "$(config_defaults_path)" "$(config_defaults_stale)" "${C_RESET:-}" >&2
+    printf '  They are keys it has retired. Run %s./install.sh%s to rebuild the file.\n' \
+        "${C_KEY:-}" "${C_RESET:-}" >&2
+    DEJIMA_STARTUP_NOTICE=1
 fi
 
 # The selected forge/workflow/harness combination, resolved and validated
