@@ -8,20 +8,11 @@
 
   var DEFAULT_TMUX_PREFIX = 'C-b';
 
-  // Rows of finger travel per scroll notch, where the notch goes to the
-  // application rather than to this page's own scrollback. Five because that
-  // is what a notch buys there: stock tmux binds WheelUpPane in copy-mode to
-  // `send -X -N 5 scroll-up`, and a full-screen application picks its own
-  // figure in the same range. One row per notch therefore moved the screen
-  // about five times faster than the finger, which is why placing a line at
-  // the bottom of the screen took several tries.
-  var DEFAULT_SCROLL_STEP = 5;
-
   // Options this page consumes itself. Everything else in the preferences is
   // an xterm.js option and is handed to the terminal untouched, which is how
   // the existing TTYD_FONT_SIZE knob keeps working with no code here knowing
   // about it. isWindows is ttyd's own, always present, and not an xterm option.
-  var PAGE_KEYS = ['tmuxPrefix', 'focusOnTap', 'buttonColors', 'scrollStep'];
+  var PAGE_KEYS = ['tmuxPrefix', 'focusOnTap', 'buttonColors'];
   var IGNORED_KEYS = ['isWindows'];
 
   // "C-b" -> "\x02", the byte tmux is actually listening for. Deliberately
@@ -101,29 +92,6 @@
     return true;
   }
 
-  // Rows of finger travel per scroll notch, from the preferences.
-  //
-  // ?scroll=N overrides per client, which matters more here than for the other
-  // knobs: what a notch is worth depends on the application in the session,
-  // and one operator can be looking at a tmux scrollback in one tab and a
-  // full-screen app in another.
-  //
-  // Anything that is not a positive number falls back to the default rather
-  // than being honoured. A zero or negative step would make the accumulator
-  // loop that consumes it spin forever on the first drag, so this is a guard
-  // rather than tidiness.
-  function scrollStepRows(search, preference) {
-    var params = new URLSearchParams(search || '');
-    var candidates = [params.get('scroll'), preference];
-    for (var i = 0; i < candidates.length; i++) {
-      if (candidates[i] === null || candidates[i] === undefined ||
-          candidates[i] === '') continue;
-      var n = Number(candidates[i]);
-      if (isFinite(n) && n > 0) return n;
-    }
-    return DEFAULT_SCROLL_STEP;
-  }
-
   // The address of the session picker: this page with the run-id dropped.
   //
   // ttyd passes ?arg=<run-id> to dejima-attach as argv (--url-arg), so a page
@@ -142,14 +110,12 @@
 
   D.config = {
     DEFAULT_TMUX_PREFIX: DEFAULT_TMUX_PREFIX,
-    DEFAULT_SCROLL_STEP: DEFAULT_SCROLL_STEP,
     PAGE_KEYS: PAGE_KEYS,
     parsePrefix: parsePrefix,
     splitPreferences: splitPreferences,
     toolbarWanted: toolbarWanted,
     focusOnTapWanted: focusOnTapWanted,
     buttonColorsWanted: buttonColorsWanted,
-    scrollStepRows: scrollStepRows,
     pickerSearch: pickerSearch
   };
 })((globalThis.DEJIMA = globalThis.DEJIMA || {}));

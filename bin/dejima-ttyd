@@ -101,11 +101,6 @@ focus_on_tap="$(remote_ttyd_focus_on_tap)"
 # reason as the line above: the page has a default and it is the right one.
 button_colors="$(remote_ttyd_button_colors)"
 
-# How far a finger travels, in terminal rows, per scroll notch. Always passed:
-# the schema has a real default because there is no "leave it alone" state -
-# the page has to pick some travel per notch whatever the config says.
-scroll_step="$(remote_ttyd_scroll_step)"
-
 # Checked rather than left to exec, whose failure is bash's "ttyd: not found"
 # on a line number - true, and useless to an operator who needs to know that
 # the missing piece is a package.
@@ -182,8 +177,6 @@ focus_opt=()
 [ -z "$focus_on_tap" ] || focus_opt=(-t "focusOnTap=$focus_on_tap")
 colors_opt=()
 [ -z "$button_colors" ] || colors_opt=(-t "buttonColors=$button_colors")
-scroll_opt=()
-[ -z "$scroll_step" ] || scroll_opt=(-t "scrollStep=$scroll_step")
 
 # The sixteen ANSI slots xterm.js draws with, which without this are its own
 # defaults - white on black, a bright red, a magenta. dejima's own output
@@ -215,6 +208,5 @@ exec ttyd --interface 127.0.0.1 --port "$port" --check-origin --url-arg --writab
     ${prefix_opt[@]+"${prefix_opt[@]}"} \
     ${focus_opt[@]+"${focus_opt[@]}"} \
     ${colors_opt[@]+"${colors_opt[@]}"} \
-    ${scroll_opt[@]+"${scroll_opt[@]}"} \
     "${theme_opt[@]}" \
     "$SCRIPT_DIR/dejima-attach"

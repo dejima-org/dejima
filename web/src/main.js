@@ -37,9 +37,6 @@
   });
   var latch = D.keys.createCtrlLatch();
   var prefixByte = D.config.parsePrefix(D.config.DEFAULT_TMUX_PREFIX);
-  // Read through a function by the gestures below, not captured, because
-  // ttyd's preferences arrive after they are created.
-  var scrollStep = D.config.scrollStepRows(window.location.search, undefined);
   var toolbar = null;
 
   function copyToClipboard(text) {
@@ -112,9 +109,6 @@
     // server-side always arrives later than the startup decision and has to be
     // able to change it.
     tapFocusPolicy(split.page.focusOnTap);
-
-    scrollStep = D.config.scrollStepRows(
-      window.location.search, split.page.scrollStep);
 
     // A class rather than per-button styling: what the page decides is
     // whether there is a palette at all, and the stylesheet owns which button
@@ -214,7 +208,6 @@
       term: term,
       mouse: mouse,
       dragMode: toolbar.dragMode,
-      scrollStep: function () { return scrollStep; },
       onCopy: copyToClipboard
     }).attach();
   }

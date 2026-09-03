@@ -26,8 +26,7 @@
     if (navigator.vibrate) navigator.vibrate(ms);
   }
 
-  // opts: {element, term, mouse, dragMode() -> bool, scrollStep() -> rows,
-  //        onCopy(text)}
+  // opts: {element, term, mouse, dragMode() -> bool, onCopy(text)}
   function createGestures(opts) {
     var term = opts.term;
     var mouse = opts.mouse;
@@ -83,23 +82,11 @@
       if (text) opts.onCopy(text);
     }
 
-    // Dragging down pulls earlier output into view, and how far the finger
-    // travels per notch depends on who is receiving the notch.
-    //
-    // This page scrolling its own scrollback moves one row per notch, so one
-    // row of travel per notch tracks the finger exactly. An application
-    // receiving the wheel does not: stock tmux scrolls five rows for one, and
-    // a full-screen app picks its own figure. A notch per row there moved the
-    // screen several times faster than the finger, which is what made placing
-    // a line at the bottom of the screen a matter of several tries.
-    //
-    // So the travel is multiplied only on the path where a notch is worth
-    // more than a row. Applying it to both would make the scrollback
-    // sluggish to fix something that is not wrong there.
+    // One notch per cell of travel, in the natural direction: dragging down
+    // pulls earlier output into view.
     function scrollBy(dy, point) {
       scrollAccum += dy;
       var step = mouse.cellHeight();
-      if (mouse.enabled()) step *= opts.scrollStep();
       if (step <= 0) return;
       while (Math.abs(scrollAccum) >= step) {
         var up = scrollAccum > 0;

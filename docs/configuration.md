@@ -76,7 +76,6 @@ config file behind them.
 | `[remote-access] ttyd_tmux_prefix` | unset | the tmux prefix the page's buttons send; the page assumes stock `C-b` without it |
 | `[remote-access] ttyd_focus_on_tap` | unset | `on` lets a tap on the terminal raise the phone keyboard; unset means only the KBD button does |
 | `[remote-access] ttyd_button_colors` | unset | `off` returns the toolbar to monochrome |
-| `[remote-access] ttyd_scroll_step` | `5` | rows of finger travel per scroll notch on the terminal page, where the application is reading the mouse. `1` is a notch per row, which outruns the finger because a notch is worth several rows there |
 | `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
 
 **No forge is the default**: `[core] forge = none` with
