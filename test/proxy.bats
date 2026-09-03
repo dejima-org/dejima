@@ -745,8 +745,6 @@ print(m._readable(b"plain \x00\x07text", ""))
     # message is not silently re-joined into a different one. The exact run
     # length is not the point; that none of them survives is.
     [[ "$output" == *"plain"*"text"* ]] || { echo "$output"; return 1; }
-    [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
-        || { echo "unprintable output survived"; return 1; }
 }
 
 @test "brotli is read when the host can, and named when it cannot" {
@@ -789,4 +787,32 @@ else:
     # Either way, no bytes.
     [ -z "$(printf '%s' "$output" | tr -d '\11\12\15\40-\176')" ] \
         || { echo "unprintable output survived"; return 1; }
+}
+
+@test "nothing unprintable reaches the diagnostics file, whatever wrote it" {
+    # Asserted at the sink rather than on one producer. bin/dejima prints this
+    # file to the operator's terminal after a session ends, so it carries text
+    # an upstream API chose and - through the request path and exception
+    # messages - text the session chose. Filtering it where it is written
+    # covers a producer added later; filtering it in one formatter does not.
+    #
+    # CPython refuses a control character in a URL today, in two places, and
+    # reprs what it refuses. That is a coincidence this should not rest on.
+    run python3 -c '
+import importlib.util, importlib.machinery, tempfile, os
+l = importlib.machinery.SourceFileLoader("p", "'"$REPO_ROOT"'/bin/dejima-credential-proxy")
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("p", l)); l.exec_module(m)
+d = tempfile.mkdtemp(); f = os.path.join(d, "log")
+m._diag(f, "path=/v1/\x1b[2J\x1b[1;31mred\x1b[0m\x07 null=\x00 tab=\t")
+raw = open(f, "rb").read()
+print("BYTES", sum(1 for b in raw if b < 32 and b != 10))
+print(raw.decode().strip())
+'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"BYTES 0"* ]] \
+        || { echo "control bytes reached the file: $output"; return 1; }
+    # And the text around them survives, so a sanitised line is still a
+    # readable one rather than a row of spaces.
+    [[ "$output" == *"path=/v1/"* ]] && [[ "$output" == *"red"* ]] \
+        || { echo "$output"; return 1; }
 }

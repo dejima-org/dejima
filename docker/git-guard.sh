@@ -38,6 +38,12 @@ fi
 repo_dir="$PWD"
 subcommand=""
 argv=("$@")
+# Every `-c key=value` this push carries, kept rather than only skipped. The
+# question below is where the push will go, and git answers that from the
+# config the push runs under - so resolving it without these would answer for
+# a different configuration than the one about to be used. A one-command
+# `-c remote.origin.pushurl=...` is exactly that case.
+config_overrides=()
 i=0
 while [ "$i" -lt "${#argv[@]}" ]; do
     case "${argv[$i]}" in
@@ -45,7 +51,12 @@ while [ "$i" -lt "${#argv[@]}" ]; do
             i=$((i + 1))
             [ "$i" -lt "${#argv[@]}" ] && repo_dir="${argv[$i]}"
             ;;
-        -c|--exec-path|--git-dir|--work-tree|--namespace|--super-prefix)
+        -c)
+            i=$((i + 1))
+            [ "$i" -lt "${#argv[@]}" ] \
+                && config_overrides+=(-c "${argv[$i]}")
+            ;;
+        --exec-path|--git-dir|--work-tree|--namespace|--super-prefix)
             i=$((i + 1))
             ;;
         -*)
@@ -97,7 +108,14 @@ while [ "$i" -lt "${#argv[@]}" ]; do
 done
 [ -n "$remote" ] || remote=origin
 
-remote_url="$("$REAL_GIT" -C "$repo_dir" remote get-url "$remote" 2>/dev/null)"
+# --push, because that is the URL the push will use. Without it this reads
+# remote.<name>.url while git pushes to remote.<name>.pushurl when one is set,
+# so a pushurl naming any other host is checked against the fetch URL and
+# allowed. It needs no evasion to reach: `git -c remote.origin.pushurl=...
+# push origin branch` sets one for a single command, and .git/config is in the
+# read-write project mount, so a session can also just write one down.
+remote_url="$("$REAL_GIT" ${config_overrides[@]+"${config_overrides[@]}"} \
+    -C "$repo_dir" remote get-url --push "$remote" 2>/dev/null)"
 # A remote this cannot resolve is refused rather than passed through. It is
 # usually a typo, which git would reject in a moment anyway - but it is also
 # what a disagreement between this parser and git's looks like, and the
