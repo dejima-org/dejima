@@ -151,6 +151,10 @@ what each one buys, what goes wrong without it, and where each one's boundary
 ends. None of them is required to run dejima; what they change is what the
 layer below the container costs, and whether anyone finds out.
 
+**→ [Why a container, and not a microVM?](docs/threat-model.md#why-a-container-and-not-a-microvm)** -
+the most common question about this design, and why the effort went into the
+layers below the container rather than into a harder one.
+
 ## Setup
 
 This repo only holds the tooling; no project lives here. Point it at a project

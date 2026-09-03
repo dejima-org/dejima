@@ -263,6 +263,80 @@ repository's behalf.
 **What this repository can do about that is say so**, which is the whole of
 this section. Nothing in dejima can bound its own host.
 
+## Why a container, and not a microVM
+
+The most frequent question about this project.
+
+The short answer is that a microVM is the stronger boundary and nothing here
+disputes it. Container escape is the least likely of the six threats above and
+the only one that needs an exploit at all, and the layer it lands on is already
+bounded by a control enforced from outside the guest. The effort went there
+rather than into a harder container.
+
+**There is already a VM here**, which is what the usual framing misses. It is
+put as container versus microVM, as though the alternative were a container
+with nothing underneath. On the deployment this document describes, dejima runs
+inside a devbox VM whose rule set is enforced from the hypervisor. So the choice
+is not one boundary against two. It is an outer VM enforced from outside the
+guest, against that plus an inner one managed by software running on the box it
+is protecting - inside the blast radius of the row it is meant to bound. A
+boundary enforced from outside is worth more than one enforced by the thing
+inside it, and that is most of the answer.
+
+**The field's ordering is not in dispute.** gVisor's syscall interposition and
+a per-workload VM kernel are both stronger than a namespaced container.
+Firecracker is what AWS runs Lambda on, for the reason that applies here too:
+untrusted code, multi-tenant, on shared hardware. The disagreement is about
+where marginal effort goes, not about which primitive is stronger.
+
+### What a stronger runtime would and would not change
+
+It would not touch the five threats ranked above escape. Two of them would get
+*harder*, because both are enforced by how the container is configured rather
+than by what isolates it:
+
+- **One project's session cannot reach another's**, because each path crossing
+  the boundary is named individually rather than mounting a tree
+  ([#104](https://gitbox.branderson.io/dejima/dejima/issues/104)). Under a VM
+  each becomes a filesystem daemon.
+- **The container sees an agent socket, never your key.** That is a live host
+  socket, and a VM has no equivalent to hand it one.
+
+One would get easier: egress rules on a tap device sit where the guest holds no
+capability to touch them. That is available without changing the runtime, which
+is what [#305](https://gitbox.branderson.io/dejima/dejima/issues/305) does.
+
+**And "swap the runtime" understates the work**, because several controls are
+implemented *in* Docker rather than merely hosted by it. The dependency
+approval is a derived image build; the tooling reaches live sessions through
+it; the capability floor is an argument about Docker's model. Porting them is a
+rewrite of the parts that *are* the security argument, in a project that says
+at the top that none of it has been reviewed by anyone else.
+
+### What would change the answer
+
+The decision is a judgement about effort, not a door held shut, and these are
+the things that would reopen it:
+
+- **Kata Containers is the cheap path if this reasoning is wrong.** It is an
+  OCI runtime, so the compose file, the mounts and the tooling survive, and it
+  can use Firecracker underneath. A per-launch switch rather than a fork.
+- **Pointing dejima at projects chosen by someone else.** That contradicts an
+  assumption stated at the top of this document, and reorders the ranked list.
+- **A container escape in the wild that clears this configuration's floor**:
+  non-root session user, `no-new-privileges`, `cap_drop: ALL` and a short list
+  added back. The class recurs, and whether a live one clears that floor is
+  asked on a schedule in
+  [research-review.md](research-review.md#the-standing-questions) rather than
+  assumed either way.
+
+What is done instead is depth below the container, which is
+[the stack](#the-stack-and-what-each-piece-buys): two of the three layers under
+dejima are enforced where the guest cannot reach them, and the third bounds a
+compromise in time. A sandbox that reaches for a microVM and stops there has
+nothing underneath it, so an escape from the VM ends its argument. Here it is a
+row with controls of its own.
+
 ## What this repository does not claim
 
 - **That the egress allowlist bounds what reaches the model.** It bounds what
