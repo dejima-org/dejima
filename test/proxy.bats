@@ -630,3 +630,46 @@ start_static() {
     [[ "$output" == *"oauth-endpoint"* ]]
     [ ! -S "$SOCK" ]
 }
+
+# The proxy is the only thing that sees both the request the session made and
+# the answer the API gave. It forwarded a rejection verbatim and recorded
+# nothing, so a session that spun and then errored left the operator with
+# nothing to act on - reported from a real cline launch against the anthropic
+# backend.
+
+@test "an upstream rejection is recorded, and still reaches the session whole" {
+    start_proxy --log "$TD/proxy.log"
+    run pcurl -i "http://localhost/status-503"
+    [ "$status" -eq 0 ]
+    # Byte for byte: what the session sees is what the API said, not the
+    # proxy's summary of it.
+    [[ "$output" == *"503"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"upstream-error"* ]] \
+        || { echo "the body did not reach the client: $output"; return 1; }
+    [ -s "$TD/proxy.log" ] || { echo "nothing was recorded"; return 1; }
+    grep -q '503' "$TD/proxy.log" || { echo "$(cat "$TD/proxy.log")"; return 1; }
+    grep -q 'upstream-error' "$TD/proxy.log" \
+        || { echo "recorded the status without the reason: $(cat "$TD/proxy.log")"; return 1; }
+}
+
+@test "a request the API accepted records nothing at all" {
+    # The success path must stay silent, and must not read the body to decide:
+    # logging every request would put the operator's traffic in a file and
+    # would buffer a streaming response to do it.
+    start_proxy --log "$TD/proxy.log"
+    run pcurl "http://localhost/v1/messages" -d '{"model":"x"}'
+    [ "$status" -eq 0 ]
+    [ ! -s "$TD/proxy.log" ] \
+        || { echo "a successful request was logged: $(cat "$TD/proxy.log")"; return 1; }
+}
+
+@test "with no log file the diagnostics still go somewhere" {
+    # A proxy run by hand has no file to read afterwards, so stderr is right
+    # there. Losing the message because no --log was passed would make the
+    # by-hand case the one with no diagnostics.
+    start_proxy
+    run pcurl "http://localhost/status-503"
+    [ "$status" -eq 0 ]
+    grep -q '503' "$TD/stderr" \
+        || { echo "nothing on stderr: $(cat "$TD/stderr")"; return 1; }
+}

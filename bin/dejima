@@ -1304,6 +1304,20 @@ cleanup() {
         # accumulates in a test suite that launches hundreds of times.
         wait "$SANDBOX_CREDENTIAL_PROXY_PID" 2>/dev/null || true
     fi
+    # What the API said, if it refused anything. The proxy is the only thing
+    # that sees both the request the session made and the answer it got, and a
+    # rejection reaches the harness as whatever the harness shows - which for
+    # a session that "spun for a bit and errored" is nothing to act on.
+    #
+    # Printed here rather than as it happens: the proxy's stderr is this
+    # terminal, and the session owns it while it runs. Read before the rm
+    # below, since that is what removes the file.
+    if [ -n "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" ] \
+        && [ -s "$SANDBOX_CREDENTIAL_PROXY_LOG" ]; then
+        printf '\n%sThe model API refused something this session:%s\n' \
+            "${C_WARN:-}" "${C_RESET:-}" >&2
+        tail -n 10 "$SANDBOX_CREDENTIAL_PROXY_LOG" | sed 's/^/  /' >&2
+    fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
@@ -2334,6 +2348,7 @@ SANDBOX_ANTHROPIC_AUTH_TOKEN=""
 SANDBOX_ANTHROPIC_API_KEY=""
 SANDBOX_CREDENTIAL_PROXY_SOCKET=""
 SANDBOX_CREDENTIAL_PROXY_DIR=""
+SANDBOX_CREDENTIAL_PROXY_LOG=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_CREDENTIAL_PROXY_PID=""
 # Whether this provider's credential is in a state the proxy can use.
@@ -2416,8 +2431,10 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     # Every value comes from backends/<name>/backend.conf. Nothing about a
     # backend is written here, which is what makes adding one a directory
     # rather than an edit to this file.
+    SANDBOX_CREDENTIAL_PROXY_LOG="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.log"
     _proxy_args=(
         --socket "$SANDBOX_CREDENTIAL_PROXY_SOCKET"
+        --log "$SANDBOX_CREDENTIAL_PROXY_LOG"
         --credentials "$DEJIMA_BACKEND_CREDENTIAL_FILE"
         --upstream "$(manifest_get backend "$DEJIMA_BACKEND_NAME" upstream)"
         --credential-kind "$DEJIMA_BACKEND_CREDENTIAL_KIND"
