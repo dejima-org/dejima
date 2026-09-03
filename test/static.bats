@@ -980,6 +980,49 @@ _cline_prepare() {
     [[ "$output" == *"no model is configured"* ]] || { echo "$output"; return 1; }
 }
 
+@test "a hosted catalogue's model id is configurable, slash and all" {
+    # `model` was typed `identifier`, which is [A-Za-z0-9._-]. Every hosted
+    # catalogue namespaces by vendor with a slash and several qualify a variant
+    # with a colon, so not one OpenRouter id could be set - the backend this
+    # harness exists to reach was unusable, and every test here said `model =
+    # m`, which is a bare identifier and passes either way.
+    local d ws
+    ws="$BATS_TEST_TMPDIR/modelid-ws"; mkdir -p "$ws"
+    local id
+    for id in z-ai/glm-5.3 deepseek/deepseek-r1:free llama3:8b plain-local-model; do
+        d="$(_cline_cfg "model = $id" 'backend = self-hosted' \
+             '[backend.self-hosted]' 'base_url = http://127.0.0.1:8080/v1')"
+        run _cline_prepare "$d" "$ws"
+        [ "$status" -eq 0 ] || { echo "refused $id: $output"; return 1; }
+        # And it reaches the file cline reads, not just the validator. Found
+        # rather than reconstructed: the state directory is keyed by the
+        # workspace slug, and spelling that out here would be a second copy of
+        # ws_slug that could agree with nothing.
+        local written
+        written="$(find "$d/state" -name providers.json -print -quit)"
+        [ -n "$written" ] || { echo "no providers.json written for $id"; return 1; }
+        local wrote
+        wrote="$(jq -r '.providers."openai-compatible".settings.model' "$written")"
+        [ "$wrote" = "$id" ] \
+            || { echo "configured $id, wrote $wrote"; return 1; }
+    done
+}
+
+@test "a model id that could split a config record is still refused" {
+    # The reason the type stays narrow rather than becoming free text: this
+    # value is written into a file whose every reader expects one record per
+    # line, so a newline or a tab in it splits one.
+    local d ws bad
+    ws="$BATS_TEST_TMPDIR/modelid-bad-ws"; mkdir -p "$ws"
+    for bad in 'has space' 'semi;colon' '/leading-slash'; do
+        d="$(_cline_cfg "model = $bad" 'backend = self-hosted' \
+             '[backend.self-hosted]' 'base_url = http://127.0.0.1:8080/v1')"
+        run _cline_prepare "$d" "$ws"
+        [ "$status" -ne 0 ] || { echo "accepted $bad"; return 1; }
+        [[ "$output" == *"model"* ]] || { echo "refused $bad without naming it: $output"; return 1; }
+    done
+}
+
 @test "cline refuses a hosted endpoint whose credential dejima cannot withhold" {
     # R5 is the requirement here, not a network rule. With base_url unset the
     # session reaches Anthropic through dejima's own credential proxy and the
