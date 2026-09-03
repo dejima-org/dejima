@@ -187,9 +187,15 @@ ones you want.
    it, which is what stops a later release changing your selection for you.
 
 That is enough to run `dejima`, and no push credential is needed to get this
-far. The rest of the starter config is commented out at its defaults, which
-means `[core] forge = none` and `[core] workflow = local-only`: the agent works
-in the sandbox and commits locally, and nothing is pushed anywhere.
+far. Everything else runs at its default, which means `[core] forge = none` and
+`[core] workflow = local-only`: the agent works in the sandbox and commits
+locally, and nothing is pushed anywhere.
+
+**Those defaults are pinned to this machine, once.** The first launch writes
+them to `~/.config/dejima/defaults.conf`, which your own config overrides, so
+a later release cannot move a setting you never chose. `./install.sh` adds keys
+a release introduced and names any shipped default that has moved, without
+taking it.
 
 **→ [docs/configuration.md](docs/configuration.md#configuration-reference)** -
 every key, its default, and what it is for. `dejima --print-config` prints the

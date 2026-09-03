@@ -219,6 +219,232 @@ write_config() {
     esac
 }
 
+# --- the pinned defaults layer ------------------------------------------------
+#
+# defaults.conf holds what dejima's defaults were when this machine first saw
+# each key, so a release that changes one cannot move a session whose config
+# never changed. The operator's file overrides it; the schema answers only for
+# a key it has no line for.
+
+write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
+
+@test "the operator's value beats the pinned one, which beats the schema" {
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'firewall = on' 'workflow = branch-push' \
+                   '[audit]' 'keep = 3'
+    # Theirs.
+    run lib config_get core firewall
+    [ "$output" = "off" ] || { echo "$output"; return 1; }
+    # Pinned, over a schema that says local-only and 10.
+    run lib config_get core workflow
+    [ "$output" = "branch-push" ] || { echo "$output"; return 1; }
+    run lib config_get audit keep
+    [ "$output" = "3" ] || { echo "$output"; return 1; }
+    # Schema, for a key nothing has pinned.
+    run lib config_get audit diffs
+    [ "$output" = "on" ] || { echo "$output"; return 1; }
+}
+
+@test "config_origin names which of the three answered" {
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'workflow = branch-push'
+    run lib config_origin core firewall
+    [ "$output" = "user" ] || { echo "firewall: $output"; return 1; }
+    run lib config_origin core workflow
+    [ "$output" = "default" ] || { echo "workflow: $output"; return 1; }
+    run lib config_origin audit diffs
+    [ "$output" = "schema" ] || { echo "diffs: $output"; return 1; }
+}
+
+@test "a pinned key is not one the operator set" {
+    # The trap the whole two-array split exists for. Ten callers of
+    # config_is_set mean "did the operator write this" - the ssh_key
+    # deprecation refusal, identity-over-forge precedence, and the ttyd knobs
+    # where unset means the page decides. A defaults.conf naming every key
+    # would answer yes to all of them.
+    write_config '[core]' 'firewall = off'
+    write_defaults '[core]' 'workflow = branch-push' '[remote-access]' \
+                   'ttyd_button_colors = on'
+    run lib config_is_set core firewall
+    [ "$status" -eq 0 ] || { echo "the operator's own key read as unset"; return 1; }
+    run lib config_is_set core workflow
+    [ "$status" -ne 0 ] || { echo "a pinned key read as one the operator set"; return 1; }
+    run lib config_is_set remote-access ttyd_button_colors
+    [ "$status" -ne 0 ] || { echo "a pinned ttyd knob read as one the operator set"; return 1; }
+}
+
+@test "no pinned layer at all is not an error" {
+    # A checkout that has never been launched. The schema answers for
+    # everything until there is a file.
+    write_config '[core]' 'firewall = on'
+    [ ! -e "$CONFIG_DIR/defaults.conf" ]
+    run lib config_get audit keep
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "10" ]
+}
+
+@test "the pinned layer is skipped line by line where the operator's is refused" {
+    # An unknown key here is one dejima RETIRED, on a machine whose
+    # defaults.conf predates the release that dropped it. The operator did not
+    # write it and is told not to edit the file, so refusing would leave them a
+    # launch that will not start and nothing to do about it.
+    write_config '[core]' 'firewall = on'
+    write_defaults '[core]' 'workflow = branch-push' 'retired_key = whatever' \
+                   'share_dir = ' '[gone-axis]' 'something = 1' \
+                   '[audit]' 'keep = 3' 'this line is malformed'
+    # It still launches, and the good lines still count.
+    run lib config_get core workflow
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "branch-push" ]
+    # Including one after the unknown section, or a stale section would take
+    # the rest of the file with it.
+    run lib config_get audit keep
+    [ "$output" = "3" ] || { echo "keep: $output"; return 1; }
+    # A value the schema refuses falls through rather than being honoured:
+    # share_dir is not optional, so an empty one is not a value.
+    run lib config_origin core share_dir
+    [ "$output" = "schema" ] || { echo "share_dir origin: $output"; return 1; }
+    # And the count is available for the launch to name once.
+    run lib config_defaults_stale
+    [ "$output" -ge 4 ] || { echo "counted $output stale lines"; return 1; }
+}
+
+@test "the operator's own file is still refused line by line" {
+    # The leniency above is for the file they cannot edit. Theirs is theirs.
+    write_defaults '[core]' 'workflow = branch-push'
+    printf '[core]\nharness = claude-code\nnonsense = 1\n' > "$CONFIG_DIR/config"
+    run lib config_get core forge
+    [ "$status" -ne 0 ] || { echo "an unknown key in the operator's file was accepted"; return 1; }
+    [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a launch pins the defaults once, and says so only that time" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    [ ! -e "$CONFIG_DIR/defaults.conf" ]
+
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$CONFIG_DIR/defaults.conf" ] || { echo "nothing was pinned"; return 1; }
+    [[ "$output" == *"Pinned dejima's current defaults"* ]] \
+        || { echo "created the file without saying so: $output"; return 1; }
+    # It is dejima's own, not the operator's: 0600 and a header saying so.
+    [ "$(stat -c '%a' "$CONFIG_DIR/defaults.conf")" = "600" ]
+    grep -q 'NOT yours to edit' "$CONFIG_DIR/defaults.conf"
+
+    # A second launch is silent about it, and does not rewrite it: a standing
+    # line on every launch is one an operator learns to scroll past.
+    local before; before="$(cat "$CONFIG_DIR/defaults.conf")"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Pinned dejima"* ]] \
+        || { echo "said it again: $output"; return 1; }
+    [ "$before" = "$(cat "$CONFIG_DIR/defaults.conf")" ] \
+        || { echo "a launch rewrote the pinned file"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "what a launch pins is every defaulted key, and no key without one" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f="$CONFIG_DIR/defaults.conf"
+
+    # A defaulted core key, a defaulted key of a harness that is NOT selected -
+    # pinning only the selected one leaves the next harness an operator picks
+    # handing them its current defaults - and one of a backend.
+    grep -q '^keep = 10$' "$f" || { echo "no [audit] keep"; cat "$f"; return 1; }
+    grep -q '^\[harness.cline\]$' "$f" || { echo "no unselected harness"; cat "$f"; return 1; }
+    grep -q '^\[backend.anthropic\]$' "$f" || { echo "no backend"; cat "$f"; return 1; }
+
+    # And nothing that has no default, because there is nothing to pin: those
+    # are exactly the keys docs/configuration.md marks required.
+    grep -q '^harness = ' "$f" && { echo "pinned a key with no default"; return 1; }
+    grep -q '^model = ' "$f" && { echo "pinned a key with no default"; return 1; }
+
+    # It reads back with nothing skipped, which a hand-kept renderer would
+    # drift out of.
+    run lib config_defaults_stale
+    [ "$output" = "0" ] || { echo "the file it wrote has $output unreadable lines"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a launch names a pinned key this dejima has retired, and carries on" {
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only'
+    printf '[core]\nworkflow = local-only\nretired_key = 1\n' > "$CONFIG_DIR/defaults.conf"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "a retired pinned key stopped the launch: $output"; return 1; }
+    [[ "$output" == *"no longer reads"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"./install.sh"* ]] \
+        || { echo "named the problem without the fix: $output"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "install.sh rebuilds the pinned file without moving what is in it" {
+    stub_docker
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local f="$CONFIG_DIR/defaults.conf"
+    [ -f "$f" ] || { echo "install.sh pinned nothing"; return 1; }
+
+    # A value already decided, a key this release would add, and a key it has
+    # retired - the three things a rebuild has to get right at once.
+    sed -i 's/^keep = 10$/keep = 25/' "$f"
+    sed -i '/^diffs = on$/d' "$f"
+    printf '\n[core]\nretired_thing = 1\n' >> "$f"
+
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q '^keep = 25$' "$f" || { echo "a rebuild moved a pinned value"; cat "$f"; return 1; }
+    grep -q '^diffs = on$' "$f" || { echo "a rebuild did not add a new key"; return 1; }
+    grep -q 'retired_thing' "$f" && { echo "a rebuild kept a retired key"; return 1; }
+
+    # Pruning is not the tidier half: an unknown key is one dejima cannot
+    # read, so a file that only grew would collect them.
+    run lib config_defaults_stale
+    [ "$output" = "0" ] || { echo "$output unreadable lines survived the rebuild"; return 1; }
+}
+
+@test "install.sh names a default that has moved, and does not take it" {
+    stub_docker
+    run_install
+    sed -i 's/^keep = 10$/keep = 25/' "$CONFIG_DIR/defaults.conf"
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"yours stays 25"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"dejima now ships 10"* ]] || { echo "$output"; return 1; }
+    # Named, not adopted, and the file it points at for taking one is the
+    # operator's - never the pinned file, which the next rebuild rewrites.
+    grep -q '^keep = 25$' "$CONFIG_DIR/defaults.conf" \
+        || { echo "install.sh adopted the shipped default"; return 1; }
+    [[ "$output" == *"$CONFIG_DIR/config"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the starter config carries only what was seeded, not every key commented" {
+    # It used to write every key commented at its schema default, which was a
+    # second copy of the defaults in comments nothing regenerates.
+    # defaults.conf is that reference now.
+    stub_docker
+    run_install
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local c="$CONFIG_DIR/config"
+    grep -q '^harness = claude-code$' "$c" || { echo "the selection is not written"; cat "$c"; return 1; }
+    grep -qE '^# [a-z_]+ = ' "$c" && { echo "still writing commented defaults:"; cat "$c"; return 1; }
+    # And no stanza left behind by a section nothing seeded. Comments and
+    # blanks dropped first: the header prose names sections in prose.
+    grep -vE '^\s*(#|$)' "$c" | awk '
+        /^\[/ { if (open) { print "empty: " prev; bad = 1 } open = 1; prev = $0; next }
+        { open = 0 }
+        END { if (open) { print "empty: " prev; bad = 1 } exit bad }
+    ' || { echo "an empty section survived:"; cat "$c"; return 1; }
+    [ "$(grep -c . "$c")" -gt 0 ]
+}
+
 @test "config_get returns the schema default when the key is absent" {
     write_config '[core]' 'firewall = on'
     run lib config_get audit keep
@@ -484,6 +710,17 @@ write_config() {
     run "$REPO_ROOT/bin/dejima" --print-config
     expected="$(lib _config_keys | wc -l)"
     [ "$(printf '%s\n' "$output" | wc -l)" -eq "$expected" ]
+}
+
+@test "--print-config inspects without pinning anything" {
+    # A query that creates a file as a side effect is not a query. Nothing is
+    # lost by waiting: with nothing pinned every key resolves through the
+    # schema, which is what the first real launch then pins.
+    write_config '[core]' 'firewall = on'
+    run "$REPO_ROOT/bin/dejima" --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$CONFIG_DIR/defaults.conf" ] \
+        || { echo "--print-config created the pinned file"; return 1; }
 }
 
 @test "warming the config cache does not swallow the reason it is invalid" {
