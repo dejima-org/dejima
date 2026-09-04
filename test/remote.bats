@@ -215,6 +215,30 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
     rm -rf "$PROJ"
 }
 
+@test "an inherited state dir and run id are not what the exit trap deletes" {
+    # cleanup() removes "$DEJIMA_STATE_DIR/debounce/$DEJIMA_RUN_ID-{waiting,done}".
+    # With remote access off nothing used to assign either name, so both came
+    # from the caller's environment if it had them - and the trap then removed
+    # a path of the environment's choosing. Both are bound by dejima before the
+    # trap is installed now, so the join can only ever name a path it made.
+    #
+    # Two canaries, because either name alone being dejima's is enough to miss
+    # the path: the removal needs both halves to come from the environment.
+    stub_launch
+    local canary="$LAUNCH_DIR/canary"
+    mkdir -p "$canary/debounce"
+    : > "$canary/debounce/deadbeefdeadbeef-waiting"
+    : > "$canary/debounce/deadbeefdeadbeef-done"
+
+    DEJIMA_STATE_DIR="$canary" DEJIMA_RUN_ID=deadbeefdeadbeef launch "$PROJ"
+
+    [ -f "$canary/debounce/deadbeefdeadbeef-waiting" ] \
+        || { echo "the trap removed a file named by the environment"; return 1; }
+    [ -f "$canary/debounce/deadbeefdeadbeef-done" ] \
+        || { echo "the trap removed a file named by the environment"; return 1; }
+    rm -rf "$PROJ"
+}
+
 @test "with remote access configured a registry entry is written and removed on exit" {
     stub_launch
     write_remote_config
