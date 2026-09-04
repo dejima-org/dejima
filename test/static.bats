@@ -70,7 +70,7 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     grep -q 'drop_caps --user="$SANDBOX_USER" -- -c .exec "\$@". dejima \$SANDBOX_CMD' \
         "$SANDBOX_DIR/entrypoint.sh" \
         || { echo "the session is not exec'd through drop_caps"; return 1; }
-    grep -q 'drop_caps .*log-shipper\.sh &' "$SANDBOX_DIR/entrypoint.sh" \
+    grep -q 'drop_caps .*log-shipper\.sh &' "$SANDBOX_DIR/firewall-up.sh" \
         || { echo "log-shipper.sh is not started through drop_caps"; return 1; }
     run grep -nE '^\s*(exec )?gosu "\$SANDBOX_USER" (\$SANDBOX_CMD|sleep)' \
         "$SANDBOX_DIR/entrypoint.sh"
@@ -1695,6 +1695,40 @@ _reference_has_key() {  # <doc> <section> <leaf>
         bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "bin/harness/$name.sh" \
             || { echo "bin/harness/$name.sh is not shellchecked"; return 1; }
     done < <(lib provider_list harness)
+}
+
+@test "shellcheck covers every docker/ script, sourced fragments included" {
+    # Same failure as the plugins above and a worse place for it: caps-lib.sh
+    # is sourced, so it has no shebang, and it holds the drop that decides what
+    # capabilities a session runs with. fixed-domains.sh is the seam holding
+    # the DNS allowlist and the ipset allowlist together.
+    #
+    # Enumerated from the tree rather than from a list here, so a fragment
+    # added tomorrow is covered without anyone remembering this test.
+    local f
+    for f in "$SANDBOX_DIR"/*.sh; do
+        [ -e "$f" ] || continue
+        bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "docker/${f##*/}" \
+            || { echo "docker/${f##*/} is not shellchecked"; return 1; }
+    done
+}
+
+@test "the entrypoint still brings the firewall up, and lets a failure stop it" {
+    # firewall-up.sh being its own script is what lets a filter container run
+    # it for a namespace the session is not in. Until one does, entrypoint.sh
+    # is the only caller, and an extraction that left nothing calling it would
+    # be a sandbox with no egress control at all - which nothing else here
+    # would notice, because every other check reads the scripts it moved to.
+    grep -qE '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "entrypoint.sh does not call firewall-up.sh, or guards the call"; return 1; }
+
+    # Unguarded is the point: under `set -e` a firewall that failed to come up
+    # takes the container with it. `|| true`, an `if`, or a background `&`
+    # would each turn that into a session running unfiltered.
+    run grep -nE 'firewall-up\.sh.*(\|\||&|;)|(if|while).*firewall-up\.sh' \
+        "$SANDBOX_DIR/entrypoint.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "the firewall-up call is guarded or backgrounded: $output"; return 1; }
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {
@@ -4702,8 +4736,8 @@ STUB
     # nothing uses - so the two are asserted together, in both directions.
     grep -qE '^\s*- SETPCAP\s*$' "$c" \
         || { echo "SETPCAP is gone, so the bounding set cannot be emptied"; return 1; }
-    grep -q 'exec capsh --drop=all' "$SANDBOX_DIR/entrypoint.sh" \
-        || { echo "SETPCAP is declared but the entrypoint no longer drops with it"; return 1; }
+    grep -q 'exec capsh --drop=all' "$SANDBOX_DIR/caps-lib.sh" \
+        || { echo "SETPCAP is declared but nothing drops with it"; return 1; }
 
     # And nothing the entrypoint does not use has been added back.
     for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
@@ -7125,7 +7159,8 @@ _provider_proxied_domain() {
     # shipping went, which is worth keeping.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
+    # And the claim that makes root safe, where the shipper is now started.
+    grep -q 'neither session-writable' "$SANDBOX_DIR/firewall-up.sh"
 }
 
 @test ".dejima.md says to cut what the code replaced, not just how it was found" {
