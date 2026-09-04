@@ -51,9 +51,40 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
 }
 
 @test "entrypoint.sh drops privilege via SANDBOX_USER, not a literal node" {
-    run grep -E 'gosu node\b' "$SANDBOX_DIR/entrypoint.sh"
+    run grep -E 'gosu "?node\b|--user="?node\b' "$SANDBOX_DIR/entrypoint.sh"
     [ "$status" -ne 0 ]
+    # Both spellings, because the session's own drop is not the gosu one: it
+    # goes through capsh, which reduces the bounding set in the same process
+    # that changes uid. A check that only knew about gosu would keep passing
+    # while the line it is really about named a literal user.
     grep -q 'gosu "$SANDBOX_USER"' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q -- '--user="$SANDBOX_USER"' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "nothing that outlives the entrypoint is started without dropping capabilities" {
+    # The session and log-shipper.sh are the two processes that survive the
+    # root phase, and the point of drop_caps is that neither inherits the
+    # bounding set that phase needed. A `gosu`/bare exec creeping back in for
+    # either is the regression, and it is invisible at runtime: the container
+    # comes up and works, holding capabilities nothing asked for.
+    grep -q 'drop_caps --user="$SANDBOX_USER" -- -c .exec "\$@". dejima \$SANDBOX_CMD' \
+        "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "the session is not exec'd through drop_caps"; return 1; }
+    grep -q 'drop_caps .*log-shipper\.sh &' "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "log-shipper.sh is not started through drop_caps"; return 1; }
+    run grep -nE '^\s*(exec )?gosu "\$SANDBOX_USER" (\$SANDBOX_CMD|sleep)' \
+        "$SANDBOX_DIR/entrypoint.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "a session exec still goes through gosu: $output"; return 1; }
+}
+
+@test "capsh is a declared package, not a dependency of something else" {
+    # entrypoint.sh refuses to start without it, so an image built without it
+    # is a container that never appears. It arrived here as a dependency of
+    # iproute2, which is exactly the kind of thing an unrelated package change
+    # takes away.
+    grep -qE '^\s+libcap2-bin \\$' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "libcap2-bin is not in the Dockerfile's package list"; return 1; }
 }
 
 @test "Playwright is installed and require()-able globally" {
@@ -4604,8 +4635,17 @@ STUB
     for cap in NET_ADMIN NET_RAW; do
         grep -qE "^\s*- $cap\s*$" "$c" || { echo "$cap is no longer added"; return 1; }
     done
+    # SETPCAP is declared, and it is the one whose use is not a line of the
+    # startup sequence: it is spent taking the rest of this list away again
+    # before the session starts. Declared without that, it is a capability
+    # nothing uses - so the two are asserted together, in both directions.
+    grep -qE '^\s*- SETPCAP\s*$' "$c" \
+        || { echo "SETPCAP is gone, so the bounding set cannot be emptied"; return 1; }
+    grep -q 'exec capsh --drop=all' "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "SETPCAP is declared but the entrypoint no longer drops with it"; return 1; }
+
     # And nothing the entrypoint does not use has been added back.
-    for cap in SYS_ADMIN MKNOD SETPCAP SETFCAP SYS_CHROOT SYS_PTRACE; do
+    for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
         run grep -nE "^\s*- $cap\s*$" "$c"
         [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
     done

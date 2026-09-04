@@ -8,6 +8,44 @@ set -Eeuo pipefail
 # refuse deliberately, and say so (#59).
 trap 'status=$?; echo "ERROR: entrypoint.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
+# The startup sequence below needs real capabilities - it builds the packet
+# filter, binds an NFLOG socket, chowns files and drops privilege twice.
+# Nothing after it does, and a bounding set survives execve: a process that
+# reaches uid 0 anywhere downstream recovers its permitted set from whatever
+# bounding set it inherited. So an unprivileged session whose effective set is
+# empty still sits inside a tree holding every capability the container
+# declares.
+#
+# `drop_caps` is how anything that outlives this script is started, and it is
+# what makes the declared floor a description of the root phase rather than of
+# the session's whole life.
+#
+# capsh, not `setpriv --bounding-set`, which is the obvious tool and silently
+# the wrong one: without CAP_SETPCAP it exits 0 having changed nothing, so a
+# container that lost the capability would run every session with the full set
+# and report success at every step. capsh refuses out loud, which is the only
+# behaviour worth having here.
+#
+# `-- -c 'exec "$@"'` runs the command through capsh's shell and immediately
+# replaces it, so nothing is left between the caller and the process.
+drop_caps() {
+    exec capsh --drop=all "$@"
+}
+
+# Checked rather than assumed, because the failure it prevents is invisible:
+# capsh would abort each call below, and the last of those is the session, so
+# the container would die at the point it looked ready. Named here instead,
+# against the file the floor actually lives in.
+if ! capsh --decode="$(awk '/^CapEff:/ {print $2}' /proc/self/status)" \
+    | grep -q cap_setpcap; then
+    echo "entrypoint: this container does not hold CAP_SETPCAP, so the capabilities" >&2
+    echo "the startup sequence needs cannot be taken away again before the session" >&2
+    echo "starts - it would run inside a tree holding all of them." >&2
+    echo "Refusing to start rather than running with a floor that is not the one" >&2
+    echo "docker/docker-compose.yml declares. Add SETPCAP to its cap_add." >&2
+    exit 1
+fi
+
 # DEJIMA_FORGE_HOSTS is resolved host-side by bin/dejima (forge_hosts, in
 # dejima-provider-lib.sh) from whichever forge is configured, so this file
 # does not derive or name any one forge's hostnames itself.
@@ -57,7 +95,12 @@ if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     #
     # What it reads is dnsmasq's query log and ulogd2's output, both written
     # by root-owned daemons here and neither session-writable.
-    /usr/local/bin/log-shipper.sh &
+    #
+    # Root, and nothing else: it is the one root process that outlives this
+    # script, it parses content the session's own traffic decides, and it needs
+    # no capability to read two files its gid already opens or to POST them. So
+    # it keeps the uid that makes it untamperable and holds none of the rest.
+    drop_caps -- -c 'exec "$@"' dejima /usr/local/bin/log-shipper.sh &
 fi
 
 # A normal login/ssh session always chowns the allocated pty to the logging
@@ -538,12 +581,18 @@ fi
 # exercising the actual code path instead of a reimplementation of it that
 # could drift out of sync.
 if [ "${SANDBOX_TEST_MODE:-0}" = "1" ]; then
-    exec gosu "$SANDBOX_USER" sleep infinity
+    drop_caps --user="$SANDBOX_USER" -- -c 'exec "$@"' dejima sleep infinity
 fi
 
 # Drop root -> the sandbox user for the actual session; that user has no
 # sudo/setuid path back to root after this, so it can't re-run
 # init-firewall.sh itself to widen the allowlist mid-session.
+#
+# And drop the bounding set with it, so "no path back to root" and "no
+# capability if there were one" are two separate things rather than one
+# resting on the other. capsh does both in one process because it has to: the
+# bounding set can only be reduced while CAP_SETPCAP is still held, and
+# changing uid first gives it away.
 #
 # SANDBOX_CMD is what actually runs as that user - the selected harness's
 # own command unless [core] command overrides it (e.g. to `nvim`) for an
@@ -560,4 +609,4 @@ if [ -z "${SANDBOX_CMD:-}" ]; then
     echo "command: docker run --entrypoint sh ..." >&2
     exit 1
 fi
-exec gosu "$SANDBOX_USER" $SANDBOX_CMD "$@"
+drop_caps --user="$SANDBOX_USER" -- -c 'exec "$@"' dejima $SANDBOX_CMD "$@"
