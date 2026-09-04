@@ -2447,6 +2447,27 @@ _install_forge_bins() {
     rm -rf "$fake" "$dest"
 }
 
+@test "the release pass refuses a base that is behind its own upstream" {
+    # Everything the pass prints is derived from base..head - which manual
+    # checks apply, which config keys a rollback would refuse - so a base
+    # behind the real one reports on a different release, confidently. Two
+    # passes ran against a local `main` 260 commits behind origin/main and
+    # named keys and a domain that had shipped releases earlier.
+    grep -q 'behind its own upstream\|behind \$base_upstream\|commit(s) behind' \
+        "$REPO_ROOT/test/release-pass.sh" \
+        || { echo "the staleness check is gone"; return 1; }
+    # The default is the tracking ref, not the local branch, so the ordinary
+    # invocation cannot pick up a stale one in the first place.
+    grep -q 'base=origin/main' "$REPO_ROOT/test/release-pass.sh" \
+        || { echo "the default base is not the tracking ref"; return 1; }
+    # And it exits rather than warning: a gate that says something is wrong
+    # and then reports anyway is one whose output still gets pasted into a
+    # release PR.
+    sed -n '/is .* behind /,/^fi$/p' "$REPO_ROOT/test/release-pass.sh" \
+        | grep -q 'exit 1' \
+        || { echo "a stale base is warned about rather than refused"; return 1; }
+}
+
 @test "the release pass names every area whose check is manual" {
     # This list is the only record of what the test suites cannot see, and it
     # is the kind of list that rots by omission: an area gets a manual check

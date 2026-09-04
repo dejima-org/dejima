@@ -10,12 +10,42 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-base="${1:-main}"
+# The remote-tracking ref by default, not the local branch. Everything this
+# prints is derived from base..head - the manual checks from which paths the
+# diff touches, the rollback list from which config keys it adds - so a base
+# behind the real one silently reports a different release. That is not
+# hypothetical: two passes ran against a local `main` 260 commits behind
+# origin/main and reported keys and a trust-anchor domain that had shipped
+# releases earlier. A gate answering confidently about the wrong diff is worse
+# than one that does not run.
+base="${1:-}"
+if [ -z "$base" ]; then
+    if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+        base=origin/main
+    else
+        base=main
+    fi
+fi
 head="${2:-HEAD}"
 # Guarded, because everything below is relative to it: a cd that failed
 # silently would have this reporting on some other directory's suites and
 # diff, which for a release gate is the worst way to be wrong.
 cd "$root" || { echo "cannot enter $root" >&2; exit 1; }
+
+# A named base that is behind its own upstream is refused rather than used.
+# Passing `main` explicitly is the ordinary thing to do and is exactly how the
+# stale-base runs happened, so this has to catch the argument as well as the
+# default.
+base_upstream="$(git rev-parse --abbrev-ref --symbolic-full-name "$base@{upstream}" 2>/dev/null || true)"
+if [ -n "$base_upstream" ]; then
+    behind="$(git rev-list --count "$base..$base_upstream" 2>/dev/null || echo 0)"
+    if [ "${behind:-0}" -gt 0 ]; then
+        echo "release-pass: '$base' is $behind commit(s) behind $base_upstream." >&2
+        echo "Everything below is derived from $base..$head, so this would report on" >&2
+        echo "a release that is not the one being made. Fetch, or name $base_upstream." >&2
+        exit 1
+    fi
+fi
 
 case "${1:-}" in
     -h|--help)
