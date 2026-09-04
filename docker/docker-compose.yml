@@ -71,9 +71,21 @@ services:
     # reach into it later.
     #
     # This narrows the ROOT phase. The session user's capabilities were already
-    # empty: they are cleared on the gosu drop, which runtime.bats asserts by
-    # reading CapEff of the running process. What this adds is that the set was
-    # never there to be regained.
+    # empty: they are cleared on the privilege drop, which runtime.bats asserts
+    # by reading CapEff of the running process. What this adds is that the set
+    # was never there to be regained.
+    #
+    # SETPCAP is the odd one out: nothing in the startup sequence uses it for
+    # its own work. It is spent, once, to take every capability here away from
+    # the session and from the one root daemon that outlives the entrypoint -
+    # see entrypoint.sh. A bounding set survives execve and a uid-0 process
+    # recovers its permitted set from it, so without this the seven above are
+    # held by everything the session can reach, effective set or not.
+    #
+    # Adding a capability to remove capabilities is worth stating plainly. It
+    # can only reduce: since Linux 4.3 SETPCAP grants nothing a process does
+    # not already hold in its permitted set, so what it buys is the drop and
+    # nothing else.
     cap_drop:
       - ALL
     cap_add:
@@ -85,6 +97,7 @@ services:
       - SETUID
       - SETGID
       - KILL
+      - SETPCAP
     # No path back up. gosu drops privilege rather than gaining it, so this
     # does not interfere with it - what it forbids is a setuid binary or a file
     # capability raising privileges on exec, which is the shape any escalation

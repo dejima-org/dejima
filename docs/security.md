@@ -1020,12 +1020,21 @@ reasoning below is what both are built on.
 - The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
-  that user via `gosu` before execing the configured command (`[core] command`,
-  or the selected harness's own if that is unset). A compromised session can't
+  that user before execing the configured command (`[core] command`, or the
+  selected harness's own if that is unset). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
-  exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
-  cleared from the effective/permitted sets on the `gosu` drop, and that
-  user gets a permission error running `iptables` directly.
+  exfiltration path. Verified: that user gets a permission error running
+  `iptables` directly.
+- **The session's capability bounding set is empty**, not merely its effective
+  one. The distinction is the whole of it: an empty effective set is what
+  changing uid gives you anyway, while the bounding set is what a process that
+  reached uid 0 in that tree would recover its capabilities from. So the two
+  claims above - no path back to root, and no capability if there were one -
+  hold separately rather than one resting on the other. The drop and the uid
+  change happen in one `capsh` process because they have to: the bounding set
+  can only be reduced while `CAP_SETPCAP` is still held, and changing uid first
+  gives it away. The same applies to `log-shipper.sh`, the one root process
+  that outlives the entrypoint.
 - A forge credential reaches the container as `-e NAME`, never
   `-e NAME=value`. The value comes from the launcher's own environment, so it
   sits in `/proc/<pid>/environ` (mode 0400, owner only) rather than in
@@ -1037,13 +1046,21 @@ reasoning below is what both are built on.
   floor - `cap_drop: ALL` plus the ones it actually uses: what the
   entrypoint's root phase needs, and `KILL`. `KILL` is there for
   `dejima-allow --container`, not for the entrypoint - adding a domain to a
-  running session signals dnsmasq, and dnsmasq runs as its own user. The list
+  running session signals dnsmasq, and dnsmasq runs as its own user. `SETPCAP`
+  is there to spend rather than to use: it is what lets the entrypoint take the
+  rest of the list away again before the session starts, and since Linux 4.3 it
+  grants nothing a process does not already hold. The list
   itself is in `docker/docker-compose.yml`, which is where it stays correct. The first means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
   would have to take; the second means the capabilities nothing here uses were
   never in the bounding set to be regained. Both are asserted against a running
   container rather than against the compose file, and the capability list the
   test uses is read out of that file so the two cannot drift.
+  What the floor describes is the container's **root phase**. A launch runs
+  with `init: true`, so PID 1 is the init that reaps for the session and it
+  holds that floor for as long as the container lives; the session is its
+  child and holds nothing. Narrowing what PID 1 itself carries means narrowing
+  the floor itself, which is #305.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see
   [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)

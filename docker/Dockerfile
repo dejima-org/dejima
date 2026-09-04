@@ -28,6 +28,11 @@ ENV TZ="$TZ"
 # hardening). Whichever harness has one, its plugin's harness_prepare_config
 # turns it off in the override layer, so there is nothing here to satisfy.
 # Claude Code's is the "sandbox" block in settings.json.
+#
+# libcap2-bin is capsh, which entrypoint.sh uses to hand the session a
+# container it holds no capabilities in. It was already here as a dependency of
+# iproute2; a security control resting on another package's dependency graph is
+# one an unrelated package change removes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
   git \
@@ -41,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iptables \
   ipset \
   iproute2 \
+  libcap2-bin \
   dnsutils \
   aggregate \
   jq \
