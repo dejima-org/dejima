@@ -861,6 +861,67 @@ _declared_config_dirs() {
     done
 }
 
+@test "every path cleanup() removes is one dejima bound, never one the environment did" {
+    # A different invariant from the test above, and the `${NAME:-}` form that
+    # satisfies that one is no help here. Guarding against UNBOUND stops set -u
+    # aborting the trap; it does nothing about a name that arrives from the
+    # caller's environment already carrying a value, which the trap then
+    # removes. bin/dejima's own comment states this - "every name cleanup()
+    # removes but does not itself create belongs here" - and until the run-id
+    # change nothing checked it, so three names had drifted out of it, one of
+    # them an `rm -rf` argument.
+    #
+    # An exit between the trap and a name's first assignment is what makes it
+    # reachable. SANDBOX_GITCONFIG_DIR is the one name assigned below the trap,
+    # and its window holds no exit; anything else below the trap is a finding.
+    local d="$REPO_ROOT/bin/dejima"
+    local trap_line; trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    [ -n "$trap_line" ]
+
+    # Only the rm lines, and only their arguments - cleanup() reads plenty it
+    # never deletes, and those are the other test's business.
+    local removed
+    removed="$(sed -n '/^cleanup() {/,/^}/p' "$d" \
+        | grep -E '^[[:space:]]*rm -' \
+        | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*' | tr -d '${' | sort -u)"
+    [ -n "$removed" ] || { echo "found no rm arguments in cleanup() at all"; return 1; }
+
+    local v asg
+    for v in $removed; do
+        [ "$v" != "SANDBOX_GITCONFIG_DIR" ] || continue
+        asg="$(grep -nE "^[[:space:]]*(export )?$v=" "$d" | head -1 | cut -d: -f1)"
+        [ -n "$asg" ] || { echo "cleanup() removes \$$v, which is never assigned"; return 1; }
+        [ "$asg" -lt "$trap_line" ] || {
+            echo "cleanup() removes \$$v, first assigned at line $asg - below the trap at"
+            echo "$trap_line, so an exit in between removes whatever the environment held."
+            return 1
+        }
+    done
+}
+
+@test "the one name assigned below the trap still has no exit to fire on" {
+    # SANDBOX_GITCONFIG_DIR is exempted above on a claim about its window, not
+    # on a claim about the name. The claim is what needs checking: an `exit`
+    # appearing between the trap and that assignment turns the exemption into
+    # the bug it is exempted from, and nothing about that edit would look like
+    # it touched this.
+    local d="$REPO_ROOT/bin/dejima"
+    local trap_line asg
+    trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    asg="$(grep -nE '^[[:space:]]*SANDBOX_GITCONFIG_DIR=' "$d" | head -1 | cut -d: -f1)"
+    [ -n "$trap_line" ] && [ -n "$asg" ]
+    [ "$asg" -gt "$trap_line" ] \
+        || skip "SANDBOX_GITCONFIG_DIR is now assigned above the trap; drop the exception"
+
+    run awk -v a="$trap_line" -v b="$asg" 'NR>a && NR<b && /^[[:space:]]*exit [0-9]/ {print NR": "$0}' "$d"
+    [ -z "$output" ] || {
+        echo "an exit now sits between the trap at $trap_line and the assignment at $asg:"
+        echo "$output"
+        echo "so bind SANDBOX_GITCONFIG_DIR above the trap like the rest."
+        return 1
+    }
+}
+
 @test "docker-compose.yml never hardcodes /home/node - the container home is host-parametrized" {
     # ${HOME:-/home/node} (the SANDBOX_HOME build arg's own default value,
     # mirroring the Dockerfile's default) is the one legitimate exception -
