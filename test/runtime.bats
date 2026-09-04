@@ -484,6 +484,22 @@ dexec_node() {
     docker exec -u node "$(container_name)" "$@"
 }
 
+# The session process itself, found by what it is rather than by being PID 1.
+#
+# The entrypoint execs it, so here it IS PID 1 - but only because these
+# containers are started with a bare `docker run`. docker-compose.yml sets
+# `init: true`, so in a real launch PID 1 is the init that reaps for the
+# session and the session is its child, holding different credentials and a
+# different capability set. A capability assertion read from PID 1 would be
+# about one process in this suite and another in production, and the one it
+# would miss is the one that matters.
+#
+# `sleep infinity` is entrypoint.sh's SANDBOX_TEST_MODE exec, matched the way
+# wait_ready matches it.
+session_pid() {
+    docker exec "$(container_name)" pgrep -x -f 'sleep infinity' 2>/dev/null | head -1
+}
+
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
     local test_image="localhost/dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
     local test_container="$(test_container_name override)"
@@ -1159,21 +1175,29 @@ dexec_node() {
 
 @test "the capability bounding set is the declared floor and nothing more" {
     # cap_drop: ALL plus an explicit list, rather than Docker's default set
-    # plus two. The entrypoint uses six capabilities during its root phase and
+    # plus two. The entrypoint uses seven capabilities during its root phase and
     # the default carries about fourteen; this asserts the difference is real
     # in the running container rather than only present in the compose file.
+    #
+    # Read from a fresh `docker exec`, which is where the CONTAINER's declared
+    # set is observable. Not from PID 1: what PID 1 holds is whatever the
+    # entrypoint left it holding, which since the drop below is nothing at all
+    # - a true statement about the session, and no statement about the floor.
     #
     # CapBnd, not CapEff: the effective set is zero for the session user
     # already (the test below), and the bounding set is what says the rest was
     # never available to regain.
-    run dexec cat /proc/1/status
+    run dexec cat /proc/self/status
     [ "$status" -eq 0 ]
     local bnd; bnd=$(echo "$output" | awk '/^CapBnd:/ {print $2}')
-    [ -n "$bnd" ] || { echo "no CapBnd in /proc/1/status"; return 1; }
+    [ -n "$bnd" ] || { echo "no CapBnd in /proc/self/status"; return 1; }
 
     # Decoded by name so a failure says which capability, not which bit.
+    # Unskippable: libcap2-bin is a declared package and entrypoint.sh refuses
+    # to start without capsh, so an image missing it is a failure to report
+    # rather than a decode this test can do without.
     local have; have="$(dexec capsh --decode="$bnd" 2>/dev/null)" || have=""
-    [ -n "$have" ] || skip "capsh not available in the image to decode $bnd"
+    [ -n "$have" ] || { echo "capsh could not decode $bnd - is libcap2-bin installed?"; return 1; }
     local cap
     for cap in $(compose_cap_add); do
         [[ "$have" == *"cap_$(echo "$cap" | tr '[:upper:]' '[:lower:]')"* ]] \
@@ -1182,7 +1206,11 @@ dexec_node() {
     # Not KILL: `dejima-allow --container` signals dnsmasq, which runs as its
     # own user, so root here needs it. That absence is what failed the first
     # privileged run of this change.
-    for cap in mknod setfcap setpcap sys_chroot audit_write net_bind_service sys_admin fsetid; do
+    #
+    # Not SETPCAP either, and for a reason worth keeping straight: it is
+    # declared, and it is declared so that everything in the list can be taken
+    # away again from anything the session can reach.
+    for cap in mknod setfcap sys_chroot audit_write net_bind_service sys_admin fsetid; do
         [[ "$have" != *"cap_$cap"* ]] \
             || { echo "cap_$cap is in the bounding set and nothing declares it: $have"; return 1; }
     done
@@ -1203,11 +1231,116 @@ dexec_node() {
         || { echo "root cannot signal dnsmasq - is KILL in the floor? $output"; return 1; }
 }
 
-@test "the real running node process has NET_ADMIN/NET_RAW stripped, not just the bounding set" {
-    run dexec cat /proc/1/status
+@test "the session process holds nothing - not effective, and not in the bounding set either" {
+    # Two claims, and the second is the one with teeth. An empty effective set
+    # is what changing uid gives you for free; it says nothing about what a
+    # process that reached uid 0 in this tree would get, because a uid-0 execve
+    # recovers its permitted set from the bounding set it inherited.
+    #
+    # entrypoint.sh empties that too, so the answer is "nothing" rather than
+    # "the seven the root phase needed". The declared floor stays what it is -
+    # the test above reads it from a fresh exec - and stops being a description
+    # of the session's whole life.
+    local pid; pid="$(session_pid)"
+    [ -n "$pid" ] || { echo "no session process found in the container"; return 1; }
+
+    run dexec cat "/proc/$pid/status"
     [ "$status" -eq 0 ]
-    cap_eff=$(echo "$output" | awk '/^CapEff:/ {print $2}')
-    [ "$cap_eff" = "0000000000000000" ]
+    local eff bnd
+    eff=$(echo "$output" | awk '/^CapEff:/ {print $2}')
+    bnd=$(echo "$output" | awk '/^CapBnd:/ {print $2}')
+    [ "$eff" = "0000000000000000" ] \
+        || { echo "the session has capabilities in effect: $(dexec capsh --decode="$eff")"; return 1; }
+    [ "$bnd" = "0000000000000000" ] \
+        || { echo "the session could regain: $(dexec capsh --decode="$bnd")"; return 1; }
+}
+
+@test "the entrypoint refuses to start when it cannot take the capabilities away again" {
+    # Without CAP_SETPCAP the bounding set cannot be reduced, so the session
+    # would run holding every capability the floor declares. The failure that
+    # matters is the quiet one: `setpriv --bounding-set` exits 0 having changed
+    # nothing in exactly this case, so a container built on it would come up,
+    # work, and report success while asserting a floor it did not have.
+    #
+    # Hence a refusal with a reason, and hence this test: the whole point is
+    # that the container does NOT come up.
+    local test_container; test_container="$(test_container_name nosetpcap)"
+    local -a caps=()
+    while IFS= read -r cap; do
+        [ "$cap" != "SETPCAP" ] || continue
+        caps+=(--cap-add="$cap")
+    done < <(compose_cap_add)
+
+    docker run -d --name "$test_container" \
+        --cap-drop=ALL "${caps[@]}" \
+        --security-opt=no-new-privileges:true \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$SESSION_IMAGE" >/dev/null
+
+    run docker wait "$test_container"
+    [ "$status" -eq 0 ]
+    [ "$output" != "0" ] \
+        || { echo "the container started anyway, without SETPCAP"; return 1; }
+
+    run docker logs "$test_container"
+    [[ "$output" == *"does not hold CAP_SETPCAP"* ]] \
+        || { echo "it failed, but said nothing about why: $output"; return 1; }
+    [[ "$output" == *"cap_add"* ]] \
+        || { echo "the refusal does not name where the floor is declared: $output"; return 1; }
+}
+
+@test "the log shipper reads two logs as root and holds no capability while doing it" {
+    # It is the one root process that outlives the entrypoint, and what it
+    # parses is decided by the session's own traffic - every hostname it
+    # resolves and every address it connects to. Root is deliberate (a session
+    # must not be able to kill or edit its own oversight log); the capabilities
+    # that came with root are not.
+    #
+    # Its own container, because the shipper exits immediately without
+    # LOKI_URL, so the file-wide fixture never starts one. The URL only has to
+    # exist - nothing here asserts delivery, and an unreachable one keeps this
+    # test off the network.
+    local test_container; test_container="$(test_container_name shipper)"
+    local -a caps=()
+    while IFS= read -r cap; do caps+=(--cap-add="$cap"); done < <(compose_cap_add)
+
+    docker run -d --name "$test_container" \
+        --cap-drop=ALL "${caps[@]}" \
+        --security-opt=no-new-privileges:true \
+        --network "$(network_name)" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}" \
+        -e LOKI_URL="http://127.0.0.1:1" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$SESSION_IMAGE" >/dev/null
+    wait_ready "$test_container"
+
+    local pid
+    pid="$(docker exec "$test_container" pgrep -f -x '/bin/bash /usr/local/bin/log-shipper.sh' \
+        2>/dev/null | head -1)"
+    [ -n "$pid" ] || {
+        echo "no log-shipper process - LOKI_URL is set, so it should be running"
+        docker exec "$test_container" ps -eo user,args >&2 || true
+        return 1
+    }
+
+    run docker exec "$test_container" cat "/proc/$pid/status"
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | awk '/^Uid:/ {print $2}')" = "0" ] \
+        || { echo "the shipper is no longer root, so a session could signal it"; return 1; }
+    local bnd; bnd=$(echo "$output" | awk '/^CapBnd:/ {print $2}')
+    [ "$bnd" = "0000000000000000" ] \
+        || { echo "the shipper could regain: $(docker exec "$test_container" capsh --decode="$bnd")"; return 1; }
+
+    # And it can still do its job with nothing: both sources readable on
+    # ordinary permissions rather than through DAC_OVERRIDE. The shipper says
+    # so itself when they are not, which is the line this looks for the absence
+    # of - `tail -F` would otherwise swallow it and ship an empty stream.
+    run docker logs "$test_container"
+    [[ "$output" != *"will ship nothing"* ]] \
+        || { echo "the shipper cannot read a source it is meant to: $output"; return 1; }
 }
 
 @test "ulogd2 runs as its own unprivileged user, not root" {
