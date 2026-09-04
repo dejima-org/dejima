@@ -33,7 +33,7 @@ dejima-update-check - say when this dejima checkout is behind its remote
 Usage: dejima-update-check
 
 Compares the checkout bin/dejima runs from against the branch it tracks and
-prints one line when the remote has commits this checkout does not. Run at
+prints a notice when the remote has commits this checkout does not. Run at
 startup by bin/dejima; safe to run by hand.
 
 Silent when the checkout is current or ahead, when [core] update_check is off,
@@ -192,4 +192,8 @@ else
     printf '  %sdejima: %s/%s has commits this checkout does not.%s\n' \
         "$C_WARN" "$_remote_shown" "$_branch_shown" "$C_RESET" >&2
 fi
-printf '    Update with %sgit -C %s pull%s\n\n' "$C_KEY" "$REPO_ROOT" "$C_RESET" >&2
+# install.sh is safe to re-run, and a release can change what it links on PATH,
+# so pulling is only half the update. Both paths absolute because the operator
+# reading this is not necessarily standing in this checkout.
+printf '    Update with %sgit -C %s pull && %s/install.sh%s\n\n' \
+    "$C_KEY" "$REPO_ROOT" "$REPO_ROOT" "$C_RESET" >&2
