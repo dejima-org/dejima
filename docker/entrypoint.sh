@@ -8,100 +8,22 @@ set -Eeuo pipefail
 # refuse deliberately, and say so (#59).
 trap 'status=$?; echo "ERROR: entrypoint.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
-# The startup sequence below needs real capabilities - it builds the packet
-# filter, binds an NFLOG socket, chowns files and drops privilege twice.
-# Nothing after it does, and a bounding set survives execve: a process that
-# reaches uid 0 anywhere downstream recovers its permitted set from whatever
-# bounding set it inherited. So an unprivileged session whose effective set is
-# empty still sits inside a tree holding every capability the container
-# declares.
+# drop_caps and require_setpcap, shared with firewall-up.sh below. Sourced
+# rather than defined here because the two callers must not drift: what
+# `drop_caps` does is the difference between a session holding nothing and a
+# session holding the whole floor, and that is not a thing to have two of.
+# shellcheck source=caps-lib.sh
+source /usr/local/bin/caps-lib.sh
+require_setpcap
+
+# The egress control for this network namespace, which this container has to
+# its own today. Its own script because that is a property of a namespace and
+# everything else here is a property of a container, and the two need not
+# belong to the same one.
 #
-# `drop_caps` is how anything that outlives this script is started, and it is
-# what makes the declared floor a description of the root phase rather than of
-# the session's whole life.
-#
-# capsh, not `setpriv --bounding-set`, which is the obvious tool and silently
-# the wrong one: without CAP_SETPCAP it exits 0 having changed nothing, so a
-# container that lost the capability would run every session with the full set
-# and report success at every step. capsh refuses out loud, which is the only
-# behaviour worth having here.
-#
-# `-- -c 'exec "$@"'` runs the command through capsh's shell and immediately
-# replaces it, so nothing is left between the caller and the process.
-drop_caps() {
-    exec capsh --drop=all "$@"
-}
-
-# Checked rather than assumed, because the failure it prevents is invisible:
-# capsh would abort each call below, and the last of those is the session, so
-# the container would die at the point it looked ready. Named here instead,
-# against the file the floor actually lives in.
-if ! capsh --decode="$(awk '/^CapEff:/ {print $2}' /proc/self/status)" \
-    | grep -q cap_setpcap; then
-    echo "entrypoint: this container does not hold CAP_SETPCAP, so the capabilities" >&2
-    echo "the startup sequence needs cannot be taken away again before the session" >&2
-    echo "starts - it would run inside a tree holding all of them." >&2
-    echo "Refusing to start rather than running with a floor that is not the one" >&2
-    echo "docker/docker-compose.yml declares. Add SETPCAP to its cap_add." >&2
-    exit 1
-fi
-
-# DEJIMA_FORGE_HOSTS is resolved host-side by bin/dejima (forge_hosts, in
-# dejima-provider-lib.sh) from whichever forge is configured, so this file
-# does not derive or name any one forge's hostnames itself.
-#
-# LOKI_URL (a full URL) still needs its own derivation here - Loki's host
-# has to be reachable for log-shipper.sh to actually deliver anything.
-loki_host=""
-if [ -n "${LOKI_URL:-}" ]; then
-    loki_host=$(echo "$LOKI_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')
-fi
-
-extra_domains="${DEJIMA_FORGE_HOSTS:-} ${loki_host} ${ALLOWED_DOMAINS:-}"
-
-if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
-    # dns-proxy.sh must run first: it repoints /etc/resolv.conf at a local
-    # dnsmasq that only resolves allowlisted names, so init-firewall.sh's own
-    # dig calls (and everything afterward) go through the same restriction.
-    EXTRA_ALLOWED_DOMAINS="${extra_domains}" /usr/local/bin/dns-proxy.sh
-    EXTRA_ALLOWED_DOMAINS="${extra_domains}" /usr/local/bin/init-firewall.sh
-
-    # NFLOG groups only exist once init-firewall.sh has run, so ulogd2 (the
-    # NFLOG consumer) and the Loki shipper start after it. Both are
-    # best-effort visibility on top of the enforcement above, not required
-    # for it - log-shipper.sh itself no-ops if LOKI_URL isn't set. Runs as
-    # its own unprivileged `ulogd` user (opens the NFLOG socket and output
-    # files first, then drops), not root - it's parsing headers from
-    # attacker-influenceable packets (whatever a compromised session sends),
-    # so a bug in it shouldn't be a path back to root in the container.
-    #
-    # `ulogd -d` daemonizes immediately and always exits 0 from this shell's
-    # point of view, regardless of whether the daemon itself goes on to
-    # start successfully - so `set -e` above won't catch a failure here (nor
-    # should it: logging is best-effort, not something worth failing the
-    # whole container over). Check separately so a failure is at least
-    # visible instead of silently producing no logs.
-    /usr/sbin/ulogd -d -u ulogd -c /etc/ulogd-sandbox.conf
-    sleep 0.5
-    if ! pgrep -x ulogd >/dev/null; then
-        echo "WARNING: ulogd2 failed to start - connection logging will be unavailable (see /var/log/ulogd.log)" >&2
-    fi
-    # Unlike ulogd2 above, this one stays root - deliberately, not an
-    # oversight. What it ships is an oversight log of the session running
-    # beside it, and letting the sandbox user own the shipper would let a
-    # compromised session tamper with or kill its own logging. Root buys
-    # tamper-resistance that a security log needs and a best-effort netflow
-    # counter does not.
-    #
-    # What it reads is dnsmasq's query log and ulogd2's output, both written
-    # by root-owned daemons here and neither session-writable.
-    #
-    # Root, and nothing else: it is the one root process that outlives this
-    # script, it parses content the session's own traffic decides, and it needs
-    # no capability to read two files its gid already opens or to POST them. So
-    # it keeps the uid that makes it untamperable and holds none of the rest.
-    drop_caps -- -c 'exec "$@"' dejima /usr/local/bin/log-shipper.sh &
-fi
+# Not backgrounded and not guarded: a firewall that failed to come up must take
+# the container with it, which is what `set -e` above does with this line.
+/usr/local/bin/firewall-up.sh
 
 # A normal login/ssh session always chowns the allocated pty to the logging
 # in user; this container's entrypoint skips that (there's no login/sshd
