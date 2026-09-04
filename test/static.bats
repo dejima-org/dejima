@@ -2485,8 +2485,18 @@ _install_forge_bins() {
     # And it must say what it could not run, rather than reporting a pass.
     grep -q 'did NOT run' "$script" \
         || { echo "a gate that could not run is reported as passing"; return 1; }
-    grep -q 'queued is not a job that passed' "$script" \
-        || { echo "nothing warns that a queued CI job is not a green one"; return 1; }
+    # Both halves of the rule, because reporting only one of them is how this
+    # goes wrong in each direction: a queued job read as a pass, or a green one
+    # hedged as though it might be queued.
+    #
+    # Matched against the script flattened to one line, so rewrapping a message
+    # does not fail a test about what it says.
+    local flat_script
+    flat_script="$(tr '\n' ' ' < "$script" | tr -s ' ')"
+    [[ "$flat_script" == *"queued one is yellow or grey"* ]] \
+        || { echo "nothing says a queued CI job is not a passing one"; return 1; }
+    [[ "$flat_script" == *"GREEN means"* ]] \
+        || { echo "nothing says what green means, so a green run gets hedged"; return 1; }
 }
 
 @test "docs/release.md exists and is pointed at from where a release starts" {
