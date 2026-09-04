@@ -3027,10 +3027,30 @@ _upd_cache() { printf '%s/.local/share/dejima/update-check' "$HOME"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"origin/trunk"* ]] \
         || { echo "does not name what it is behind: $output"; return 1; }
-    # The path, because the checkout that is behind is not necessarily the
+    # The paths, because the checkout that is behind is not necessarily the
     # directory the operator is standing in when they read this.
     [[ "$output" == *"git -C $UPD_CHECKOUT pull"* ]] \
         || { echo "does not say how to update: $output"; return 1; }
+    # install.sh too, because pulling does not re-link what a new release
+    # adds on PATH.
+    [[ "$output" == *"$UPD_CHECKOUT/install.sh"* ]] \
+        || { echo "does not say to re-run install.sh: $output"; return 1; }
+}
+
+@test "the notice is set off by a blank line either side" {
+    _upd_fixture
+    _upd_commit "$UPD_ORIGIN" second
+    # Read from the file the tool wrote: bats' run strips the blank lines at
+    # either end of what it captures, and those are the thing being asserted -
+    # they are what keeps the launch's startup lines and image build from
+    # reading as part of the notice.
+    local out="$UPD_DIR/notice"
+    "$UPD_CHECKOUT/bin/dejima-update-check" >"$out" 2>&1
+    grep -q "commits this checkout" "$out" || { cat "$out"; return 1; }
+    [ -z "$(head -n 1 "$out")" ] \
+        || { echo "no blank line before it: $(cat "$out")"; return 1; }
+    [ -z "$(tail -n 1 "$out")" ] \
+        || { echo "no blank line after it: $(cat "$out")"; return 1; }
 }
 
 @test "the commit count is given only when the commits are actually here" {
