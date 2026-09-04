@@ -46,11 +46,14 @@ at all.
 `test/runtime.bats` needs Docker, which a sandbox does not have. It is the only
 thing that exercises the mounts, the firewall and the entrypoint end to end, so
 a release is exactly when not running it stops being acceptable. Either run it
-on the host, or **check that the privileged CI job ran** - it is pinned to one
-self-hosted runner and queues silently when that runner is down, so a pull
-request can sit with the runtime half neither green nor red.
+on the host, or **read the pull request's checks**: green means every job
+finished and passed, `runtime.bats` among them. Yellow or grey means the
+privileged job has not run - it is pinned to one self-hosted runner and queues
+silently when that runner is down.
 
-"CI covers it" is not "it passed."
+So the answer is the colour. Green is verified end to end; say so. Anything
+else is a run that has not happened, and reporting it as passing is what this
+paragraph exists to prevent.
 
 ## 2. Security review
 
