@@ -48,6 +48,18 @@ services:
     # ten per run - becomes a permanent zombie, and a long session eventually
     # exhausts the cgroup pids limit and can no longer fork at all.
     init: true
+    # The session does not get a network namespace of its own. It joins the one
+    # the filter container owns, where the egress rules are already installed -
+    # so the filter bounding this session sits somewhere it declares no
+    # capability to reach. bin/dejima starts that container and passes its name
+    # here; see the block above its compose invocation, and docs/security.md.
+    #
+    # The default is what a `docker compose` invocation by hand gets, and it is
+    # a network with no filter on it. That is the same thing such an invocation
+    # has always got - this file's first line says it is not meant to be run
+    # that way - but it is worth naming, because the value that makes a session
+    # safe now arrives from outside this file.
+    network_mode: ${SANDBOX_NETNS_CONTAINER:-bridge}
     # An explicit floor rather than Docker's default set plus two. The default
     # carries about fourteen capabilities and this container uses seven: it
     # writes and chowns files, runs the firewall, drops privilege twice (gosu

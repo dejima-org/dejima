@@ -8,22 +8,31 @@ set -Eeuo pipefail
 # refuse deliberately, and say so (#59).
 trap 'status=$?; echo "ERROR: entrypoint.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
-# drop_caps and require_setpcap, shared with firewall-up.sh below. Sourced
-# rather than defined here because the two callers must not drift: what
+# drop_caps and require_setpcap, shared with the filter container's entrypoint.
+# Sourced rather than defined here because the callers must not drift: what
 # `drop_caps` does is the difference between a session holding nothing and a
 # session holding the whole floor, and that is not a thing to have two of.
 # shellcheck source=caps-lib.sh
 source /usr/local/bin/caps-lib.sh
 require_setpcap
 
-# The egress control for this network namespace, which this container has to
-# its own today. Its own script because that is a property of a namespace and
-# everything else here is a property of a container, and the two need not
-# belong to the same one.
+# The egress control for this namespace is already up: the filter container
+# that owns it installed the rules, and bin/dejima waited for that before
+# starting this container. Nothing here brings it up, and nothing here could -
+# this container declares none of the capabilities it would take.
 #
-# Not backgrounded and not guarded: a firewall that failed to come up must take
-# the container with it, which is what `set -e` above does with this line.
-/usr/local/bin/firewall-up.sh
+# What this container does need is to be pointed at the resolver enforcing the
+# name allowlist. /etc/resolv.conf is per container even when the namespace is
+# shared, so dns-proxy.sh repointing the filter container's file says nothing
+# about this one - which Docker generated pointing straight at its embedded
+# resolver. Left alone, every lookup the session makes would go around dnsmasq
+# and the DNS allowlist would apply to nothing.
+#
+# The same value dns-proxy.sh writes for itself, at the same loopback address,
+# because loopback is shared with the container the resolver runs in.
+if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+fi
 
 # A normal login/ssh session always chowns the allocated pty to the logging
 # in user; this container's entrypoint skips that (there's no login/sshd

@@ -884,6 +884,12 @@ if [ "$(manifest_get forge "$DEJIMA_FORGE_NAME" hosts_allowlisted_by_core)" = "o
 else
     DEJIMA_FORGE_HOSTS="$_forge_all_hosts"
 fi
+# Exported as well as passed to the sandbox with `-e NAME=value`. The filter
+# container is started with `docker run` and takes this the `-e NAME` way, so
+# it has to be in this process's environment - and that form is what keeps a
+# value out of a command line, which is the rule the credential beside it in
+# that list follows.
+export DEJIMA_FORGE_HOSTS
 if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
     DEJIMA_PUSH_HOSTS="$_forge_all_hosts"
 else
@@ -1241,6 +1247,11 @@ DEJIMA_STATE_DIR=""
 SANDBOX_BRIEFING_FILE=""
 SANDBOX_CREDENTIAL_PROXY_DIR=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
+# The same rule, for two names cleanup() hands to `docker rm` rather than to
+# `rm`. An inherited value there removes a container or a network belonging to
+# something else on this host, which is a worse thing to get wrong than a file.
+SANDBOX_FILTER_CONTAINER=""
+SANDBOX_RUN_NETWORK=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1399,6 +1410,21 @@ cleanup() {
     # dejima-notify-watch's marker consumption.
     rm -rf "${DEJIMA_NOTIFY_DIR:-}" \
         || echo "warning: could not remove the marker directory ${DEJIMA_NOTIFY_DIR:-}" >&2
+    # This launch's egress control, and the network under it. The sandbox has
+    # already exited by the time the trap runs, so nothing is left holding the
+    # namespace - Docker permits removing an owner from under a live joiner
+    # anyway, which is why the order here is deliberate rather than incidental.
+    #
+    # `|| true` on both, like every other removal in this trap: a Docker daemon
+    # that has gone away must not replace the session's exit status. What that
+    # leaves behind is inert - a filter container filters a namespace nothing
+    # is in - and a later launch reconciles it.
+    if [ -n "${SANDBOX_FILTER_CONTAINER:-}" ]; then
+        docker rm -f "$SANDBOX_FILTER_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${SANDBOX_RUN_NETWORK:-}" ]; then
+        docker network rm "$SANDBOX_RUN_NETWORK" >/dev/null 2>&1 || true
+    fi
     exit_step "session ended - keeping what it compacted away"
     # Keep whatever the session compacted away, into a store nothing mounts.
     # `|| true` for the same reason every other line in this trap has it: a
@@ -3101,6 +3127,104 @@ if [ -n "$pending_crit" ] && [ ! -t 0 ]; then
     else
         echo "          (not a tty - continuing; set audit.strict = on to refuse)" >&2
     fi
+fi
+
+# The egress control runs in a container of its own, which owns this launch's
+# network namespace. The sandbox joins that namespace rather than getting one
+# of its own, so the filter bounding it is installed somewhere it has no
+# capability to reach - capabilities are per process, and the sandbox declares
+# none of the network ones.
+#
+# Ordering is the point, and it is why this is here rather than inside the
+# sandbox's own startup. The namespace has its rules before anything is created
+# in it, so the window where a session holds an interface and no filter does
+# not exist, rather than being bounded by an argument about how fast an
+# entrypoint runs.
+#
+# The base image, never the per-project derived one: this is the privileged
+# half of the pair and has no use for a project's declared dependencies.
+SANDBOX_RUN_NETWORK="dejima-run-$DEJIMA_RUN_ID"
+SANDBOX_FILTER_CONTAINER="dejima-filter-$DEJIMA_RUN_ID"
+
+# Per launch, and not the shared bridge every session used to sit on. Two
+# reasons, and the first is not optional: Docker's embedded resolver at
+# 127.0.0.11 exists only on a user-defined network, and dns-proxy.sh forwards
+# to it. The second is that concurrent sessions stop sharing a link layer,
+# which egress default-deny was doing on its own.
+docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK" >/dev/null
+
+# Everything the firewall path reads, passed as `-e NAME` so a value is taken
+# from this process's environment rather than written into a command line every
+# process on the host can read - GH_TOKEN is in this list.
+#
+# Derived from nothing: this IS the declaration, because the filter container
+# is started with `docker run` and so gets none of the environment
+# docker-compose.yml declares for the sandbox. A static test reads the same
+# names back out of the firewall scripts, so a script that starts reading a new
+# one fails rather than silently allowlisting less than it was told to.
+filter_env=(
+    -e ENABLE_FIREWALL       # whether to install rules at all
+    -e ALLOWED_DOMAINS       # the operator's approved names
+    -e DEJIMA_FORGE_HOSTS    # the configured forge's, resolved host-side
+    -e ALLOW_GITHUB_PUSH     # whether port 22 to GitHub opens
+    -e GH_TOKEN              # authenticates the GitHub ranges fetch
+    -e LOKI_URL              # its host is allowlisted, and the shipper needs it
+    -e SANDBOX_HARNESS_DOMAINS
+    -e SANDBOX_BACKEND_PROXIED_DOMAIN
+    -e SANDBOX_CREDENTIAL_PROXY_SOCKET
+)
+
+docker run -d --init \
+    --name "$SANDBOX_FILTER_CONTAINER" \
+    --label "dejima.filter=$DEJIMA_RUN_ID" \
+    --network "$SANDBOX_RUN_NETWORK" \
+    --cap-drop ALL \
+    --cap-add NET_ADMIN --cap-add NET_RAW --cap-add KILL \
+    --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+    --security-opt no-new-privileges:true \
+    --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+    ${filter_env[@]+"${filter_env[@]}"} \
+    --entrypoint /usr/local/bin/filter-entrypoint.sh \
+    "${SANDBOX_IMAGE_REPO}:${SANDBOX_USER}" >/dev/null
+
+# Named, not the id `docker run -d` printed. Both work for `container:`, and a
+# name we chose is one this launcher already knows without reading anything
+# back - which is also what lets the teardown below name it after a failure
+# that happened before any output could be captured.
+export SANDBOX_NETNS_CONTAINER="container:$SANDBOX_FILTER_CONTAINER"
+
+# Waited for, rather than assumed. The filter container resolves domains and
+# fetches GitHub's published ranges, which is seconds on a good day and retries
+# for half a minute on a bad one - so "it will be up by the time compose has
+# started the sandbox" is a guess, and the thing it guesses about is whether
+# the session gets a filter.
+#
+# Two ways out, and the second is why this is a loop rather than a sleep: the
+# marker appears, or the container is gone. A firewall that refused to come up
+# exits the container, and without that check this would wait out the whole
+# timeout before reporting a failure that had already been decided.
+echo "dejima: bringing up this session's egress control..." >&2
+_filter_ready=0
+for _ in $(seq 1 240); do
+    if docker exec "$SANDBOX_FILTER_CONTAINER" \
+        test -f /run/dejima-firewall-ready 2>/dev/null; then
+        _filter_ready=1
+        break
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$SANDBOX_FILTER_CONTAINER" 2>/dev/null)" != "true" ]; then
+        break
+    fi
+    sleep 0.5
+done
+if [ "$_filter_ready" -ne 1 ]; then
+    echo "" >&2
+    echo "The egress control for this session did not come up, so there is no" >&2
+    echo "filter for the sandbox to run behind. Refusing to start it." >&2
+    echo "" >&2
+    echo "What the filter container said:" >&2
+    docker logs "$SANDBOX_FILTER_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+    exit 1
 fi
 
 compose_status=0
