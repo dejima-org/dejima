@@ -1637,6 +1637,41 @@ _reference_has_key() {  # <doc> <section> <leaf>
     done
 }
 
+@test "CI runs every confined suite, not just the ones someone remembered" {
+    # The matrix in tests.yml is enumerated by hand, and test/run-confined.sh
+    # discovers suites from the directory. So a suite added to the tree runs
+    # locally and never runs in CI - a green set of checks covering less than
+    # it appears to, which is this repo's least acceptable failure and one
+    # nothing was watching for.
+    #
+    # Which suites are confined is run-confined.sh's own declaration, read
+    # rather than restated: runtime and ci-runner are privileged and have their
+    # own jobs elsewhere in this workflow, and a list here would be a second
+    # place for that to be true.
+    local matrix privileged f n
+    matrix="$(sed -n '/^        suite:/,/^    name:/p' "$REPO_ROOT/.gitea/workflows/tests.yml" \
+        | grep -oE '^          - [a-z-]+' | sed 's/^          - //')"
+    [ -n "$matrix" ] || { echo "found no suite matrix in tests.yml"; return 1; }
+    privileged="$(grep -oE '^PRIVILEGED=" [a-z -]+"' "$REPO_ROOT/test/run-confined.sh" \
+        | sed -E 's/^PRIVILEGED=" //; s/ "$//')"
+    [ -n "$privileged" ] || { echo "could not read the privileged list"; return 1; }
+
+    for f in "$REPO_ROOT"/test/*.bats; do
+        n="$(basename "$f" .bats)"
+        [[ " $privileged " == *" $n "* ]] && continue
+        grep -qx "$n" <<< "$matrix" \
+            || { echo "test/$n.bats is a confined suite and CI never runs it"; return 1; }
+    done
+
+    # And the other direction, or the matrix names a job that fails on a
+    # missing file rather than covering anything.
+    while read -r n; do
+        [ -n "$n" ] || continue
+        [ -f "$REPO_ROOT/test/$n.bats" ] \
+            || { echo "CI runs a suite that does not exist: $n"; return 1; }
+    done <<< "$matrix"
+}
+
 @test "the changed lane's map names only suites that exist" {
     # The map is what --changed selects with, so a suite renamed out from under
     # it stops being selected silently: the run still says green, having
@@ -1713,22 +1748,74 @@ _reference_has_key() {  # <doc> <section> <leaf>
     done
 }
 
-@test "the entrypoint still brings the firewall up, and lets a failure stop it" {
-    # firewall-up.sh being its own script is what lets a filter container run
-    # it for a namespace the session is not in. Until one does, entrypoint.sh
-    # is the only caller, and an extraction that left nothing calling it would
-    # be a sandbox with no egress control at all - which nothing else here
-    # would notice, because every other check reads the scripts it moved to.
-    grep -qE '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/entrypoint.sh" \
-        || { echo "entrypoint.sh does not call firewall-up.sh, or guards the call"; return 1; }
+@test "the filter entrypoint brings the firewall up, and lets a failure stop it" {
+    # Exactly one caller, and it is the one in the container that holds the
+    # capabilities. A second caller in the session's container would try to
+    # install rules in a namespace that already has them, and start a second
+    # dnsmasq on an address the first one is already bound to.
+    grep -qE '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/filter-entrypoint.sh" \
+        || { echo "filter-entrypoint.sh does not call firewall-up.sh, or guards the call"; return 1; }
+    # Code, not prose: the entrypoint may well go on mentioning the script in a
+    # comment, and a check that could not tell the two apart would be one
+    # nobody could satisfy while explaining why the call is absent.
+    run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/entrypoint.sh' | grep -n 'firewall-up'"
+    [ "$status" -ne 0 ] \
+        || { echo "the session's entrypoint still brings the firewall up: $output"; return 1; }
 
     # Unguarded is the point: under `set -e` a firewall that failed to come up
-    # takes the container with it. `|| true`, an `if`, or a background `&`
-    # would each turn that into a session running unfiltered.
+    # takes the container with it, and the readiness marker below it is never
+    # written, so bin/dejima refuses the launch. `|| true`, an `if`, or a
+    # background `&` would each turn that into a session running unfiltered.
     run grep -nE 'firewall-up\.sh.*(\|\||&|;)|(if|while).*firewall-up\.sh' \
-        "$SANDBOX_DIR/entrypoint.sh"
+        "$SANDBOX_DIR/filter-entrypoint.sh"
     [ "$status" -ne 0 ] \
         || { echo "the firewall-up call is guarded or backgrounded: $output"; return 1; }
+
+    # And the marker is written after it, never before: it is what the launcher
+    # waits on, so writing it first would announce a filter that is not there.
+    local up_at ready_at
+    up_at="$(grep -n '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/filter-entrypoint.sh" | cut -d: -f1)"
+    ready_at="$(grep -n 'dejima-firewall-ready' "$SANDBOX_DIR/filter-entrypoint.sh" | grep -v '^ *#' | tail -1 | cut -d: -f1)"
+    [ -n "$up_at" ] && [ -n "$ready_at" ] && [ "$up_at" -lt "$ready_at" ] \
+        || { echo "the readiness marker is not written after the firewall comes up"; return 1; }
+}
+
+@test "the session container points itself at the namespace's resolver" {
+    # /etc/resolv.conf is per container even when the network namespace is
+    # shared - measured, and the reason this line has to exist at all.
+    # dns-proxy.sh repoints the filter container's copy; Docker generated this
+    # container's pointing straight at its embedded resolver.
+    #
+    # Left alone, every name the session looks up goes around dnsmasq and the
+    # DNS allowlist applies to nothing - while the packet filter still holds,
+    # so nothing fails and nothing says so.
+    grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "the session container never points itself at the allowlisting resolver"; return 1; }
+
+    # The same address dns-proxy.sh binds and writes for itself, or the two
+    # halves of one arrangement disagree about where the resolver is.
+    grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/dns-proxy.sh" \
+        || { echo "dns-proxy.sh no longer writes that address; the two have drifted"; return 1; }
+}
+
+@test "dejima-allow changes the allowlist where it lives, and checks where it matters" {
+    # The dnsmasq and the ipsets are in the filter container. Every mutation
+    # has to go there; the reachability probe has to stay in the session's
+    # container, because that is the container whose reachability the command
+    # claims to have changed. A probe that ran in the filter container would
+    # pass on an arrangement where the session still could not reach the host.
+    local a="$REPO_ROOT/bin/dejima-allow"
+    grep -q 'docker exec -u root "$filter" bash -c' "$a" \
+        || { echo "the dnsmasq reload does not target the filter container"; return 1; }
+    grep -q 'docker exec -u root "$filter" ipset add' "$a" \
+        || { echo "the ipset add does not target the filter container"; return 1; }
+    grep -q 'docker exec "$container" curl' "$a" \
+        || { echo "the reachability check no longer runs in the session's container"; return 1; }
+
+    # Derived from Docker rather than recorded, so nothing has to be kept in
+    # step with it.
+    grep -q "HostConfig.NetworkMode" "$a" \
+        || { echo "the filter container is not derived from the session's namespace"; return 1; }
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {

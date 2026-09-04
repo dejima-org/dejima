@@ -31,6 +31,11 @@ if [ "\$1" = ps ]; then
     exit 0
 fi
 case "\$*" in
+    # A session container shares a filter container's network namespace, and
+    # that is where the dnsmasq and the ipsets are. dejima-allow derives the
+    # one from the other rather than being told, so a stub that answers this
+    # with nothing is a session with no filter to add a domain to.
+    *inspect*NetworkMode*) echo "container:dejima-test-filter"; exit 0 ;;
     *dig*)  echo 10.0.0.1; exit 0 ;;
     *curl*) exit $2 ;;
     *)      exit 0 ;;
@@ -651,6 +656,30 @@ EOF
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
+@test "dejima-allow refuses a container that shares no filter container's namespace" {
+    # The allowlist a session runs behind is not in that session's container,
+    # so there is nothing to add a domain to without finding the container it
+    # is in. A launch predating the split has a namespace of its own, and the
+    # useful answer there is "relaunch", not a docker exec that fails somewhere
+    # inside a heredoc.
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+case "$*" in
+    *inspect*NetworkMode*) echo "bridge"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    PATH="$STUB_DIR:$PATH" run "$REPO_ROOT/bin/dejima-allow" --container c1 crates.io
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"does not share another container's network namespace"* ]] \
+        || { echo "$output"; return 1; }
+    [[ "$output" == *"relaunch"* ]] \
+        || { echo "the refusal does not say what to do about it: $output"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
 @test "dejima-allow --global persists without needing a container" {
     run "$REPO_ROOT/bin/dejima-allow" --global example.com
     [ "$status" -eq 0 ]
@@ -704,6 +733,7 @@ stub_docker_rebind() {
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
 case "$*" in
+    *inspect*NetworkMode*) echo "container:dejima-test-filter"; exit 0 ;;
     *dig*@127.0.0.11*) echo 10.0.0.1 ;;
 esac
 exit 0
@@ -737,7 +767,15 @@ EOF
     # The rebind branch above must not swallow the ordinary failure: a typo'd
     # or dead name gets no answer from the upstream either.
     STUB_DIR="$(mktemp -d)"
-    printf '#!/bin/bash\nexit 0\n' > "$STUB_DIR/docker"
+    # Answers where the filter container is and nothing else, so every lookup
+    # comes back empty - which is the case this is about.
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/bash
+case "$*" in
+    *inspect*NetworkMode*) echo "container:dejima-test-filter" ;;
+esac
+exit 0
+EOF
     chmod +x "$STUB_DIR/docker"
     run env PATH="$STUB_DIR:$PATH" \
         "$REPO_ROOT/bin/dejima-allow" --container c1 nowhere.example.com

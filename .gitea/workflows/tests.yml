@@ -80,6 +80,7 @@ jobs:
       matrix:
         suite:
           - static
+          - launch
           - project
           - remote
           - audit
