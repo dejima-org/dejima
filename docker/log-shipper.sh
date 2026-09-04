@@ -48,6 +48,19 @@ ship_stream() {
         last_flush=$(date +%s)
     }
 
+    # tail's stderr is discarded below because -F is meant to wait for a file
+    # that does not exist yet, and complains once per second while it does.
+    # That also swallows a permission error, which is not transient and which
+    # looks identical from the outside: a stream that ships nothing, which is
+    # also what a quiet session looks like.
+    #
+    # This process holds no capabilities (see entrypoint.sh), so it reads these
+    # two files on their ordinary permissions and nothing else. Say so once
+    # when that is not enough, rather than shipping an empty stream.
+    if [ -e "$file" ] && [ ! -r "$file" ]; then
+        echo "WARNING: $file is not readable by $(id -un) - the $job stream will ship nothing." >&2
+    fi
+
     last_flush=$(date +%s)
     tail -F -n0 "$file" 2>/dev/null | while true; do
         if IFS= read -r -t "$BATCH_MAX_SECONDS" line; then
