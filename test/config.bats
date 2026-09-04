@@ -3027,10 +3027,14 @@ _upd_cache() { printf '%s/.local/share/dejima/update-check' "$HOME"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"origin/trunk"* ]] \
         || { echo "does not name what it is behind: $output"; return 1; }
-    # The path, because the checkout that is behind is not necessarily the
+    # The paths, because the checkout that is behind is not necessarily the
     # directory the operator is standing in when they read this.
     [[ "$output" == *"git -C $UPD_CHECKOUT pull"* ]] \
         || { echo "does not say how to update: $output"; return 1; }
+    # install.sh too, because pulling does not re-link what a new release
+    # adds on PATH.
+    [[ "$output" == *"$UPD_CHECKOUT/install.sh"* ]] \
+        || { echo "does not say to re-run install.sh: $output"; return 1; }
 }
 
 @test "the notice is set off by a blank line either side" {
