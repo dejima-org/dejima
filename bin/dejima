@@ -1222,6 +1222,25 @@ SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
 # and SANDBOX_DERIVED_CONTEXT is one of the `rm -rf` arguments.
 DEJIMA_NOTIFY_DIR=""
 DEJIMA_SESSION_FILE=""
+# The debounce removal in cleanup() joins this to a run id and removes the
+# result, so it belongs here for the same reason as the two above and was
+# missing: with remote access off nothing assigns it, and an operator with
+# DEJIMA_STATE_DIR exported would have had the trap remove a path of their
+# environment's choosing rather than one dejima made.
+DEJIMA_STATE_DIR=""
+# These three are assigned again further down, where each is read - the
+# briefing file when it is composed, the other two among the credential
+# proxy's own variables. Both of those sites are BELOW `trap cleanup EXIT`,
+# with ten and twelve ordinary `exit` paths between, so on any of those exits
+# the trap ran against whatever the environment held. SANDBOX_CREDENTIAL_PROXY_DIR
+# is an `rm -rf` argument.
+#
+# Bound here as well rather than moved, because the later sites are read as
+# "what this feature starts from" and are correct as that. This block is a
+# different statement: what the trap must never inherit.
+SANDBOX_BRIEFING_FILE=""
+SANDBOX_CREDENTIAL_PROXY_DIR=""
+SANDBOX_FAKE_CREDENTIALS_FILE=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1229,6 +1248,17 @@ SANDBOX_CONVERSATION_SHIP_PID=""
 SANDBOX_TTY_SUSPEND_PID=""
 SANDBOX_TTY_MODES=""
 SANDBOX_CLIENT_PID=""
+
+# This launch's identity, generated for every launch rather than only for a
+# remote-enabled one, and here rather than further down for the same reason as
+# the block above: cleanup() reads it, so it must be dejima's own value by the
+# time the trap is installed and not whatever arrived in the environment.
+#
+# It names the registry entry and the marker directory when remote access is
+# on, and nothing when it is off - but it is the launch's identity either way,
+# and deriving it from whether one optional feature is configured made it
+# absent exactly where an inherited value could stand in for it.
+DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
 
 # Names each host-side task in cleanup() as it starts. Between the container
 # exiting and the operator's shell prompt returning, dejima audits every
@@ -1266,10 +1296,15 @@ cleanup() {
     #
     # SANDBOX_GITCONFIG_DIR additionally carries a `:-` default because it is
     # the one name here first assigned BELOW `trap cleanup EXIT` rather than
-    # above it. Nothing in that window can exit today (it holds only
-    # comments, and a failed `VAR="$(mktemp -d)"` still binds VAR to the
-    # empty string before set -e fires), so this is the invariant every other
-    # name here already keeps, not a live fix - see the static test.
+    # above it. What makes that safe is not the `:-` but the window: it holds
+    # only comments, so there is no exit between the trap and the assignment
+    # for the trap to fire on (and a failed `VAR="$(mktemp -d)"` still binds
+    # VAR to the empty string before set -e fires).
+    #
+    # That is a property of this one name and of nothing else here, so the
+    # static test asserts it by exception: every other name the trap removes
+    # is bound above the trap, and adding a second name to the window fails
+    # the test rather than resting on someone re-deriving the argument.
     # SIGTERM, which the shipper traps: it scans once more and flushes before
     # exiting, so the tail of the session - the part worth having - is shipped
     # rather than dying with the batch. Reaped for the same reason the proxy
@@ -2583,7 +2618,6 @@ export SANDBOX_CREDENTIAL_TRANSPORT
 # nothing below runs, no state is created, and nothing is added to the
 # compose invocation.
 if remote_enabled; then
-    DEJIMA_RUN_ID="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
     DEJIMA_STATE_DIR="$(remote_state_dir)"
 
     # The state dir's parent (e.g. /tmp, when XDG_RUNTIME_DIR is unset - the
