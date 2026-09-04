@@ -14,10 +14,13 @@ run them.
 | `docker/install-forge-bins.sh` | Installs each forge's CLIs into the image from its manifest's `install` list, and fails the build on a file that is shipped but not declared, or declared but not shipped |
 | `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
 | `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
-| `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at container start |
+| `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at filter-container start |
+| `docker/firewall-up.sh` | Brings a network namespace's egress control up: the DNS proxy, the packet filter, and the two log producers. What a namespace needs, rather than what a container does |
+| `docker/filter-entrypoint.sh` | PID 1 of the filter container: runs `firewall-up.sh`, signals readiness, then holds the namespace open for the sandbox to join |
+| `docker/caps-lib.sh` | `drop_caps` and the `CAP_SETPCAP` precondition, sourced by both entrypoints so the two cannot drift |
 | `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
 | `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`). Container-side, because those files only exist there |
-| `docker/entrypoint.sh` | Runs as root: DNS proxy, firewall, logging, drops to the sandbox user via `gosu`, then execs the session's command |
+| `docker/entrypoint.sh` | PID 1 of the session container: runs as root to prepare the session's own state, points `resolv.conf` at the namespace's resolver, then execs the session's command as the sandbox user with an empty capability bounding set. It does not bring the firewall up - the container beside it did |
 | `docker/harness-wrapper.sh` | Shadows the selected harness's command on `PATH` to add its no-confirm flags and dejima's settings layer. Named by no harness; `entrypoint.sh` links it into place |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
