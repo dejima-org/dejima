@@ -27,7 +27,15 @@ import time
 
 HELPER = os.path.abspath(sys.argv[1])
 SHELL = sys.argv[2] if len(sys.argv) > 2 else "bash"
-WORK = os.environ.get("TTY_SUSPEND_WORK") or "/tmp"
+# Required, not defaulted. The fallback was "/tmp", and the three paths below
+# are then fixed names in a world-writable directory that this fixture goes on
+# to WRITE and EXECUTE. Every bats caller passes a directory, so nothing
+# shipped ever took that branch - but this runs on CI hosts, and a predictable
+# executed path is not a thing to leave lying around for the one caller that
+# forgets (#249).
+WORK = os.environ.get("TTY_SUSPEND_WORK")
+if not WORK:
+    sys.exit("tty-suspend-harness: set TTY_SUSPEND_WORK to a directory of its own")
 RECEIVED = os.path.join(WORK, "received")
 LAUNCHER = os.path.join(WORK, "launcher.sh")
 CONTAINER = os.path.join(WORK, "container.py")
@@ -110,8 +118,8 @@ finally:
 # TTY_SUSPEND_NO_HELPER leaves the helper out, which is dejima before this
 # existed. It is the control: a harness that cannot see the bug cannot be
 # trusted to see the fix either.
-start_helper = "" if os.environ.get("TTY_SUSPEND_NO_HELPER") else \
-    '"%s" &\nhelper=$!' % HELPER
+HELPER_EXPECTED = not os.environ.get("TTY_SUSPEND_NO_HELPER")
+start_helper = '"%s" &\nhelper=$!' % HELPER if HELPER_EXPECTED else ""
 # bin/dejima's shape: the client inherits SIGTSTP ignored and is started with
 # the terminal, and the keystroke is converted into an explicit SIGSTOP for it
 # before the launcher stops itself. Without the conversion the client is the
@@ -159,7 +167,11 @@ if pid == 0:
     if slave > 2:
         os.close(slave)
     os.close(master)
-    env = dict(os.environ, PS1="PROMPT> ")
+    # LC_ALL=C so the shell's job-control notice is the "Stopped" this expects.
+    # Left to the environment it is whatever locale the runner happens to have,
+    # and the assertion then fails on a translated message with nothing about
+    # the terminal handling having changed (#249).
+    env = dict(os.environ, PS1="PROMPT> ", LC_ALL="C", LANG="C")
     args = [SHELL, "--norc", "-i"] if "bash" in SHELL else [SHELL, "-f", "-i"]
     os.execvpe(SHELL, args, env)
 os.close(slave)
@@ -209,12 +221,81 @@ def lflag():
     return termios.tcgetattr(master)[3]
 
 
+def reclaimed():
+    """True once dejima-tty-suspend has taken ^Z back from the container's raw mode.
+
+    Read off the pty rather than inferred from output, and specific enough to
+    mean only the helper. Raw mode has ISIG off; a plain shell has ISIG on with
+    intr at ^C. Only the helper leaves ISIG on, susp at ^Z, and intr undefined
+    - which is the whole of what it does, so this is the feature's precondition
+    stated exactly.
+    """
+    attrs = termios.tcgetattr(master)
+    cc = attrs[6]
+    return bool(attrs[3] & termios.ISIG) \
+        and cc[termios.VSUSP] == b"\x1a" \
+        and cc[termios.VINTR] == b"\x00"
+
+
+def await_reclaim(timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if reclaimed():
+            return True
+        pump(0.05)
+    return reclaimed()
+
+
+def raw_restored():
+    """True once the resumed client has put the terminal back into raw mode."""
+    flags = lflag()
+    return not (flags & termios.ICANON) and not (flags & termios.ECHO)
+
+
+def await_raw(timeout=15.0):
+    """Wait for that, rather than reading the flags at a fixed moment after fg.
+
+    `fg` returns as soon as the job is continued; the client sets raw mode some
+    scheduling later. Sampling the flags right after fg was timing the machine,
+    and on a loaded one it read the shell's own canonical mode and reported it
+    as a failure to restore - the same shape as the reclaim wait above.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if raw_restored():
+            return True
+        pump(0.05)
+    return raw_restored()
+
+
 def received():
     try:
         with open(RECEIVED, "rb") as fh:
             return fh.read()
     except FileNotFoundError:
         return b""
+
+
+def await_received(predicate, timeout=15.0):
+    """Wait for what the container received to satisfy predicate.
+
+    The third instance of the same bug in this file - see await_raw and the
+    reclaim wait above. A byte written to the master pty has to reach the
+    client, cross into the container's stand-in and be appended to a file
+    before the check can see it, and pumping for a fixed 0.8s and then looking
+    was timing the machine rather than waiting for the thing. It failed in CI
+    exactly that way: the check for ^C saw the tail of the line typed before
+    it, because ^C had not arrived yet.
+
+    Returns the predicate's answer either way, so a real failure still fails
+    rather than hanging until the suite's own timeout.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate(received()):
+            return True
+        pump(0.05)
+    return predicate(received())
 
 
 def check(name, ok, detail=""):
@@ -230,6 +311,27 @@ try:
     check("the container run attached", expect("CONTAINER-ATTACHED"))
 
     for cycle in (1, 2):
+        # Wait for the helper to hold the terminal before typing at it (#262).
+        #
+        # CONTAINER-ATTACHED is printed by the stand-in immediately after it
+        # sets raw mode, so it marks the START of the window this feature
+        # exists to close, not the end. The helper only acts once it has POLLED
+        # the terminal and seen -isig, so between those two moments ^Z is still
+        # the byte 0x1a. Sending into that window put the byte in the container
+        # and failed `nothing-reached-the-container` - the security assertion -
+        # on a machine where nothing was wrong but the scheduling.
+        #
+        # Waiting for the precondition rather than lengthening the deadline
+        # after it: with the terminal provably converting ^Z to a signal before
+        # anything is typed, that check can no longer fail for timing reasons
+        # at all, which is the point. A longer timeout would only have narrowed
+        # the window.
+        #
+        # Skipped without the helper, where the byte reaching the container is
+        # the expected result and this would never come true.
+        if HELPER_EXPECTED:
+            check("cycle%d-suspend-char-reclaimed" % cycle, await_reclaim(),
+                  "dejima-tty-suspend never took ^Z back from raw mode")
         before = received()
         forget()
         send("\x1a")
@@ -243,23 +345,21 @@ try:
               expect("SHELL-ALIVE-%d" % cycle, 5.0))
         forget()
         send("fg\n")
-        expect("CONTAINER-REDRAW", 5.0)
+        restored = await_raw()
         flags = lflag()
-        check("cycle%d-raw-mode-restored" % cycle,
-              not (flags & termios.ICANON) and not (flags & termios.ECHO),
+        check("cycle%d-raw-mode-restored" % cycle, restored,
               "ICANON=%s ECHO=%s" % (bool(flags & termios.ICANON), bool(flags & termios.ECHO)))
-        check("cycle%d-redraw-poked" % cycle, "CONTAINER-REDRAW" in "".join(seen))
+        check("cycle%d-redraw-poked" % cycle, expect("CONTAINER-REDRAW", 15.0))
         check("cycle%d-session-alive" % cycle, "LAUNCHER-DONE" not in "".join(seen))
 
     before = received()
     send("typed\n")
-    pump(0.8)
-    check("input-reaches-the-resumed-session", received() != before)
+    check("input-reaches-the-resumed-session",
+          await_received(lambda got: got != before))
 
-    before = received()
     send("\x03")
-    pump(0.8)
-    check("ctrl-c-still-reaches-the-session", received().endswith(b"\x03"),
+    check("ctrl-c-still-reaches-the-session",
+          await_received(lambda got: got.endswith(b"\x03")),
           repr(received()[-4:]))
 
     # The finding, asserted: the client is stopped by SIGSTOP, which it cannot

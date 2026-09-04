@@ -1,0 +1,186 @@
+#!/bin/bash
+# Where a project's ~/shared lives on the host, and what is in it.
+#
+# `[core] share_dir` holds one directory per project, and a launch mounts only
+# that project's at ~/shared. This is the host side of that: where to put a
+# file so the next session against a project finds it, what every project is
+# holding, and how to move files left over from when share_dir was mounted
+# whole.
+#
+# Nothing here is a security control. The boundary is the mount bin/dejima
+# sets up; this is the operator's view of what is on the other side of it.
+#
+# Usage: dejima-share <path|list|adopt> [<path>]
+set -euo pipefail
+
+case "${1:-}" in
+    -h|--help)
+        cat <<'DEJIMA_SHARE_HELP'
+dejima-share - the host side of a project's ~/shared
+
+Usage: dejima-share <path|list|adopt> [path]
+
+  path [path]    print the host directory a launch against `path` mounts at
+                 ~/shared, creating it if it does not exist yet - so a file
+                 copied there is waiting for the next session
+  list           every project's share directory, with its size and when it
+                 was last written, plus anything left loose in share_dir
+  adopt [path]   move whatever is loose in share_dir's top level into `path`'s
+                 share directory, after showing it and asking
+
+  path defaults to the current directory.
+
+A launch mounts <share_dir>/projects/<slug> at ~/shared, where slug is the
+project's absolute path with every non-alphanumeric character replaced by a
+dash - the same key the audit and epitaph stores use. Only that directory
+crosses into the container, so one project's session cannot read another's
+handoff files.
+
+Files that were in share_dir's top level before this split are still there and
+are no longer mounted anywhere. `adopt` is for moving them somewhere a session
+will see them; it never overwrites.
+
+Nothing here deletes anything by itself, and dejima never prunes share_dir. It
+grows until you clear it out - `list` is what tells you what has gone stale.
+
+See docs/configuration.md.
+DEJIMA_SHARE_HELP
+        exit 0 ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# The provider library rather than the config one directly: [core] harness and
+# the other provider-typed keys resolve against the manifests, so config
+# validation refuses an ordinary config without it.
+# shellcheck source=dejima-provider-lib.sh
+source "$SCRIPT_DIR/dejima-provider-lib.sh"
+# shellcheck source=dejima-slug-lib.sh
+source "$SCRIPT_DIR/dejima-slug-lib.sh"
+config_validate || exit 1
+
+action="${1:-}"
+[ -n "$action" ] || { echo "Usage: dejima-share <path|list|adopt> [<path>]" >&2; exit 1; }
+
+SHARE_ROOT="$(config_get core share_dir)"
+PROJECTS_ROOT="$(share_projects_root "$SHARE_ROOT")"
+
+# A workspace argument becomes a mount path, so it is resolved the way
+# bin/dejima resolves the one it is about to mount rather than used as typed.
+# A path that does not exist is a typo, and answering it with a share
+# directory nothing will ever mount is worse than refusing.
+resolve_workspace() {
+    local given="${1:-$PWD}"
+    [ -d "$given" ] || { echo "no such directory: $given" >&2; exit 1; }
+    (cd "$given" && pwd)
+}
+
+# Whatever is in share_dir's top level that is not the per-project root. Every
+# one of these was visible to every session before the split and is visible to
+# none now.
+loose_entries() {
+    find "$SHARE_ROOT" -mindepth 1 -maxdepth 1 ! -name projects -printf '%f\n' \
+        2>/dev/null | sort
+}
+
+case "$action" in
+    path)
+        ws="$(resolve_workspace "${2:-}")"
+        dir="$(share_dir_for "$SHARE_ROOT" "$ws")"
+        # Created here rather than only at launch, because the point of asking
+        # is usually to put something in it before the launch happens.
+        mkdir -p "$dir"
+        printf '%s\n' "$dir"
+        ;;
+
+    list)
+        if [ ! -d "$PROJECTS_ROOT" ]; then
+            echo "No project has a share directory yet ($PROJECTS_ROOT does not exist)."
+        else
+            found=0
+            while IFS= read -r d; do
+                [ -n "$d" ] || continue
+                found=1
+                # du and date rather than a stat of the directory itself: the
+                # directory's own mtime changes when an entry is added or
+                # removed and not when one is written, which would report a
+                # share nobody has touched in months as fresh.
+                size="$(du -sh "$PROJECTS_ROOT/$d" 2>/dev/null | cut -f1)"
+                newest="$(find "$PROJECTS_ROOT/$d" -type f -printf '%T@\n' 2>/dev/null \
+                    | sort -rn | head -1)"
+                if [ -n "$newest" ]; then
+                    when="$(date -d "@${newest%.*}" '+%Y-%m-%d' 2>/dev/null || echo '?')"
+                else
+                    when="empty"
+                fi
+                printf '%-10s %-12s %s\n' "${size:-?}" "$when" "$d"
+            done < <(find "$PROJECTS_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+                2>/dev/null | sort)
+            [ "$found" = 1 ] || echo "No project has a share directory yet."
+        fi
+
+        loose="$(loose_entries)" || true
+        if [ -n "$loose" ]; then
+            echo
+            echo "Loose in $SHARE_ROOT, mounted into no session:"
+            while IFS= read -r e; do
+                [ -n "$e" ] || continue
+                printf '  %s\n' "$e"
+            done <<< "$loose"
+            echo
+            echo "Move them with 'dejima-share adopt <project path>', or delete them."
+        fi
+        echo
+        echo "Nothing prunes this. Clear out what you no longer need: everything"
+        echo "in a project's share is readable by every future session against it."
+        ;;
+
+    adopt)
+        ws="$(resolve_workspace "${2:-}")"
+        dest="$(share_dir_for "$SHARE_ROOT" "$ws")"
+        loose="$(loose_entries)" || true
+        if [ -z "$loose" ]; then
+            echo "Nothing loose in $SHARE_ROOT - every entry is already under projects/."
+            exit 0
+        fi
+        echo "Moving into $ws's share ($dest):"
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
+            if [ -e "$dest/$e" ]; then
+                printf '  %-30s SKIP - %s already has one\n' "$e" "$dest"
+            else
+                printf '  %s\n' "$e"
+            fi
+        done <<< "$loose"
+        echo
+        # One question, after showing everything, the way dejima-project
+        # approve asks - and read from stdin for the same reason it does, so a
+        # non-interactive caller answering no is the default rather than an
+        # error about /dev/tty. A move is not undoable by this tool, and the
+        # files are the operator's.
+        printf 'Move them? [y/N] '
+        read -r reply || reply=n
+        case "$reply" in
+            y|Y) ;;
+            *) echo "Nothing moved."; exit 0 ;;
+        esac
+        mkdir -p "$dest"
+        moved=0
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
+            # Never overwrites: a name that already exists in the destination
+            # is left where it is and reported, because the two files are both
+            # the operator's and this cannot know which one they meant.
+            if [ -e "$dest/$e" ]; then
+                echo "Skipped $e - $dest already has one" >&2
+                continue
+            fi
+            mv -n "$SHARE_ROOT/$e" "$dest/$e"
+            moved=$((moved + 1))
+        done <<< "$loose"
+        echo "Moved $moved entr$([ "$moved" = 1 ] && echo y || echo ies) into $dest"
+        ;;
+
+    *)
+        echo "Usage: dejima-share <path|list|adopt> [<path>]" >&2
+        exit 1 ;;
+esac

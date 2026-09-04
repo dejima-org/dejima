@@ -1,10 +1,13 @@
 #!/bin/bash
-# Idempotent installer for dejima. Registers the selected harness's guard
-# hooks wherever that harness reads them from, and puts
+# Idempotent installer for dejima. Writes NOTHING to the harness's own
+# configuration: every hook dejima uses is baked into the image and registered
+# per launch into a settings layer of dejima's own, so installing this does not
+# change how the harness behaves outside a sandbox. What it still does is take
+# back what older versions put there. It puts
 # bin/dejima, bin/dejima-allow, bin/dejima-dep, bin/dejima-project,
-# bin/dejima-audit and the opt-in remote-access scripts on PATH. Safe to
-# re-run - every step is a no-op if already done, and every change is
-# printed as it happens.
+# bin/dejima-audit, bin/dejima-share and the opt-in remote-access scripts on
+# PATH. Safe to re-run - every step is a no-op if already done, and every
+# change is printed as it happens.
 #
 # It never enables anything: the remote-access scripts do nothing without
 # [remote-access] enabled = on in ~/.config/dejima/config, and the user units
@@ -76,6 +79,10 @@ link_bin dejima-project
 # operator to run `dejima-audit ack`, which is only true once it is on PATH.
 link_bin dejima-audit
 link_bin dejima-epitaph
+# ~/shared is one directory per project now, so "where do I put a file for the
+# next session" has an answer only this can give - and the launch notice about
+# files left over from the old layout tells the operator to run it.
+link_bin dejima-share
 link_bin dejima-update-check
 
 # Remote access (opt-in, see docs/remote-access.md). All three are inert
@@ -123,9 +130,14 @@ else
         _starter_extra_keys="$(_config_extra_keys_for forge gitea)"
     fi
     # Seeded from any legacy variables still exported, so the one-time
-    # migration is a review rather than a retyping. Everything else is
-    # written commented-out at its schema default, so the file doubles as
-    # the reference for what can be set.
+    # migration is a review rather than a retyping.
+    #
+    # Only what is seeded. This file used to carry every key commented out at
+    # its schema default, so it doubled as the reference - which meant a second
+    # copy of the defaults, in comments nothing regenerates, drifting against
+    # the schema as keys were added. defaults.conf beside it is that reference
+    # now, complete and rewritten by every ./install.sh, and this file holds
+    # only what the operator has actually decided.
     {
         printf '# dejima configuration. See README.md.\n'
         printf '# Every key below is shown at its default; uncomment to change one.\n'
@@ -147,11 +159,6 @@ else
             [ -n "$_key" ] || continue
             _leaf="${_key##*.}"
             _sec="${_key%.*}"
-            _default="$(config_default "$_key")"
-            if [ "$_sec" != "$_section" ]; then
-                printf '\n[%s]\n' "$_sec"
-                _section="$_sec"
-            fi
             _seed=""
             case "$_key" in
                 forge.gitea.ssh_host)      _seed="${GITEA_SSH_HOST:-}" ;;
@@ -179,15 +186,28 @@ else
                     [ -n "${XDG_DATA_HOME:-}" ] && _seed="$XDG_DATA_HOME/dejima/baselines"
                     ;;
             esac
-            if [ -n "$_seed" ]; then
-                printf '%s = %s\n' "$_leaf" "$_seed"
-            else
-                printf '# %s = %s\n' "$_leaf" "$_default"
+            [ -n "$_seed" ] || continue
+            # The header is written with the first key that lands under it, so
+            # a section nothing seeded leaves no empty stanza behind.
+            if [ "$_sec" != "$_section" ]; then
+                printf '\n[%s]\n' "$_sec"
+                _section="$_sec"
             fi
+            printf '%s = %s\n' "$_leaf" "$_seed"
         done < <(_config_keys; [ -z "$_starter_extra_keys" ] || printf '%s\n' "$_starter_extra_keys")
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 fi
+
+# The pinned defaults, rebuilt: keys this release added appended, keys it
+# retired dropped, everything already decided left where it is. This is the
+# only place that reports a shipped default having moved, because this is when
+# it moves - you pulled and re-ran this. A launch checking would be a standing
+# condition in front of every one.
+# The blank line is the rebuild's, not this script's: on a run with nothing to
+# add, drop or report it says nothing, and an unconditional `echo` here left a
+# second blank line between two paragraphs that were already separated.
+config_defaults_rebuild
 
 # Guard registration, after the starter config above rather than before it:
 # where dejima's guards go, and in what shape, is the selected harness's
@@ -195,8 +215,11 @@ fi
 # Registering before reading it would mean writing one harness's config for
 # an operator who has chosen another.
 #
-# Delegated to the harness's plugin, which is also what gates each guard on
-# the harness having declared it (see `guards` in its manifest).
+# Nothing to register: the sandbox's hooks are baked into the image and
+# registered per launch into its own settings overlay. What is delegated to
+# the plugin is the host-side cleanup an upgrade needs - taking back what
+# older versions wrote into the harness's config - which still has to know
+# which harness is selected.
 echo
 source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # A config that does not parse leaves config_get empty for EVERY key, so
@@ -205,20 +228,20 @@ source "$SCRIPT_DIR/bin/dejima-harness-lib.sh"
 # fault, on stderr, which is the answer to a question this cannot answer.
 _harness=""
 if config_exists && ! config_validate; then
-    echo "$CONFIG_FILE could not be read, so no guard hooks were registered."
+    echo "$CONFIG_FILE could not be read, so no harness host-side setup was checked."
     echo "Fix what is reported above and re-run ./install.sh."
 elif ! _harness="$(config_get core harness 2>/dev/null)" || [ -z "$_harness" ]; then
     _harness=""
-    echo "No [core] harness is set in $CONFIG_FILE, so no guard hooks were"
-    echo "registered. Set one and re-run ./install.sh."
+    echo "No [core] harness is set in $CONFIG_FILE, so no harness host-side"
+    echo "setup was checked. Set one and re-run ./install.sh."
 else
     DEJIMA_HARNESS_NAME="$_harness"
     harness_plugin_load "$_harness"
     if declare -F harness_register_guards >/dev/null 2>&1; then
-        echo "Registering $_harness's guard hooks"
+        echo "Checking $_harness's host-side setup"
         harness_register_guards "$SCRIPT_DIR" "$BACKUP_DIR"
     else
-        echo "Harness '$_harness' installs no guard hooks."
+        echo "Harness '$_harness' needs nothing on the host."
         echo
     fi
 fi

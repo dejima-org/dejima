@@ -29,6 +29,17 @@ npm:cline
 
 apt:tmux
 apt:bats
+
+# What `bats --jobs` needs. CI runs every suite with
+# `--jobs $(nproc) --no-parallelize-across-files`, so without this a sandbox
+# cannot run the suites the way they are actually run - and the failure is
+# quiet in the worst way: bats exits with "Cannot execute N jobs without GNU
+# parallel" and produces no test output at all, so a check that greps for
+# `not ok` reads a suite that never ran as a suite that passed.
+#
+# Debian's `parallel` IS GNU parallel. moreutils ships a different binary of
+# the same name and conflicts with it; bats needs this one.
+apt:parallel
 # The other half of what CI runs. The CI job installs it itself, so without
 # this line a sandbox is the one place the gate cannot be run at all - and a
 # base image that happens to carry it is not a guarantee, as one that stopped

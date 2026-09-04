@@ -28,8 +28,10 @@
 #                        to a forge here.
 #   DEJIMA_FORGE_REPO    the "<owner>/<name>" of the repository the session
 #                        was launched against, and DEJIMA_FORGE_REPO_FLAGS /
-#                        DEJIMA_FORGE_REPO_ENV the spellings this forge's CLI
-#                        accepts for naming a different one.
+#                        DEJIMA_FORGE_REPO_ENV / DEJIMA_FORGE_REPO_PATHS the
+#                        spellings this forge's CLI accepts for naming a
+#                        different one: a flag, an environment variable, and a
+#                        path segment under a named subcommand.
 #   DEJIMA_FORGE_REAL_DIR  where the real CLIs live, behind the shadow.
 set -u
 
@@ -44,7 +46,8 @@ fi
 # Outside a dejima container, or with nothing to do, this is a pass-through.
 if [ -z "${DEJIMA:-}" ] ||
    { [ -z "${DEJIMA_MERGE_BLOCK:-}" ] && [ -z "${DEJIMA_DISCLOSE:-}" ] &&
-     [ -z "${DEJIMA_FORGE_REPO_FLAGS:-}" ] && [ -z "${DEJIMA_FORGE_REPO_ENV:-}" ]; }; then
+     [ -z "${DEJIMA_FORGE_REPO_FLAGS:-}" ] && [ -z "${DEJIMA_FORGE_REPO_ENV:-}" ] &&
+     [ -z "${DEJIMA_FORGE_REPO_PATHS:-}" ]; }; then
     exec "$real" "$@"
 fi
 
@@ -120,7 +123,8 @@ fi
 # Refused rather than skipped when the launch resolved no repository at all: a
 # workspace with no origin has nothing for --repo to legitimately name, and
 # "cannot confirm" is not a reason to let it through.
-if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ] || [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ]; then
+if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ] || [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ] ||
+   [ -n "${DEJIMA_FORGE_REPO_PATHS:-}" ]; then
     refuse_repo() {
         echo "Blocked by dejima's forge guard: this session was launched against ${DEJIMA_FORGE_REPO:-no repository}, and $1 names '$2'. Act on the repository the sandbox mounts." >&2
         exit 1
@@ -154,19 +158,70 @@ if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ] || [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ];
                         ;;
                     "$flag"=*) value="${arg#*=}" ;;
                     *)
-                        # A one-dash flag may carry its value with no
-                        # separator - `-Rowner/name` - which two-dash flags do
-                        # not do.
+                        # One-dash flags only; a two-dash flag carries its
+                        # value with `=` or as the next argument, both above.
                         case "$flag" in
-                            --*) continue ;;
                             -?) ;;
                             *) continue ;;
                         esac
-                        case "$arg" in "$flag"?*) value="${arg#"$flag"}" ;; *) continue ;; esac
+                        # Short flags cluster, so the letter can sit anywhere
+                        # in one: `-Rowner/name`, `-wR owner/name` and
+                        # `-wRowner/name` all name a repository and none of
+                        # them is `-R` as its own argument (#243). Split at the
+                        # letter the way getopt does - what follows it in the
+                        # same argument is the value, and nothing following it
+                        # means the next argument is.
+                        letter="${flag#-}"
+                        # A cluster, not a value that happens to start with a
+                        # dash: one dash, then the letter somewhere in a run of
+                        # letters. Without the second check, `--search foo-R/x`
+                        # style arguments would be mined for flag letters.
+                        case "$arg" in -[!-]*) ;; *) continue ;; esac
+                        rest="${arg#-}"
+                        case "$rest" in *"$letter"*) ;; *) continue ;; esac
+                        case "${rest%%"$letter"*}" in *[!A-Za-z]*) continue ;; esac
+                        value="${rest#*"$letter"}"
+                        if [ -z "$value" ]; then
+                            [ "${#args_left[@]}" -gt 0 ] || continue
+                            value="${args_left[0]}"
+                        fi
                         ;;
                 esac
                 [ -n "$value" ] || continue
                 same_repo "$value" || refuse_repo "$flag" "$value"
+            done
+        done
+    fi
+
+    # A repository named in a path rather than in a flag - `gh api
+    # repos/<owner>/<name>/issues` reaches any repository the token does,
+    # without a --repo anywhere in it (#243).
+    #
+    # Only when the declared subcommand is argv's first word. The alternative
+    # is inspecting every positional that contains two slashes, which would
+    # refuse `gh issue create --title repos/a/b` - and a false refusal costs an
+    # honest agent a working command, which is the wrong way for a fast-fail to
+    # be wrong.
+    if [ -n "${DEJIMA_FORGE_REPO_PATHS:-}" ] && [ "$#" -gt 0 ]; then
+        read -ra repo_paths <<< "$DEJIMA_FORGE_REPO_PATHS"
+        for spec in "${repo_paths[@]}"; do
+            [ "$1" = "${spec%%:*}" ] || continue
+            segment="${spec#*:}"
+            for arg in "$@"; do
+                case "$arg" in -*) continue ;; esac
+                # gh substitutes {owner} and {repo} from the checkout, so a
+                # path carrying them names this repository by construction and
+                # comparing the literal braces would refuse it.
+                case "$arg" in *'{'*) continue ;; esac
+                path="${arg#/}"
+                case "$path" in "$segment"/*/*) ;; *) continue ;; esac
+                path="${path#"$segment"/}"
+                owner="${path%%/*}"
+                path="${path#*/}"
+                name="${path%%/*}"
+                [ -n "$owner" ] && [ -n "$name" ] || continue
+                same_repo "$owner/$name" \
+                    || refuse_repo "the path '$arg'" "$owner/$name"
             done
         done
     fi

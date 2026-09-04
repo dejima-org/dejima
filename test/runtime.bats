@@ -49,7 +49,10 @@ compose_cap_add() {
     ' "$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
 }
 
-IMAGE=dejima:latest
+# localhost/ for the same reason bin/dejima uses it: a bare name is a Docker
+# Hub name to anything that pushes, and nothing built here is meant to leave
+# the host (#53).
+IMAGE=localhost/dejima:latest
 
 # What a session actually runs: the base image plus the selected harness's own
 # layer, built in setup_file. Exported there because bats re-runs this file's
@@ -74,6 +77,29 @@ network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 # constant one turns any failed run into a failing run afterwards, on a
 # long-lived runner, until someone clears it by hand.
 test_container_name() { echo "dejima-test-$1-$(basename "$BATS_RUN_TMPDIR")"; }
+
+# The Anthropic arrangement, in one place.
+#
+# dejima-credential-proxy defaults none of this any more (#171): which upstream,
+# which credential kind, which header and what shape are all the caller's to
+# state, because a default is one backend's arrangement wearing every
+# backend's name. Three copies of the same eight flags in this file would be
+# three places for them to drift from what bin/dejima actually launches, so
+# there is one - and static.bats pins that bin/dejima still passes the same set.
+#
+# Sets PROXY_PID, which every caller's teardown already kills.
+start_credential_proxy() {  # <socket> <credentials> <upstream> <oauth-endpoint>
+    "$BATS_TEST_DIRNAME/../bin/dejima-credential-proxy" \
+        --socket "$1" --credentials "$2" --upstream "$3" \
+        --credential-kind anthropic-oauth \
+        --oauth-endpoint "$4" \
+        --oauth-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+        --auth-header Authorization \
+        --auth-format "Bearer {token}" \
+        --strip-header x-api-key \
+        --ensure-header "anthropic-beta=oauth-2025-04-20" &
+    PROXY_PID=$!
+}
 
 # Every container here must go on network_name(), never the default bridge:
 # dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
@@ -165,11 +191,19 @@ harness_manifest_value() {
     sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../harnesses/claude-code/harness.conf"
 }
 
+# The same, for the selected model backend. proxied_domain lives off the
+# harness manifest onto this one (#171): a harness reaches whichever endpoint
+# it is configured for, so the name the terminator answers for belongs to the
+# endpoint rather than to the program talking to it.
+backend_manifest_value() {
+    sed -n "s/^$1 *= *//p" "$BATS_TEST_DIRNAME/../backends/anthropic/backend.conf"
+}
+
 # The selected harness's image layer, on top of $1, tagged for this run so
 # teardown_file's sweep finds it. Prints the new tag.
 build_harness_layer() {
     local base="$1" tag df ctx
-    tag="dejima-test-harness:$(basename "$BATS_RUN_TMPDIR")"
+    tag="localhost/dejima-test-harness:$(basename "$BATS_RUN_TMPDIR")"
     df="$(mktemp)"
     # An empty build context, for the reason bin/dejima uses one: a build
     # whose context is a directory anything else can write is a way into the
@@ -321,6 +355,37 @@ setup_file() {
     done < <(docker ps -a --filter name=^dejima-test- --filter status=exited \
                  --filter status=created --format '{{.Names}}' 2>/dev/null)
 
+    # And the images this suite builds - harness, override, derived - which
+    # nothing reaps across runs (#26). The per-test teardown removes only the
+    # CURRENT run's suffix, so an abandoned run's images have no reaper at all.
+    # They hold no subnet, so this is disk rather than the network's kind of
+    # harm; it is also the largest thing here by disk, since each is built
+    # FROM the session image.
+    #
+    # Same age guard as above, for the same reason: a concurrent run's images
+    # are minutes old. The prefix is checked again on the name rather than
+    # trusted to the CLI filter, so the reap can only ever reach this suite's
+    # own namespace.
+    local _img _born _suffix
+    _suffix="$(basename "$BATS_RUN_TMPDIR")"
+    while IFS= read -r _img; do
+        [ -n "$_img" ] || continue
+        # Both spellings, because the images this suite builds were renamed to
+        # localhost/ (#53) after this reap was written against the bare form,
+        # and for two releases it therefore matched nothing. A reap whose
+        # pattern stops matching is not a reap that fails - it is one that
+        # silently does nothing, which is indistinguishable from having
+        # nothing to do, so nothing anywhere reported it.
+        #
+        # Matching both is also what stops the next rename doing it again.
+        case "$_img" in dejima-test-*|localhost/dejima-test-*) ;; *) continue ;; esac
+        case "$_img" in *":$_suffix") continue ;; esac
+        _born="$(docker image inspect -f '{{.Created}}' "$_img" 2>/dev/null)" || continue
+        _born="$(date -d "$_born" +%s 2>/dev/null)" || continue
+        [ "$(( $(date +%s) - _born ))" -gt "$REAP_AFTER" ] || continue
+        docker rmi -f "$_img" >/dev/null 2>&1 || true
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)
+
     docker network create "$network" >/dev/null
 
     # No DEJIMA_FORGE_HOSTS/LOKI_URL: this suite only asserts the default
@@ -360,7 +425,7 @@ setup_file() {
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null
 
@@ -407,7 +472,7 @@ teardown() {
         docker rm -f "$c" >/dev/null 2>&1 || true
     done < <(docker ps -a --filter "name=^dejima-test-.*$suffix\$" \
                  --format '{{.Names}}' 2>/dev/null)
-    docker images -q "dejima-test-*:$suffix" 2>/dev/null \
+    docker images -q "localhost/dejima-test-*:$suffix" 2>/dev/null \
         | xargs -r docker rmi -f >/dev/null 2>&1 || true
 }
 
@@ -420,7 +485,7 @@ dexec_node() {
 }
 
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
-    local test_image="dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
+    local test_image="localhost/dejima-test-override:$(basename "$BATS_RUN_TMPDIR")"
     local test_container="$(test_container_name override)"
     local sandbox_dir="$BATS_TEST_DIRNAME/../docker"
     local repo_root="$BATS_TEST_DIRNAME/.."
@@ -601,7 +666,7 @@ dexec_node() {
     # on, so a bypass of the /etc/hosts pin that resolves the name by DNS gets
     # no address. When the proxy is off (kill switch or API-key auth), DNS is
     # the only path to the API and fixed-domains.sh allowlists it. This file's
-    # shared container runs with no SANDBOX_ANTHROPIC_PROXY_SOCKET, so it is
+    # shared container runs with no SANDBOX_CREDENTIAL_PROXY_SOCKET, so it is
     # in proxy-off mode and the name must resolve.
     run dexec dig +short api.anthropic.com
     [ -n "$output" ]
@@ -1256,17 +1321,16 @@ EOF'
     cat > "$TD/credentials.json" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
-        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$TD/credentials.json" \
+        "http://127.0.0.1:$(cat "$TD/port")" \
+        "http://127.0.0.1:$(cat "$TD/port")/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     # UnixStreamServer binds at umask default, so the socket lands 755, and
     # connecting to a unix socket needs *write* permission on it. In the real
     # flow the connecting uid is the one that bound it, so that is fine;
     # under CI it is root binding and node connecting, and the whole chain
     # this test follows fails at its first hop. Widened rather than left to
-    # dejima-anthropic-proxy, which has no such problem in production.
+    # dejima-credential-proxy, which has no such problem in production.
     # Unconditional: if the loop above timed out, "No such file" here says so
     # more clearly than a test that fails on a bare false condition.
     chmod 666 "$TD/proxy.sock"
@@ -1277,9 +1341,9 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
-        -e SANDBOX_ANTHROPIC_TRANSPORT=loopback \
+        -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
+        -e SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
@@ -1478,7 +1542,7 @@ EOF
 }
 
 @test "a derived project image gets the package and keeps the base privilege posture" {
-    local derived="dejima-test-derived:$(basename "$BATS_RUN_TMPDIR")"
+    local derived="localhost/dejima-test-derived:$(basename "$BATS_RUN_TMPDIR")"
     local test_container="$(test_container_name derived)"
     local ctx; ctx="$(mktemp -d)"
     local store; store="$(mktemp -d)"
@@ -1535,13 +1599,13 @@ EOF
 @test "live end-to-end: claude -p through the real proxy (RUN_LIVE_API=1 only)" {
     [ "${RUN_LIVE_API:-0}" = "1" ] || skip "set RUN_LIVE_API=1 to hit the real API"
     TD="$BATS_TEST_TMPDIR"
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$HOME/.claude/.credentials.json" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$HOME/.claude/.credentials.json" \
+        "https://api.anthropic.com" \
+        "https://platform.claude.com/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
-    SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_ANTHROPIC_PROXY_PORT=18399 \
-        SANDBOX_ANTHROPIC_TRANSPORT=loopback \
-        node "$BATS_TEST_DIRNAME/../docker/anthropic-proxy-forwarder.js" &
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" SANDBOX_CREDENTIAL_PROXY_PORT=18399 \
+        SANDBOX_CREDENTIAL_TRANSPORT=loopback \
+        node "$BATS_TEST_DIRNAME/../docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     sleep 0.5
     run env ANTHROPIC_BASE_URL=http://127.0.0.1:18399 \
@@ -1630,10 +1694,9 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     cat > "$TD/credentials.json" <<EOF
 {"claudeAiOauth":{"accessToken":"real-access-token","refreshToken":"r","expiresAt":$((($(date +%s) + 7200) * 1000)),"refreshTokenExpiresAt":$((($(date +%s) + 86400) * 1000)),"scopes":[],"subscriptionType":"max","rateLimitTier":"default"}}
 EOF
-    "$BATS_TEST_DIRNAME/../bin/dejima-anthropic-proxy" \
-        --socket "$TD/proxy.sock" --credentials "$TD/credentials.json" \
-        --upstream "http://127.0.0.1:$(cat "$TD/port")" &
-    PROXY_PID=$!
+    start_credential_proxy "$TD/proxy.sock" "$TD/credentials.json" \
+        "http://127.0.0.1:$(cat "$TD/port")" \
+        "http://127.0.0.1:$(cat "$TD/port")/v1/oauth/token"
     for _ in $(seq 1 50); do [ -S "$TD/proxy.sock" ] && break; sleep 0.1; done
     # See the loopback test above for why this chmod is here.
     chmod 666 "$TD/proxy.sock"
@@ -1645,8 +1708,8 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_PROXY_SOCKET="$TD/proxy.sock" \
-        -e SANDBOX_HARNESS_PROXIED_DOMAIN="$(harness_manifest_value proxied_api_domain)" \
+        -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         -v "$TD:$TD" \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE" >/dev/null
@@ -1656,7 +1719,7 @@ EOF
     # the image's ENV, not from the entrypoint process's exported environment.
     # The session command itself is a child of the entrypoint and does inherit
     # it - which is what the /proc/1/environ check below confirms.
-    run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-anthropic-tls/cert.pem \
+    run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-credential-tls/cert.pem \
         "$container" node -e '
         fetch("https://api.anthropic.com/v1/messages", {method: "POST", body: "{}"})
           .then(r => r.text()).then(t => { console.log(t); })
@@ -1750,7 +1813,7 @@ EOF
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e SANDBOX_ANTHROPIC_TRANSPORT=Loopback \
+        -e SANDBOX_CREDENTIAL_TRANSPORT=Loopback \
         --entrypoint /usr/local/bin/entrypoint.sh \
         "$SESSION_IMAGE"
     exit_code=$status
@@ -1781,7 +1844,7 @@ EOF
     }
 
     [ "$exit_code" = "1" ] || dump "expected the container to exit 1"
-    [[ "$logs" == *"SANDBOX_ANTHROPIC_TRANSPORT is set to 'Loopback'"* ]] \
+    [[ "$logs" == *"SANDBOX_CREDENTIAL_TRANSPORT is set to 'Loopback'"* ]] \
         || dump "the transport check never ran - something aborted the entrypoint before it"
     [[ "$logs" == *"'tls'"* ]] || dump "the refusal did not name the valid values"
     [[ "$logs" == *"'loopback'"* ]] || dump "the refusal did not name the valid values"

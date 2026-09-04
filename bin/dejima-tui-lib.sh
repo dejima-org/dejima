@@ -13,37 +13,16 @@
 #
 # Sourced, never run.
 
-# The names are carried so a wrong hex is catchable by reading.
+# The palette is dejima-color-lib.sh's, and there is only one of it. This file
+# used to carry a second, in hardcoded gruvbox truecolor, which collided with
+# that one on C_OK and C_WARN and broke on any background dejima does not own -
+# see the comment there for the contrast measurements that decided it.
 #
-# Truecolor only: a terminal without it, or tmux without `Tc`, approximates
-# 38;2 to its nearest colour rather than printing the escape, so the fallback
-# already exists one layer down.
-#
-# Empty unless stdout is a colour-capable terminal, which keeps --list a
-# machine interface (ttyd feeds run ids back in) and is also how the bats
-# suite reads this script.
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
-    C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'
-    C_BADGE=$'\033[38;2;254;128;25m'    # bright_orange #fe8019, the wordmark
-    C_TEXT=$'\033[38;2;235;219;178m'    # light1        #ebdbb2
-    C_MUTED=$'\033[38;2;146;131;116m'   # gray_245      #928374
-    C_SUBTLE=$'\033[38;2;124;111;100m'  # dark4         #7c6f64
-    C_RULE=$'\033[38;2;80;73;69m'       # dark2         #504945, separator
-    C_OK=$'\033[38;2;184;187;38m'       # bright_green  #b8bb26, success
-    C_WARN=$'\033[38;2;250;189;47m'     # bright_yellow #fabd2f, warning
-    C_ERR=$'\033[38;2;251;73;52m'       # bright_red    #fb4934, error
-    C_LINK=$'\033[38;2;131;165;152m'    # bright_blue   #83a598
-    GLYPH_BAR='▏'; GLYPH_DOT='●'; GLYPH_RULE='─'
-else
-    C_OFF=""; C_BOLD=""; C_BADGE=""; C_TEXT=""; C_MUTED=""; C_SUBTLE=""
-    C_RULE=""; C_OK=""; C_WARN=""; C_ERR=""; C_LINK=""
-    # Glyphs ride the same switch rather than a separate UTF-8 probe. Not
-    # because no-colour implies no-UTF-8, but because the two terminals this
-    # has to stay readable on - a $TERM the host has no entry for, and a pipe -
-    # are exactly the ones that mangle box drawing, and one flag is easier to
-    # reason about than two.
-    GLYPH_BAR='|'; GLYPH_DOT='*'; GLYPH_RULE='-'
-fi
+# Sourced and initialised here rather than left to the caller, because both
+# callers draw to stdout and this file's functions assume the names exist.
+# shellcheck source=dejima-color-lib.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/dejima-color-lib.sh"
+color_init 1
 
 # The rule under the heading, the width of the heading itself. Built rather
 # than written out because the heading is now the caller's: two literals kept
@@ -58,6 +37,33 @@ tui_rule() {
 }
 
 # "dejima | <subtitle>", underlined to its own width.
+# A blank screen to draw a front door on, scrollback included.
+#
+# The picker is reached by navigating to it - the web toolbar's SESS button is
+# a full page load - and it drew on top of whatever the previous session had
+# left on screen, so the rows arrived interleaved with the tail of the session
+# just left. Over SSH it was invisible, because a fresh connection to the
+# forced command usually starts on an empty screen (#213).
+#
+# 3J as well as 2J: without it a swipe up on a phone lands in the middle of
+# the previous session's output, which is the same confusion one gesture away.
+#
+# Its own function rather than part of tui_banner, because dejima-allow's
+# picker must NOT do this: that one is a prompt inside a shell the operator is
+# already using, and wiping their scrollback to ask one question is worse than
+# the interleaving this fixes.
+#
+# Rides the same switch as the colour and the glyphs, for the reason stated
+# above them: one flag is easier to reason about than two, and the terminals
+# that mangle box drawing are the ones these bytes should not reach either. So
+# NO_COLOR turns this off as well - a reading of it this file has already
+# committed to, and the alternative is a picker that answers to two different
+# ideas of "plain".
+tui_clear() {
+    [ -n "$C_OFF" ] || return 0
+    printf '\033[H\033[2J\033[3J'
+}
+
 tui_banner() {
     local subtitle="$1"
     printf '\n  %s%sdejima%s %s%s%s %s%s%s\n' \

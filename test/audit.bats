@@ -629,10 +629,21 @@ EOF
     printf 'keep = 10\n' >> "$CONFIG_DIR/config"
     snap; git -C "$WS" config user.name changed
     chmod 500 "$AUDITDIR/$slug"
-    run timeout 5 "$AUDIT" compare "$WS" "$STATE"
+    # The subject is FOREVER, not fast. Rotation trims oldest-first and breaks
+    # when the unlink fails; without that break the loop's condition never
+    # changes and it spins. Any finite bound catches that, so the bound is
+    # generous on purpose: a five-second one was timing the machine, and on a
+    # loaded one a correct run exceeded it and reported a spin that had not
+    # happened (#295).
+    run timeout 120 "$AUDIT" compare "$WS" "$STATE"
     result="$status"
     chmod 700 "$AUDITDIR/$slug"
-    [ "$result" -ne 124 ]
+    [ "$result" -ne 124 ] || { echo "rotation did not terminate"; return 1; }
+    # And it gave up rather than evicting: an unwritable directory means every
+    # planted report is still there. Without this the test says only that the
+    # command exited, which a rotation that silently did nothing also satisfies.
+    [ "$(find "$AUDITDIR/$slug" -maxdepth 1 -name '2026-01-01-*.txt' | wc -l)" -eq 12 ] \
+        || { echo "reports were evicted from a directory that cannot be written"; return 1; }
 }
 
 # One `ack` run used to walk one report and exit, saying nothing about the

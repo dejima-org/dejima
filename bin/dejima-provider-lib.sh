@@ -28,29 +28,57 @@ MAX_MANIFEST_LINES=200
 # filling this on first use meant filling it again in every `$(...)` that
 # reached it, which was a fork apiece and hundreds of them per launch.
 _PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-provider_root() {
+# Assigns rather than prints, so a caller reaching it in a loop does not pay a
+# `$( )` fork per call. provider_root below is the printing form for everyone
+# who wants a value in a substitution anyway.
+_provider_root_into() {
     if [ -n "${DEJIMA_PROVIDER_ROOT:-}" ]; then
-        printf '%s' "$DEJIMA_PROVIDER_ROOT"
+        printf -v "$1" '%s' "$DEJIMA_PROVIDER_ROOT"
         return 0
     fi
     # Only the repo path is cached. The test hook is re-read every call, so a
     # test that repoints it mid-process still gets the directory it just set.
     [ -n "$_PROVIDER_ROOT_CACHE" ] || _PROVIDER_ROOT_CACHE="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-    printf '%s' "$_PROVIDER_ROOT_CACHE"
+    printf -v "$1" '%s' "$_PROVIDER_ROOT_CACHE"
 }
 
-_provider_axis_dir() {
-    case "$1" in
-        forge)    printf 'forges' ;;
-        workflow) printf 'workflows' ;;
-        harness)  printf 'harnesses' ;;
+provider_root() {
+    local _root
+    _provider_root_into _root
+    printf '%s' "$_root"
+}
+
+# Same assign-instead-of-print split as _provider_root_into, for the same
+# reason: provider_dir is reached once per manifest read.
+_provider_axis_dir_into() {
+    case "$2" in
+        forge)    printf -v "$1" 'forges' ;;
+        workflow) printf -v "$1" 'workflows' ;;
+        harness)  printf -v "$1" 'harnesses' ;;
+        # The model API a session talks to, and how its credential is
+        # presented. Selected per harness rather than in [core], because what
+        # it configures is the credential proxy rather than the shape of the
+        # work (#171).
+        #
+        # "backend" and not "provider", which is what the industry calls a
+        # model API: this repo already calls the axes themselves providers, and
+        # one word for both reads as one thing. A harness's own config keeps
+        # its own vocabulary - cline writes providers.json with a
+        # lastUsedProvider key, and bin/harness/cline.sh translates.
+        backend) printf -v "$1" 'backends' ;;
         # Not an axis in the select-one sense the other three are: a launch
         # enables zero or more tools, and none is the default. It is here
         # because everything else about it is the same - a manifest that is
         # data, validated by the same schema machinery, never sourced.
-        tool)     printf 'tools' ;;
-        *) echo "unknown provider axis: $1" >&2; return 1 ;;
+        tool)     printf -v "$1" 'tools' ;;
+        *) echo "unknown provider axis: $2" >&2; return 1 ;;
     esac
+}
+
+_provider_axis_dir() {
+    local _sub
+    _provider_axis_dir_into _sub "$1" || return 1
+    printf '%s' "$_sub"
 }
 
 _provider_manifest_name() {
@@ -58,6 +86,7 @@ _provider_manifest_name() {
         forge)    printf 'forge.conf' ;;
         workflow) printf 'workflow.conf' ;;
         harness)  printf 'harness.conf' ;;
+        backend) printf 'backend.conf' ;;
         tool)     printf 'tool.conf' ;;
         *) return 1 ;;
     esac
@@ -72,6 +101,18 @@ valid_provider_name() {
     [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]
 }
 
+# `readlink -m` answers memoized per path, because the containment check below
+# resolves the same axis directory once per provider and provider_dir is
+# reached from inside each `$( manifest_get ... )`. What is cached is one
+# path's resolution, not a verdict: every caller still runs the containment
+# comparison and the -d check itself.
+declare -gA _PROVIDER_REAL_CACHE=()
+_provider_resolve_into() {
+    [ -n "${_PROVIDER_REAL_CACHE[$2]+set}" ] \
+        || _PROVIDER_REAL_CACHE["$2"]="$(readlink -m "$2")"
+    printf -v "$1" '%s' "${_PROVIDER_REAL_CACHE[$2]}"
+}
+
 # Resolved once per root+axis+name. The two readlinks are the containment
 # check, and it is called on every manifest read; keying the cache on the
 # resolved root rather than just the name is what keeps a test that repoints
@@ -79,19 +120,19 @@ valid_provider_name() {
 declare -gA _PROVIDER_DIR_CACHE=()
 provider_dir() {
     local axis="$1" name="$2" sub root axis_root dir_real id
-    sub="$(_provider_axis_dir "$axis")" || return 1
+    _provider_axis_dir_into sub "$axis" || return 1
     if ! valid_provider_name "$name"; then
         echo "invalid $axis name: $name" >&2
         return 1
     fi
-    root="$(provider_root)"
+    _provider_root_into root
     id="$root:$axis:$name"
     if [ -n "${_PROVIDER_DIR_CACHE[$id]+set}" ]; then
         printf '%s' "${_PROVIDER_DIR_CACHE[$id]}"
         return 0
     fi
-    axis_root="$(readlink -m "$root/$sub")"
-    dir_real="$(readlink -m "$root/$sub/$name")"
+    _provider_resolve_into axis_root "$root/$sub"
+    _provider_resolve_into dir_real "$root/$sub/$name"
     case "$dir_real/" in
         "$axis_root"/*) ;;
         *)  echo "refusing $axis '$name': it resolves outside $axis_root" >&2
@@ -122,15 +163,26 @@ _config_extra_type_valid() {
     esac
 }
 
-provider_list() {
-    local axis="$1" sub entry name
-    sub="$(_provider_axis_dir "$axis")" || return 1
-    for entry in "$(provider_root)/$sub"/*/; do
+# Fills _PROVIDER_LIST_OUT rather than printing, so the warm-up at the bottom
+# of this file can walk all three axes without a `$( )` fork apiece.
+declare -ga _PROVIDER_LIST_OUT=()
+_provider_list_into() {
+    local axis="$1" sub root entry name
+    _PROVIDER_LIST_OUT=()
+    _provider_axis_dir_into sub "$axis" || return 1
+    _provider_root_into root
+    for entry in "$root/$sub"/*/; do
         [ -d "$entry" ] || continue
-        name="$(basename "$entry")"
+        name="${entry%/}"
+        name="${name##*/}"
         valid_provider_name "$name" || continue
-        printf '%s\n' "$name"
+        _PROVIDER_LIST_OUT+=("$name")
     done
+}
+
+provider_list() {
+    _provider_list_into "$1" || return 1
+    [ "${#_PROVIDER_LIST_OUT[@]}" -eq 0 ] || printf '%s\n' "${_PROVIDER_LIST_OUT[@]}"
 }
 
 # Manifest schema. Same three-column shape as the config table: key, type,
@@ -151,6 +203,7 @@ issue_command	?command
 merge_block	?command
 repo_flags	?list:flag
 repo_env	?identifier
+repo_paths	?list:repopath
 identity_keys	?list:identifier
 disclose	?disclosures
 keys	?list:keyspec
@@ -183,12 +236,60 @@ EOF
 requires	?list:identifier
 push	bool	on
 blocked_branches	?list:identifier
-block_merge	bool	off
+block_merge	bool	on
 requires_worktree	bool	off
 autonomy	enum:commit|push-branch|open-pr	commit
 briefing	?relpath
 EOF
             ;;
+        # credential = none is an endpoint that needs no credential - a model
+        # the operator serves. There is nothing to withhold, so no proxy runs
+        # and neither upstream nor proxied_domain applies: the session reaches
+        # it directly, and where it is comes from the operator's own
+        # [backend.<name>] base_url rather than from the manifest. Both are
+        # optional for that reason and bin/dejima requires them where they do
+        # apply.
+        #
+        # api_style is which dialect the endpoint speaks, and it is a property
+        # of the API rather than of any harness: Anthropic's Messages API and
+        # an OpenAI-compatible one are different wire formats, so a harness
+        # that can only speak one has to know which it is being pointed at
+        # before it writes its own configuration.
+        #
+        # A model API and how its credential is presented. Every field here
+        # is an argument bin/dejima-credential-proxy already takes (#171):
+        # this axis is what turns "the caller states the arrangement" into
+        # "a file states it", so adding a backend is adding a directory.
+        #
+        # Nothing here is a secret. A backend declares WHERE its credential
+        # is read from, never what it is - the file it names is read
+        # host-side per request and never mounted.
+        #
+        # WHERE a credential sits is the operator's, so credential_field is
+        # a `keys` entry rather than a manifest key. A key is not always the
+        # whole file - Claude Code's console login keeps its key as
+        # primaryApiKey in ~/.claude.json, beside unrelated app state - and
+        # the same static arrangement serves a bare key file with the field
+        # cleared. Two placements of one credential, not two backends.
+        backend) cat <<'EOF'
+upstream	?url
+proxied_domain	?hostname
+api_style	enum:anthropic|openai
+credential	enum:static|anthropic-oauth|none
+auth_header	identifier	Authorization
+auth_format	authformat	Bearer {token}
+strip_headers	?list:identifier
+ensure_headers	?list:headerpair
+oauth_endpoint	?url
+oauth_client_id	?identifier
+keys	?list:keyspec
+requires	?list:identifier
+EOF
+            ;;
+        # api_styles is which of those dialects this harness can speak. A
+        # launch pairing it with a backend it has no client for is refused at
+        # launch rather than failing later with well-formed requests in the
+        # wrong shape.
         harness) cat <<'EOF'
 install	?depspec
 image_dirs	?list:homepath
@@ -197,8 +298,8 @@ image_env	?list:envpair
 command	identifier	claude
 command_path	?path
 api_domains	?list:hostname
-proxied_api_domain	?hostname
 guards	?list:identifier
+api_styles	?list:identifier
 briefing_args	?args
 briefing_path	?homepath
 no_confirm_args	?args
@@ -207,6 +308,7 @@ keys	?list:keyspec
 resume_command	?template
 transcript_update	enum:append|rewrite	append
 briefing	?relpath
+assumed_backend	?provider:backend
 EOF
             ;;
         *) return 1 ;;
@@ -302,6 +404,42 @@ _provider_valid_value() {
             # the guard would be comparing a word that could just as well be a
             # subcommand or a value.
             [[ "$value" =~ ^--?[A-Za-z0-9][A-Za-z0-9-]*$ ]]
+            ;;
+        repopath)
+            # A repository named in a path rather than in a flag:
+            # `<subcommand>:<first path segment>`, as in `api:repos` for
+            # `gh api repos/<owner>/<name>/...`.
+            #
+            # Scoped to a subcommand because the alternative is comparing every
+            # positional argument that happens to contain two slashes, and a
+            # false refusal on an issue title is worse than the miss - this is
+            # a fast-fail, so a wrong yes costs an honest agent a working
+            # command. The guard applies it only when the subcommand is argv's
+            # first word.
+            case "$value" in *:*) ;; *) return 1 ;; esac
+            local sub="${value%%:*}" seg="${value#*:}"
+            [[ "$sub" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 1
+            [[ "$seg" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+            ;;
+        authformat)
+            # How the credential is written into its header. "{token}" rather
+            # than a scheme name, so a provider wanting a bare key or a prefix
+            # of its own needs no code - and required, because a format
+            # without it produces a proxy that starts, answers, and sends
+            # every request unauthenticated. The proxy checks this too; a
+            # manifest that cannot be loaded is the better place to find out.
+            case "$value" in *"{token}"*) ;; *) return 1 ;; esac
+            _provider_valid_value text "$value"
+            ;;
+        headerpair)
+            # NAME=VALUE for ensure_headers, where NAME is a header rather
+            # than an environment variable - lower case and dashes are the
+            # norm (anthropic-beta), which is exactly what envpair refuses.
+            case "$value" in *=*) ;; *) return 1 ;; esac
+            local hname="${value%%=*}" hvalue="${value#*=}"
+            [ -n "$hname" ] && [ -n "$hvalue" ] || return 1
+            _provider_valid_value identifier "$hname" || return 1
+            _provider_valid_value identifier "$hvalue"
             ;;
         relpath)
             # Joined to a provider directory, so no absolute paths and no
@@ -496,12 +634,45 @@ manifest_validate() {
 #
 # Failures are ignored: a missing or unreadable directory is not this loop's
 # to report, and provider_dir refuses it again when something asks.
-for _axis in forge workflow harness; do
-    for _name in $(provider_list "$_axis" 2>/dev/null); do
-        provider_dir "$_axis" "$_name" >/dev/null 2>&1 || true
+#
+# One `readlink -m` for every path rather than two per provider. It takes
+# several operands and prints one resolved path per line, so the warm-up costs
+# a single process instead of one per directory - which is most of what
+# sourcing this file costs, and is paid by every `bin/dejima` invocation and
+# every test that drives the library in a fresh shell. The batch only fills
+# the resolution cache; provider_dir still does its own containment check
+# against what it finds there.
+_provider_warm_dirs() {
+    local axis sub root name path i=0
+    local -a axes=() names=() paths=() lines=()
+    _provider_root_into root
+    for axis in forge workflow harness backend; do
+        _provider_axis_dir_into sub "$axis" || continue
+        paths+=("$root/$sub")
+        _provider_list_into "$axis" || continue
+        for name in "${_PROVIDER_LIST_OUT[@]}"; do
+            axes+=("$axis")
+            names+=("$name")
+            paths+=("$root/$sub/$name")
+        done
     done
-done
-unset _axis _name
+    mapfile -t lines < <(readlink -m -- "${paths[@]}" 2>/dev/null)
+    # A path containing a newline would desync the one-line-per-operand
+    # pairing. Nothing shipped can produce one - names are validated and the
+    # root comes from `pwd` - but a mismatched count means the pairing cannot
+    # be trusted, so the batch is dropped rather than cached wrong. provider_dir
+    # then resolves each path itself, exactly as it would have.
+    if [ "${#lines[@]}" -eq "${#paths[@]}" ]; then
+        for path in "${paths[@]}"; do
+            _PROVIDER_REAL_CACHE["$path"]="${lines[$i]}"
+            i=$((i + 1))
+        done
+    fi
+    for i in "${!names[@]}"; do
+        provider_dir "${axes[$i]}" "${names[$i]}" >/dev/null 2>&1 || true
+    done
+}
+_provider_warm_dirs
 
 _manifest_parse() {
     local axis="$1" name="$2" dir="$3" id="$4" file line key value type line_count
@@ -596,13 +767,44 @@ manifest_get() {
 # `wc -l`, both to avoid a subshell/external-process fork per manifest line:
 # this runs once per key in a [forge.<name>]/[harness.<name>] section, on
 # every config_validate pass that has not already been answered from cache.
+# Cached, and that is a correctness fix as well as a speed one (#284).
+#
+# Speed: this is reached once per key of a [forge.<name>]/[harness.<name>]
+# section on every config_validate pass, and each miss re-reads the manifest
+# and revalidates the whole keys list - a fork per element for the keyspec
+# parse.
+#
+# Correctness: dejima-conversation-ship re-resolves its transcript paths from
+# a SIGTERM handler, and bash clobbers $? with 128+n when it delivers a pending
+# signal at a command boundary. Measured: _config_valid_value returned 0 and
+# its caller read 143, so the `|| return 1` chain below failed for a manifest
+# that is perfectly valid, the shipper reported "unknown config key" and the
+# last lines of the session's transcript went unshipped. Anything that has
+# already been resolved once is answered from here instead, so the signal
+# handler does no work that a spurious status can fail.
+#
+# Keyed on the resolved directory rather than the name, like every other cache
+# here, so two roots cannot answer for each other.
+#
+# SUCCESSES ONLY. A remembered refusal was the first shape of this and it is
+# the wrong one: it turns one transient failure into a permanent one, and the
+# symptom is indistinguishable from the bug this exists to fix - a lookup that
+# worked at startup failing for the rest of the process. Nothing here is
+# expensive enough to be worth remembering a "no" for.
+declare -gA _PROVIDER_KEYS_CACHE=() _PROVIDER_KEYS_SEEN=()
+
 _provider_keys_field() {
-    local axis="$1" name="$2" dir file line key value="" seen=0 type n=0
+    local axis="$1" name="$2" dir file line key value="" seen=0 type n=0 id
     # An unselected axis contributes no keys - a different question from
     # whether a selection is valid. Without this, --print-config prints
     # "invalid harness name:" and fails at the thing it is for.
     [ -n "$name" ] || return 1
     dir="$(provider_dir "$axis" "$name")" || return 1
+    id="$axis:$dir"
+    if [ -n "${_PROVIDER_KEYS_SEEN[$id]+set}" ]; then
+        printf '%s' "${_PROVIDER_KEYS_CACHE[$id]}"
+        return 0
+    fi
     file="$dir/$(_provider_manifest_name "$axis")"
     [ -f "$file" ] || return 1
     type="$(_manifest_type "$axis" keys)" || return 1
@@ -620,8 +822,39 @@ _provider_keys_field() {
         seen=1
     done < "$file"
     [ "$seen" = 1 ] || value="$(_manifest_default "$axis" keys)"
+    # Core's own key on every backend section, appended rather than declared
+    # by each manifest. Whether to withhold a credential is dejima's question,
+    # not the backend author's, and a backend that forgot to declare it would
+    # silently lose the setting.
+    #
+    # No default, deliberately: unset means "whatever [credentials] proxy
+    # says", which is a third state that on/off cannot carry. See
+    # backend_proxy_enabled.
+    [ "$axis" != backend ] || value="${value:+$value }proxy:?bool"
     _provider_valid_value "$type" "$value" || return 1
+    _PROVIDER_KEYS_CACHE[$id]="$value"
+    _PROVIDER_KEYS_SEEN[$id]=ok
     printf '%s' "$value"
+}
+
+# Is the credential proxy on for this backend?
+#
+# [backend.<name>] proxy, falling back to [credentials] proxy. Per backend
+# because the global switch has the wrong blast radius: an operator with one
+# backend the proxy cannot serve had to disable withholding for every backend,
+# including the ones it serves perfectly.
+#
+# Deliberately not config_get_bool, which reports an UNSET optional key as
+# off. Unset here means "inherit", and reading it as "disabled" would turn the
+# credential proxy off for every backend the moment this key existed.
+backend_proxy_enabled() {  # <backend-name>
+    local v=""
+    [ -n "${1:-}" ] || return 1
+    if config_type "backend.$1.proxy" >/dev/null 2>&1; then
+        v="$(config_get "backend.$1" proxy)"
+    fi
+    [ -n "$v" ] || v="$(config_get credentials proxy)"
+    [ "$v" = on ]
 }
 
 # A section is known only when a provider directory for its name actually
@@ -632,6 +865,7 @@ _config_extra_section_known() {
     case "$section" in
         forge.*)   axis=forge;   name="${section#forge.}" ;;
         harness.*) axis=harness; name="${section#harness.}" ;;
+        backend.*) axis=backend; name="${section#backend.}" ;;
         # An identity is the operator's own name for a set of credentials, so
         # there is no directory to check it against - only that it is a name
         # at all. Unlike a provider, an unused one is not a misconfiguration:
@@ -680,6 +914,174 @@ _identity_key_specs() {
     done
 }
 
+# The pinned defaults file, rendered. Every key that HAS a default, at the
+# value this release ships, grouped by section.
+#
+# Keys with no default are deliberately absent, because there is nothing to
+# pin: they are the ones an operator must supply, and "has no line in
+# defaults.conf" is exactly what docs/configuration.md marks as required. The
+# document and the file agree by construction rather than by someone keeping
+# them in step.
+#
+# EVERY installed provider, not only the selected one. Pinning just the
+# harness in use would leave the next one an operator selects handing them
+# ITS current defaults - the same failure one axis over, a year later, when
+# nothing about their config changed.
+# $1: "keep" to take a value already pinned in defaults.conf over the shipped
+# one, which is what a rebuild does - it adds keys and drops retired ones
+# without moving anything already decided. Empty renders the shipped defaults,
+# which is what a first pin does.
+config_defaults_render() {
+    local keep="${1:-}" key type default axis name spec section last=""
+    printf '# dejima'"'"'s own defaults, pinned when this machine first saw each key.\n'
+    printf '#\n'
+    printf '# NOT yours to edit - ./install.sh rewrites it, keeping the values already\n'
+    printf '# here so a release cannot move a setting you never chose. Put your own\n'
+    printf '# settings in %s, which overrides everything below and which\n' "$(config_path)"
+    printf '# dejima never writes.\n'
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        default="$(config_default "$key")" || continue
+        [ -n "$default" ] || continue
+        [ "$keep" = keep ] && [ -n "${_CFG_BASE_SEEN[$key]+x}" ] \
+            && default="${_CFG_BASE_VAL[$key]}"
+        section="${key%.*}"
+        [ "$section" = "$last" ] || { printf '\n[%s]\n' "$section"; last="$section"; }
+        printf '%s = %s\n' "${key##*.}" "$default"
+    done < <(_config_keys_core_sorted)
+    for axis in forge harness backend; do
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            last=""
+            for spec in $(_provider_keys_field "$axis" "$name" 2>/dev/null); do
+                IFS=$'\t' read -r key type default <<< "$(_provider_keyspec_parse "$spec")"
+                [ -n "$default" ] || continue
+                [ "$keep" = keep ] && [ -n "${_CFG_BASE_SEEN[$axis.$name.$key]+x}" ] \
+                    && default="${_CFG_BASE_VAL[$axis.$name.$key]}"
+                [ -n "$last" ] || { printf '\n[%s.%s]\n' "$axis" "$name"; last=1; }
+                printf '%s = %s\n' "$key" "$default"
+            done
+        done < <(provider_list "$axis" 2>/dev/null)
+    done
+}
+
+# The core schema's keys with their sections kept together, so the rendered
+# file groups rather than repeating a header per key. The schema's own order
+# is otherwise preserved: it is the order docs/configuration.md follows.
+_config_keys_core_sorted() {
+    local key member seen=" " sect
+    local -a keys=()
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        keys+=("$key")
+    done < <(_config_table | cut -f1 | grep -E '^[a-z-]+\.[a-z_]+$')
+    for key in "${keys[@]}"; do
+        sect="${key%.*}"
+        case "$seen" in *" $sect "*) continue ;; esac
+        seen="$seen$sect "
+        for member in "${keys[@]}"; do
+            [ "${member%.*}" = "$sect" ] && printf '%s\n' "$member"
+        done
+    done
+}
+
+# Rebuild the pinned file: keys this release added appended, keys it retired
+# dropped, and every value already decided left exactly as it was.
+#
+# Both halves fall out of rendering with "keep" rather than being two rules
+# somebody has to remember, and pruning is not the tidier half: an unknown key
+# is one this dejima cannot read, so a file that only ever grew would collect
+# them until the notice about it became permanent.
+#
+# Prints what it did, and what has drifted - a shipped default that no longer
+# matches the pinned one - naming both values and the line that would adopt
+# it. It does not adopt it. That would be dejima writing a decision into a
+# session's behaviour on an upgrade, which is the thing this exists to stop.
+config_defaults_rebuild() {
+    local path tmp key section leaf pinned shipped
+    local added=0 dropped=0 drifted=0
+    path="$(config_defaults_path)"
+    _config_parse_defaults "$path"
+    dropped="$_CFG_BASE_STALE"
+    mkdir -p "$(dirname "$path")" || return 1
+    tmp="$(mktemp "$path.XXXXXX")" || return 1
+    config_defaults_render keep > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp"
+
+    # Counted from the rendered file rather than guessed at: a key with no
+    # line in the old one is a key this release added.
+    while IFS= read -r key; do
+        [ -n "${_CFG_BASE_SEEN[$key]+x}" ] || added=$((added + 1))
+    done < <(_config_defaults_keys "$tmp")
+
+    if [ ! -e "$path" ]; then
+        mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+        printf '\nPinned this release'"'"'s defaults in %s.\n' "$path"
+        return 0
+    fi
+    mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+
+    # Each line carries the blank one before it, so a rebuild with nothing to
+    # say prints nothing at all rather than a gap where a message would go.
+    [ "$added" -eq 0 ] || printf '\nPinned %s new default(s) in %s.\n' "$added" "$path"
+    [ "$dropped" -eq 0 ] || printf '\nDropped %s retired line(s) from %s.\n' "$dropped" "$path"
+
+    # Drift, last, because it is the part that asks something of the operator.
+    while IFS= read -r key; do
+        [ -n "${_CFG_BASE_SEEN[$key]+x}" ] || continue
+        pinned="${_CFG_BASE_VAL[$key]}"
+        shipped="$(config_default "$key")" || continue
+        [ "$pinned" = "$shipped" ] && continue
+        [ "$drifted" -eq 0 ] && {
+            printf '\ndejima ships a different default now for %s:\n' "$path"
+        }
+        drifted=$((drifted + 1))
+        section="${key%.*}"; leaf="${key##*.}"
+        printf '  [%s] %s: yours stays %s, dejima now ships %s\n' \
+            "$section" "$leaf" "$pinned" "$shipped"
+    done < <(_config_defaults_keys "$path")
+    [ "$drifted" -eq 0 ] || {
+        printf '\nYours are kept, so nothing about your sandbox changed. To take one,\n'
+        printf 'write it in %s under its section - never in the file above.\n' "$(config_path)"
+    }
+    return 0
+}
+
+# "section.key" for each line of a rendered defaults file, in file order.
+_config_defaults_keys() {
+    awk '
+        /^\[/ { s = $0; gsub(/^\[|\]$/, "", s); next }
+        /^[a-z_]+ = / && s != "" { split($0, p, " = "); print s "." p[1] }
+    ' "$1"
+}
+
+# Write it if it is not there. dejima's own file, so dejima creating it is not
+# the kind of write this whole arrangement removes - it is the opposite of
+# one. Without it the pin would exist only for operators who ran ./install.sh,
+# and dejima runs perfectly well from a checkout without it.
+#
+# Present is left alone: no rebuild, no prune, no drift check. Those belong to
+# ./install.sh, which is when the shipped defaults actually change. Doing them
+# per launch would put a standing condition in front of every one.
+#
+# Prints one line, and only when it creates the file.
+config_defaults_ensure() {
+    local path tmp
+    path="$(config_defaults_path)"
+    [ -e "$path" ] && return 0
+    mkdir -p "$(dirname "$path")" || return 0
+    tmp="$(mktemp "$path.XXXXXX")" || return 0
+    if config_defaults_render > "$tmp" 2>/dev/null; then
+        chmod 600 "$tmp"
+        mv "$tmp" "$path" || { rm -f "$tmp"; return 0; }
+        printf 'Pinned dejima'"'"'s current defaults in %s so a later release cannot move them.\n' \
+            "$path" >&2
+    else
+        rm -f "$tmp"
+    fi
+    return 0
+}
+
 # Looks up one [forge.<name>]/[harness.<name>] key's TYPE<TAB>DEFAULT in that
 # provider's `keys` manifest entry instead of a row hardcoded in core.
 _config_extra_spec() {
@@ -687,6 +1089,7 @@ _config_extra_spec() {
     case "$want" in
         forge.*)   axis=forge ;;
         harness.*) axis=harness ;;
+        backend.*) axis=backend ;;
         identity.*)
             rest="${want#identity.}"
             key="${rest#*.}"
@@ -872,7 +1275,7 @@ identity_validate() {
     # "once" that a session could not reach, and a deprecation nobody sees
     # until removal is not a deprecation.
     if config_is_set core ssh_key; then
-        printf '  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
+        printf '\n  %s[core] ssh_key is deprecated%s - it is [identity.default] ssh_key\n' \
             "${C_WARN:-}" "${C_RESET:-}" >&2
         printf '  under its old name.\n' >&2
         if [ -n "$name" ]; then
@@ -888,8 +1291,10 @@ identity_validate() {
         # force it answers with THAT identity's key - and printing it as the
         # thing to move would name a key the operator is not being asked to
         # touch.
-        printf '      [identity.default]\n      ssh_key = %s\n\n' \
+        printf '      [identity.default]\n      ssh_key = %s\n' \
             "$(_config_get_from_file core ssh_key)" >&2
+        # Worth a pause before the build scrolls it away - see bin/dejima.
+        DEJIMA_STARTUP_NOTICE=1
     fi
 
     [ -n "$name" ] || return 0
@@ -1274,10 +1679,12 @@ the user's machine, with
 
 What this means:
 - The workspace directory is bind-mounted read-write and is the real
-  project. ~/shared is also a real, persistent host directory (not part of
-  the project) - use it to hand the user a file (a screenshot, a temp
-  script) without touching the project checkout, or to pick up something
-  they left there for you. Your harness keeps its own state on the host too,
+  project. ~/shared is also a real, persistent host directory (this
+  project's own, and not part of its checkout) - use it to hand the user a
+  file (a screenshot, a temp script) without touching the project checkout,
+  or to pick up something they left there for you. It outlives this session
+  and every session against this project shares it, so treat what is in it
+  as readable by all of them. Your harness keeps its own state on the host too,
   so this session's transcript outlives the container - the work is
   recoverable on the host with the command at the end of this
   briefing.{{writable_mounts}} Everything else is disposable: installed system
@@ -1433,8 +1840,6 @@ If a task genuinely needs something else the sandbox can't provide -
 broader network access than a domain or two, host-level or system changes,
 GUI/hardware access - stop and explain clearly to the user what you need
 and why, instead of trying to work around the firewall or sandbox yourself.
-They can continue this exact session outside the container by running on
-the host:
 BRIEFING_EOF
 }
 
@@ -1788,9 +2193,11 @@ briefing_compose() {
     # The harness fragment closes the briefing: it supplies both the resume
     # command closing_a has just promised and the sentence about where the
     # session history it resumes from actually lives. Both are the harness's
-    # own facts - Claude Code resumes from a bind-mounted ~/.claude, Cline
-    # from a per-project state directory named in the command itself - and
-    # core stating either one meant stating Claude Code's.
+    # own facts, INCLUDING whether there is anything to say. Claude Code
+    # resumes from a bind-mounted ~/.claude and says so; Cline cannot be
+    # resumed outside dejima at all, and a core sentence promising it could
+    # was Claude Code's fact stated as everyone's - which left a Cline session
+    # able to send its operator somewhere that does not work.
     #
     # $requirements and $project_doc (the missing-dependency report and
     # .dejima.md) stay hook-computed and hook-appended after this - they read

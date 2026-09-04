@@ -34,7 +34,13 @@ services:
     # $SANDBOX_IMAGE lets bin/dejima point a run at a derived,
     # per-project image instead, without this build ever producing one
     # under that name itself - see bin/dejima.
-    image: ${SANDBOX_IMAGE:-dejima:${SANDBOX_USER:-node}}
+    # localhost/ so this can never resolve to Docker Hub: Docker reads a first
+    # component containing a dot or colon, or exactly "localhost", as a
+    # registry host, and a bare `dejima:node` is `docker.io/library/dejima:node`
+    # to anything that pushes (#53). bin/dejima holds the same prefix in
+    # SANDBOX_IMAGE_REPO and passes it in; this default is for a compose
+    # invocation by hand.
+    image: ${SANDBOX_IMAGE:-localhost/dejima:${SANDBOX_USER:-node}}
     # Run tini as PID 1 so orphaned processes get reaped. Without it PID 1 is
     # the session's own command (claude, or nvim under SANDBOX_NVIM_CONFIG),
     # which never reaps: every process-substitution child the test suite and
@@ -131,10 +137,11 @@ services:
       # The names this harness needs reachable, and the one its credential
       # proxy stands in front of - see docker/fixed-domains.sh.
       SANDBOX_HARNESS_DOMAINS: ${SANDBOX_HARNESS_DOMAINS:-}
-      SANDBOX_HARNESS_PROXIED_DOMAIN: ${SANDBOX_HARNESS_PROXIED_DOMAIN:-}
+      SANDBOX_BACKEND_PROXIED_DOMAIN: ${SANDBOX_BACKEND_PROXIED_DOMAIN:-}
       SANDBOX_HARNESS_BRIEFING_ARGS: ${SANDBOX_HARNESS_BRIEFING_ARGS:-}
       SANDBOX_HARNESS_BRIEFING_PATH: ${SANDBOX_HARNESS_BRIEFING_PATH:-}
       SANDBOX_HARNESS_SEED: ${SANDBOX_HARNESS_SEED:-}
+      SANDBOX_HARNESS_STAGED_EMPTY: ${SANDBOX_HARNESS_STAGED_EMPTY:-}
       # Opt-in escape hatch from the default hard GitHub-push block - see
       # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}
@@ -162,8 +169,12 @@ services:
       # empty - and unset by entrypoint.sh - otherwise.
       ANTHROPIC_BASE_URL: ${SANDBOX_ANTHROPIC_BASE_URL:-}
       ANTHROPIC_AUTH_TOKEN: ${SANDBOX_ANTHROPIC_AUTH_TOKEN:-}
-      SANDBOX_ANTHROPIC_PROXY_SOCKET: ${SANDBOX_ANTHROPIC_PROXY_SOCKET:-}
-      SANDBOX_ANTHROPIC_TRANSPORT: ${SANDBOX_ANTHROPIC_TRANSPORT:-}
+      # The placeholder an API-billing session authenticates with. The real key
+      # never enters the container; the host-side proxy swaps this for it per
+      # request, exactly as it does for a subscription login's token.
+      ANTHROPIC_API_KEY: ${SANDBOX_ANTHROPIC_API_KEY:-}
+      SANDBOX_CREDENTIAL_PROXY_SOCKET: ${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}
+      SANDBOX_CREDENTIAL_TRANSPORT: ${SANDBOX_CREDENTIAL_TRANSPORT:-}
     volumes:
       # Mounted at the same absolute path as on the host (rather than a
       # fixed /workspace) so Claude Code's project/session-history keying

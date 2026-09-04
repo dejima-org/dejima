@@ -36,9 +36,9 @@ attached. The two things holding that line are:
 - **[The bind address](#the-bind-address-is-the-one-thing-to-get-right).**
   `ttyd` binds `127.0.0.1` and your proxy must bind one specific LAN
   address - never the wildcard, never a Docker bridge.
-- **Authentication on the proxy.** `ttyd` carries no credential of its own,
-  so a `server` block without `auth_basic` is an unauthenticated host shell
-  for everyone on that network.
+- **[Authentication on the proxy](#authenticating-the-front-door).** `ttyd`
+  carries no credential of its own, so a `server` block that authenticates
+  nothing is an unauthenticated host shell for everyone on that network.
 
 What it does **not** add is a way *out* of a sandbox. Configured as
 described below, a compromised session cannot reach `ttyd`, cannot reach
@@ -321,8 +321,10 @@ and forgotten. What matters in it:
 
 - **Authentication on every server block.** `ttyd` is started with no
   credential of its own, because the loopback bind means only this host can
-  reach it - the proxy is the entire gate. A block without `auth_basic` is
-  an unauthenticated host shell on your network.
+  reach it - the proxy is the entire gate. A block that authenticates nothing
+  is an unauthenticated host shell on your network. The example uses HTTP
+  Basic; [Authenticating the front door](#authenticating-the-front-door) is
+  what that costs and what else meets the requirement.
 - **A `default_server` that refuses.** nginx picks a server block by
   SNI/`Host`, and when nothing matches it serves the **default** for that
   listen address - which, if the front door is the only block on it, is the
@@ -344,6 +346,60 @@ and forgotten. What matters in it:
   line in `ttyd`'s log.
 - **A long `proxy_read_timeout`.** An attached terminal sits idle for hours;
   nginx's default is 60 seconds.
+
+**The page carries its own colours.** dejima's terminal output uses indexed
+colour so your terminal's theme fills the slots - but a browser has no theme
+to inherit, so the front door is handed gruvbox explicitly: all sixteen ANSI
+slots plus background, foreground and cursor. Without it xterm.js draws with
+its own defaults, and the same session looks one way over SSH and another in
+the browser. `bin/dejima-ttyd` sets it, and `web/src/page.css` carries the
+same values for the chrome around it.
+
+## Authenticating the front door
+
+`ttyd` binds loopback and carries no credential, so whatever sits in front of
+it is the entire gate. The requirement is that it authenticates **every
+request to every server block, the default one included** - not that it is any
+particular software. These are the shapes that meet it, roughly in order of
+how much they change.
+
+**A network the public internet cannot reach.** Tailscale, WireGuard, or any
+VPN that puts the listener on an interface nothing outside can route to.
+First because it removes the exposure rather than authenticating it, because
+it composes with everything below, and because for a lot of readers it is both
+the simplest answer and the strongest. It does not replace [the bind
+address](#the-bind-address-is-the-one-thing-to-get-right): a VPN interface is
+still one specific address to bind, and the wildcard is still wrong.
+
+**HTTP Basic**, which is what the example config shows. One shared credential,
+no per-operator identity, no second factor, revocation that means editing
+`htpasswd`, and an access log that cannot tell two people apart. For a solo
+operator that is a reasonable trade, and worth saying that it is one; for
+anyone else it is the first thing to replace. It also sends the password on
+every request, which is why TLS is not optional here.
+
+**Client certificates.** `ssl_client_certificate` and `ssl_verify_client on`
+in the same block. Per-device identity, revocable through a CRL, and nothing
+worth stealing sent on every request. The cost is distribution and renewal,
+and a phone that has to have the certificate installed - the part that will
+bite, and the part that differs per platform.
+
+**A forward-auth proxy.** oauth2-proxy or Authelia via nginx `auth_request`:
+OIDC, per-user identity, and a session cookie rather than a credential on
+every request. Also where passkeys realistically arrive, since the proxy
+handles WebAuthn and `ttyd` never learns about it. The cost is another moving
+piece in the path to a host shell, which is worth naming given what is on the
+other side of it.
+
+**Something you already run.** An identity-aware gateway, or an
+authenticating proxy already in the path. The requirement above is the whole
+of what this document asks of it.
+
+**None of these stops a browser that has already authenticated.** Whatever is
+in front, a page loaded in a session that has passed it can act - which is the
+same property that makes the front door usable from a phone you unlocked an
+hour ago. Authentication decides who gets a shell, not what an already-open
+tab does with one.
 
 ## How it works
 
@@ -397,7 +453,7 @@ guarantee actually lives.
  ════════╪══════════════════ your LAN ══════════════════╪══════════════
  ┌─ your machine, as your user ───────────────────────────────────────┐
  │  nginx, listening on ONE LAN address        sshd                   │
- │   TLS + auth_basic, plus a default_server    authorized_keys with  │
+ │   TLS + auth, plus a default_server          authorized_keys with  │
  │   that refuses every other name              a forced command      │
  │       │                                              │             │
  │       │  proxy_pass http://127.0.0.1:7681            │             │
@@ -486,6 +542,46 @@ nvim split separator resizes the split. Neither needs any server-side
 configuration - they are stock tmux and nvim behaviour; the page's only
 contribution is delivering the drag.
 
+### A scroll gesture jumps too far, and the amount is tmux's
+
+A scroll gesture is sent as wheel notches, one per row of finger travel. What a
+notch is then worth belongs to whoever receives it, and this page is not it:
+when the pane is scrolling its own history, tmux is.
+
+**Find out what yours does before changing anything:**
+
+```sh
+tmux list-keys -T copy-mode-vi | grep WheelUpPane
+```
+
+Stock tmux scrolls five lines (`send-keys -X -N 5 scroll-up`), which is a fifth
+of a desktop terminal and better than half a phone one. A configuration that
+binds `halfpage-up` instead - a common enough idiom that it is worth naming -
+scrolls half the pane, so twenty lines in a forty-line one. That is the case
+this section exists for: on a phone it throws the screen on the smallest
+movement of a thumb, and placing a particular line takes several tries.
+
+Set it to a few lines, in your own `~/.tmux.conf`:
+
+```tmux
+bind -T copy-mode-vi WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode-vi WheelDownPane select-pane \; send -X -N 4 scroll-down
+bind -T copy-mode    WheelUpPane   select-pane \; send -X -N 4 scroll-up
+bind -T copy-mode    WheelDownPane select-pane \; send -X -N 4 scroll-down
+```
+
+Both tables, because which one is active follows `mode-keys`. `scroll-up` takes
+no amount of its own, so the `-N` repeat count is the amount. It applies to
+every client of that tmux server, phone and desktop alike - which is the reason
+it is not something dejima sets for you: `dejima-attach` joins the tmux session
+you launched from, and its configuration is yours.
+
+Nothing in dejima can make the step smaller from this side. The page can only
+choose how many notches to send, and sending fewer means dragging further for
+each one - which trades a jumpy scroll for a stiff one rather than fixing
+either. An application reading the mouse directly, rather than through tmux,
+picks its own figure and there is no binding for that at all.
+
 ### Toolbar
 
 ```
@@ -506,7 +602,10 @@ PREFIX  ◀W   W▶   SESS   ZOOM   DRAG   PASTE   KBD
   without closing the tab. It reloads the page without the run-id, which is
   what makes `dejima-attach` show the list again. The session you leave is
   unaffected: each client gets its own tmux session grouped onto the real one,
-  and only that view is reaped when you detach.
+  and only that view is reaped when you detach. The picker arrives on a
+  cleared screen, scrollback included - it is a page load rather than a
+  scroll, so otherwise it draws over the tail of the session you just left and
+  a swipe up lands in the middle of it.
 - `ZOOM` is prefix + `z`, toggling tmux's pane zoom - the fastest way to make
   one pane usable on a small screen.
 - `PASTE` reads the phone's clipboard and sends it, wrapped in bracketed-paste
@@ -686,8 +785,8 @@ cost of losing the correction everywhere else.
 Terminating TLS somewhere else and forwarding here is a supported shape, but
 read this first: it moves the front door out of the LAN threat model
 everything above is written against. If the outer proxy is internet-facing,
-`auth_basic` over TLS is now the only thing between the public internet and
-a host shell. Put something stronger in front of it, and take the
+whatever authenticates it is now the only thing between the public internet
+and a host shell, and HTTP Basic is a thin thing for that to be. Put something stronger in front of it, and take the
 [security notes](security.md) as the floor rather than the ceiling.
 
 The mechanical part has four requirements at the outer hop, and each one
@@ -739,13 +838,20 @@ what the outer proxy sends.
 
 ## Notifications
 
-`dejima` registers `hooks/dejima-notify.sh` as a `Stop` hook for a
-remote-enabled session, into the throwaway settings override layer it already
-generates - never into your real `~/.claude/settings.json`. Your own hooks
-keep running alongside it, since Claude Code merges hooks across layers rather
-than replacing. The layer is mounted read-only, so a session cannot
-unregister its own hook. The hook writes one empty file named `done` into
-this run's marker directory: no content, no stdin, no network.
+**Only for a harness that declares the `notify` guard**, because a
+notification needs a session-lifecycle signal to hang off and not every
+harness has one. Claude Code does; Cline does not, and a remote-enabled Cline
+session gets attach and the web terminal but no push. The launch says which
+guards a harness is going without, so that is visible rather than a
+notification that silently never arrives.
+
+Where it is declared, `dejima` registers `hooks/dejima-notify.sh` as a `Stop`
+hook for a remote-enabled session, into the throwaway settings override layer
+it already generates - never into your real `~/.claude/settings.json`. Your
+own hooks keep running alongside it, since Claude Code merges hooks across
+layers rather than replacing. The layer is mounted read-only, so a session
+cannot unregister its own hook. The hook writes one empty file named `done`
+into this run's marker directory: no content, no stdin, no network.
 
 **One push per stop, and not a second one a minute later.** The hook and the
 watcher both understand a `waiting` event as well, and Claude Code's
@@ -875,7 +981,12 @@ the next one is worth checking.
    with a 404 usually means `ntfy_url` names the server but no topic; a 401
    or 403 means the instance wants credentials, which the URL can carry as
    `https://<user>:<token>@<host>/<topic>` - nothing here sends an auth
-   header of its own.
+   header of its own. That URL is handed to `curl` on stdin rather than as an
+   argument, because every argument of every process on a host is readable by
+   any local account through `/proc/<pid>/cmdline`, and a token in a URL is a
+   token in `ps` output for as long as the request runs. Worth knowing if you
+   reach for `curl -sv "$ntfy_url"` yourself in the next step: that one does
+   put it there, briefly, on a machine you are already logged into.
 5. **Can this host reach the ntfy server at all?** `curl -sv "$ntfy_url"`
    from the host, not from a session. A host-level egress filter this machine
    does not control drops the push with nothing in any log here, and every
@@ -946,3 +1057,180 @@ from shrinking the desktop's view, and the option's only scopes are the
 window - which a grouped session *shares* with yours, so setting it there
 would permanently overwrite your choice with nothing to restore afterwards -
 and global. An operator who deliberately set `smallest` keeps it.
+
+## Mounting the box's files
+
+The front doors above get you a terminal. The other half of working from
+another machine is the files - the screenshots, specs and scratch output a
+session leaves behind - and `sshfs` puts those directories in your own file
+manager and editor over the SSH access you already have.
+
+Read the next section before setting it up. What it costs is not obvious from
+the fact that it is only a filesystem mount, and it is not a cost dejima can
+carry for you: nothing dejima runs is in the path.
+
+### What mounting it costs you
+
+**Every byte and every name in those directories was written by a sandboxed
+session.** That is what they are for - a handoff directory a session cannot
+write to is not a handoff directory - so this is not a defect to fix but the
+surface to know about. dejima sanitises session-authored bytes before
+printing them to your terminal, in `dejima-audit` and `dejima-epitaph`,
+because that is the one surface it controls. A file manager on another
+machine is not that surface, and nothing carries the sanitising there.
+
+**Mounting removes the deciding.** Copying a file off the box when you want
+it is a decision per file. A mount, and especially one a login unit brings up
+for you, means the directory is simply present whenever you are logged in -
+and a desktop does not wait to be asked. A file indexer walks new directories and
+opens what it finds to extract text from PDFs, archives and office documents.
+A thumbnailer decodes images and video frames. A previewer parses on
+selection. Those are image and document parsers, running as you, unsandboxed,
+reached with no click. dejima's whole premise is that the session may be
+hostile; none of that software was written with that assumption about a
+directory on your own disk. This is the [threat
+model](threat-model.md#ranked-by-what-is-actually-likely)'s fifth-ranked item
+with its one bound removed - it is still the operator's side of the handoff,
+but no person decides per file any more.
+
+**Names are session-chosen too, and a desktop renders names.** Control
+characters, bidi overrides, and a long name whose visible tail is not its real
+extension all survive into a file listing. The rule for a terminal applies
+unchanged to a file manager: what is displayed is not evidence of what it is.
+
+**Opening the directory as a project is code execution.** Editors act on
+configuration they find beside the files - `.envrc` for direnv, a `.vscode`
+directory, a project-local `exrc`, a `.git/config` that any later `git`
+command run in that directory honours. A session that can write the directory
+chooses those files as freely as it chooses the screenshots. Pull files out of
+the mount; do not point a project-opening tool at it.
+
+**The mount is read-write, and your desktop uses that.** Thumbnail caches,
+trash directories, editor swap and undo files land in the share, where every
+later session reads them. An editor swap file can hold buffer content from
+the file you had open, and deleting something in a file manager usually moves
+it to a trash directory inside the same mount rather than removing it.
+
+**Symlinks resolve on your machine.** `sshfs` passes a symlink through as a
+symlink, so one a session planted resolves against *your* filesystem: a
+backup job, an indexer, `cp -r` or `rsync -L` pointed at the mount can be led
+out of it and into your own files. `-o follow_symlinks` inverts that by
+resolving them on the box instead, which hands you the box's files rather
+than yours. Neither is what you want, so do not add that option and do not
+point recursive tools at the mount.
+
+**What it does not add is a route inward.** A session cannot see the mount,
+cannot cause one, and gains nothing from the fact that one exists. The ssh
+credential involved already gets you a shell on that box, so it is not a new
+grant either. Everything above is about where session-authored bytes end up,
+which is a machine that appears nowhere in dejima's blast-radius table.
+
+**Keeping it small** is most of the answer, and unmounting is the biggest
+lever: none of the above happens to a directory that is not currently there.
+Then mount the handoff directories rather than the box's home, add `-o ro` for
+one you only ever pull from, exclude the mount point from your indexer's and
+your backup tool's scope, and [clear `share_dir` out
+periodically](configuration.md#shared-scratch-space) - which now means stale
+files on two machines rather than one.
+
+### Setting it up
+
+**Use your ordinary key, not the front-door one.** A `command=` in
+`authorized_keys` replaces whatever the client asked to run, and a
+`subsystem sftp` request is not an exception, so a client offering the phone
+key gets `dejima-attach` where it expected the SFTP protocol and fails
+without explaining itself. Do not relax that key to make this work: the
+forced command is the whole of what makes it safe to leave on a phone. The
+key that already gets you a normal shell on the box is the right one, and it
+grants nothing new here - you had the shell.
+
+**Find the host path first.** `~/shared` is where the *container* sees it; on
+the host it is one project's directory under `[core] share_dir`, which defaults
+to `~/.local/share/dejima/shared` and is not named `shared` at all.
+`dejima --print-config | grep share_dir` on the box prints the resolved root,
+and `dejima-share list` prints what is under it. Mount `<share_dir>/projects`
+to get one directory per project with no loose files mixed in, or a single
+project's directory - `dejima-share path <project>` - to keep the mount to the
+one you actually pull from.
+Anything in `[mounts] read_write` needs no lookup, because those mount at the
+host path they name: `~/specs` in the container is `~/specs` on the box.
+
+```sh
+sshfs box:.local/share/dejima/shared/projects ~/mnt/dejima-shared \
+    -o IdentityFile=/home/<you>/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+    -o Compression=no
+```
+
+`IdentitiesOnly=yes` stops ssh offering every key your agent holds ahead of
+the one you named, which can exhaust the server's `MaxAuthTries` and fail as
+though the key were wrong. `PasswordAuthentication=no` makes an unattended
+mount fail immediately rather than block on a prompt nobody is there to
+answer. The keepalives are what make `reconnect` worth having: they give up
+after about 45 seconds, where a laptop that slept or changed network
+otherwise leaves every `ls` hanging on the kernel's TCP timeout.
+`Compression=no` because screenshots and PDFs are already compressed.
+
+Two additions worth knowing rather than copying. `-o
+Ciphers=aes128-gcm@openssh.com` is faster when both ends have AES-NI, and
+slower when they do not - ssh's default puts `chacha20-poly1305` first
+precisely because it wins on hardware without it. And `-o idmap=user` if your
+account has a different UID on the two machines, or every file arrives owned
+by whoever holds that number locally.
+
+A `Host box` block in `~/.ssh/config` carrying the identity and keepalive
+options keeps all of this to `sshfs box:... ~/mnt/...`, which is worth doing
+once rather than pasting the long form wherever you need it.
+
+**Mount it when you want it, and `fusermount3 -u` when you are done.** Two
+commands is not much friction, and it buys back the thing the section above
+says a mount costs: while it is unmounted there is no directory for an
+indexer to walk or a previewer to open, so the window in which your machine
+acts on session output is one you opened on purpose. Every automatic form
+below trades that away. There is deliberately no `/etc/fstab` line here -
+those run as root, which means a key root can read, root's `~/.ssh/config`
+instead of yours, and `allow_other` before your own account can see inside
+the mount, at which point every account on the machine can too. That is a
+worse deal in every direction than typing `sshfs`.
+
+### On login
+
+**Prefer mounting on demand.** This is here because a mount you have to
+remember is a mount you stop using, not because it is the better answer: an
+always-present directory is exactly the case the cost section is about. Worth
+it for a directory you genuinely work out of, like `~/specs`; not worth it
+for one you look at twice a week.
+
+A **user** service runs as you, so the key in your home directory works
+without being made readable by anyone else. In
+`~/.config/systemd/user/dejima-shared.service`:
+
+```ini
+[Unit]
+Description=dejima shared directory
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/sshfs -f box:.local/share/dejima/shared %h/mnt/dejima-shared \
+    -o IdentityFile=%h/.ssh/id_ed25519,IdentitiesOnly=yes \
+    -o PasswordAuthentication=no \
+    -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
+ExecStop=/bin/fusermount3 -u %h/mnt/dejima-shared
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+`-f` is the load-bearing flag: without it `sshfs` daemonises, systemd watches
+the parent exit and calls the mount a failure. `fusermount3` is the libfuse3
+name, `fusermount` the libfuse2 one. Then
+`systemctl --user enable --now dejima-shared`, and one unit per directory -
+`%h` expands to your home, so the same file with two paths changed covers
+`~/specs`.
+
+`systemctl --user` needs `loginctl enable-linger <you>` if you want the mount
+to survive you logging out, the same requirement `dejima-notify-watch` has.

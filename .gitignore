@@ -1,7 +1,7 @@
 .claude
 web/node_modules
 
-# Python bytecode. bin/dejima-anthropic-proxy is a python program, so anything
+# Python bytecode. bin/dejima-credential-proxy is a python program, so anything
 # that imports or compiles it leaves these beside it.
 __pycache__/
 *.pyc

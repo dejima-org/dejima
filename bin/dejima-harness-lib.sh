@@ -128,6 +128,30 @@ harness_plugin_load() {
     fi
     # shellcheck disable=SC1090
     source "$plugin"
+
+    # Resolve this harness's key schema now, in the caller's own shell.
+    #
+    # A plugin reads its settings through harness_config_get, and its callers
+    # reach it from inside subshells - a process substitution, a pipeline. A
+    # subshell inherits this shell's variables, so warming the cache here means
+    # those never re-derive it; without this they each start cold, because a
+    # cache filled in a subshell dies with it.
+    #
+    # That is a correctness fix and not only a speed one (#284).
+    # dejima-conversation-ship re-resolves its transcript paths from a SIGTERM
+    # handler, and bash reports 128+n for commands completing while it is
+    # delivering a signal - measured, _config_valid_value returned 0 and its
+    # caller read 143. So a perfectly valid manifest was rejected inside the
+    # trap, "unknown config key" was printed, and the tail of the session's
+    # transcript went unshipped. Resolved before any signal is possible, the
+    # handler answers from cache and has nothing left to fail at.
+    #
+    # Failure is ignored on purpose: an unreadable manifest is the caller's to
+    # report when it asks for a value, in its own words, not this function's to
+    # turn into a plugin-load error.
+    if declare -F _provider_keys_field >/dev/null 2>&1; then
+        _provider_keys_field harness "$name" >/dev/null 2>&1 || true
+    fi
 }
 
 # Calls one hook of the loaded plugin, if it defines it. Absence is normal:
@@ -368,9 +392,26 @@ harness_config_dirs_load() {
 DEJIMA_STAGED_CONFIG=()
 
 # host path, and the path under $HOME it is installed at.
+# `ensure` asks for a placeholder at that path in the container when the host
+# has none, so a harness that needs a file to exist gets one without dejima
+# creating it on the operator's machine.
+#
+# Two kinds, because empty is not always a valid file. `ensure` writes nothing;
+# `ensure-json` writes `{}`, and settings.json needs that one - an empty file
+# is not valid JSON, and Claude Code discards a settings.json it cannot parse
+# wholesale, taking every permission, hook and plugin the operator configured
+# with it.
+#
+# Opt-in per file rather than implied: an empty statusline.sh would be
+# installed executable and run as the status line, so that one stays absent.
 emit_staged_config() {
-    local src="$1" rel="$2"
+    local src="$1" rel="$2" ensure="${3:-}"
     [ -n "$src" ] && [ -n "$rel" ] || return 0
+    case "$ensure" in
+        ''|ensure|ensure-json) ;;
+        *) echo "Harness plugin emitted an invalid staged-config flag: $ensure" >&2
+           exit 1 ;;
+    esac
     # The relative path becomes a location under $HOME inside the container.
     # Anything that could climb out of it, or that is not relative at all, is
     # a plugin bug rather than something to normalise quietly.
@@ -379,7 +420,7 @@ emit_staged_config() {
             echo "Harness plugin emitted an invalid staged-config path: $rel" >&2
             exit 1 ;;
     esac
-    DEJIMA_STAGED_CONFIG+=("$src"$'\t'"$rel")
+    DEJIMA_STAGED_CONFIG+=("$src"$'\t'"$rel"$'\t'"$ensure")
 }
 
 harness_staged_config_load() {

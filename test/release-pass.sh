@@ -10,12 +10,42 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-base="${1:-main}"
+# The remote-tracking ref by default, not the local branch. Everything this
+# prints is derived from base..head - the manual checks from which paths the
+# diff touches, the rollback list from which config keys it adds - so a base
+# behind the real one silently reports a different release. That is not
+# hypothetical: two passes ran against a local `main` 260 commits behind
+# origin/main and reported keys and a trust-anchor domain that had shipped
+# releases earlier. A gate answering confidently about the wrong diff is worse
+# than one that does not run.
+base="${1:-}"
+if [ -z "$base" ]; then
+    if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+        base=origin/main
+    else
+        base=main
+    fi
+fi
 head="${2:-HEAD}"
 # Guarded, because everything below is relative to it: a cd that failed
 # silently would have this reporting on some other directory's suites and
 # diff, which for a release gate is the worst way to be wrong.
 cd "$root" || { echo "cannot enter $root" >&2; exit 1; }
+
+# A named base that is behind its own upstream is refused rather than used.
+# Passing `main` explicitly is the ordinary thing to do and is exactly how the
+# stale-base runs happened, so this has to catch the argument as well as the
+# default.
+base_upstream="$(git rev-parse --abbrev-ref --symbolic-full-name "$base@{upstream}" 2>/dev/null || true)"
+if [ -n "$base_upstream" ]; then
+    behind="$(git rev-list --count "$base..$base_upstream" 2>/dev/null || echo 0)"
+    if [ "${behind:-0}" -gt 0 ]; then
+        echo "release-pass: '$base' is $behind commit(s) behind $base_upstream." >&2
+        echo "Everything below is derived from $base..$head, so this would report on" >&2
+        echo "a release that is not the one being made. Fetch, or name $base_upstream." >&2
+        exit 1
+    fi
+fi
 
 case "${1:-}" in
     -h|--help)
@@ -105,6 +135,9 @@ touches '^(harnesses/|bin/harness/|docker/harness-wrapper)' &&
     manual "Launch each affected harness against a real model."
 touches '^(bin/dejima-attach|bin/dejima-ttyd|systemd/)' &&
     manual "Attach over the web front door and detach again."
+touches '^tools/' &&
+    manual "Launch with the affected tool included and use it. A tool is
+       layered into the image and put on PATH; nothing here runs one."
 touches '^\.dejima/allowed-domains$' &&
     manual "A domain here is read from main by the CI hardener and widens every
        future CI job on that runner. Say in the PR what it is for."
@@ -132,8 +165,30 @@ added="$(comm -13 \
 # itself the thing that makes the rollback refuse.
 # The singular is spelled out rather than derived: "harnesses" does not lose
 # an s to become "harness", and a manifest is named for the singular.
+#
+# Every axis there is, and the list is checked against the tree below rather
+# than trusted: the newest axis is exactly the one a hand-kept list misses,
+# because a list is only ever updated by whoever remembers. tools is an axis
+# like the rest - `[core] tools = rtk` on a dejima that does not ship rtk is
+# refused the same way an unknown harness is.
+DEJIMA_RELEASE_AXES="harnesses:harness forges:forge workflows:workflow backends:backend tools:tool"
+# The singular is spelled out above rather than derived - "harnesses" does not
+# lose an s to become "harness", and a manifest is named for the singular - so
+# this is the check that the spelling out has not fallen behind the tree.
+for _d in */; do
+    _d="${_d%/}"
+    case "$_d" in
+        harnesses|forges|workflows|backends|tools) ;;
+        *) continue ;;
+    esac
+    case " $DEJIMA_RELEASE_AXES " in
+        *" $_d:"*) ;;
+        *) fail "$_d/ is a provider axis this script does not check for rollback" ;;
+    esac
+done
+
 new_providers=""
-for pair in harnesses:harness forges:forge workflows:workflow; do
+for pair in $DEJIMA_RELEASE_AXES; do
     axis="${pair%%:*}"
     one="${pair#*:}"
     [ -d "$axis" ] || continue
@@ -144,9 +199,43 @@ for pair in harnesses:harness forges:forge workflows:workflow; do
     done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
 done
 
-if [ -n "$added" ] || [ -n "$new_providers" ]; then
+# And the keys a provider DECLARES, which are config keys an operator writes
+# and an older dejima refuses - but which live in a manifest rather than in
+# core's schema, so the diff above cannot see them. `[harness.claude-code]
+# backend` is one: adopting it is what makes the rollback refuse, and nothing
+# said so.
+new_keys=""
+for pair in $DEJIMA_RELEASE_AXES; do
+    axis="${pair%%:*}"
+    one="${pair#*:}"
+    [ -d "$axis" ] || continue
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        now="$(sed -n 's/^keys *= *//p' "$axis/$name/$one.conf" 2>/dev/null \
+               | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
+        was="$(git show "$base:$axis/$name/$one.conf" 2>/dev/null \
+               | sed -n 's/^keys *= *//p' | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
+        while IFS= read -r k; do
+            [ -n "$k" ] || continue
+            new_keys="$new_keys [$one.$name]|$k"
+        done < <(comm -13 <(printf '%s\n' "$was") <(printf '%s\n' "$now"))
+    done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+done
+
+if [ -n "$added" ] || [ -n "$new_providers" ] || [ -n "$new_keys" ]; then
     [ -z "$added" ] || printf '   %s\n' $added
-    [ -z "$new_providers" ] || printf '   [%s] as a config section\n' $new_providers
+    # How an older dejima refuses a new provider differs by axis, and saying
+    # "as a config section" for all of them was wrong for tools: a tool has no
+    # keys and so no section. It is refused through the value that names it.
+    for entry in $new_providers; do
+        case "$entry" in
+            tool.*) printf '   [core] tools = %s\n' "${entry#tool.}" ;;
+            *)      printf '   [%s] as a config section\n' "$entry" ;;
+        esac
+    done
+    for entry in $new_keys; do
+        printf '   %s %s\n' "${entry%%|*}" "${entry#*|}"
+    done
 else
     echo "   (none - a rollback accepts any config this release accepts)"
 fi

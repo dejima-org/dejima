@@ -44,6 +44,14 @@ than the thing inferred from silence.
   session that loops until someone notices is not prevented, and this is a
   deliberate omission rather than an oversight - see
   [Why there are no timeouts](#why-there-are-no-timeouts).
+- **A suspended job. Ctrl-Z stops the observer, not the session.** It
+  suspends `bin/dejima` on the host; the container keeps running, with its
+  mounts, its firewall grants and its forge token, and keeps making requests
+  while the terminal looks stopped. That is deliberate - SIGSTOP mid-tool-call
+  leaves a session wherever it was, and the feature exists to get the terminal
+  back rather than to pause the work - but a stopped job reads as a paused
+  agent, and the difference matters most to whoever suspends one because they
+  are uneasy about what it is doing.
 - **The first layer's controls against an agent that has stopped
   cooperating.** The briefing and `.dejima.md` are advice. They shape what a
   cooperating agent does and stop nothing that has decided otherwise. Only the
@@ -250,13 +258,30 @@ checkout itself and needs no symlink to edit, so a session with write access
 to this repo's own checkout can change what the next launch composes and
 hands to whichever session starts against it.
 
-The provider directories are in the exit-time audit's TCB list for that
-reason, alongside `bin/`, `hooks/`, `docker/` and `test/`. They hold no code
-and nothing executes them, but what they hold decides what the next launch
-permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`, which
-`entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so a
-line added to a manifest widens the egress boundary on the next run. An
-ordinary edit is a diff you are about to read and is not reported; one git
+**Which requires dejima's own checkout to be the workspace, and almost never
+is.** Nothing mounts `forges/`, `workflows/`, `harnesses/`, `tools/` or the
+rest of the checkout into a container - the resolved values go in, the files
+do not - so for every launch pointed at some other project, a session cannot
+read these paths, let alone write them. The rest of this section is about the
+one configuration where it can: dejima sandboxing the repository it is itself
+installed from, which is how dejima is developed. `bin/dejima` says so at
+launch when it notices.
+
+In that configuration the provider directories are in the exit-time audit's
+TCB list, alongside `bin/`, `hooks/`, `docker/`, `test/` and `tools/`. They
+hold no code and nothing executes them, but what they hold decides what the
+next launch permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`,
+which `entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so
+a line added to a manifest widens the egress boundary on the next run.
+`tools/*/tool.conf` is the same class, and is read by the host rather than the
+container: it names a tarball URL, the sha256 checked against it and the
+layout it is unpacked with, all consumed by the image build - so a session
+that edits one chooses what the next launch downloads and installs as root.
+`backends/*/backend.conf` names the upstream every request is forwarded to and
+the host path the credential is read from, so an edit there redirects where a
+real credential is sent.
+
+An ordinary edit is a diff you are about to read and is not reported; one git
 cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`
 or `skip-worktree` - is a CRITICAL finding. It is still a change a session
 can make; it is one the audit reports. See
@@ -266,29 +291,31 @@ can make; it is one the audit reports. See
 
 - Running the harness with its permission prompts off removes your chance to
   review tool calls before they run. Only point this at trusted repositories.
-- The mounted project itself has **no write protection**. `deny-dangerous-
-  bash.sh`, `git-push-guard.sh` and `merge-guard.sh` are regex
-  pattern-matching on the literal Bash command string - a fast-fail guard
-  against an overeager agent doing something obviously destructive, not a
-  boundary against one that's actively trying to get around them (a
-  different scripting language, an encoded command, editing `.git/config`
-  directly all sail right through).
-  Nothing here stops a compromised or badly-instructed session from
-  modifying or deleting the real working copy it's mounted against.
+- The mounted project itself has **no write protection**. The guards are
+  fast-fail checks against an overeager agent doing something obviously
+  destructive, not a boundary against one actively trying to get around them.
+  `deny-dangerous-bash.sh` is regex pattern-matching on the literal Bash
+  command string, so a different scripting language, an encoded command or
+  editing `.git/config` directly all sail right through. The push and merge
+  guards shadow `git` and the forge CLI on `PATH` and read argv, so quoting
+  and pipelines stop mattering - but a session that means to get round one can
+  call `/usr/bin/git` directly. Nothing here stops a compromised or
+  badly-instructed session from modifying or deleting the real working copy
+  it's mounted against.
 - That same read-write access to the mounted project is also a
   host-code-execution vector, not just a data-destruction one: a
   compromised session could plant `.git/hooks/post-commit` (or
   `pre-push`), set `core.hooksPath`, or write a
   `.claude/settings.local.json` with a malicious hook command, into the
   project. Any of those run unsandboxed on the host the next time you run
-  `git` or open Claude Code in that repo - no network egress required, so
+  `git` or open your harness in that repo - no network egress required, so
   the firewall doesn't see it either. Same underlying persistence pattern
-  as the `~/.claude/hooks` and `~/.claude.json` risks above, just through
+  as the harness config risks above, just through
   the project mount instead of the config mount. "Only point this at
   trusted repositories" (above) covers input trust; this is about the
   sandbox writing a persistence payload into an otherwise-trusted repo.
   The workspace's own `.git/hooks` directory is mounted read-only
-  (same pattern as the `~/.claude` code directories below), so planting a hook
+  (same pattern as the harness's own code directories below), so planting a hook
   file directly is closed - accepted breakage: installing hooks
   *in-session* (`husky`, `pre-commit install`) fails, which is the
   point. `core.hooksPath` and `.claude/settings.local.json` aren't
@@ -473,6 +500,16 @@ approximation of its name.
 
 ## One project's session cannot reach another's
 
+The property is the same for every harness; the mechanism is not, because it
+depends on how the harness keys its own state. Claude Code stores a directory
+per project and dejima mounts a slice of it. Cline stores one flat database
+indexing every session it has ever run, with the project as a field inside the
+record, so there is no slice to take - dejima gives each workspace a data
+directory of its own instead. Both reach the same place: a session sees its
+own project's history and no other's.
+
+### Claude Code: a slice of your own tree
+
 - `~/.claude/projects` (session transcripts and per-project memory) is
   **not** mounted as a tree. A session gets the workspace's own slug
   directory plus one for each live git worktree nested under it,
@@ -526,6 +563,31 @@ approximation of its name.
   That costs undo history for that session if it is later resumed on the
   host, and it is the reason this cannot be scoped as completely as
   `projects/`, where the workspace's own slug is known at launch.
+
+### Cline: a directory dejima owns, one per workspace
+
+- `~/.cline/data` is **not** mounted. Cline indexes every session it has ever
+  run in one `sessions.db`, with the project a session belonged to as a field
+  inside the record rather than a directory above it, so there is no
+  per-project subtree to slice: mounting your data directory would put every
+  project's transcripts in every session, which is this section's whole
+  subject.
+
+  A launch instead creates `<[harness.cline] state_dir>/<workspace slug>` on
+  the host and mounts *that* at `~/.cline/data`. Every session under it belongs
+  to this project by construction rather than by a filter that could be wrong,
+  which is why Cline clears this requirement more cleanly than Claude Code
+  rather than less.
+
+  The cost is that the directory is dejima's rather than yours: a session
+  started inside the sandbox is not offered back to a host-side Cline, and one
+  you started on the host is not visible inside. There is no import or export
+  ([#301](https://gitbox.branderson.io/dejima/dejima/issues/301)), and the
+  briefing tells the session so, so it will not offer you a resume command that
+  cannot work.
+
+### Whichever harness is selected
+
 - Epitaphs - the summary a session leaves when its context is compacted away -
   are kept host-side in `[epitaph] dir`, and that directory is never mounted. A session can neither read what earlier
   sessions concluded nor edit what this one is about to record, which is the
@@ -533,7 +595,184 @@ approximation of its name.
   they are extracted from *is* session-writable, so a summary records what was
   there rather than vouching for it - and nothing loads one back into a later
   session, deliberately: that would be the channel #104 closed, rebuilt.
+- `[core] share_dir` is **not** mounted whole. A launch mounts
+  `<share_dir>/projects/<slug>` at `~/shared`, so a session sees its own
+  project's handoff files and no other project's - the same slicing as
+  `projects/` above, applied to the directory that was the remaining way
+  around it. A handoff file is session-authored by design, and one project's
+  session writing a plausible-looking note that a session in another project
+  then picks up is #104's channel by a different route.
+
+  The per-project split bounds *which* sessions, not *how long*: a project's
+  share persists, so everything in it is readable by every later session
+  against that project. Nothing prunes it, which is why
+  [docs/configuration.md](configuration.md#shared-scratch-space) says to clear
+  it out and `dejima-share list` prints what each project is holding.
+
+  `<share_dir>/projects` is in the guarded list, so an operator cannot hand
+  the whole of it back through `[mounts] readonly` or `[mounts] read_write`.
+  The session's own share arrives at `~/shared` without going through either.
 ## The model API credential never enters the container
+
+### Four arrangements, and what a session can take from each
+
+Which one a launch is in comes from the selected backend's `credential` kind
+and from whether the proxy is on. The differences are worth stating together,
+because only the last one puts a durable credential where a session can read
+it.
+
+| Arrangement | In the container | What a compromised session can take | What it can still do |
+| --- | --- | --- | --- |
+| **Proxied, refreshing** (`credential = anthropic-oauth`) | A fake credential file whose secrets are placeholders. The real one is read host-side per request. | The placeholder. | Use the API as you, through the proxy, while the session runs. |
+| **Proxied, static key** (`credential = static`) | A placeholder key in the harness's own model configuration, and the endpoint's real hostname. | The placeholder. | The same. |
+| **A backend with no credential** (`credential = none`, a model you serve) | Nothing but the endpoint's address. It needs no credential, so there is none to withhold. | Nothing. | Reach that endpoint, which is why it has to be one you allowlisted. |
+| **No proxy** (`[credentials] proxy = off`, or `[backend.<name>] proxy = off`) | The real credential file, mounted. | **The credential itself**, durable and usable offline. | Everything the credential allows, for as long as it is valid. |
+
+**The first three keep the credential out; the fourth does not.** That is the
+whole of the difference, and it is why `proxy = off` is described here as a
+kill switch rather than as an option.
+
+**Both Anthropic billing models are in the first three.** A subscription login
+is `backends/anthropic`, whose OAuth token the proxy refreshes and writes back;
+a console key is `backends/anthropic-api-key`, a static credential against the
+same endpoint presented as `x-api-key` - one backend whether the key came from
+Claude Code's own login or a file you hold. Either way the credential is held on
+the host and injected per request. On the API-key path the container gets
+`ANTHROPIC_API_KEY=sandbox-credential-proxy-placeholder` and no credential file
+at all.
+
+**Only `proxy = off` lands in the fourth row, and only where you wrote it.**
+A credential the selected backend cannot serve - a Claude Code signed in with
+a console API token, whose file holds no `claudeAiOauth` block, against
+`backends/anthropic` - is a refusal, naming the backend, the file, the shape
+it expected and the two ways forward. A kill switch that can engage itself is
+not one, which is why this row is a kill switch rather than an option.
+
+The refusal is scoped to a credential that *exists* and cannot be served. An
+absent one mounts nothing and downgrades nothing - that is a host where the
+harness has not been signed in yet, and it still launches.
+
+**The proxy is switched per backend, not globally.** `[backend.<name>] proxy`
+falls back to `[credentials] proxy` when unset. One backend whose credential
+the proxy cannot serve is then an opt-out for that backend, rather than a
+reason to stop withholding credentials from the ones it serves. Turning it off
+for a backend prints what the session is being given, because it is a
+downgrade the operator chose rather than a setting that happens to be off.
+
+**Everything dejima copies in is scanned for credential-shaped values it does
+not recognise, and an unknown one is a question rather than a surprise.** The
+scanner reports a redacted path, a shape name, the harness and the backend -
+never the value, and never a real path, since a gitconfig can carry userinfo
+in a section header. **Finding it is best effort**: this recognises common
+credential shapes and can miss an unusual one. Removing one it has found is
+not - a value it names is removed whole, including one split across
+continuation lines.
+
+The choice is yours: keep it out for this launch, let it in for this launch,
+let it in every launch, or stop. Only the third persists, in
+`credential-scan.decisions` beside your config, keyed by field rather than by
+value so rotating a credential does not re-ask a question you already
+answered. A standing *scrub* is available there too but is not offered at the
+prompt: removing something the harness turns out to need would break every
+launch after, with the cause several layers from the symptom. With nothing
+attached to answer, the launch stops rather than carrying it in.
+
+This is the general form of the two fixes below, which are denylists and so
+only know what was already found. See
+[#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+#### What the scan does not catch
+
+It recognises the *shape* of a credential, not its meaning, so it is a
+backstop against the class of leak that has actually happened here twice -
+not a guarantee that nothing crosses. Specifically:
+
+- **Values containing whitespace.** Both heuristic rules require one token
+  from a restricted alphabet, because the alternative flags every sentence in
+  a config file: English prose scores 4.0-4.5 bits per character by the same
+  entropy measure a random key does. People do put spaces in passphrases they
+  chose themselves, and one of those would go straight through. It is a
+  deliberate trade and it fits these files, which hold credentials issued to a
+  machine rather than typed by a person.
+- **Short or low-entropy secrets in fields not named like one.** A token that
+  is eight lowercase letters in a field called `nickname` is indistinguishable
+  from a nickname.
+- **Anything in a format it cannot parse.** JSON and INI only. An unparseable
+  file is copied unchecked, and says so at launch rather than being silently
+  trusted or silently blocked.
+- **Anything dejima does not copy.** This covers the files dejima *stages* -
+  `~/.claude.json` and `~/.gitconfig`. It does not read your read-write
+  mounts, the workspace, or anything else you have pointed a session at, and a
+  credential you leave in one of those is not something dejima is looking for.
+
+The value of it is not that it is exhaustive. It is that a credential shape
+dejima has never seen becomes a question at launch instead of a copy nobody
+noticed for a year.
+
+**Two host files are copied into a container, and both are filtered.**
+`~/.gitconfig` can hold a `credential.helper` that prints a token, an
+`http.<url>.extraHeader` carrying an Authorization line, or userinfo inside a
+`url.<...>.insteadOf` key; none of that is part of what the sandbox is
+granted, so the copy drops it and says so. The general problem - that these
+filters are denylists, and a harness's authentication is not a stable
+interface - is [#291](https://gitbox.branderson.io/dejima/dejima/issues/291).
+
+**`~/.claude.json` is staged, not mounted, and the staging strips a
+credential.** That file mixes app state with configuration the copy exists to
+carry, and a Claude Code signed in with a console API token keeps its key
+there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
+`{}` for that login. The copy drops that key, and `backends/anthropic-api-key`
+reads it host-side per request instead. Without it the proxy would
+withhold one file while dejima copied another, on every launch and whatever
+backend was selected.
+
+**The residual the first two share is use-while-running.** A session that has
+been turned can spend your quota, ask the model anything, and read the answers
+- through the proxy, without ever holding the credential. That is inherent to
+the sandbox working at all: the session has to be able to reach the model, and
+anything it can reach it can misuse. What the proxy buys is that the misuse
+stops when the session does, and nothing durable leaves.
+
+**Refreshing and static differ in what a leak elsewhere costs, not in what the
+container sees.** Neither enters it. But an OAuth access token is short-lived
+and the proxy rotates it, while an API key is typically long-lived and
+account-wide - so the host-side file is worth more in the static case, and a
+compromise of the *host* is correspondingly worse. Scope the key at the
+backend where you can, the same argument
+[docs/providers.md](providers.md) makes for a repository-scoped forge token.
+
+**The proxied domain is not in the egress allowlist while the proxy is on.**
+`docker/fixed-domains.sh` adds it only when there is no proxy, so a session
+that tries to reach the API by name finds it unresolvable and goes through the
+terminator instead. Worth being precise about the limit: this defeats a lookup,
+not a route. The API's address stays reachable as an IP literal for as long as
+any other allowlisted name resolves to it.
+
+**A hosted OpenAI-compatible backend is the second arrangement, and it is
+what `backends/openrouter` is.** The key sits in a file on the host, named by
+`[backend.openrouter] credential_file` and read per request; the container
+gets `sandbox-credential-proxy-placeholder` and the endpoint's real hostname,
+which the in-container terminator answers for. Nothing about the arrangement
+is visible to the session, which is the same property the Anthropic path has
+and the reason both are worth having rather than one.
+
+Worth naming what a *hosted* backend adds over Anthropic's OAuth, since it is
+not the container that changes: an API key is typically long-lived and
+account-wide where an access token is short-lived and rotated, so the host-side
+file is worth more. Scope the key at the backend where it offers that, the
+same argument this repository makes for a repository-scoped forge token.
+
+**A backend you serve yourself is the strongest posture available**, and it is
+worth saying so plainly rather than treating it as the degraded one. A session
+pointed at a model on your own network has no credential anywhere in the
+picture, so there is nothing to place, nothing to withhold and nothing to
+steal. What it costs is that the model is yours to run.
+
+It is a backend like any other - `backends/self-hosted`, with
+`credential = none` and its address in `[backend.self-hosted] base_url`. That
+placement is deliberate: an operator who serves a model locally and also uses a
+hosted API keeps both configured and switches by changing one word, rather than
+having to unset one setting to stop it overriding another.
 
 **This assumes the host has one.** dejima authenticates nothing: the proxy
 holds a credential the harness wrote on the host, so a machine where the
@@ -545,11 +784,19 @@ prerequisite. Sign in on the host first; see the README's
 Refreshing an expired credential is the same: on the host, not from inside a
 session, where the credential deliberately never goes.
 
+### The refreshing OAuth path, in detail
+
+The `backends/anthropic` arrangement, at the level of what the proxy actually
+does. The machinery is not Anthropic's - the credential's kind, which header
+carries it, what must not travel beside it are all arguments a backend
+supplies - but it is worth reading through one backend rather than in the
+abstract, and this is the one with the most miles on it.
+
 - The Anthropic OAuth credential (`~/.claude/.credentials.json`) never
   enters the container. It isn't mounted: `~/.claude` is not shared as a
   whole (see the mount inventory below), so there is no path from
   inside the container to that file. `dejima` starts a host-side proxy
-  (`bin/dejima-anthropic-proxy`) on a per-session unix socket and mounts a
+  (`bin/dejima-credential-proxy`) on a per-session unix socket and mounts a
   fake credential in place of the real one - the secrets are placeholders,
   while `scopes`/`subscriptionType`/`rateLimitTier`/`clientId` are copied so
   the session's UI stays accurate. Its expiry is a year out rather than
@@ -557,7 +804,7 @@ session, where the credential deliberately never goes.
   refresh token that isn't real, logging the session out. Inside the
   container,
   `entrypoint.sh` points `api.anthropic.com` at a loopback TLS terminator
-  (`anthropic-proxy-forwarder.js`) whose certificate is generated at startup
+  (`credential-proxy-forwarder.js`) whose certificate is generated at startup
   and trusted only there, and which pipes raw bytes into the proxy's socket.
   The proxy injects the real access token per request and owns OAuth refresh
   - rotated tokens are written back to the real host file atomically, so
@@ -566,7 +813,13 @@ session, where the credential deliberately never goes.
   `ANTHROPIC_AUTH_TOKEN`, nothing marking the session as unusual. The proxy
   forwards the client's header block verbatim - same names, casing, order and
   repeats, and no `Accept-Encoding` it didn't send - changing only
-  `Authorization`, and `anthropic-beta` if the OAuth value isn't there. Left
+  `Authorization`, and `anthropic-beta` if the OAuth value isn't there.
+  Neither of those is a name the proxy holds: which header carries the
+  credential, what shape it takes, what must not travel beside it and which
+  comma-list value has to be present are all arguments, and `bin/dejima`
+  supplies the Anthropic ones (#171). The credential kind is an argument too -
+  a refreshing OAuth file, or a static key that is read and sent - so a
+  backend that cannot be refreshed is not a branch here. Left
   alone, Python's `http.client` would rewrite all of that into its own style
   and move the fingerprint from the client to the wire. It cannot disguise
   that the connection is CPython's `ssl` rather than Node: the TLS handshake
@@ -595,7 +848,7 @@ session, where the credential deliberately never goes.
   after an upgrade, as `UNABLE_TO_VERIFY_LEAF_SIGNATURE`,
   `ERR_TLS_CERT_ALTNAME_INVALID`, or a pin-specific error. What
   distinguishes pinning from a merely broken certificate is that
-  `curl --cacert /etc/dejima-anthropic-tls/cert.pem https://api.anthropic.com/v1/messages`
+  `curl --cacert /etc/dejima-credential-tls/cert.pem https://api.anthropic.com/v1/messages`
   still succeeds from inside the container while Claude Code does not: the
   certificate is fine, the client is refusing it. **This is not a reason to
   set `[credentials] proxy = off`.** That kill switch mounts the real,
@@ -624,7 +877,13 @@ session, where the credential deliberately never goes.
   real credential into the container. Rung one is a supported, tested mode,
   not an improvised workaround; if you reach the third, treat it as a
   temporary state rather than a new baseline.
-## What the container sees of `~/.claude`
+## What the container sees of Claude Code's `~/.claude`
+
+One harness's inventory, because there is no shared one to give: what a
+harness keeps where, and which of it is safe to mount, is the harness's own
+answer and each plugin gives it. Cline's is the table in
+[configuration.md](configuration.md#what-comes-in-from-your-host); the
+reasoning below is what both are built on.
 
 - `~/.claude` is **not** shared with the container as a whole. Its contents
   are enumerated in `docker-compose.yml`, in three classes, and anything not
@@ -647,10 +906,10 @@ session, where the credential deliberately never goes.
     approval step, skills can ship executable scripts, and
     commands/agents/output-styles are prompt text loaded into a later host
     session, so without this a compromised session could plant a backdoored
-    hook - including by unlinking one of `install.sh`'s hook symlinks and
-    dropping a plain file in its place, since the dynamic per-target mounts
-    only protect symlink targets that resolve *outside* `~/.claude`, never
-    this directory itself - tamper with plugin code, or drop a malicious
+    hook - including by unlinking one of your own hook symlinks and dropping a
+    plain file in its place, since the dynamic per-target mounts only protect
+    symlink targets that resolve *outside* `~/.claude`, never this directory
+    itself - tamper with plugin code, or drop a malicious
     skill/command/agent/output-style file. Any of those would then run or
     load **unsandboxed on the host** the next time Claude Code starts
     there, turning a single compromised sandbox session into persistent
@@ -895,11 +1154,13 @@ default:
 - DNS resolution via a local proxy (see "DNS is allowlisted too")
 - the Docker host itself (not its whole subnet)
 - GitHub's published IP ranges, port 443 only (see "GitHub push" below)
-- `registry.npmjs.org` and `platform.claude.com` (the harness and its
-  updates), `release-assets.githubusercontent.com` (GitHub release assets, a
-  separate CDN from github.com's own IPs, and where a good deal of tooling
-  fetches its binaries); `api.anthropic.com` when the credential proxy is off
-  (kill switch or API-key auth)
+- `registry.npmjs.org`, plus whatever the selected harness declares as its own
+  (`platform.claude.com` for Claude Code; Cline declares none, so a session
+  falling back to Cline's hosted endpoints fails to connect, which is the
+  right outcome); `release-assets.githubusercontent.com` (GitHub release
+  assets, a separate CDN from github.com's own IPs, and where a good deal of
+  tooling fetches its binaries); and the selected backend's API endpoint when
+  the credential proxy is off for it
 
   That is the whole built-in list, and it is meant to stay that way: it covers
   what the sandbox itself cannot run without, not what a project might want.
@@ -1013,9 +1274,9 @@ Internal hosts named before the container starts (`[forge.gitea] ssh_host`,
 `api`, `[logging] loki_url`, and any globally or per-project approved domain)
 are already exempted and unaffected by this.
 
-The sandbox-context.sh `SessionStart` hook tells the agent to ask for this
-by name when a task is blocked on a single missing domain, rather than
-stopping the whole session over it.
+The session briefing tells the agent to ask for this by name when a task is
+blocked on a single missing domain, rather than stopping the whole session
+over it.
 
 ### The firewall bounds the container, not the harness
 

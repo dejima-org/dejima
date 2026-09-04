@@ -87,6 +87,7 @@ jobs:
           - config
           - providers
           - conversation
+          - share
     name: confined (${{ matrix.suite }})
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
@@ -163,9 +164,16 @@ jobs:
       # they fail on the terminal rather than on anything they mean to check.
       # xterm-256color ships in ncurses-base, which is Essential - nothing to
       # install. Set on the command rather than in env: so it survives su.
+      #
+      # --jobs runs the tests within the file concurrently. bats needs GNU
+      # parallel only to parallelize ACROSS files; within one file it uses its
+      # own flock-based semaphore, and flock is in util-linux, which Debian
+      # marks Essential - so nothing here has to install anything for it.
+      # --no-parallelize-across-files is what tells bats that, since it
+      # otherwise refuses --jobs outright when GNU parallel is absent.
       - run: |
           chown -R node:node .
-          su node -c "TERM=xterm-256color bats test/${{ matrix.suite }}.bats"
+          su node -c "TERM=xterm-256color bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
 
   shellcheck:
     # Its own job rather than a matrix entry: it installs a different package,
@@ -425,8 +433,18 @@ jobs:
       # SKIP_BUILD below then reuses this image rather than skipping a build.
       # The image is still built fresh from this commit, so the property the
       # test file defaults to - never assert against a stale image - holds.
+      # Named under localhost/ so a stray push cannot resolve to Docker Hub,
+      # like every other image this repo builds (#53).
+      #
+      # This step and runtime.bats must agree on that name, and they come from
+      # different commits: this file is read from the BASE branch (see the
+      # pull_request_target note at the top) while the checkout above is the
+      # branch under test. So a rename here lands in two steps - the base
+      # tagging both names first, then this - and a future one has to do the
+      # same. A single pull request that changes both sides fails, because the
+      # half that runs is the half it did not change.
       - name: Build the sandbox image
-        run: docker build -t dejima:latest -f docker/Dockerfile .
+        run: docker build -t localhost/dejima:latest -f docker/Dockerfile .
 
       - run: bats test/runtime.bats
         env:

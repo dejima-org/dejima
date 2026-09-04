@@ -273,7 +273,7 @@ COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 # Into $VIMRUNTIME/plugin, not /etc/xdg/nvim - see the file's own comment.
 COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua
 COPY docker/entrypoint.sh /usr/local/bin/
-COPY docker/anthropic-proxy-forwarder.js /usr/local/bin/anthropic-proxy-forwarder.js
+COPY docker/credential-proxy-forwarder.js /usr/local/bin/credential-proxy-forwarder.js
 COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
 # The two guards that do not need the harness's help. git-guard shadows git on
 # PATH; forge-guard is linked over a forge CLI by entrypoint.sh when a workflow
@@ -287,6 +287,17 @@ COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
 # entrypoint.sh, which renders the briefing before the session starts - to
 # hand to the harness as an argument, or to write to a file it reads.
 COPY hooks/dejima-briefing-render.sh /usr/local/lib/dejima/dejima-briefing-render.sh
+# dejima's own hooks, for the same reason and one more: they are registered
+# into the sandbox's --settings overlay rather than into the operator's
+# ~/.claude/settings.json, so nothing has to be written to a host config to
+# make the sandbox work. Baked rather than mounted from the checkout because a
+# guard whose script can change under a running session is not one.
+#
+COPY hooks/deny-dangerous-bash.sh /usr/local/lib/dejima/hooks/deny-dangerous-bash.sh
+COPY hooks/sandbox-context.sh /usr/local/lib/dejima/hooks/sandbox-context.sh
+COPY hooks/git-push-guard.sh /usr/local/lib/dejima/hooks/git-push-guard.sh
+COPY hooks/merge-guard.sh /usr/local/lib/dejima/hooks/merge-guard.sh
+COPY hooks/dejima-notify.sh /usr/local/lib/dejima/hooks/dejima-notify.sh
 # Back to root before the first RUN that writes outside /home/node. The npm
 # installs above run as node deliberately; COPY writes as root regardless of
 # USER, so the copies above are unaffected, but the install(1) below is a RUN
@@ -312,7 +323,7 @@ RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr
 # and describes what a page should look like instead of going and seeing.
 RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall

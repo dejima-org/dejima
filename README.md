@@ -45,18 +45,18 @@ starts.
 
 - **An egress allowlist.** DNS and IP, IPv4 and IPv6. Anything not on the
   list does not connect, and the agent is told so.
-- **Credentials that stay on the host.** Your Anthropic OAuth credential
-  never enters the container: a host-side proxy holds it and the container
-  gets a placeholder. Your SSH key doesn't either; the container sees an
-  agent socket, never the key.
+- **Credentials that stay on the host.** Your model credential never enters
+  the container, whichever backend you selected: a host-side proxy holds it
+  and injects it per request, and the container gets a placeholder. Your SSH
+  key doesn't either; the container sees an agent socket, never the key.
 - **Per-project declaration and approval.** A project declares the domains
   and dependencies it needs in `.dejima/`. Declaring is not granting: the
   approval is a separate decision you make on the host, and the approval
   store is never mounted where a session could reach it.
-- **One project's session cannot reach another's.** `~/.claude` is not
-  mounted whole. A session gets its own project's transcripts, memory and edit
-  history and nothing else, so it cannot read what you did elsewhere or write
-  into another project's memory.
+- **One project's session cannot reach another's.** Your harness's state
+  directory is not mounted whole. A session gets its own project's
+  transcripts, memory and edit history and nothing else, so it cannot read
+  what you did elsewhere or write into another project's memory.
 - **CI hardening, because push access is code execution elsewhere.** A session
   opens a pull request, the workflow fires, and your runner executes that
   commit before you've read a line of it. The container bounds what a session
@@ -64,12 +64,17 @@ starts.
   [docs/ci.md](docs/ci.md) for what hardening a runner takes, and
   [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
   for a tool that does it.
-- **Guard rails inside the session.** Hooks refuse obviously destructive
-  commands, pushes to anywhere but the allowed remote, and merging a PR from
-  inside the sandbox. These are fast-fail guards against an overeager agent,
-  not a boundary against a hostile one: the container is the boundary.
+- **Guard rails inside the session.** Pushes to anywhere but the allowed
+  remote, and merging a PR from inside the sandbox, are refused whichever
+  harness is selected - they shadow `git` and the forge CLI on `PATH`. Refusing
+  an obviously destructive command needs a hook the harness can host, so a
+  harness without one goes without it, and the launch says so rather than
+  leaving you to assume. All of these are fast-fail guards against an
+  overeager agent, not a boundary against a hostile one: the container is the
+  boundary.
 - **An exit-time audit** of the host surfaces a session could have written to,
-  so a change to your git config or `~/.claude` does not go unnoticed.
+  so a change to your git config, to the workspace's own agent configuration,
+  or to a file your harness runs on the host does not go unnoticed.
 
 **What it gives an agent to work with:**
 
@@ -83,9 +88,10 @@ starts.
   name - and dejima loads it alongside a briefing on where the session is and
   why the limits are there. An agent that knows it is in a sandbox asks for a
   domain rather than working around the firewall.
-- **Config parity with your host.** `CLAUDE.md`, settings, hooks, plugins and
-  git identity carry over; uid, home directory and project path match on both
-  sides, so a session's transcript is readable from the host afterward.
+- **Config parity with your host.** Your harness's own global instructions,
+  settings, hooks, skills, rules and plugins carry over, and so does your git
+  identity; uid, home directory and project path match on both sides, so a
+  session's transcript is readable from the host afterward.
 - **Remote access, opt-in and off by default.** Attach to a live session from
   a terminal or a browser, with a push notification when it wants you.
 - **What a long session worked out, kept.** Each time the agent compacts, the
@@ -123,6 +129,32 @@ A note from the developer about the voice in this repository:
 
 [![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
 
+## The dejima stack
+
+dejima runs inside the machine it is protecting the rest of, so it cannot bound
+its own host, a runner it never touches, or notice anything after a session
+ends. These are what cover the rest. **Only the first row is required.** The
+last two are categories rather than products; the named ones are what this
+deployment happens to use.
+
+| Piece | Runs on | What it adds |
+| --- | --- | --- |
+| **dejima** | a devbox | The container boundary: what a session reaches on disk, and deny-by-default egress. |
+| **[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)** | the same devbox | Cuts LAN reach to what is declared, enforced from outside the guest so root in the VM cannot flush it. |
+| **[dejima-guard](https://gitbox.branderson.io/dejima/dejima-guard)** | a different machine | Notices the devbox changed, against a baseline held off the box. Detection, not enforcement. |
+| **[dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)** | your CI runner | A runner that executes a session's pull request without that being LAN access. Hosted CI is the alternative, on someone else's network rather than yours. |
+| **ntfy**, or any push service | anywhere both can reach | Where "session needs input" and the guard's alerts arrive. |
+| **Uptime Kuma**, or any uptime monitor | off the devbox | The dead man's switch: what notices the guard itself stopped reporting. |
+
+**→ [docs/threat-model.md](docs/threat-model.md#the-stack-and-what-each-piece-buys)** -
+what each one buys, what goes wrong without it, and where each one's boundary
+ends. None of them is required to run dejima; what they change is what the
+layer below the container costs, and whether anyone finds out.
+
+**→ [Why a container, and not a microVM?](docs/threat-model.md#why-a-container-and-not-a-microvm)** -
+the most common question about this design, and why the effort went into the
+layers below the container rather than into a harder one.
+
 ## Setup
 
 This repo only holds the tooling; no project lives here. Point it at a project
@@ -143,18 +175,27 @@ ones you want.
    [Sign in on the host first](#sign-in-on-the-host-first) - and skip it
    entirely for a harness pointed at a model you serve yourself, which needs
    no credential.
-2. **`./install.sh`**, which symlinks the CLIs into `~/.local/bin`, writes a
-   starter `~/.config/dejima/config` if none exists, and registers whatever
-   guard hooks the harness you selected can host. Idempotent, so re-run it
-   after pulling; it never overwrites an existing config.
+2. **`./install.sh`**, which symlinks the CLIs into `~/.local/bin` and writes
+   a starter `~/.config/dejima/config` if none exists. It writes nothing to
+   your harness's own config: the sandbox's guards are baked into the image and
+   registered per launch into a settings layer of dejima's own, so installing
+   dejima does not change how your harness behaves outside a sandbox.
+   Idempotent, so re-run it after pulling; it never overwrites an existing
+   config.
 3. **Put `~/.local/bin` on your `PATH`** if it isn't already.
 4. **Set `[core] harness`.** It has no default and a launch is refused without
    it, which is what stops a later release changing your selection for you.
 
 That is enough to run `dejima`, and no push credential is needed to get this
-far. The rest of the starter config is commented out at its defaults, which
-means `[core] forge = none` and `[core] workflow = local-only`: the agent works
-in the sandbox and commits locally, and nothing is pushed anywhere.
+far. Everything else runs at its default, which means `[core] forge = none` and
+`[core] workflow = local-only`: the agent works in the sandbox and commits
+locally, and nothing is pushed anywhere.
+
+**Those defaults are pinned to this machine, once.** The first launch writes
+them to `~/.config/dejima/defaults.conf`, which your own config overrides, so
+a later release cannot move a setting you never chose. `./install.sh` adds keys
+a release introduced and names any shipped default that has moved, without
+taking it.
 
 **→ [docs/configuration.md](docs/configuration.md#configuration-reference)** -
 every key, its default, and what it is for. `dejima --print-config` prints the
@@ -271,8 +312,8 @@ works if the host has a credential to hold. Authenticating from inside is not
 the fix: the container is where the credential deliberately never goes, and the
 egress allowlist is not built around completing a sign-in flow there. The same
 applies to the account state your harness keeps alongside the credential, read
-fresh from the host at every launch (see "Throwaway ~/.claude.json" in
-[docs/security.md](docs/security.md)).
+fresh from the host at every launch (Claude Code's is "Throwaway
+~/.claude.json" in [docs/security.md](docs/security.md)).
 
 So: run your harness once on the host, sign in, confirm it answers, and then
 point dejima at a project. When a credential expires, refresh it the same way,
@@ -283,19 +324,33 @@ There is no credential to hold or expire; what that setup needs instead is for
 the endpoint to be reachable from inside the container, which is an allowlist
 question rather than a sign-in one.
 
-## Provider axes: forge, workflow, harness
+## Provider axes: forge, workflow, harness, model backend
 
-The forge integration, the push/PR workflow, and the agent harness aren't
-hardcoded into dejima: each is a directory under `forges/`, `workflows/` or
-`harnesses/`, selected independently by `[core] forge`, `[core] workflow` and
-`[core] harness`.
+The forge integration, the push/PR workflow, the agent harness and the model
+API aren't hardcoded into dejima: each is a directory under `forges/`,
+`workflows/`, `harnesses/` or `backends/`, selected independently by
+`[core] forge`, `[core] workflow`, `[core] harness` and
+`[harness.<name>] backend`.
 
 - **Forges:** `none`, `gitea`, `github`
 - **Workflows:** `local-only`, `branch-push`, `worktree-pr`
 - **Harnesses:** `claude-code`, `cline`
+- **Model backends:** `anthropic`, `anthropic-api-key`, `openrouter`, `self-hosted`
+
+Which of those last two pair up is the backend's API dialect against the
+harness's, checked at launch rather than maintained as a list:
+
+| Backend | `claude-code` | `cline` | Credential |
+| --- | --- | --- | --- |
+| `anthropic` | yes | yes | OAuth, held on the host |
+| `anthropic-api-key` | yes | yes | a static key, held on the host |
+| `openrouter` | no | yes | a static key, held on the host |
+| `self-hosted` | no | yes | none, and so no proxy at all |
 
 **→ [docs/providers.md](docs/providers.md)** - the manifest contract, key by
-key, and the shipped providers as worked examples.
+key, what each pairing needs configured, and the shipped providers as worked
+examples. The model API is called a *backend* throughout, to keep it apart
+from the axes themselves.
 
 ## Using this responsibly
 
@@ -351,9 +406,11 @@ equivalent for it.
 
 The allowlist covers what the sandbox needs to function - DNS, the Docker host,
 GitHub on port 443 for read access whichever forge is selected, whatever the
-selected forge needs, the harness's own update and model endpoints, and
-`api.anthropic.com` when the credential proxy is off - plus whatever a project
-has declared and had approved.
+selected forge needs, the harness's own update endpoints, and the selected
+backend's API endpoint when the credential proxy is off - plus whatever a
+project has declared and had approved. With the proxy on that last name is
+deliberately absent: the session reaches the API through the in-container
+terminator rather than by resolving it.
 
 DNS is allowlisted as well as IPs: a local resolver only forwards lookups for
 names already on that same allowlist, so an unapproved domain does not resolve
@@ -402,25 +459,35 @@ exact command to hand you.
 tarball dependencies, the symlink refusal that protects the approval store,
 and the complete `dejima-allow`/`dejima-dep`/`dejima-project` reference.
 
-## Config parity with your host Claude Code setup
+## Config parity with your host harness setup
 
-Global `CLAUDE.md`, settings, hooks, skills, plugins and git identity all carry
-over, and your existing login stays effective, with the credential itself never
-entering the container. `~/.claude` is not shared as a whole - only an
-enumerated subset does, so a session transcript is readable from the host
-afterward but a credential or cache isn't. The container's own user matches
-yours exactly, so `$HOME`-relative paths resolve the same on both sides.
+Your harness's own global instructions, settings, hooks, skills, rules and
+plugins carry over, along with your git identity, and your existing login stays
+effective with the credential itself never entering the container. The
+harness's config directory is not shared as a whole - only an enumerated subset
+is, so a session transcript is readable from the host afterward but a
+credential or cache isn't. The container's own user matches yours exactly, so
+`$HOME`-relative paths resolve the same on both sides.
+
+Which files those are is each harness's own question, answered in its plugin:
+`~/.claude` for Claude Code, `~/.agents` and `~/.cline` for Cline.
 
 **→ [docs/configuration.md](docs/configuration.md)** - exactly what carries
-over and what doesn't, and why single-file mounts couldn't be trusted here.
+over and what doesn't, per harness, and why single-file mounts couldn't be
+trusted here.
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `[core] share_dir`, separate from the
-project mount, for passing files in and out of a session without touching the
-checkout. It persists across sessions since it's a real directory, not a
-container volume. **Clear it out between sessions:** anything left there is
-readable by the next session, and by every session after that.
+`~/shared` is a read-write bind mount of this project's directory under
+`[core] share_dir`, separate from the project mount, for passing files in and
+out of a session without touching the checkout. One directory per project, so a
+session sees its own project's handoff files and no other project's.
+`dejima-share path` prints the host directory to drop a file into before a
+launch; `dejima-share list` shows what every project is holding.
+
+It persists across sessions since it's a real directory, not a container
+volume. **Clear it out between sessions:** anything left there is readable by
+the next session against that project, and by every session after that.
 
 `~/shared`, the project mount, and anything in `[mounts] read_write` are the
 only writable host paths in the container. Everything else a session writes
@@ -484,9 +551,9 @@ what a forwarded personal agent changes, and the persistent alternative.
 
 Before each run, dejima snapshots the host surfaces a session could write to
 and persist through: `.git/config` keys that run a command on the next `git`,
-`.git/hooks/`, the workspace's `.claude/`, `.mcp.json`, `.envrc`, and writes
-under `~/.claude/projects`. After the container exits it diffs them and tells
-you what changed.
+`.git/hooks/`, the workspace's `.claude/` and `.vscode/`, `.mcp.json`, `.envrc`,
+and any host-side file the selected harness declares as one it runs by itself.
+After the container exits it diffs them and tells you what changed.
 
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in
@@ -625,7 +692,7 @@ and how to run them.
 | [research-review.md](docs/research-review.md) | Checking the threat model against the field's, and the standing questions that are the agenda |
 | [configuration.md](docs/configuration.md) | Per-project declaration, dependencies, config parity |
 | [tools.md](docs/tools.md) | The optional tools a session can be given, and what hardening each one carries |
-| [providers.md](docs/providers.md) | Forge, workflow and harness axes, and writing your own |
+| [providers.md](docs/providers.md) | Forge, workflow, harness and model-backend axes, and writing your own |
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |

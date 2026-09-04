@@ -29,17 +29,25 @@ teardown() {
 # A real HTTP server standing in for Loki, appending each pushed body to a
 # file. Real because the shipper reaches it with curl: a stub that replaced
 # curl would stop testing the thing that formats and sends the payload.
+# The server binds port 0 itself and reports what it got, rather than a helper
+# picking a free port and handing the number over.
+#
+# That handover was a race, and `bats --jobs` is what makes it fire: the helper
+# bound port 0, read the number, CLOSED the socket, and only then did the
+# server bind it. Another test starting in that window takes the same port, and
+# the loser dies with "Address already in use" - but the readiness probe below
+# still succeeds, because something IS listening on that port. The test then
+# ships to the other test's Loki, finds its own log empty, and reports the
+# failure as a lost transcript. Seen in CI, not locally: it needs enough cores
+# for two tests to be in that window at once.
 start_loki() {
-    LOKI_PORT="$(python3 - <<'EOF'
-import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
-EOF
-)"
-    python3 - "$LOKI_PORT" "$LOKI_LOG" <<'EOF' &
-import sys
+    local portfile="$BATS_TEST_TMPDIR/loki-port"
+    rm -f "$portfile"
+    python3 - "$portfile" "$LOKI_LOG" <<'EOF' &
+import sys, os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-port, path = int(sys.argv[1]), sys.argv[2]
+portfile, path = sys.argv[1], sys.argv[2]
 
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -51,12 +59,26 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+srv = HTTPServer(("127.0.0.1", 0), H)
+# Written only once the socket is bound and listening, and atomically, so the
+# shell can never read a half-written number or one for a socket that is gone.
+tmp = portfile + ".tmp"
+with open(tmp, "w") as f:
+    f.write(str(srv.server_address[1]))
+os.replace(tmp, portfile)
+srv.serve_forever()
 EOF
     LOKI_PID=$!
     local i
-    for i in $(seq 1 50); do
-        (exec 3<>/dev/tcp/127.0.0.1/"$LOKI_PORT") 2>/dev/null && return 0
+    for i in $(seq 1 100); do
+        if [ -s "$portfile" ]; then
+            LOKI_PORT="$(cat "$portfile")"
+            return 0
+        fi
+        # A server that died on startup will never write the file, and waiting
+        # the full timeout for a process that is already gone only delays the
+        # real message.
+        kill -0 "$LOKI_PID" 2>/dev/null || break
         sleep 0.1
     done
     echo "the fake Loki never came up" >&2
@@ -103,6 +125,23 @@ await_shipped() {
         grep -q "$1" "$LOKI_LOG" 2>/dev/null && return 0
         sleep 0.25
     done
+    return 1
+}
+
+# Blocks until the shipper has finished a poll and is asleep between polls.
+# The two SIGTERM tests below need exactly that state - the trap installed, one
+# scan done - and both used to state it by sleeping for a second. That is a
+# statement about the machine rather than about the shipper: under load the
+# startup that precedes the trap takes longer than the sleep, the TERM lands
+# before there is a trap to catch it, and the process dies flushing nothing.
+# The nap is a child `sleep` of the shipper, which makes the state observable.
+await_napping() {
+    local i
+    for i in $(seq 1 200); do
+        pgrep -P "$SHIP_PID" -x sleep >/dev/null 2>&1 && return 0
+        sleep 0.05
+    done
+    echo "the shipper never reached its first nap" >&2
     return 1
 }
 
@@ -156,10 +195,11 @@ await_shipped() {
     write_config
     mkdir -p "$(slug_dir)"
     start_ship
-    # Long enough for one poll to read the line into the batch, short enough
-    # that the 2s batch interval has not flushed it on its own.
+    # Written before the first poll, so the poll reads it into the batch; the
+    # kill then lands while the shipper is asleep with it still in there,
+    # because the batch interval has not elapsed since it started.
     say "already batched" >> "$(slug_dir)/s1.jsonl"
-    sleep 1
+    await_napping
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true
     SHIP_PID=""
@@ -172,10 +212,11 @@ await_shipped() {
     write_config
     mkdir -p "$(slug_dir)"
     start_ship
-    # Written and killed inside one poll interval, so nothing has read it yet:
-    # only the trap's own rescan can find it. A final_flush that flushed the
-    # batch without rescanning would pass the test above and fail this one.
-    sleep 1
+    # Written after a poll has already run and killed before the next one, so
+    # nothing has read it yet: only the trap's own rescan can find it. A
+    # final_flush that flushed the batch without rescanning would pass the test
+    # above and fail this one.
+    await_napping
     say "the final answer" >> "$(slug_dir)/s1.jsonl"
     kill -TERM "$SHIP_PID"
     wait "$SHIP_PID" 2>/dev/null || true
@@ -351,4 +392,65 @@ EOF
     sleep 3
     run grep -c "should not ship" "$LOKI_LOG"
     [ "$output" -eq 0 ] || { echo "shipped without a resolvable layout: $(shipped)"; return 1; }
+}
+
+@test "the tail survives a kill even when the harness declares an optional key with no default" {
+    # #284, and it is worth pinning by SHAPE rather than by the key that
+    # exposed it. Any optional keyspec with an empty default in the selected
+    # harness's `keys` used to make final_flush's config lookup fail: it
+    # re-resolves the transcript paths from the SIGTERM handler, and bash
+    # reports 128+n for commands completing while it delivers a signal, so a
+    # perfectly valid manifest was rejected and the tail - usually the agent's
+    # final answer, which is the whole reason final_flush exists - was dropped
+    # with no error the operator would ever see.
+    #
+    # Nothing shipped for claude-code had that shape until #171 added one, so
+    # this adds one of its own rather than depending on a real key keeping it.
+    # A provider root of its own, so the shipped manifests are not edited and
+    # a concurrent run is unaffected.
+    local proot="$BATS_TEST_TMPDIR/proot"
+    mkdir -p "$proot"
+    # Loudly: a partial copy here produces exactly the symptom this test is
+    # about - a lookup that fails - and swallowing the error would report the
+    # fixture's fault as the code's.
+    cp -a "$REPO_ROOT/forges" "$REPO_ROOT/workflows" "$REPO_ROOT/harnesses" \
+          "$REPO_ROOT/backends" "$proot/" \
+        || { echo "could not build the probe provider root"; return 1; }
+    local axis
+    for axis in forges workflows harnesses backends; do
+        [ -d "$proot/$axis" ] || { echo "the probe provider root has no $axis/"; return 1; }
+    done
+    sed -i 's/^keys \( *\)=/keys \1= probe_only_key:?identifier/' \
+        "$proot/harnesses/claude-code/harness.conf"
+    grep -q 'probe_only_key:?identifier' "$proot/harnesses/claude-code/harness.conf" \
+        || { echo "the probe key was not injected"; return 1; }
+    export DEJIMA_PROVIDER_ROOT="$proot"
+
+    start_loki
+    write_config
+    mkdir -p "$(slug_dir)"
+    start_ship
+
+    # Wait for the shipper to be demonstrably running rather than sleeping at
+    # it. A fixed sleep is a second race on a loaded machine: if the process
+    # is still starting when the signal arrives, the handler runs before the
+    # key schema has been resolved, which fails for the ORIGINAL #284 reason
+    # and would read as this fix not working.
+    say "a first line" >> "$(slug_dir)/s1.jsonl"
+    await_shipped "a first line" || { echo "the shipper never started"; return 1; }
+
+    say "the final answer" >> "$(slug_dir)/s1.jsonl"
+    kill -TERM "$SHIP_PID"
+    wait "$SHIP_PID" 2>/dev/null || true
+    SHIP_PID=""
+    # Wait for the line rather than reading the log the instant the shipper
+    # exits. `wait` returns when the SHIPPER is gone, which says nothing about
+    # the collector on the other end having written what it was sent - so
+    # reading immediately is a race the loaded machine loses, and it fails as
+    # "the tail was lost", which is precisely this test's bug signature (#295).
+    await_shipped "the final answer" \
+        || { echo "the unread tail was lost: $(shipped)"; return 1; }
+    # And the lookup did not merely survive - it never failed. That message
+    # reaching an operator's terminal is the visible half of this bug.
+    [[ "$(shipped)" != *"unknown config key"* ]] || { echo "$(shipped)"; return 1; }
 }

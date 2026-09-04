@@ -9,71 +9,216 @@ scratch space, and what the sandbox knows about itself.
 
 ## Configuration reference
 
-Every key dejima reads, its default, and what it is for. All of it lives in
-one file, `~/.config/dejima/config`. `./install.sh` writes a starter copy with
-every key present and commented out at its default, so nothing here has to be
-set to get a working sandbox: uncomment what you need. `dejima --print-config`
-prints the resolved schema with real values, which is the fastest way to see
-what a given launch will actually use.
+Every key dejima reads, its default, and what it is for.
+
+### Two files, and only one of them is yours
+
+`~/.config/dejima/config` is **yours**. dejima reads it and never writes it.
+`./install.sh` creates it if you have none, carrying your selection and
+anything it could migrate from an older setup, and nothing else.
+
+`~/.config/dejima/defaults.conf` beside it is **dejima's**, and holds every
+defaulted key at the value dejima shipped *when this machine first saw that
+key*. Your file overrides it; it overrides what the current release would have
+chosen.
+
+That second file is why a release cannot move a setting you never chose.
+`[core] harness` has no default at all for this reason - a default that could
+change later is a config file that is not the source of truth - and this
+applies the same argument to every other key. It is not hypothetical: the
+`forge` and `workflow` defaults once changed from `gitea`+`worktree-pr` to
+`none`+`local-only`, which silently stopped existing sandboxes pushing.
+
+The first launch on a machine writes it and says so once. `./install.sh`
+rebuilds it: keys a release added are appended, keys it retired are dropped,
+and **every value already in it stays**. When a shipped default no longer
+matches your pinned one, `./install.sh` names both and the line that would
+take the new one. It does not take it - that is the whole point - and the line
+goes in *your* file, never in `defaults.conf`, which the next rebuild rewrites.
+
+Do not edit `defaults.conf`. Anything in it that dejima no longer understands
+is skipped rather than refused, since you are not the one who put it there, and
+a launch tells you to re-run `./install.sh`.
+
+`dejima --print-config` prints every key as it resolves. Which of the three
+answered is readable from the files themselves: in `config` it is yours, in
+`defaults.conf` it is pinned, in neither it is what this release ships.
+
+**`required` in the Default column is what you have to set yourself**, and it
+is exactly the set with no line in `defaults.conf`: a key with no default has
+nothing to pin. Exactly one is required unconditionally - `[core] harness`.
+Every other `required` is conditional on a selection you made, and each table
+below says which; a section belonging to something you did not select is never
+read, so its required keys are not yours to fill in.
 
 Every tool takes `--help`, which describes its own arguments and what they do.
 That is the fastest answer to "what does this flag mean"; this page is for the
 config file behind them.
 
+### `[core]` - what this sandbox runs
+
+The three selections come first because everything below depends on them: the
+harness decides which `[harness.<name>]` section is read, and the forge decides
+which `[forge.<name>]`.
+
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `[core] harness` | *(none - must be set)* | agent harness the container runs; refused if unset, so a later default cannot change your selection. Also settable per launch with `--harness`, which is how a host keeps one harness as its default and reaches another when it wants to |
-| `[core] forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
-| `[core] workflow` | `local-only` | workflow `sandbox-context.sh` tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
-| `[core] command` | *(the selected harness's own `command`)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
-| `[core] identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. Unset selects `[identity.default]` where the config has one. A name with no section is refused rather than falling back |
-| `[core] tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
-| `[core] update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
-| `[core] firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
-| `[core] share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir, mounted at `~/shared` |
-| `[core] ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
-| `[core] known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
-| `[harness.claude-code] projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
-| `[harness.claude-code] file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
-| `[harness.claude-code] statusline_path` | `~/.claude/statusline.sh` | statusline script path |
-| `[harness.cline] model` | *(none - must be set)* | model id the endpoint serves; no default, because any shipped one goes stale with the next Cline release. Also settable per launch with `--model` |
-| `[harness.cline] base_url` | unset | OpenAI-compatible endpoint. Unset means Anthropic through dejima's credential proxy. Accepts a loopback or RFC 1918 address, or a host you have allowlisted. Also settable per launch with `--base-url` |
-| `[harness.cline] context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one. Also settable per launch with `--context-window` |
-| `[harness.cline] state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
-| `[forge.gitea] ssh_host` | unset | Gitea/Forgejo SSH hostname: skip if you only push to GitHub |
-| `[forge.gitea] api` | unset | `https://<gitea host>/api/v1`: skip if you only push to GitHub |
-| `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
-| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file` below; see "GitHub push" in docs/security.md |
-| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh` |
-| `[mounts] readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `[mounts] read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
-| `[mounts] nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
-| `[credentials] proxy` | `on` | host-side credential proxy; `off` mounts the real OAuth credential into the container directly |
-| `[credentials] transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit `ANTHROPIC_BASE_URL`, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](security.md)) |
-| `[logging] loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |
-| `[epitaph] enabled` | `on` | keep the summary a harness writes when a session compacts; `--no-epitaph` skips it for one launch |
-| `[epitaph] dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
-| `[epitaph] loki` | `off` | also push each epitaph to `[logging] loki_url`, host-side |
-| `[logging] conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in docs/security.md. `--no-conversation` turns it off for one launch, and `--no-log` implies it |
-| `[audit] dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
-| `[audit] baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
-| `[audit] keep` | `10` | how many past findings/baselines to retain |
-| `[audit] diffs` | `on` | keep the diff of what changed alongside each finding; `off` records that something changed without retaining the content |
-| `[audit] strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings; also settable per launch with `--strict-audit` |
-| `[remote-access] enabled` | `off` | the switch: nothing in "Remote access" below runs until this is `on` |
-| `[remote-access] ntfy_url` | unset | ntfy topic URL for session notifications |
-| `[remote-access] base_url` | unset | public URL of the web front door, for notification links |
-| `[remote-access] ttyd_port` | `7681` | port `ttyd` listens on |
-| `[remote-access] ttyd_font_size` | unset | `ttyd` terminal font size |
-| `[remote-access] ttyd_tmux_prefix` | unset | the tmux prefix the page's buttons send; the page assumes stock `C-b` without it |
-| `[remote-access] ttyd_focus_on_tap` | unset | `on` lets a tap on the terminal raise the phone keyboard; unset means only the KBD button does |
-| `[remote-access] ttyd_button_colors` | unset | `off` returns the toolbar to monochrome |
-| `[remote-access] debounce` | `60` | seconds between repeat notifications for the same session |
+| `harness` | **required** | agent harness the container runs; refused if unset, so a later default cannot change your selection. Also settable per launch with `--harness`, which is how a host keeps one harness as its default and reaches another when it wants to |
+| `forge` | `none` | forge integration: `gitea` (`gitea-pr`/`gitea-issue`), `github` (`gh`/`github-pr`, opens `ssh.github.com:22` for push), or `none` (no forge at all) |
+| `workflow` | `local-only` | workflow the session briefing tells the agent to follow: `worktree-pr` (push + open a PR), `branch-push` (push, stop at the branch), or `local-only` (commit locally, push nothing) |
+| `identity` | unset | which `[identity.<name>]` section supplies the credentials and git name this session acts under; also settable per launch with `--identity`, which is how one host runs a session per account. Unset selects `[identity.default]` where the config has one. A name with no section is refused rather than falling back |
+| `command` | *(the selected harness's own)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
+| `tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
+| `firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
+| `share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir. One directory per project underneath it, and only that project's is mounted at `~/shared`. `dejima-share` is the host side of it |
+| `known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
+| `update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
+| `ssh_key` | unset | **deprecated** - the pre-identity spelling of `[identity.default] ssh_key`. Still read when the config has no `[identity.default]`; refused when it has one, since the two say the same thing |
 
 **No forge is the default**: `[core] forge = none` with
 `[core] workflow = local-only`, so the sandbox works locally and pushes
 nowhere. Every other workflow needs forge credentials, which is what you are
 opting into when you pick one.
+
+### `[harness.<name>]` - the harness you selected
+
+One section per harness, and only the one `[core] harness` names is read. Each
+ships its own keys; see [providers.md](providers.md) for the manifest contract
+behind them.
+
+#### `[harness.claude-code]`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `backend` | **required** | which model API this harness talks to, and so which credential the proxy injects. A directory under `backends/`, each shipping its own `[backend.<name>]` keys. Per harness rather than global, because running Claude Code against Anthropic and Cline against something else is the ordinary case. No default, for the reason `[core] harness` has none: one that could change later would move a session to another endpoint without its config changing. Unset, dejima writes `anthropic` into your config once and says so - a migration rather than a default, so nothing it decides later can move you. Also settable per launch with `--backend`. See [providers.md](providers.md#model-backends) |
+| `projects_dir` | `~/.claude/projects` | where Claude Code session transcripts live |
+| `file_history_dir` | `~/.claude/file-history` | Claude Code's edit-undo record, mounted per session rather than whole |
+| `statusline_path` | `~/.claude/statusline.sh` | statusline script path |
+
+#### `[harness.cline]`
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `backend` | **required** | as above, and the risk is concrete here: Cline supports many backends and has one of its own. Nothing is written into your config for you either, unlike Claude Code: there is no one endpoint every existing Cline session was already using, so any value dejima recorded would be a guess. Also settable per launch with `--backend` |
+| `model` | **required** | model id the endpoint serves, exactly as that endpoint spells it - a hosted catalogue namespaces by vendor (`z-ai/glm-5.3`) and may qualify a variant (`deepseek/deepseek-r1:free`). No default, because any shipped one goes stale with the next Cline release. Also settable per launch with `--model` |
+| `context_window` | unset | tokens Cline may use before compacting. Needed for a model it has no catalogue entry for, which is every self-served one. Also settable per launch with `--context-window` |
+| `state_dir` | `~/.local/share/dejima/cline` | per-project Cline state; one directory per workspace |
+
+### `[backend.<name>]` - the model API you selected
+
+One section per backend, and only the one your harness's `backend` names is
+read. `proxy` is available in every one of them; the rest are that backend's
+own. See [providers.md](providers.md#model-backends) for how much use each has
+actually had.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `[backend.<name>] proxy` | *(inherits `[credentials] proxy`)* | whether the credential proxy runs for this backend. Per backend so that one backend the proxy cannot serve is not a reason to stop withholding credentials from the ones it can. Off means this backend's real credential is given to the session, and dejima says so at launch |
+| `[backend.anthropic] credential_file` | `~/.claude/.credentials.json` | the host file this backend's credential is read from, per request. A path, never a secret, and never mounted into the container |
+| `[backend.anthropic-api-key] credential_file` | `~/.claude.json` | where your Anthropic API key is. Defaulted to where Claude Code's console login puts it, so the common case needs nothing set; point it at a file of your own if you hold the key yourself. Read host-side per request and never mounted, and the key is stripped from the copy of `~/.claude.json` dejima stages |
+| `[backend.anthropic-api-key] credential_field` | `primaryApiKey` | which value inside that file is the key, as dot-separated object names. Clear it (`credential_field =`) when the file is nothing but the key |
+| `[backend.openrouter] credential_file` | **required** | your OpenRouter API key, in a file. Read host-side per request and never mounted; the container only ever holds a placeholder. No default, because a key's location is yours and guessing at one would point dejima at a file it has no reason to think exists |
+| `[backend.self-hosted] base_url` | **required** | where you serve the model. A loopback or RFC 1918 address, or a host you have allowlisted - it has to be an endpoint needing no credential, since there is none to withhold. On the backend rather than the harness, so a local endpoint stays configured while a hosted API is selected |
+
+### `[credentials]` - how the credential is withheld
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `proxy` | `on` | host-side credential proxy; `off` mounts the real credential into the container directly. Overridable per backend with `[backend.<name>] proxy` |
+| `transport` | `tls` | set to `loopback` to fall back to a plaintext forwarder with an explicit base URL, keeping the credential out of the container but reinstating the base-URL fingerprint: for when certificate pinning breaks the default TLS path (see [security notes](security.md)) |
+
+### `[identity.<name>]` - who the session acts as
+
+Groups the SSH key, the git name and the forge credential belonging to one
+account, so a host can run a session per account. Selected by `[core]
+identity`, or `[identity.default]` when that is unset. Nothing here is
+required: an identity supplies what it names and no more.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `ssh_key` | unset | the SSH key this identity pushes with |
+| `user_name` | unset | `user.name` for commits made in the session |
+| `user_email` | unset | `user.email` for commits made in the session |
+| `token_file` | *(the forge's own default)* | this identity's Gitea/Forgejo API token, overriding `[forge.gitea] token_file`. Read only when `[core] forge = gitea` |
+| `push_token_file` | unset | this identity's write-capable GitHub PAT, overriding `[forge.github] push_token_file`. Read only when `[core] forge = github` |
+
+See [Identities](#identities) below for the worked examples.
+
+### `[forge.<name>]` and `[github]` - forge credentials
+
+Only the section `[core] forge` names is read. `[github]` is separate from
+`[forge.github]` on purpose: the first is read access to GitHub whichever forge
+you selected, the second is push access when GitHub *is* your forge.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `[forge.gitea] ssh_host` | **required** for `forge = gitea` | Gitea/Forgejo SSH hostname |
+| `[forge.gitea] api` | **required** for `forge = gitea` | `https://<gitea host>/api/v1` |
+| `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
+| `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file`; see "GitHub push" in [docs/security.md](security.md) |
+| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh`. Read whichever forge is selected, and it should stay read-only |
+
+### `[mounts]` - extra host paths
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
+| `read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
+| `nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
+
+### `[audit]` - the exit-time audit
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `dir` | `~/.local/share/dejima/audit` | where exit-time audit findings are stored |
+| `baselines_dir` | `~/.local/share/dejima/baselines` | where audit baselines are stored |
+| `keep` | `10` | how many past findings/baselines to retain |
+| `diffs` | `on` | keep the diff of what changed alongside each finding; `off` records that something changed without retaining the content |
+| `strict` | `off` | refuse a headless (non-tty) launch over unacknowledged CRITICAL findings; also settable per launch with `--strict-audit` |
+
+### `[epitaph]` - what a compacted session leaves behind
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `on` | keep the summary a harness writes when a session compacts; `--no-epitaph` skips it for one launch |
+| `dir` | `~/.local/share/dejima/epitaphs` | where they are kept; never mounted into a container |
+| `loki` | `off` | also push each epitaph to `[logging] loki_url`, host-side |
+
+### `[logging]` - shipping logs off the host
+
+Off entirely until `loki_url` is set. Nothing leaves the machine otherwise,
+and there is no endpoint of dejima's own anywhere in this.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `loki_url` | unset | ship DNS/firewall logs to a Loki endpoint; `--no-log` clears it for one launch, which silences everything downstream of it |
+| `conversation` | `off` | opt-in: also ship session transcripts to Loki (needs `loki_url`); see "Conversation logging (opt-in)" in [docs/security.md](security.md). `--no-conversation` turns it off for one launch, and `--no-log` implies it |
+
+### `[remote-access]` - the web front door
+
+Off entirely until `enabled` is `on`. The `ttyd_*` keys configure the terminal
+page and are read once at process start, so editing them needs
+`systemctl --user restart dejima-ttyd.service`. See
+[docs/remote-access.md](remote-access.md).
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `off` | the switch: nothing else here runs until this is `on` |
+| `ntfy_url` | **required** for notifications | ntfy topic URL for session notifications. `dejima-notify-watch` refuses to start without it; nothing else reads it |
+| `base_url` | unset | public URL of the web front door, for the notification's deep link. Absent, pushes still go out - just with no link on them |
+| `debounce` | `60` | seconds between repeat notifications for the same session |
+| `ttyd_port` | `7681` | loopback port `ttyd` listens on; the reverse proxy has to `proxy_pass` to the same one |
+| `ttyd_font_size` | unset | terminal font size in px, 8-72. Applies to every client, phone and desktop alike |
+| `ttyd_tmux_prefix` | unset | the tmux prefix the page's buttons send; the page assumes stock `C-b` without it |
+| `ttyd_focus_on_tap` | unset | `on` lets a tap on the terminal raise the phone keyboard; unset means only the KBD button does |
+| `ttyd_button_colors` | unset | `off` returns the toolbar to monochrome |
+
+### `[ui]` - what a launch prints
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `banner` | `on` | the three-line summary at the top of a launch - project and branch, the selection, and the switches whose state changes what a session can do. `off` prints nothing. Never drawn when output is redirected |
+
 
 ## Global and per-project domains and dependencies
 
@@ -332,7 +477,9 @@ you don't have one.
 
 ### Cline
 
-Almost nothing carries over, and that is the design rather than a gap.
+Your own configuration carries over the same way Claude Code's does - the
+table under [What comes in from your host](#what-comes-in-from-your-host) is
+the list. Your *sessions* do not, and that is the design rather than a gap.
 
 Cline keeps one `sessions.db` indexing every session it has ever run, with
 the project a session belonged to as a field inside the record rather than a
@@ -343,20 +490,32 @@ under `[harness.cline] state_dir` (default `~/.local/share/dejima/cline`),
 mounted at `~/.cline/data` in the container. Sessions persist across runs of
 the same project and are invisible to every other project.
 
-Because that directory is dejima's rather than yours, resuming on the host
-needs `CLINE_DATA_DIR` set to it. The exact command is at the end of every
-session's briefing.
+Because that directory is dejima's rather than yours, resuming on the host is
+not a supported path - see
+[Sessions, and where they live](#sessions-and-where-they-live) below. Relaunch
+dejima on the same project instead, which is what the briefing tells the
+session to offer.
 
-The provider configuration is written fresh by dejima at each launch and is
-not yours either. Two shapes are supported:
+The model configuration is written fresh by dejima at each launch and is not
+yours either. Where the model is comes from `[harness.cline] backend` and
+nowhere else, so there is no second setting for it to disagree with, and two
+shapes are supported:
 
-- **`base_url` unset** - Anthropic, reached through dejima's own credential
-  proxy exactly as Claude Code is. What is written into the container is the
-  placeholder `sandbox-credential-proxy-placeholder`; the real credential
-  stays on the host.
-- **`base_url` set to a model you serve yourself** - either a loopback or
-  RFC 1918 address, or a host you have allowlisted with `dejima-allow`.
+- **A backend the proxy serves** (`anthropic`, `anthropic-api-key`,
+  `openrouter`) - reached through dejima's own credential proxy exactly as
+  Claude Code is. What is written into the container is the placeholder
+  `sandbox-credential-proxy-placeholder` and the endpoint's real hostname; the
+  credential stays on the host. Which of Cline's own provider types dejima
+  writes comes from the backend's `api_style`: its native Anthropic client for
+  one, its OpenAI-compatible client for the other.
+- **A backend with no credential** (`self-hosted`, carrying its own
+  `[backend.self-hosted] base_url`) - a model you serve, at either a loopback
+  or RFC 1918 address or a host you have allowlisted with `dejima-allow`.
   Nothing needs a credential, so there is nothing to withhold.
+
+Keeping the address on the backend rather than on the harness is what lets you
+have a local model and a hosted API both configured and switch between them by
+changing one word.
 
 A name qualifies through the allowlist rather than through how it is spelled,
 because that is the same store deciding whether the container can reach the
@@ -365,13 +524,13 @@ connected to anyway. A model server on your own network normally has a name,
 so requiring a literal address would have made this path unusable for the
 ordinary case.
 
-Anything else is refused at launch - a hosted provider's API key would have to
-go inside the container, and dejima has no proxy that could hold one back on
-its behalf. Note what the check is *not* doing: dejima writes a placeholder
-into the container on this path whatever the endpoint is, so no real
-credential enters it either way. What the check decides is whether the
-configuration can work at all, which is worth saying at launch rather than as
-an auth error three layers down. See
+Anything else is refused at launch - a hosted API pointed at through a
+no-credential backend would want its key inside the container, and dejima has
+no proxy that could hold one back on its behalf. Note what the check is *not*
+doing: dejima writes a placeholder into the container on the proxied path
+whatever the endpoint is, so no real credential enters it either way. What the
+check decides is whether the configuration can work at all, which is worth
+saying at launch rather than as an auth error three layers down. See
 [development.md](development.md#worked-example-cline).
 
 If the endpoint serves a model Cline has no catalogue entry for - which is every
@@ -406,6 +565,96 @@ tooling is installed in the image. Add it with `dejima-dep` rather than by
 editing the base `Dockerfile`: a dependency added that way is declared,
 approved and layered like any other, and it survives a rebuild. Editing the
 Dockerfile directly puts it outside that record.
+
+
+#### Sessions, and where they live
+
+This project's Cline state - sessions, transcripts, tasks - is kept on the host
+in `~/.local/share/dejima/cline/<project>` and mounted at `~/.cline/data`. It
+survives the container being replaced, so **launching dejima again on the same
+project picks up where the last session left off.**
+
+A directory per project rather than one shared: Cline indexes every session it
+has ever run in a single database, so sharing one would put every project's
+history in every project's context - the same boundary `~/.claude/projects`
+gets, for the same reason.
+
+**Cline sessions are not importable or exportable.** A session started by
+running `cline` on your own machine is in `~/.cline/data` and is not visible
+inside dejima; a session started inside dejima is in the per-project directory
+and is not offered back to a host-side Cline. There is no import, no export,
+and no merge - see
+[#301](https://gitbox.branderson.io/dejima/dejima/issues/301) for why that was
+looked at and not built.
+
+The session briefing tells a Cline agent this, so it will not offer to hand
+you a session to resume outside the sandbox. Claude Code can be resumed on the
+host and its briefing says so; the claim lives in each harness's own briefing
+fragment rather than in the shared preamble, because only one of them can make
+it.
+
+#### What comes in from your host
+
+The same shape as Claude Code's, and for the same reason: your own
+configuration should reach a session, and nothing the session writes should
+reach your machine.
+
+| Host path | How it arrives | Why |
+| --- | --- | --- |
+| `~/.agents/skills/` | read-only mount | skills are instructions the agent follows |
+| `~/.agents/hooks/`, `~/.cline/hooks/` | read-only mount | hooks are programs cline runs |
+| `~/.agents/AGENTS.md` | read-only copy | instructions; a copy also survives it being a symlink into a dotfiles checkout |
+| `~/.agents/rules/*.md`, `*.txt` | read-only copy, into `Documents/Cline/Rules/` | see below |
+| `~/Documents/Cline/Rules/*.md`, `*.txt` | read-only copy | the location cline actually reads |
+| `~/.cline/settings.json`, `~/.cline/cline_mcp_settings.json` | writable copy, discarded | cline rewrites both as it runs |
+| `~/.cline/data/` | this project's own state directory | see above |
+
+Read-only is the point rather than caution. A session that could rewrite a
+hook, a skill or an MCP server definition would be choosing what happens on
+**your** machine the next time you start cline outside a container - which is
+persistence for a prompt injection, in files nobody re-reads before the next
+run. The two settings files are copies rather than read-only mounts because
+cline rewrites them itself; the copy is discarded with the container.
+
+The read-only directories are scanned for symlinks, so a `skills/` that is a
+link into a dotfiles checkout brings its target too. dejima refuses a target
+that overlaps one of its own guarded stores.
+
+**Global rules come from two places and land in one.** cline loads them from
+`~/Documents/Cline/Rules` and nowhere else - `~/.agents/rules` reads like the
+obvious companion to `~/.agents/skills` and is not loaded, which you can see
+by planting a file in each and opening `cline config`. So dejima copies the
+files from *both* host locations into the one directory cline reads, rather
+than mounting `~/.agents/rules` where nothing would look at it.
+
+They are copied file by file rather than mounted as a directory, because
+dejima writes its own briefing into that same directory and a read-only mount
+over it would leave nowhere to put it.
+
+Two collisions have fixed answers. A name present in **both** host locations
+is taken from `Documents/Cline/Rules`, since that is cline's own location for
+rules and where it writes when you edit them through cline. A host file named
+`00-dejima.md` is skipped: that is the briefing's name, and dejima's wins.
+## What dejima says before it starts
+
+Some launches print a notice first: an environment variable that is no longer
+read, a deprecated key, a guard that is not registered, a line dejima wrote
+into your config. Everything after that is the image build, which on a cold
+cache is thousands of lines - so when a notice was printed, dejima waits for
+Enter before starting it.
+
+The wait happens only when there was something to read, and only when a
+terminal is attached. An unattended launch never blocks on it.
+
+`--no-pause` skips the wait and still prints the notice. It is for starting
+several sessions at once - a tmuxinator layout, a script - where every one of
+them has a terminal and none of them wants a keypress. It is a flag rather
+than a config key on purpose: it describes the terminal in front of one
+launch, not a standing preference.
+
+A long list of entries left in the shared directory is sampled rather than
+printed whole, for the same reason: it is a standing condition you clear once,
+and it should not push the things about this run off the screen.
 
 ## Identities
 
@@ -604,12 +853,20 @@ is to be a well-known handoff point.
 
 An entry is **refused, not warned about**, if it overlaps anything dejima
 relies on being out of a session's reach: the approval store, either audit
-store, `~/.claude`, `~/.local/bin`, dejima's own checkout, or the project mount
-(already read-write, so listing it again is a mistake worth surfacing). A
-writable mount over any of those would let a session approve its own domains,
-delete the audit findings naming it, or plant code that runs unsandboxed on the
-host next time you start an agent. Overlap is checked in both directions after
-resolving symlinks, so `read_write = ~` is caught too.
+store, the epitaph store, every project's share, `~/.local/bin`, dejima's own
+checkout, the project mount (already read-write, so listing it again is a
+mistake worth surfacing), and **everything the selected harness keeps on the
+host** - its config directories, the files staged and seeded from them, and
+the state directories its manifest declares. A writable mount over any of
+those would let a session approve its own domains, delete the audit findings
+naming it, read another project's transcripts, or plant code that runs
+unsandboxed on the host next time you start an agent. Overlap is checked in
+both directions after resolving symlinks, so `read_write = ~` is caught too.
+
+The harness half of that list is derived from what the harness declares, not
+written down in dejima, so it covers whichever one you selected - `~/.claude`
+for Claude Code, `~/.agents` and `~/.cline` for Cline - and covers a harness
+added later without anyone extending a list.
 
 Sessions are told which directories these are, so "everything else is
 disposable" stays true in the briefing rather than becoming a trap.
@@ -661,11 +918,41 @@ pick up from somewhere else, run dejima inside tmux and use
 
 ## Shared scratch space
 
-`~/shared` is a read-write bind mount of `[core] share_dir` (default
-`~/.local/share/dejima/shared`, created automatically) - separate
-from the project mount, for passing files (screenshots, temp scripts) in and
-out of a session without touching the actual checkout. Persists across
-sessions since it's a real directory, not a container volume.
+`~/shared` is a read-write bind mount of one project's directory under
+`[core] share_dir` (default `~/.local/share/dejima/shared`, created
+automatically) - separate from the project mount, for passing files
+(screenshots, temp scripts) in and out of a session without touching the actual
+checkout. Persists across sessions since it's a real directory, not a container
+volume.
+
+**One directory per project, not one for the host.** A launch mounts
+`<share_dir>/projects/<slug>` at `~/shared`, where the slug is the project's
+absolute path with every non-alphanumeric character replaced by a dash - the
+same key the audit and epitaph stores use. So a session sees its own project's
+handoff files and no other project's, and nothing an agent has been told
+changes, because inside the container the path is still `~/shared`.
+
+`dejima-share` is the host side of that:
+
+```sh
+dejima-share path            # the host directory for this project, created if new
+dejima-share path ~/code/x   # …for another project
+dejima-share list            # every project's share, with size and last write
+dejima-share adopt           # move files left loose in share_dir into this project's
+```
+
+**To hand a file *to* a session,** put it in `dejima-share path` before
+launching. That is what makes the inbound direction work without a mount that
+every project can read.
+
+**From another machine,** `sshfs` puts a project's share in your own file
+manager over the SSH access you already have. Read
+[Mounting the box's files](remote-access.md#mounting-the-boxs-files) before
+setting that up: every byte and every filename in there was written by a
+sandboxed session, and a desktop that mounts the directory indexes,
+thumbnails and previews what it finds without waiting to be asked. Nothing
+dejima runs is in that path, so the sanitising it does for its own output does
+not reach there.
 
 Treat it as a handoff point, not as general-purpose storage. If your own
 project instructions tell agents to write somewhere at a fixed host path -
@@ -679,10 +966,20 @@ being rewritten to point at `~/shared`.
 only writable host paths in the container. Everything else a session writes
 goes away with it.
 
-**Clear it out periodically.** It persists across sessions by design, which
-means anything you left in it is readable by every session after the one you
-left it for. A credential dropped in there to get one job done, and then
-forgotten, is a credential you have handed to every session since.
+**Clear it out periodically.** The per-project split bounds which sessions can
+read what you left, and bounds nothing about how long. A project's share
+persists by design, so anything in it is readable by every future session
+against that project: a credential dropped in there to get one job done, and
+then forgotten, is a credential you have handed to every session against that
+project since. Nothing prunes `share_dir` - `dejima-share list` prints each
+project's size and the date of its last write, and deleting is yours.
+
+**Files from before the split.** `share_dir` used to be mounted whole, so
+anything at its top level was visible to every session. Those files are still
+there and are now mounted into nothing; dejima says so at every launch while
+that is true, rather than moving an operator's files on its own.
+`dejima-share adopt <project>` moves them into one project's share after
+showing what it will move and asking, and it never overwrites.
 
 ## Reading what a session left behind
 
@@ -781,14 +1078,21 @@ session can run.
 
 ### The session briefing
 
-A `SessionStart` hook (`~/.claude/hooks/sandbox-context.sh`) injects a
-reminder when `DEJIMA` is set: the session is running in a
-disposable, firewalled container and should stay within the task at hand -
-if something genuinely needs to break out (broader network, host changes,
-GUI/hardware), stop and ask rather than trying to work around the firewall,
-since the same session can be resumed unrestricted on the host via
-`claude --resume`. No-op outside the container. `deny-dangerous-bash.sh`
-(`PreToolUse`) also applies here, since `~/.claude/hooks` is mounted in.
+Every session is told where it is running: a disposable, firewalled container
+it should stay within, and if something genuinely needs to break out - broader
+network, host changes, GUI/hardware - it should stop and ask rather than work
+around the firewall. Whether the session can be resumed unrestricted on the
+host afterwards is the harness's own answer, and each harness's briefing
+fragment gives it: Claude Code's names `claude --resume`, Cline's says plainly
+that its sessions do not leave the sandbox.
+
+*How* the briefing reaches a session is per harness too, because they do not
+agree on a mechanism. Claude Code takes it as a system prompt through the flag
+its manifest names; Cline takes no such flag and registers no hook, so
+`entrypoint.sh` renders it into a file the harness reads, root-owned and
+read-only. A harness doing neither gets it through a `SessionStart` hook. What
+the briefing *says* is none of theirs - one script composes it for all three
+routes. See [development.md](development.md).
 
 When GitHub is a push destination this session - `--allow-github-push`, or
 `forge = github` under a pushing workflow - the briefing also tells the

@@ -67,7 +67,10 @@ source "$SCRIPT_DIR/dejima-tui-lib.sh"
 # rule underlines the heading instead of spanning the table because the
 # table's width follows the longest project name - a rule that chased it would
 # wrap on a phone exactly when the rows did.
-banner() { tui_banner 'live sessions'; }
+# Cleared first: this is a front door, and it is navigated to rather than
+# scrolled to. dejima-allow's picker shares the banner and deliberately not
+# this - see tui_clear.
+banner() { tui_clear; tui_banner 'live sessions'; }
 
 # Coloured by meaning, not by name: attachable is the one an operator wants to
 # find, and stale/no-tmux are the two that will refuse if picked.

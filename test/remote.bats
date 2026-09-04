@@ -763,27 +763,28 @@ start_tmux() {
 }
 
 # Provenance, pinned offline. Upstream's color.table is the authority, but a
-# test cannot go and fetch it, so the name->hex half is transcribed from it
-# here. The half that catches a typo is checked rather than transcribed: every
-# escape is decoded back to a hex and compared against the one written beside
-# it, so a value edited in one place and not the other fails here instead of
-# shipping under the name "gruvbox".
-@test "the picker's palette is gruvbox, by upstream's own values" {
-    local -A gruvbox=(
-        [bright_orange]=fe8019  [light1]=ebdbb2        [gray_245]=928374
-        [dark4]=7c6f64          [dark2]=504945         [bright_green]=b8bb26
-        [bright_yellow]=fabd2f  [bright_red]=fb4934    [bright_blue]=83a598
-    )
-    local seen=0 r g b name hex
-    while read -r r g b name hex; do
-        seen=$((seen + 1))
-        [ "${gruvbox[$name]:-unknown}" = "$hex" ]
-        [ "$(printf '%02x%02x%02x' "$r" "$g" "$b")" = "$hex" ]
-    done < <(sed -n \
-        "s/.*38;2;\([0-9]*\);\([0-9]*\);\([0-9]*\)m'.*# \([a-z_0-9]*\) *#\([0-9a-f]*\).*/\1 \2 \3 \4 \5/p" \
-        "$REPO_ROOT/bin/dejima-tui-lib.sh")
-    [ "$seen" -eq "${#gruvbox[@]}" ] \
-        || { echo "found $seen of ${#gruvbox[@]} palette entries"; return 1; }
+# The terminal palette carries no hexes at all any more, and that is the
+# property worth pinning. It used to hardcode gruvbox in 24-bit, which is the
+# brand but assumes a background dejima does not own: measured against a light
+# one, light1 came out at 1.21:1 and bright yellow at 1.49:1. Indexed colours
+# cannot have that problem, because the theme's author picked them against
+# their own background - and on a gruvbox terminal they ARE those hexes.
+@test "the terminal palette is the terminal's own, not hardcoded" {
+    local lib="$REPO_ROOT/bin/dejima-color-lib.sh"
+    run grep -n '38;2;' "$lib" "$REPO_ROOT/bin/dejima-tui-lib.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "24-bit colour is back in a terminal palette:"; echo "$output"; return 1; }
+    # And it is one palette: a second definition is how C_OK and C_WARN came
+    # to mean two different things depending on which file a caller sourced.
+    run grep -c '^\s*C_OK=' "$REPO_ROOT/bin/dejima-tui-lib.sh"
+    [ "$output" -eq 0 ] \
+        || { echo "dejima-tui-lib.sh defines its own palette again"; return 1; }
+    # The colours it does use are the semantic slots, so a gruvbox terminal
+    # fills them with gruvbox.
+    local slot
+    for slot in '92m' '93m' '91m' '94m' '90m'; do
+        grep -q "$slot" "$lib" || { echo "the palette lost slot $slot"; return 1; }
+    done
 }
 
 @test "attaching creates a grouped session on the requested window and disposes of it on detach" {
@@ -1352,15 +1353,29 @@ EOF
 # the whitelist below is what makes the log sufficient.
 stub_curl() {
     STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
+    # stdin as well as argv, because the request URL now arrives that way and
+    # a stub that only saw argv would report the push as carrying no
+    # destination at all - which reads like the value being dropped.
+    #
+    # Drained only when `--config -` asked for it, exactly as the real curl
+    # does. A stub that reads stdin unconditionally HANGS when the caller
+    # sends none, so a change that stopped redirecting would fail this suite
+    # by timing out rather than by failing an assertion.
     cat > "$STUB_DIR/curl" <<EOF
 #!/bin/bash
 printf '%s\n' "\$@" >> "$STUB_DIR/curl-argv"
+_want_stdin=
+for _a in "\$@"; do
+    [ "\$_a" = --config ] && _want_stdin=1
+done
+[ -z "\$_want_stdin" ] || cat >> "$STUB_DIR/curl-stdin"
 exit 0
 EOF
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
 }
 curl_log() { cat "$STUB_DIR/curl-argv" 2>/dev/null; }
+curl_stdin() { cat "$STUB_DIR/curl-stdin" 2>/dev/null; }
 
 # The EXACT argument vector of one push, one argument per line - a whitelist,
 # not a search. Absence assertions cannot do this job: an argument that leaks
@@ -1374,7 +1389,7 @@ expect_argv() {
         -H "Title: dejima: $1" \
         -H "Priority: default"
     [ -z "${3:-}" ] || printf '%s\n' -H "Click: $3"
-    printf '%s\n' -d "$2" -- https://ntfy.example.invalid/dejima
+    printf '%s\n' -d "$2" --config -
 }
 # Compared as a whole file, so a SECOND push would fail this too. The
 # sentinel is what makes "whole" true: both sides are command substitutions,
@@ -1565,6 +1580,49 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"not configured"* ]]
     [ ! -d "$RUNTIME_DIR/dejima" ]
+    [ -z "$(curl_log)" ]
+}
+
+@test "the ntfy URL never reaches curl's argv, because it can carry a token" {
+    # An ntfy server that wants credentials takes them in the URL, and
+    # docs/remote-access.md documents that form. Every argument of every
+    # process on this host is readable by any local account through
+    # /proc/<pid>/cmdline, so a URL in argv is a token published to the
+    # machine for as long as the request runs - `ps` is enough.
+    #
+    # Both halves are asserted. Absent from argv is the fix; present on stdin
+    # is what stops the fix from being "the push lost its destination", which
+    # would pass an absence check just as well.
+    stub_curl
+    conf_with_ntfy
+    write_entry 0123456789abcdef '%1' 'work:2'
+    marker 0123456789abcdef waiting
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [[ "$(curl_log)" != *ntfy.example.invalid* ]] \
+        || { echo "the URL is in argv:"; curl_log; return 1; }
+    [[ "$(curl_stdin)" == *'url = "https://ntfy.example.invalid/dejima"'* ]] \
+        || { echo "the URL did not reach curl at all:"; curl_stdin; return 1; }
+
+    # The click URL is not secret and stays where it is: it is composed from
+    # base_url, which is the address of the operator's own front door.
+    [[ "$(curl_log)" == *"Click: https://dejima.example.invalid/?arg=0123456789abcdef"* ]] \
+        || { echo "the click target moved:"; curl_log; return 1; }
+}
+
+@test "a misconfigured ntfy URL is not echoed back with its credentials" {
+    # The refusal path prints the offending value, and the journal is where
+    # that lands under a systemd user unit. A token that survives a
+    # misconfiguration by being written to the journal is a token that
+    # outlives the mistake.
+    stub_curl
+    write_remote_config 'ntfy_url = https://someone:hunter2@ntfy.example.invalid/t{}'
+    run "$REPO_ROOT/bin/dejima-notify-watch" --once
+    [ "$status" -ne 0 ] || { echo "a bad URL was accepted: $output"; return 1; }
+    [[ "$output" != *hunter2* ]] \
+        || { echo "the credential was echoed back: $output"; return 1; }
+    [[ "$output" == *"ntfy_url"* ]] || { echo "$output"; return 1; }
     [ -z "$(curl_log)" ]
 }
 
@@ -1950,6 +2008,12 @@ expect_ttyd_argv() {
     [ -z "${3:-}" ] || printf '%s\n' -t "tmuxPrefix=$3"
     [ -z "${4:-}" ] || printf '%s\n' -t "focusOnTap=$4"
     [ -z "${5:-}" ] || printf '%s\n' -t "buttonColors=$5"
+    # Always sent, unlike the four above: a browser has no theme to inherit,
+    # so this is not an option an operator turns on. Read out of the script
+    # rather than transcribed - this file asserts that ttyd is given a theme
+    # and that its values match the page (static.bats), not what they are.
+    printf '%s\n' -t "$(sed -n "/^theme_opt=(-t '/,/^}')$/p" \
+        "$REPO_ROOT/bin/dejima-ttyd" | sed "1s/^theme_opt=(-t '//; \$s/')$//")"
     printf '%s\n' "$(readlink -f "$REPO_ROOT/bin")/dejima-attach"
 }
 # Sentinel on both sides: both are command substitutions, which strip trailing
@@ -2175,7 +2239,10 @@ PY
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
-    run grep -cx -- '-t' "$STUB_DIR/ttyd-argv"
+    # No fontSize reaches ttyd, rather than no -t at all: the theme is sent on
+    # every launch (a browser has no palette to inherit), so counting -t stopped
+    # measuring what this is about, which is that an unset option sends nothing.
+    run grep -c 'fontSize' "$STUB_DIR/ttyd-argv"
     [ "$output" = "0" ]
 
     # Set. Checked through the exact vector, not a substring: "fontSize=20
@@ -2667,10 +2734,14 @@ nginx_blocks() {
 }
 
 @test "install.sh links the remote scripts and the notify hook, registers neither, and enables nothing" {
-    # The hook is linked by the harness plugin now - which file it is, and
-    # where the harness reads it from, is the harness's business - while the
-    # CLIs stay install.sh's, being dejima's own.
-    grep -q '_link_hook dejima-notify.sh' "$REPO_ROOT/bin/harness/claude-code.sh"
+    # The hook is baked into the image and registered by absolute path, so
+    # install.sh puts nothing of it on the host - which file it is, and where
+    # a session reads it from, is the harness plugin's business. The CLIs stay
+    # install.sh's, being dejima's own.
+    grep -q 'COPY hooks/dejima-notify.sh /usr/local/lib/dejima/hooks/dejima-notify.sh' \
+        "$REPO_ROOT/docker/Dockerfile"
+    grep -q '_link_hook' "$REPO_ROOT/bin/harness/claude-code.sh" \
+        && { echo "install.sh still links hooks into ~/.claude/hooks"; return 1; }
     grep -q '^link_bin dejima-attach$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-ttyd$' "$REPO_ROOT/install.sh"
     grep -q '^link_bin dejima-notify-watch$' "$REPO_ROOT/install.sh"
@@ -2702,13 +2773,25 @@ nginx_blocks() {
     # $output, and this is a statement about what THIS run printed.
     [[ "$output" == *"nothing is listening"* ]]
 
-    # bin/dejima registers $HOME/.claude/hooks/dejima-notify.sh per session,
-    # and ~/.claude/hooks is what gets mounted read-only into the container.
-    # Without this link every notification hook is an exit-127.
-    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
-    [ "$(readlink -f "$FAKE_HOME/.claude/hooks/dejima-notify.sh")" \
-      = "$(readlink -f "$REPO_ROOT/hooks/dejima-notify.sh")" ]
-    [ -x "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    # The notify hook is baked into the image and registered per session by
+    # its absolute path there, so nothing about it lands on the host. Without
+    # the baked copy every notification hook would be an exit-127.
+    [ ! -e "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ] \
+        || { echo "install.sh still puts the notify hook on the host"; return 1; }
+    # Asserted on what the registration PRODUCES rather than on the source
+    # text: the path is a variable there, and a grep for the literal passes or
+    # fails on how it happens to be spelled rather than on where it points.
+    local st; st="$(mktemp)"; echo '{}' > "$st"
+    bash -c '
+        source "'"$REPO_ROOT"'/bin/dejima-provider-lib.sh"
+        source "'"$REPO_ROOT"'/bin/dejima-harness-lib.sh"
+        harness_plugin_load claude-code
+        harness_hook harness_register_notify "$1"
+    ' _ "$st" >/dev/null 2>&1
+    [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$st")" \
+        = "/usr/local/lib/dejima/hooks/dejima-notify.sh done" ] \
+        || { echo "notify is not registered at its baked path: $(cat "$st")"; rm -f "$st"; return 1; }
+    rm -f "$st"
     local b
     for b in dejima-attach dejima-ttyd dejima-notify-watch; do
         [ -L "$FAKE_HOME/.local/bin/$b" ]
@@ -2716,14 +2799,15 @@ nginx_blocks() {
         [ -x "$FAKE_HOME/.local/bin/$b" ]
     done
 
-    # Positive first: an absence assertion against a settings.json that did
-    # not get written would pass on its own.
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("sandbox-context.sh"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -eq 0 ]
-    run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
-        "$FAKE_HOME/.claude/settings.json"
-    [ "$status" -ne 0 ]
+    # install.sh registers nothing in the harness's config now, so there is
+    # nothing positive to check there - the settings file may not exist at
+    # all. The positive assertion that matters moved above: the notify hook IS
+    # registered, at its baked path, in the sandbox's own overlay.
+    if [ -f "$FAKE_HOME/.claude/settings.json" ]; then
+        run jq -e '[.hooks[]?[]?.hooks[]?.command] | any(test("dejima-notify"))' \
+            "$FAKE_HOME/.claude/settings.json"
+        [ "$status" -ne 0 ]
+    fi
 
     # Nothing was enabled, and nothing under the runtime dir was created: the
     # feature stays off until the operator sets [remote-access] enabled = on.
@@ -2734,7 +2818,7 @@ nginx_blocks() {
     run env HOME="$FAKE_HOME" PATH="$STUB_DIR:$PATH" "$REPO_ROOT/install.sh"
     [ "$status" -eq 0 ]
     [ ! -e "$FAKE_HOME/.dejima-backup" ]
-    [ -L "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/hooks/dejima-notify.sh" ]
 
     # And with one, it may not: re-running the installer after a git pull is
     # exactly what an operator with a front door already up does, and telling
@@ -3088,4 +3172,45 @@ remote_doc() {
         || { echo "the marker was left to accumulate"; return 1; }
     assert_argv 'myproject needs input' 'Session is waiting for you.' \
         'https://dejima.example.invalid/?arg=0123456789abcdef'
+}
+
+@test "the session picker starts on a clean screen, scrollback included" {
+    # Reopening it from the web toolbar is a full page load, and it drew on
+    # top of whatever the previous session had left on screen - rows
+    # interleaved with the tail of the session just left, which reads as a
+    # rendering fault rather than a new screen (#213). Invisible over SSH,
+    # where a fresh connection to the forced command starts on a blank one.
+    write_remote_config
+    stub_docker_run_id 0123456789abcdef
+    start_tmux
+    write_entry 0123456789abcdef "$TARGET_PANE" 'work:1'
+
+    run script -qec "echo q | '$REPO_ROOT/bin/dejima-attach'" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[2J'* ]] || { echo "the screen is not cleared"; return 1; }
+    # And the scrollback with it: without 3J a swipe up on a phone lands in
+    # the middle of the previous session's output.
+    [[ "$output" == *$'\033[3J'* ]] || { echo "the scrollback is left behind"; return 1; }
+
+    # Not on the machine interface. ttyd feeds run ids back in from --list,
+    # and these bytes in a log are the failure this is gated to avoid.
+    run script -qec "'$REPO_ROOT/bin/dejima-attach' --list" /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" != *$'\033[2J'* ]] || { echo "--list cleared the screen"; return 1; }
+}
+
+@test "no terminal, no clear" {
+    # A pipe or a dumb terminal gets none of it. NO_COLOR does not suppress it
+    # though: that asks for no decoration, not for a front door drawn over the
+    # last session.
+    local out
+    out="$(bash -c 'source "$1"; tui_clear; echo AFTER' _ "$REPO_ROOT/bin/dejima-tui-lib.sh")"
+    [ "$out" = AFTER ] || { echo "a pipe got escape bytes: $(printf '%q' "$out")"; return 1; }
+    run script -qec "TERM=dumb bash -c 'source $REPO_ROOT/bin/dejima-tui-lib.sh; tui_clear; echo AFTER'" /dev/null
+    [[ "$output" != *$'\033['* ]] || { echo "a dumb terminal got escape bytes"; return 1; }
+    # NO_COLOR too, on a real terminal. It rides the same switch as the colour
+    # and the glyphs, which is the reading this file already committed to -
+    # the alternative is a picker answering to two ideas of "plain".
+    run script -qec "NO_COLOR=1 TERM=xterm bash -c 'source $REPO_ROOT/bin/dejima-tui-lib.sh; tui_clear; echo AFTER'" /dev/null
+    [[ "$output" != *$'\033['* ]] || { echo "NO_COLOR still got a screen clear"; return 1; }
 }

@@ -98,7 +98,8 @@ launch() {
     # launch is what triggers it. Its cache needs nothing further: it lands
     # under $HOME, which every launch fixture already points somewhere of its
     # own.
-    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n' \
+    # backend is stated, not defaulted: it has none and never will (#171).
+    printf '[core]\nharness = claude-code\nupdate_check = off\nssh_key = %s\n[harness.claude-code]\nbackend = anthropic\n' \
         "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
@@ -981,7 +982,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # no domains at all, or by the env prefix below never reaching the child.
     printf 'good.example.com\n' > "$CONFIG_DIR/allowed-domains"
     launch_setup
-    printf '[core]\nharness = claude-code\nssh_key = %s\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
+    printf '[core]\nharness = claude-code\nssh_key = %s\n[harness.claude-code]\nbackend = anthropic\n' "$LAUNCH_DIR/sandbox-key" >> "$CONFIG_DIR/config"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS=evil.example \
@@ -1066,13 +1067,13 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-harness-claude-code" ]
 
     "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ]
 }
 
 # nvim's data/state/cache are Docker volumes, not host paths, so nothing a
@@ -1116,8 +1117,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     launch_setup
     run launch "$PROJ"
     [ "$status" -eq 0 ]
-    grep -q -- "-t dejima:$(id -un)-global -f" <(docker_log)
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-global" ]
+    grep -q -- "-t localhost/dejima:$(id -un)-global -f" <(docker_log)
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-global" ]
 }
 
 @test "the launcher builds the global layer then the project layer on top of it" {
@@ -1127,12 +1128,12 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
-    global_line=$(grep -n -- "-t dejima:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
-    project_line=$(grep -n -- "-t dejima:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
+    global_line=$(grep -n -- "-t localhost/dejima:$(id -un)-global -f" <(docker_log) | cut -d: -f1)
+    project_line=$(grep -n -- "-t localhost/dejima:$(id -un)-$slug -f" <(docker_log) | cut -d: -f1)
     [ -n "$global_line" ]
     [ -n "$project_line" ]
     [ "$global_line" -lt "$project_line" ]
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-$slug" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ]
 }
 
 @test "the project layer's Dockerfile is generated FROM the global layer, not the base image" {
@@ -1148,11 +1149,11 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
     # base -> harness -> global -> project, each FROM the one before it.
-    dockerfile_for "dejima:$(id -un)-harness-claude-code" \
-        | grep -qxF "FROM dejima:$(id -un)"
-    dockerfile_for "dejima:$(id -un)-global" \
-        | grep -qxF "FROM dejima:$(id -un)-harness-claude-code"
-    dockerfile_for "dejima:$(id -un)-$slug" | grep -qxF "FROM dejima:$(id -un)-global"
+    dockerfile_for "localhost/dejima:$(id -un)-harness-claude-code" \
+        | grep -qxF "FROM localhost/dejima:$(id -un)"
+    dockerfile_for "localhost/dejima:$(id -un)-global" \
+        | grep -qxF "FROM localhost/dejima:$(id -un)-harness-claude-code"
+    dockerfile_for "localhost/dejima:$(id -un)-$slug" | grep -qxF "FROM localhost/dejima:$(id -un)-global"
 }
 
 @test "the launcher builds no dependency layer when neither global nor project deps are approved" {
@@ -1163,10 +1164,10 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # harness in the image - so this is about the DEPENDENCY layers, which is
     # what "no approved dependencies" is a statement about.
     local tagged
-    tagged="$(grep -oE -- '-t dejima:[^ ]+' <(docker_log) | sed 's/^-t //' | sort -u)"
-    [ "$tagged" = "dejima:$(id -un)-harness-claude-code" ] \
+    tagged="$(grep -oE -- '-t localhost/dejima:[^ ]+' <(docker_log) | sed 's/^-t //' | sort -u)"
+    [ "$tagged" = "localhost/dejima:$(id -un)-harness-claude-code" ] \
         || { echo "expected only the harness layer to be built, got:"; echo "$tagged"; return 1; }
-    [ "$(launched_env SANDBOX_IMAGE)" = "dejima:$(id -un)-harness-claude-code" ]
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-harness-claude-code" ]
 }
 
 @test "the launcher warns when the approval store sits inside the mounted workspace" {
@@ -1998,5 +1999,21 @@ declare_repeatedly() {
         | awk '{ print index($0, "dejima-run") }' | sort -u | wc -l)"
     [ "$proj_cols" -eq 1 ] \
         || { echo "rows start the name at different columns:"; echo "$out"; return 1; }
+    rm -rf "$STUB_DIR"
+}
+
+@test "dejima-allow's picker does not wipe the terminal it was run in" {
+    # It shares the banner with dejima-attach and deliberately not the clear.
+    # dejima-attach is a front door, navigated to; this is a prompt inside a
+    # shell the operator is already using, and wiping their scrollback to ask
+    # one question is worse than the interleaving the clear exists to fix.
+    stub_two_containers
+    local out
+    out="$(printf 'q\n' | TERM=xterm-256color script -qec \
+        "PATH='$STUB_DIR:$PATH' '$REPO_ROOT/bin/dejima-allow' crates.io" /dev/null || true)"
+    [[ "$out" != *$'\033[2J'* ]] \
+        || { echo "dejima-allow cleared the operator's screen"; return 1; }
+    # It still drew the picker, so this is not passing because nothing ran.
+    [[ "$out" == *"q to quit"* ]] || { echo "no picker at all: $out"; return 1; }
     rm -rf "$STUB_DIR"
 }
