@@ -69,6 +69,10 @@ SESSION_IMAGE="${SESSION_IMAGE:-$IMAGE}"
 REAP_AFTER=$((6 * 60 * 60))
 
 container_name() { echo "dejima-test-$(basename "$BATS_RUN_TMPDIR")"; }
+# The file-wide container's filter. teardown_file removes it by name, like
+# the session container beside it - teardown's pattern deliberately skips
+# both, since they have to survive every test in the file.
+filter_name() { echo "dejima-test-filter-$(basename "$BATS_RUN_TMPDIR")"; }
 network_name() { echo "dejima-test-net-$(basename "$BATS_RUN_TMPDIR")"; }
 
 # A container for ONE test, named the same way and for the same reasons: a
@@ -407,33 +411,23 @@ setup_file() {
     # container started without these gets none of them. Read from the
     # manifest rather than written here, so this fixture cannot drift from
     # what a real launch supplies.
-    # The capability posture from docker-compose.yml rather than a copy of it.
-    # This container is started with `docker run`, so a hand-written --cap-add
-    # list here would drift from the compose file the moment either changed -
-    # and the whole point of the floor is that the container a session actually
-    # gets is the one under test.
-    local -a caps=()
-    while IFS= read -r cap; do caps+=(--cap-add="$cap"); done < <(compose_cap_add)
-    [ "${#caps[@]}" -gt 0 ] || { echo "no cap_add found in docker-compose.yml" >&2; return 1; }
-
-    docker run -d --name "$container" \
-        --cap-drop=ALL "${caps[@]}" \
-        --security-opt=no-new-privileges:true \
-        --network "$network" \
+    # The capability posture of both halves comes from the code that declares
+    # each, never from a copy here - see start_pair.
+    start_pair "" "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e ANTHROPIC_BASE_URL= \
         -e ANTHROPIC_AUTH_TOKEN= \
         -e SANDBOX_HARNESS_DOMAINS="$(harness_manifest_value api_domains)" \
-        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-
-    wait_ready "$container"
+        -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)"
 }
 
 teardown_file() {
+    # Session first: it is the one joined to the other's network namespace, and
+    # taking the holder away from under it is the arrangement bin/dejima orders
+    # deliberately rather than incidentally.
     docker rm -f "$(container_name)" >/dev/null 2>&1 || true
+    docker rm -f "$(filter_name)" >/dev/null 2>&1 || true
     docker network rm "$(network_name)" >/dev/null 2>&1 || true
 }
 
@@ -462,13 +456,19 @@ teardown() {
     # EVERY test, and it is the one container that has to survive all of them.
     # test_container_name() puts a purpose between the prefix and the suffix,
     # so the file-wide name is the only one with nothing there.
-    local suffix keep
+    local suffix keep keep_filter
     suffix="$(basename "$BATS_RUN_TMPDIR")"
     keep="$(container_name)"
+    # And its filter, which is named to end in the same suffix so that every
+    # PER-TEST filter is swept by the pattern below. That makes the file-wide
+    # one match too, and removing it after the first test would take the
+    # network namespace out from under the container every later test uses.
+    keep_filter="$(filter_name)"
     local c
     while IFS= read -r c; do
         [ -n "$c" ] || continue
         [ "$c" != "$keep" ] || continue
+        [ "$c" != "$keep_filter" ] || continue
         docker rm -f "$c" >/dev/null 2>&1 || true
     done < <(docker ps -a --filter "name=^dejima-test-.*$suffix\$" \
                  --format '{{.Names}}' 2>/dev/null)
@@ -476,8 +476,102 @@ teardown() {
         | xargs -r docker rmi -f >/dev/null 2>&1 || true
 }
 
+# The capability list bin/dejima gives the filter container, read out of the
+# launcher for the same reason compose_cap_add reads the session's out of the
+# compose file: a copy here would drift, and the whole point is that what the
+# suite starts is what a launch starts.
+launcher_filter_cap_add() {
+    sed -n '/^docker run -d --init \\$/,/^    "\${SANDBOX_IMAGE_REPO}/p' \
+        "$BATS_TEST_DIRNAME/../bin/dejima" \
+        | grep -oE '\-\-cap-add [A-Z_]+' | awk '{print $2}'
+}
+
+# The pair a launch actually starts: a filter container that owns the network
+# namespace and brings the egress control up, and a session container that
+# joins it. Every fixture in this file has to build the same thing, because a
+# session container on its own now has no firewall at all - its entrypoint
+# stopped bringing one up when it stopped being the container that could.
+#
+# The environment goes to BOTH, which is deliberately not what bin/dejima does
+# (it hands the filter container a curated list). Here it is the right choice:
+# a fixture that varies ALLOW_GITHUB_PUSH or a forge host is varying what the
+# FIREWALL does, and making twenty-odd call sites each declare which half their
+# variables belong to would be twenty-odd chances to send one to the wrong
+# container - which fails by passing, since a firewall told nothing simply
+# allowlists less.
+#
+# Both capability floors come from the code that declares them, neither from a
+# list here.
+start_pair() {  # <purpose|""> <image> [docker run args...]
+    local purpose="$1" image="$2"; shift 2
+    local session filter
+    if [ -z "$purpose" ]; then
+        session="$(container_name)"
+        filter="$(filter_name)"
+    else
+        session="$(test_container_name "$purpose")"
+        # The suffix stays last so `teardown`'s name filter, which is anchored
+        # on it, removes these too. A leaked filter container holds a network
+        # namespace open and the next run collides with its name.
+        filter="$(test_container_name "$purpose-filter")"
+    fi
+
+    local -a fcaps=() scaps=()
+    while IFS= read -r cap; do fcaps+=(--cap-add="$cap"); done < <(launcher_filter_cap_add)
+    while IFS= read -r cap; do scaps+=(--cap-add="$cap"); done < <(compose_cap_add)
+    [ "${#fcaps[@]}" -gt 0 ] || { echo "no --cap-add found in bin/dejima's filter run" >&2; return 1; }
+    [ "${#scaps[@]}" -gt 0 ] || { echo "no cap_add found in docker-compose.yml" >&2; return 1; }
+
+    docker run -d --init --name "$filter" \
+        --cap-drop=ALL "${fcaps[@]}" \
+        --security-opt=no-new-privileges:true \
+        --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+        --network "$(network_name)" \
+        "$@" \
+        --entrypoint /usr/local/bin/filter-entrypoint.sh \
+        "$image" >/dev/null
+    wait_filter "$filter" || return 1
+
+    docker run -d --name "$session" \
+        --cap-drop=ALL "${scaps[@]}" \
+        --security-opt=no-new-privileges:true \
+        --network "container:$filter" \
+        "$@" \
+        --entrypoint /usr/local/bin/entrypoint.sh \
+        "$image" >/dev/null
+    wait_ready "$session"
+}
+
+# The filter container is up when it says its egress control is, which is the
+# same marker bin/dejima waits for rather than a second opinion about it.
+wait_filter() {
+    local container="$1"
+    for _ in $(seq 1 120); do
+        if docker exec "$container" test -f /run/dejima-firewall-ready 2>/dev/null; then
+            return 0
+        fi
+        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" = false ]; then
+            echo "filter container $container exited during startup - log:" >&2
+            settled_logs "$container" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "filter container $container never reported its firewall up - log:" >&2
+    settled_logs "$container" >&2
+    return 1
+}
+
 dexec() {
     docker exec "$(container_name)" "$@"
+}
+
+# Into the container the egress control is in. iptables, ipset, dnsmasq and
+# ulogd2 all live there now, so a check about any of them that ran in the
+# session container would be asking the wrong process - and would fail rather
+# than pass, which is the better direction but still the wrong question.
+dexec_filter() {
+    docker exec "$(filter_name)" "$@"
 }
 
 dexec_node() {
@@ -513,15 +607,9 @@ session_pid() {
         --build-arg SANDBOX_HOME=/home/testuser \
         -f "$sandbox_dir/Dockerfile" "$repo_root" >&2
 
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair override "$test_image" \
         -e SANDBOX_TEST_MODE=1 \
-        -e GH_TOKEN="${GH_TOKEN:-}" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$test_image" >/dev/null
-
-    wait_ready "$test_container"
+        -e GH_TOKEN="${GH_TOKEN:-}"
 
     run docker exec -u testuser "$test_container" whoami
     [ "$status" -eq 0 ]
@@ -541,16 +629,10 @@ session_pid() {
     ssh-keygen -t ed25519 -N '' -f "$key_dir/testkey" >/dev/null
 
     test_container="$(test_container_name sshkey)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair sshkey "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-
-    wait_ready "$test_container"
+        -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro"
 
     # A fresh `docker exec` is a sibling of PID 1, not a descendant of the
     # exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
@@ -596,16 +678,10 @@ session_pid() {
     chmod 666 "$mounted_copy"
     cp "$mounted_copy" "$host_copy"
 
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair claudejson "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$mounted_copy:/home/node/.claude.json" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-
-    wait_ready "$test_container"
+        -v "$mounted_copy:/home/node/.claude.json"
 
     # Simulate the write Claude Code itself does against this path at
     # startup (before login even completes - see docker-compose.yml's
@@ -624,7 +700,7 @@ session_pid() {
 }
 
 @test "IPv6 is fully blocked" {
-    run dexec ip6tables -L OUTPUT -n
+    run dexec_filter ip6tables -L OUTPUT -n
     [[ "$output" == *"policy DROP"* ]]
 }
 
@@ -638,7 +714,7 @@ session_pid() {
     # this one says why - and on a host that takes the fallback branch,
     # init-firewall.sh now either turns the family off or refuses to start,
     # rather than logging a conclusion it had not checked.
-    run dexec sh -c 'ip6tables -L >/dev/null 2>&1 && echo usable'
+    run dexec_filter sh -c 'ip6tables -L >/dev/null 2>&1 && echo usable'
     [[ "$output" == *usable* ]] \
         || { echo "ip6tables is not usable as root; the fallback branch is live"; return 1; }
     # And the fallback's own condition is readable, so a failure here can be
@@ -750,17 +826,12 @@ session_pid() {
     printf 'shipped\n' > "$seed/version/plugin.json"
 
     ver=/home/node/.claude/plugins/cache/mkt/alpha/1.0.0
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair seed "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e SANDBOX_HARNESS_SEED=".claude/plugins/installed_plugins.json .claude/plugins/marketplaces .claude/plugins/cache .claude/plugins/cache/mkt .claude/plugins/cache/mkt/alpha" \
         -v "$seed/state/.claude/plugins/installed_plugins.json:/etc/dejima-seed/.claude/plugins/installed_plugins.json:ro" \
         -v "$seed/state/.claude/plugins/marketplaces:/etc/dejima-seed/.claude/plugins/marketplaces:ro" \
-        -v "$seed/version:$ver:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$seed/version:$ver:ro"
 
     # The seeded copies arrived, and belong to the session.
     run docker exec "$test_container" cat /home/node/.claude/plugins/installed_plugins.json
@@ -791,16 +862,10 @@ session_pid() {
 
 @test "ALLOW_GITHUB_PUSH=1 opens port 22 to GitHub" {
     local test_container="$(test_container_name ghpush)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair ghpush "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e ALLOW_GITHUB_PUSH=1 \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-
-    wait_ready "$test_container"
+        -e ALLOW_GITHUB_PUSH=1
 
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
@@ -823,19 +888,16 @@ session_pid() {
     # finds github.com:22 reachable without ALLOW_GITHUB_PUSH=1, and
     # entrypoint.sh (set -Eeuo pipefail) dies before the agent ever runs.
     local test_container="$(test_container_name ghforge)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    local test_filter="$(test_container_name ghforge-filter)"
+    start_pair ghforge "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_FORGE_HOSTS= \
         -e DEJIMA_PUSH_HOSTS="github.com ssh.github.com api.github.com" \
-        -e ALLOW_GITHUB_PUSH=1 \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
+        -e ALLOW_GITHUB_PUSH=1
 
-    # The container coming up at all is half the assertion.
-    wait_ready "$test_container"
+    # Coming up at all is half the assertion, and start_pair waited for both
+    # halves: a filter whose startup self-checks failed never reports ready.
 
     # Port 22 open, and open through the path that says so out loud.
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
@@ -857,7 +919,7 @@ session_pid() {
     # And the other half of the widening this avoids: GitHub's names keep
     # dnsmasq's rebind protection, which the extra-domains path would have
     # exempted them from.
-    run docker exec "$test_container" grep 'rebind-domain-ok=/github.com/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/github.com/' /etc/dnsmasq-sandbox.conf
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
@@ -877,19 +939,16 @@ session_pid() {
     # GitHub's second answer matches the first, and misses it when the name
     # has rotated in between. This test does not depend on that coin flip.
     local test_container="$(test_container_name ghextra)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    local test_filter="$(test_container_name ghextra-filter)"
+    start_pair ghextra "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_FORGE_HOSTS= \
-        -e ALLOWED_DOMAINS="github.com api.github.com" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
+        -e ALLOWED_DOMAINS="github.com api.github.com"
 
-    # Coming up at all is part of the assertion: the port-22 self-check runs
-    # during startup, and with the address in the wrong set it fails the boot.
-    wait_ready "$test_container"
+    # Coming up at all is part of the assertion, and start_pair waited for it:
+    # the port-22 self-check runs during the FILTER container's startup, and
+    # with the address in the wrong set it fails that boot rather than this one.
 
     # Resolved inside the container, through the same dnsmasq that answered
     # during startup - so this asks about the address actually allowlisted,
@@ -898,10 +957,10 @@ session_pid() {
     ip=$(docker exec "$test_container" dig +short A github.com | head -1)
     [ -n "$ip" ]
 
-    run docker exec "$test_container" ipset test github-domains "$ip"
+    run docker exec "$test_filter" ipset test github-domains "$ip"
     [ "$status" -eq 0 ]
 
-    run docker exec "$test_container" ipset test allowed-domains "$ip"
+    run docker exec "$test_filter" ipset test allowed-domains "$ip"
     [ "$status" -ne 0 ]
 
     # And the property those two sets exist to produce.
@@ -918,25 +977,20 @@ session_pid() {
     # over under this one name. Feeding the old variable here made the test
     # assert against a hostname the entrypoint never saw.
     local test_container="$(test_container_name rebind)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    local test_filter="$(test_container_name rebind-filter)"
+    start_pair rebind "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e DEJIMA_FORGE_HOSTS=forge.internal.example \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
+        -e DEJIMA_FORGE_HOSTS=forge.internal.example
 
-    wait_ready "$test_container"
-
-    run docker exec "$test_container" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 
-    run docker exec "$test_container" grep 'rebind-domain-ok=/forge.internal.example/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/forge.internal.example/' /etc/dnsmasq-sandbox.conf
     [ "$status" -eq 0 ]
 
-    run docker exec "$test_container" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
@@ -946,17 +1000,12 @@ session_pid() {
     local test_container="$(test_container_name overlays)"
     local src; src="$(mktemp -d)"
     mkdir -p "$src/skills" "$src/commands" "$src/agents"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair overlays "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$src/skills:/home/node/.claude/skills:ro" \
         -v "$src/commands:/home/node/.claude/commands:ro" \
-        -v "$src/agents:/home/node/.claude/agents:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$src/agents:/home/node/.claude/agents:ro"
     for d in skills commands agents; do
         run docker exec -u node "$test_container" bash -c "touch /home/node/.claude/$d/pwned 2>&1"
         [ "$status" -ne 0 ]
@@ -986,16 +1035,11 @@ session_pid() {
     # session directory being absent is the whole point of scoping it.
     echo 'other project source' > "$src/fh-own/aaaa@v1"
     chmod -R 777 "$src"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair projects "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$src/own:/home/node/.claude/projects/own" \
-        -v "$src/fh-own:/home/node/.claude/file-history/own-session" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$src/fh-own:/home/node/.claude/file-history/own-session"
 
     # the sibling project is absent, not merely unwritable
     run docker exec -u node "$test_container" test -e /home/node/.claude/projects/sibling
@@ -1051,15 +1095,10 @@ session_pid() {
     # back here the write below would succeed and this test would say so.
     chmod 777 "$dotclaude"
 
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair statusline-regular "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro"
 
     run docker exec -u node "$test_container" cat /home/node/.claude/statusline.sh
     [[ "$output" == *"original"* ]]
@@ -1114,15 +1153,10 @@ session_pid() {
     # able to land, or this would pass for reasons unrelated to the gap.
     chmod 777 "$target_dir" "$dotclaude"
 
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair statusline-symlink "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$dotclaude/statusline.sh:/etc/dejima-harness/.claude/statusline.sh:ro"
 
     run docker exec -u node "$test_container" sh -c \
         'rm -f /home/node/.claude/statusline.sh && echo pwned > /home/node/.claude/statusline.sh'
@@ -1226,9 +1260,13 @@ session_pid() {
     # Adding a domain to a running session is a documented feature that every
     # session briefing tells the agent to ask for, so this asserts the
     # capability by exercising what needs it.
-    run dexec sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    #
+    # In the FILTER container: dnsmasq went where the egress control did, so
+    # the floor this is about is the one bin/dejima gives that container, not
+    # the one docker-compose.yml gives the session.
+    run dexec_filter sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     [ "$status" -eq 0 ] \
-        || { echo "root cannot signal dnsmasq - is KILL in the floor? $output"; return 1; }
+        || { echo "root cannot signal dnsmasq - is KILL in the filter floor? $output"; return 1; }
 }
 
 @test "the session process holds nothing - not effective, and not in the bounding set either" {
@@ -1264,6 +1302,10 @@ session_pid() {
     #
     # Hence a refusal with a reason, and hence this test: the whole point is
     # that the container does NOT come up.
+    # Deliberately NOT start_pair: the point is a floor with one capability
+    # missing, and start_pair supplies the declared one to both halves. No
+    # filter container either - this container is meant to die in its first few
+    # lines, long before anything about a network matters.
     local test_container; test_container="$(test_container_name nosetpcap)"
     local -a caps=()
     while IFS= read -r cap; do
@@ -1298,53 +1340,48 @@ session_pid() {
     # must not be able to kill or edit its own oversight log); the capabilities
     # that came with root are not.
     #
-    # Its own container, because the shipper exits immediately without
-    # LOKI_URL, so the file-wide fixture never starts one. The URL only has to
-    # exist - nothing here asserts delivery, and an unreachable one keeps this
-    # test off the network.
-    local test_container; test_container="$(test_container_name shipper)"
-    local -a caps=()
-    while IFS= read -r cap; do caps+=(--cap-add="$cap"); done < <(compose_cap_add)
+    # Its own pair, because the shipper exits immediately without LOKI_URL, so
+    # the file-wide fixture never starts one. The URL only has to exist -
+    # nothing here asserts delivery, and an unreachable one keeps this test off
+    # the network.
+    #
+    # It runs in the FILTER container: it tails what dnsmasq and ulogd2 write,
+    # and both of those went where the egress control did.
+    local test_filter; test_filter="$(test_container_name shipper-filter)"
 
-    docker run -d --name "$test_container" \
-        --cap-drop=ALL "${caps[@]}" \
-        --security-opt=no-new-privileges:true \
-        --network "$(network_name)" \
+    start_pair shipper "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
-        -e LOKI_URL="http://127.0.0.1:1" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -e LOKI_URL="http://127.0.0.1:1"
 
     local pid
-    pid="$(docker exec "$test_container" pgrep -f -x '/bin/bash /usr/local/bin/log-shipper.sh' \
+    pid="$(docker exec "$test_filter" pgrep -f -x '/bin/bash /usr/local/bin/log-shipper.sh' \
         2>/dev/null | head -1)"
     [ -n "$pid" ] || {
         echo "no log-shipper process - LOKI_URL is set, so it should be running"
-        docker exec "$test_container" ps -eo user,args >&2 || true
+        docker exec "$test_filter" ps -eo user,args >&2 || true
         return 1
     }
 
-    run docker exec "$test_container" cat "/proc/$pid/status"
+    run docker exec "$test_filter" cat "/proc/$pid/status"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | awk '/^Uid:/ {print $2}')" = "0" ] \
         || { echo "the shipper is no longer root, so a session could signal it"; return 1; }
     local bnd; bnd=$(echo "$output" | awk '/^CapBnd:/ {print $2}')
     [ "$bnd" = "0000000000000000" ] \
-        || { echo "the shipper could regain: $(docker exec "$test_container" capsh --decode="$bnd")"; return 1; }
+        || { echo "the shipper could regain: $(docker exec "$test_filter" capsh --decode="$bnd")"; return 1; }
 
     # And it can still do its job with nothing: both sources readable on
     # ordinary permissions rather than through DAC_OVERRIDE. The shipper says
     # so itself when they are not, which is the line this looks for the absence
     # of - `tail -F` would otherwise swallow it and ship an empty stream.
-    run docker logs "$test_container"
+    run docker logs "$test_filter"
     [[ "$output" != *"will ship nothing"* ]] \
         || { echo "the shipper cannot read a source it is meant to: $output"; return 1; }
 }
 
 @test "ulogd2 runs as its own unprivileged user, not root" {
-    run dexec ps -eo user,comm
+    run dexec_filter ps -eo user,comm
     [[ "$output" == *"ulogd    ulogd"* ]] || [[ "$output" == *$'\nulogd '* ]]
     ! [[ "$output" == *$'\nroot     ulogd'* ]]
 }
@@ -1355,18 +1392,18 @@ session_pid() {
     # rather than one a project happens to have approved.
     ip=$(dexec dig +short registry.npmjs.org | head -1)
     [ -n "$ip" ]
-    dexec ipset del allowed-domains "$ip"
-    run dexec ipset test allowed-domains "$ip"
+    dexec_filter ipset del allowed-domains "$ip"
+    run dexec_filter ipset test allowed-domains "$ip"
     [ "$status" -ne 0 ]
 
     # SIGHUP clears dnsmasq's answer cache, forcing a genuine upstream
     # re-forward on the next query instead of a cache hit - only a fresh
     # forward triggers dnsmasq's --ipset= tracking (see dns-proxy.sh).
-    dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    dexec_filter bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     sleep 0.5
     dexec dig +short registry.npmjs.org >/dev/null
     sleep 0.5
-    run dexec ipset test allowed-domains "$ip"
+    run dexec_filter ipset test allowed-domains "$ip"
     [ "$status" -eq 0 ]
 }
 
@@ -1469,22 +1506,17 @@ EOF
     chmod 666 "$TD/proxy.sock"
 
     container="$(test_container_name proxy)"
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair proxy "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
         -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
         -e SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         -e ANTHROPIC_AUTH_TOKEN=sandbox-credential-proxy-placeholder \
-        -v "$TD:$TD" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    # This test depends on the forwarder having already bound port 18300;
-    # wait_ready covers that, since entrypoint.sh waits for the bind itself
-    # before reaching the `sleep infinity` wait_ready matches on.
-    wait_ready "$container"
+        -v "$TD:$TD"
+    # This test depends on the forwarder having already bound port 18300.
+    # start_pair's own wait covers it, since entrypoint.sh waits for the bind
+    # before reaching the `sleep infinity` that wait_ready matches on.
 
     run docker exec "$container" node -e '
         fetch("http://127.0.0.1:18300/v1/messages", {method: "POST",
@@ -1539,16 +1571,11 @@ EOF
     chmod -R 777 "$TD/dotclaude"
 
     container="$(test_container_name proxy-mask)"
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair proxy-mask "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$TD/dotclaude/projects:/home/node/.claude/projects" \
-        -v "$TD/dotclaude/plans:/home/node/.claude/plans" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$container"
+        -v "$TD/dotclaude/plans:/home/node/.claude/plans"
 
     run docker exec -u node "$container" cat /home/node/.claude/.credentials.json
     [ "$status" -eq 0 ]
@@ -1581,24 +1608,24 @@ EOF
     # SIGHUP-to-reload is asynchronous - give dnsmasq a moment to actually
     # reload servers-file and flush its cache before digging (see the
     # existing "ipset stays in sync" test above for the same convention).
-    dexec bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    dexec_filter bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     sleep 0.5
     ip=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     sleep 0.5
     [ -n "$ip" ]
     # The resolution itself must have populated the ipset (wildcard ipset=).
-    dexec ipset test allowed-domains "$ip"
+    dexec_filter ipset test allowed-domains "$ip"
     # Simulate a CDN edge rotating away and back: drop the IP, clear the
     # dnsmasq cache, resolve again - the wildcard must re-add it with no
     # dejima-allow involvement. This is exactly the case that used
     # to break ("allowed but blocked again minutes later").
-    dexec ipset del allowed-domains "$ip"
-    dexec bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    dexec_filter ipset del allowed-domains "$ip"
+    dexec_filter bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     sleep 0.5
     ip2=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     sleep 0.5
     [ -n "$ip2" ]
-    dexec ipset test allowed-domains "$ip2"
+    dexec_filter ipset test allowed-domains "$ip2"
 }
 
 @test "github resolutions land only in github-domains, never the port-unrestricted allowed-domains" {
@@ -1608,9 +1635,9 @@ EOF
     # (read-only; SSH push physically unreachable).
     ip=$(dexec dig +short A github.com | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     [ -n "$ip" ]
-    run dexec ipset test allowed-domains "$ip"
+    run dexec_filter ipset test allowed-domains "$ip"
     [ "$status" -ne 0 ]
-    dexec ipset test github-domains "$ip"
+    dexec_filter ipset test github-domains "$ip"
 }
 
 @test "nvim falls back to the sandbox OSC 52 clipboard provider" {
@@ -1649,16 +1676,11 @@ EOF
     cp "$BATS_TEST_DIRNAME/../hooks/sandbox-context.sh" "$hook"
 
     local test_container="$(test_container_name ctxreq)"
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair ctxreq "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$ws:$ws" \
-        -v "$hook:/usr/local/bin/sandbox-context.sh:ro" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$test_container"
+        -v "$hook:/usr/local/bin/sandbox-context.sh:ro"
 
     # -w is deliberately an unrelated directory, not "$ws": if cwd extraction
     # from the payload broke and silently fell back to $PWD, running with
@@ -1705,14 +1727,9 @@ EOF
     run docker inspect -f '{{json .Config.Entrypoint}}' "$derived"
     [[ "$output" == *"/usr/local/bin/entrypoint.sh"* ]]
 
-    docker run -d --name "$test_container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair derived "$derived" \
         -e SANDBOX_TEST_MODE=1 \
-        -e GH_TOKEN="${GH_TOKEN:-}" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$derived" >/dev/null
-    wait_ready "$test_container"
+        -e GH_TOKEN="${GH_TOKEN:-}"
 
     run docker exec "$test_container" dpkg-query -W -f='${Status}' cowsay
     [[ "$output" == *"install ok installed"* ]]
@@ -1836,17 +1853,12 @@ EOF
 
     container="$(test_container_name tls)"
     # No ANTHROPIC_* env at all - that absence is the thing under test.
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair tls "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e SANDBOX_CREDENTIAL_PROXY_SOCKET="$TD/proxy.sock" \
         -e SANDBOX_BACKEND_PROXIED_DOMAIN="$(backend_manifest_value proxied_domain)" \
-        -v "$TD:$TD" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$container"
+        -v "$TD:$TD"
 
     # NODE_EXTRA_CA_CERTS has to be passed explicitly: docker exec starts from
     # the image's ENV, not from the entrypoint process's exported environment.
@@ -1897,14 +1909,9 @@ EOF
     # entry, say), this container would send every API call into a loopback
     # port nothing is listening on.
     container="$(test_container_name nohosts)"
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair nohosts "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
-        -e GH_TOKEN="${GH_TOKEN:-}" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$container"
+        -e GH_TOKEN="${GH_TOKEN:-}"
 
     run docker exec "$container" grep -c 'api.anthropic.com' /etc/hosts
     hosts_hits=$output
@@ -1941,8 +1948,17 @@ EOF
     # The timeout stays: without the transport check the entrypoint runs on
     # into SANDBOX_TEST_MODE's `sleep infinity` and never exits, and that
     # regression should fail here rather than hang the suite.
+    # Deliberately NOT start_pair, and deliberately no filter container: this
+    # container is meant to abort at the transport check, which sits well
+    # before anything needs a network. Pairing it would only add a second
+    # container to wait for and then tear down.
+    #
+    # SETPCAP is named rather than left to Docker's default set, which happens
+    # to include it. The entrypoint refuses to start without it now, so leaving
+    # it implicit would make a change to those defaults present as this test's
+    # subject failing rather than as its precondition being gone.
     run timeout 120 docker run --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
+        --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETPCAP \
         --network "$(network_name)" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
@@ -2011,16 +2027,11 @@ EOF
     # means something.
     chmod 555 "$host_dir"
 
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair notifydir "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_NOTIFY_DIR=/run/dejima-notify \
-        -v "$host_dir:/run/dejima-notify" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$container"
+        -v "$host_dir:/run/dejima-notify"
 
     run settled_logs "$container"
     [[ "$output" == *"not writable by"* ]]
@@ -2044,14 +2055,9 @@ EOF
 # start, and noise is what stops warnings being read.
 @test "no marker-directory warning when remote access is not enabled" {
     local container="$(test_container_name nonotify)"
-    docker run -d --name "$container" \
-        --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        --network "$(network_name)" \
+    start_pair nonotify "$SESSION_IMAGE" \
         -e SANDBOX_TEST_MODE=1 \
-        -e GH_TOKEN="${GH_TOKEN:-}" \
-        --entrypoint /usr/local/bin/entrypoint.sh \
-        "$SESSION_IMAGE" >/dev/null
-    wait_ready "$container"
+        -e GH_TOKEN="${GH_TOKEN:-}"
 
     run settled_logs "$container"
     [[ "$output" != *"dejima-notify"* ]]

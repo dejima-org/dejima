@@ -4833,30 +4833,46 @@ STUB
     done
 }
 
-@test "the runtime suite's session container reads the capability floor rather than copying it" {
-    # Only the container that stands in for a real session. The suite also
-    # starts ad-hoc containers to exercise the firewall in isolation, and those
-    # legitimately pass NET_ADMIN/NET_RAW by hand - they are testing a
-    # component, not the posture a session runs under.
+@test "the runtime suite's containers read both capability floors rather than copying them" {
+    # start_pair builds the pair a launch actually starts, so it is where both
+    # floors have to come from the code that declares each: the session's from
+    # docker-compose.yml, the filter's from bin/dejima's own `docker run`. A
+    # hand-written list in either place would drift, and the containers under
+    # test would stop being the containers a launch gets.
     #
-    # The one in setup_file is different: a hand-written list there would drift
-    # from the compose file, and the container under test would stop being the
-    # container a session gets.
+    # The suite still starts two containers by hand - one that must refuse to
+    # start, one that must abort at a check before the network matters. Both
+    # say so at the call site; neither stands in for a session.
     local rt="$REPO_ROOT/test/runtime.bats"
     grep -q '^compose_cap_add()' "$rt" \
-        || { echo "runtime.bats no longer derives the capability list"; return 1; }
+        || { echo "runtime.bats no longer derives the session capability list"; return 1; }
+    grep -q '^launcher_filter_cap_add()' "$rt" \
+        || { echo "runtime.bats no longer derives the filter capability list"; return 1; }
+
+    local pair
+    pair="$(sed -n '/^start_pair()/,/^}/p' "$rt")"
+    [ -n "$pair" ] || { echo "no start_pair in runtime.bats"; return 1; }
+    grep -q 'compose_cap_add' <<< "$pair" \
+        || { echo "the session container no longer derives its capabilities"; return 1; }
+    grep -q 'launcher_filter_cap_add' <<< "$pair" \
+        || { echo "the filter container no longer derives its capabilities"; return 1; }
+
+    # Both halves, twice each: an empty set to start from, and no way back up.
+    [ "$(grep -c -- '--cap-drop=ALL' <<< "$pair")" = 2 ] \
+        || { echo "a container in the pair does not start from an empty set"; return 1; }
+    [ "$(grep -c -- '--security-opt=no-new-privileges:true' <<< "$pair")" = 2 ] \
+        || { echo "a container in the pair runs without no-new-privileges"; return 1; }
+
+    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$pair"
+    [ "$status" -ne 0 ] \
+        || { echo "a capability is hardcoded in the pair:"; echo "$output"; return 1; }
+
+    # And the fixture that stands in for a session goes through it, or the
+    # derivation above is true of a helper nothing calls.
     local setup_block
     setup_block="$(sed -n '/^setup_file()/,/^}/p' "$rt")"
-    [ -n "$setup_block" ] || { echo "no setup_file in runtime.bats"; return 1; }
-    grep -q 'compose_cap_add' <<< "$setup_block" \
-        || { echo "the session container no longer derives its capabilities"; return 1; }
-    grep -q -- '--cap-drop=ALL' <<< "$setup_block" \
-        || { echo "the session container does not start from an empty set"; return 1; }
-    grep -q -- '--security-opt=no-new-privileges:true' <<< "$setup_block" \
-        || { echo "the session container does not run with no-new-privileges"; return 1; }
-    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$setup_block"
-    [ "$status" -ne 0 ] \
-        || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
+    grep -q 'start_pair ""' <<< "$setup_block" \
+        || { echo "setup_file no longer starts the pair a launch starts"; return 1; }
 }
 
 @test "dejima writes host state under one root, not a new base directory per file" {
