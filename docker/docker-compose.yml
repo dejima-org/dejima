@@ -63,25 +63,25 @@ services:
     # about fourteen capabilities; this container writes and chowns files and
     # drops privilege once, to the session user. FSETID, MKNOD, SETFCAP,
     # SYS_CHROOT, AUDIT_WRITE and NET_BIND_SERVICE are used by nothing here -
-    # the last one because the sysctl below is what lets the TLS terminator
-    # bind :443 unprivileged.
+    # the last one because a sysctl on this namespace, not a capability, is
+    # what lets the TLS terminator bind :443 unprivileged.
     #
-    # The egress control's own capabilities are not in this list. They belong
-    # to the filter container, which bin/dejima starts with a floor of its own.
+    # No network capability at all, which is the point of the arrangement
+    # rather than an economy. This container is inside a network namespace the
+    # filter container owns and has already installed the egress rules in, and
+    # capabilities are per process: without NET_ADMIN, nothing here can alter
+    # those rules even at uid 0. NET_RAW goes with it - a raw socket is the
+    # other way to speak past a filter, and nothing here opens one.
     #
-    # KILL is the one worth explaining, because it is not obvious from reading
-    # entrypoint.sh and was missing from the first version of this list. It is
-    # not for anything the entrypoint does. `dejima-allow --container` adds a
-    # domain to a RUNNING session by appending a server= line and sending
-    # dnsmasq a SIGHUP, from outside via docker exec - and dnsmasq drops to its
-    # own user (`user=dnsmasq`), so root in this container cannot signal it
-    # without CAP_KILL. Without this line, adding a domain mid-session fails
-    # with "Operation not permitted", which is a documented feature every
-    # session briefing tells the agent to ask for.
+    # KILL is gone for a reason worth keeping, because it was here for
+    # something real: `dejima-allow --container` adds a domain to a RUNNING
+    # session by signalling dnsmasq, which drops to its own user, so whoever
+    # signals it needs CAP_KILL. dnsmasq is in the filter container, so that is
+    # where the capability belongs and where bin/dejima declares it.
     #
     # The general lesson, since the next capability will be the same shape:
-    # what the container needs is not only what its entrypoint does. Things
-    # reach into it later.
+    # what a container needs is not only what its entrypoint does. Things reach
+    # into it later.
     #
     # This narrows the ROOT phase. The session user's capabilities were already
     # empty: they are cleared on the privilege drop, which runtime.bats asserts
@@ -102,14 +102,11 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - NET_ADMIN
-      - NET_RAW
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
       - SETUID
       - SETGID
-      - KILL
       - SETPCAP
     # No path back up. gosu drops privilege rather than gaining it, so this
     # does not interfere with it - what it forbids is a setuid binary or a file
@@ -118,12 +115,13 @@ services:
     # structural instead of only observed.
     security_opt:
       - no-new-privileges:true
-    # The credential-proxy TLS terminator binds :443 as the unprivileged
-    # sandbox user (see entrypoint.sh). Docker already defaults this to 0, but
-    # pinning it makes the dependency explicit: a future default change then
-    # fails the launch instead of silently breaking the credential path.
-    sysctls:
-      net.ipv4.ip_unprivileged_port_start: 0
+    # No sysctls here. The one this container depends on -
+    # net.ipv4.ip_unprivileged_port_start, which lets the credential proxy's
+    # TLS terminator bind :443 as the unprivileged sandbox user - is a property
+    # of a network namespace, and this container does not own the one it is in.
+    # bin/dejima sets it on the filter container that does, so it is declared
+    # once, by the container it belongs to. runtime.bats reads the value back
+    # from in here, which is where it has to be true.
     environment:
       # The forge's own env vars (declared by its manifest's env_export) and
       # the DEJIMA_* resolved values (DEJIMA_FORGE_HOSTS, DEJIMA_PUSH_HOSTS,
