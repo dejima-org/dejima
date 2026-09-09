@@ -1062,25 +1062,37 @@ reasoning below is what both are built on.
   anyone. `docker inspect` still shows the resolved value to whoever can
   reach the daemon - that is daemon access rather than any process at all,
   and it is not something the launcher can change.
-- The container runs with `no-new-privileges` and an explicit capability
-  floor - `cap_drop: ALL` plus the ones it actually uses: what the
-  entrypoint's root phase needs, and `KILL`. `KILL` is there for
-  `dejima-allow --container`, not for the entrypoint - adding a domain to a
-  running session signals dnsmasq, and dnsmasq runs as its own user. `SETPCAP`
-  is there to spend rather than to use: it is what lets the entrypoint take the
-  rest of the list away again before the session starts, and since Linux 4.3 it
-  grants nothing a process does not already hold. The list
-  itself is in `docker/docker-compose.yml`, which is where it stays correct. The first means a setuid binary or a file capability cannot raise
+- **Each container runs with `no-new-privileges` and a capability floor of its
+  own**, `cap_drop: ALL` plus what that container actually uses. The two lists
+  are the arrangement stated as configuration:
+
+  The session container declares **no network capability at all** - not
+  `NET_ADMIN`, not `NET_RAW`. It is inside a namespace the filter container
+  owns and has already installed the rules in, and capabilities are per
+  process, so uid 0 in there is refused by the kernel rather than by policy.
+  What it keeps is what its root phase does before the session starts: write
+  and chown files, and drop privilege once. `SETPCAP` is there to spend rather
+  than to use - it is what lets the entrypoint take the rest of the list away
+  again before execing the session, and since Linux 4.3 it grants nothing a
+  process does not already hold.
+
+  The filter container holds the network capabilities, and `KILL` with them:
+  adding a domain to a running session signals dnsmasq, dnsmasq runs as its own
+  user, and dnsmasq is in there. The session's list is in
+  `docker/docker-compose.yml` and the filter's is in `bin/dejima`, each beside
+  the container it describes.
+
+  `no-new-privileges` means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
-  would have to take; the second means the capabilities nothing here uses were
-  never in the bounding set to be regained. Both are asserted against a running
-  container rather than against the compose file, and the capability list the
-  test uses is read out of that file so the two cannot drift.
-  What the floor describes is the container's **root phase**. A launch runs
-  with `init: true`, so PID 1 is the init that reaps for the session and it
-  holds that floor for as long as the container lives; the session is its
-  child and holds nothing. Narrowing what PID 1 itself carries means narrowing
-  the floor itself, which is #305.
+  would have to take. The floor means the capabilities nothing uses were never
+  in the bounding set to be regained. Both are asserted against running
+  containers rather than against the files, and both lists the tests use are
+  read out of those files so neither can drift.
+
+  What a floor describes is a container's **root phase**. A launch runs with
+  `init: true`, so PID 1 is the init that reaps for the session and it holds
+  that container's floor for as long as the container lives; the session is its
+  child and holds nothing.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see
   [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)

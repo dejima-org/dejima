@@ -1178,6 +1178,46 @@ session_pid() {
     rm -rf "$target_dir" "$dotclaude"
 }
 
+@test "root in the session container cannot alter the filter bounding it" {
+    # The claim the whole arrangement rests on, and the one that needs a real
+    # kernel to settle: capabilities are per PROCESS, not per namespace. This
+    # container is inside a namespace whose rules were installed by another
+    # container that holds NET_ADMIN, and it declares none - so uid 0 in here
+    # is refused, which is what makes an escape to container root stop short of
+    # the filter that bounds it.
+    #
+    # As root, deliberately. `node cannot run iptables directly` below asserts
+    # the unprivileged case and would pass on a container that simply had the
+    # capability and a user without it.
+    run docker exec -u root "$(container_name)" iptables -F
+    [ "$status" -ne 0 ] \
+        || { echo "root in the session container flushed the filter"; return 1; }
+    run docker exec -u root "$(container_name)" ipset list
+    [ "$status" -ne 0 ] \
+        || { echo "root in the session container can read the ipsets: $output"; return 1; }
+
+    # And the filter is still there afterwards - the negative above would read
+    # the same if there were no rules to flush in the first place.
+    run dexec_filter iptables -S OUTPUT
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"-P OUTPUT DROP"* ]] \
+        || { echo "the filter is not in the state this test assumed: $output"; return 1; }
+}
+
+@test "the session container inherits the namespace's unprivileged port floor" {
+    # docker-compose.yml declares no sysctls: this one is a property of a
+    # network namespace, and the session container does not own the one it is
+    # in. bin/dejima sets it on the filter container that does.
+    #
+    # Read from in here rather than from there, because in here is where it has
+    # to be true - the credential proxy's TLS terminator binds :443 in this
+    # container, as the unprivileged sandbox user.
+    run dexec cat /proc/sys/net/ipv4/ip_unprivileged_port_start
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ] \
+        || { echo "unprivileged binds start at $output, so :443 is out of reach"; return 1; }
+}
+
 @test "node cannot run iptables directly" {
     run dexec_node iptables -L
     [ "$status" -ne 0 ]

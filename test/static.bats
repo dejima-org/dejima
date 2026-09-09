@@ -4811,12 +4811,6 @@ STUB
     grep -qE '^\s*- ALL\s*$' "$c" || { echo "cap_drop does not drop ALL"; return 1; }
     grep -qE '^\s*- no-new-privileges:true\s*$' "$c" \
         || { echo "no-new-privileges is gone"; return 1; }
-    # The two the firewall needs are still declared, or the container cannot
-    # bring its own egress control up at all.
-    local cap
-    for cap in NET_ADMIN NET_RAW; do
-        grep -qE "^\s*- $cap\s*$" "$c" || { echo "$cap is no longer added"; return 1; }
-    done
     # SETPCAP is declared, and it is the one whose use is not a line of the
     # startup sequence: it is spent taking the rest of this list away again
     # before the session starts. Declared without that, it is a capability
@@ -4827,10 +4821,41 @@ STUB
         || { echo "SETPCAP is declared but nothing drops with it"; return 1; }
 
     # And nothing the entrypoint does not use has been added back.
+    local cap
     for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
         run grep -nE "^\s*- $cap\s*$" "$c"
         [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
     done
+}
+
+@test "the session container declares no network capability, and the filter declares them" {
+    # The arrangement's whole point, asserted where each list is written.
+    # Capabilities are per process, so a session container that declares
+    # NET_ADMIN can alter the filter bounding it however carefully everything
+    # else is arranged - and would do so silently, since the launch keeps
+    # working either way.
+    #
+    # KILL travels with dnsmasq: it exists so `dejima-allow --container` can
+    # signal it, and dnsmasq is in the filter container.
+    #
+    # Both directions for each, or "the session declares none of them" is
+    # satisfied just as well by a launch with no filter container to hold them.
+    local c="$SANDBOX_DIR/docker-compose.yml" cap
+    for cap in NET_ADMIN NET_RAW KILL; do
+        run grep -nE "^\s*- $cap\s*$" "$c"
+        [ "$status" -ne 0 ] \
+            || { echo "the session container declares $cap, so it can reach the filter"; return 1; }
+        grep -q -- "--cap-add $cap" "$REPO_ROOT/bin/dejima" \
+            || { echo "$cap left the session container without arriving at the filter"; return 1; }
+    done
+
+    # The same split for the one sysctl: a property of a namespace the session
+    # container does not own, so it is set by the container that does.
+    run grep -nE '^\s*sysctls:' "$c"
+    [ "$status" -ne 0 ] \
+        || { echo "the session container declares a sysctl for a namespace it does not own"; return 1; }
+    grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing sets the unprivileged port floor the TLS terminator needs"; return 1; }
 }
 
 @test "the runtime suite's containers read both capability floors rather than copying them" {
@@ -6559,12 +6584,19 @@ q
     grep -q 'echo "\$openssl_err" >&2' "$SANDBOX_DIR/entrypoint.sh"
 }
 
-@test "compose passes the transport through and lets an unprivileged process bind :443" {
+@test "the transport is passed through, and an unprivileged process can bind :443" {
     grep -qE '^\s*SANDBOX_CREDENTIAL_TRANSPORT:\s*\$\{SANDBOX_CREDENTIAL_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     # Docker already defaults this to 0, but the terminator runs as the
     # unprivileged sandbox user: pinning it means a future default change
     # fails at launch instead of silently breaking the credential path.
-    grep -qE '^\s*net\.ipv4\.ip_unprivileged_port_start:\s*0\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    #
+    # Pinned on the filter container, because it is a property of a network
+    # namespace and that is the container that owns one. The terminator binds
+    # in the session container, which joins that namespace - so this is
+    # asserted here as a declaration and in runtime.bats by reading the value
+    # back from the container that has to have it.
+    grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing pins the unprivileged port floor"; return 1; }
 }
 
 @test "compose does not pin api.anthropic.com to loopback unconditionally" {
