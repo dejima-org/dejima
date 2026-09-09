@@ -489,8 +489,8 @@ launcher_filter_cap_add() {
 # The pair a launch actually starts: a filter container that owns the network
 # namespace and brings the egress control up, and a session container that
 # joins it. Every fixture in this file has to build the same thing, because a
-# session container on its own now has no firewall at all - its entrypoint
-# stopped bringing one up when it stopped being the container that could.
+# session container on its own has no firewall at all - bringing one up is the
+# filter container's job, and the session declares nothing it would take.
 #
 # The environment goes to BOTH, which is deliberately not what bin/dejima does
 # (it hands the filter container a curated list). Here it is the right choice:
@@ -567,9 +567,9 @@ dexec() {
 }
 
 # Into the container the egress control is in. iptables, ipset, dnsmasq and
-# ulogd2 all live there now, so a check about any of them that ran in the
-# session container would be asking the wrong process - and would fail rather
-# than pass, which is the better direction but still the wrong question.
+# ulogd2 all live there, so a check about any of them aimed at the session
+# container asks the wrong process - and fails rather than passes, which is
+# the better direction but still the wrong question.
 dexec_filter() {
     docker exec "$(filter_name)" "$@"
 }
@@ -1267,9 +1267,9 @@ session_pid() {
     # session briefing tells the agent to ask for, so this asserts the
     # capability by exercising what needs it.
     #
-    # In the FILTER container: dnsmasq went where the egress control did, so
-    # the floor this is about is the one bin/dejima gives that container, not
-    # the one docker-compose.yml gives the session.
+    # In the FILTER container, which is where dnsmasq runs - so the floor this
+    # is about is the one bin/dejima gives that container, not the one
+    # docker-compose.yml gives the session.
     run dexec_filter sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
     [ "$status" -eq 0 ] \
         || { echo "root cannot signal dnsmasq - is KILL in the filter floor? $output"; return 1; }
@@ -1351,8 +1351,8 @@ session_pid() {
     # nothing here asserts delivery, and an unreachable one keeps this test off
     # the network.
     #
-    # It runs in the FILTER container: it tails what dnsmasq and ulogd2 write,
-    # and both of those went where the egress control did.
+    # It runs in the FILTER container, which is where the two logs it tails are
+    # written - dnsmasq's and ulogd2's.
     local test_filter; test_filter="$(test_container_name shipper-filter)"
 
     start_pair shipper "$SESSION_IMAGE" \
@@ -1960,8 +1960,8 @@ EOF
     # container to wait for and then tear down.
     #
     # SETPCAP is named rather than left to Docker's default set, which happens
-    # to include it. The entrypoint refuses to start without it now, so leaving
-    # it implicit would make a change to those defaults present as this test's
+    # to include it. The entrypoint refuses to start without it, so leaving it
+    # implicit would make a change to those defaults present as this test's
     # subject failing rather than as its precondition being gone.
     run timeout 120 docker run --name "$container" \
         --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETPCAP \

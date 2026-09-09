@@ -3146,11 +3146,11 @@ fi
 SANDBOX_RUN_NETWORK="dejima-run-$DEJIMA_RUN_ID"
 SANDBOX_FILTER_CONTAINER="dejima-filter-$DEJIMA_RUN_ID"
 
-# Per launch, and not the shared bridge every session used to sit on. Two
-# reasons, and the first is not optional: Docker's embedded resolver at
-# 127.0.0.11 exists only on a user-defined network, and dns-proxy.sh forwards
-# to it. The second is that concurrent sessions stop sharing a link layer,
-# which egress default-deny was doing on its own.
+# One network per launch, for two reasons, and the first is not optional:
+# Docker's embedded resolver at 127.0.0.11 exists only on a user-defined
+# network, and dns-proxy.sh forwards to it. The second is that concurrent
+# sessions are then separated at the link layer as well, rather than only by
+# each namespace's own egress default-deny.
 docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK" >/dev/null
 
 # Everything the firewall path reads, passed as `-e NAME` so a value is taken

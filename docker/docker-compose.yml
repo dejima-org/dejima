@@ -55,18 +55,19 @@ services:
     # here; see the block above its compose invocation, and docs/security.md.
     #
     # The default is what a `docker compose` invocation by hand gets, and it is
-    # a network with no filter on it. That is the same thing such an invocation
-    # has always got - this file's first line says it is not meant to be run
-    # that way - but it is worth naming, because the value that makes a session
-    # safe now arrives from outside this file.
+    # a network with no filter on it. This file's first line says it is not
+    # meant to be run that way, but it is worth naming here: the value that
+    # makes a session safe arrives from outside this file.
     network_mode: ${SANDBOX_NETNS_CONTAINER:-bridge}
-    # An explicit floor rather than Docker's default set plus two. The default
-    # carries about fourteen capabilities and this container uses seven: it
-    # writes and chowns files, runs the firewall, drops privilege twice (gosu
-    # for the session, `ulogd -u` for the log daemon), and signals dnsmasq.
-    # FSETID, MKNOD, SETFCAP, SETPCAP, SYS_CHROOT, AUDIT_WRITE and
-    # NET_BIND_SERVICE are used by nothing here - the last one because the
-    # sysctl below is what lets the TLS terminator bind :443 unprivileged.
+    # An explicit floor rather than Docker's default set. The default carries
+    # about fourteen capabilities; this container writes and chowns files and
+    # drops privilege once, to the session user. FSETID, MKNOD, SETFCAP,
+    # SYS_CHROOT, AUDIT_WRITE and NET_BIND_SERVICE are used by nothing here -
+    # the last one because the sysctl below is what lets the TLS terminator
+    # bind :443 unprivileged.
+    #
+    # The egress control's own capabilities are not in this list. They belong
+    # to the filter container, which bin/dejima starts with a floor of its own.
     #
     # KILL is the one worth explaining, because it is not obvious from reading
     # entrypoint.sh and was missing from the first version of this list. It is
@@ -88,11 +89,11 @@ services:
     # was never there to be regained.
     #
     # SETPCAP is the odd one out: nothing in the startup sequence uses it for
-    # its own work. It is spent, once, to take every capability here away from
-    # the session and from the one root daemon that outlives the entrypoint -
-    # see entrypoint.sh. A bounding set survives execve and a uid-0 process
-    # recovers its permitted set from it, so without this the seven above are
-    # held by everything the session can reach, effective set or not.
+    # its own work. It is spent, once, to take every capability above away from
+    # the session before it starts - see entrypoint.sh. A bounding set survives
+    # execve and a uid-0 process recovers its permitted set from it, so without
+    # this the whole list is held by everything the session can reach, effective
+    # set or not.
     #
     # Adding a capability to remove capabilities is worth stating plainly. It
     # can only reduce: since Linux 4.3 SETPCAP grants nothing a process does

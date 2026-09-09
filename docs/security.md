@@ -1026,26 +1026,25 @@ reasoning below is what both are built on.
   `ipset` both return `Operation not permitted` to a joiner that lacks
   `NET_ADMIN`.
 
-  Two things follow that were previously arguments. The namespace has its rules
-  before anything is created in it, so the window where a session holds an
-  interface and no filter does not exist rather than being bounded by how fast
-  an entrypoint runs; `bin/dejima` waits for the filter container to say it is
-  up and refuses the launch otherwise. And killing the filter container leaves
-  the sandbox holding loopback alone - no network at all, rather than an
-  unfiltered one.
+  Two things follow. The namespace has its rules before anything is created in
+  it, so there is no window in which a session holds an interface and no
+  filter; `bin/dejima` waits for the filter container to say it is up and
+  refuses the launch otherwise. And killing the filter container leaves the
+  sandbox holding loopback alone - no network at all, rather than an unfiltered
+  one.
 
   Nothing a session runs ever executes in the filter container. It holds the
-  privilege; the one beside it holds the session. A per-launch network comes
-  with this, so concurrent sessions no longer share a link layer either.
+  privilege; the one beside it holds the session. Each launch gets a network of
+  its own, so concurrent sessions are separated at the link layer as well.
 - The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, prepares the session's own state, then drops to
   that user before execing the configured command (`[core] command`, or the
   selected harness's own if that is unset). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
-  exfiltration path - and since that script now runs in the container beside
-  it, there is no copy of the allowlist in reach to re-run against. Verified:
-  that user gets a permission error running `iptables` directly.
+  exfiltration path: that script runs in the container beside it, so there is
+  no copy of the allowlist within reach to re-run against. Verified: that user
+  gets a permission error running `iptables` directly.
 - **The session's capability bounding set is empty**, not merely its effective
   one. The distinction is the whole of it: an empty effective set is what
   changing uid gives you anyway, while the bounding set is what a process that

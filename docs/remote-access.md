@@ -52,14 +52,11 @@ running.
 
 ## The bind address is the one thing to get right
 
-`docker/init-firewall.sh` deliberately ACCEPTs OUTPUT to the default-route
-address - the Docker bridge gateway, which is your host. That is the one host
-address a sandbox can reach at all. It runs in the filter container now rather
-than in the session's own, which changes who can alter that rule and changes
-nothing about what it permits. Combine it
-with the fact above (a tmux client is a host shell) and the consequence is
-direct: **a front door the sandbox can reach is a compromised session's own
-escape hatch.**
+`docker/init-firewall.sh` deliberately ACCEPTs OUTPUT to the session's
+default-route address - the Docker bridge gateway, which is your host. That is
+the one host address a sandbox can reach at all. Combine it with the fact above
+(a tmux client is a host shell) and the consequence is direct: **a front door
+the sandbox can reach is a compromised session's own escape hatch.**
 
 So:
 
