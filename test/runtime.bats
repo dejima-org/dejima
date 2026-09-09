@@ -902,6 +902,12 @@ session_pid() {
     # Port 22 open, and open through the path that says so out loud.
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
+    # The FILTER container's log, because init-firewall.sh prints this and
+    # init-firewall.sh is what moved. The connect check above stays in the
+    # session container for the opposite reason: reachability is a claim about
+    # the session, and it is the half of this test that would still pass on a
+    # grant that was never announced.
+    #
     # Polled rather than read once, for the reason settled_logs documents: the
     # json-file driver's writes lag the process that produced them, so a single
     # read taken here can stop short of a line printed seconds earlier. That is
@@ -910,7 +916,7 @@ session_pid() {
     # the line cannot mask its absence: one never printed still fails, later.
     local want="ALLOW_GITHUB_PUSH=1: opening port 22" logs=""
     for _ in $(seq 1 40); do
-        logs=$(docker logs "$test_container" 2>&1)
+        logs=$(docker logs "$test_filter" 2>&1)
         case "$logs" in *"$want"*) break ;; esac
         sleep 0.25
     done
