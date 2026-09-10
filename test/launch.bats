@@ -256,10 +256,17 @@ EOF
 stub_orphan() {  # <age-seconds> <joined-by|"">
     local age="$1" joiner="$2"
     stub_launch
+    # Each query answers in the format Docker really answers it in, and the two
+    # differ: `Created` is a string field on a container and a time.Time on a
+    # network, so a template prints the second through String() and appends a
+    # timezone NAME. One format for both is what let the network half of the
+    # reconciler pass a test while reaping nothing.
     cat > "$LAUNCH_DIR/docker" <<EOF
 #!/bin/bash
 echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
-made=\$(date -u -d "@\$(( \$(date +%s) - $age ))" +%Y-%m-%dT%H:%M:%S.000000000Z)
+epoch=\$(( \$(date +%s) - $age ))
+made=\$(date -u -d "@\$epoch" +%Y-%m-%dT%H:%M:%S.000000000Z)
+made_go=\$(date -u -d "@\$epoch" '+%Y-%m-%d %H:%M:%S.000000000 +0000 UTC')
 case "\$*" in
     # The running containers, and what namespace each is in.
     "ps -q")                       [ -n "$joiner" ] && echo j0 ; exit 0 ;;
@@ -268,7 +275,7 @@ case "\$*" in
     *"ps -aq --filter label=dejima.filter"*) echo orphan0 ; exit 0 ;;
     *"{{.Id}} {{.Name}} {{.Created}}"*)     echo "orphan0 /dejima-filter-old \$made" ; exit 0 ;;
     *"network ls -q --filter label=dejima.run"*) echo net0 ; exit 0 ;;
-    *"{{.Name}} {{.Created}}"*)             echo "dejima-run-old \$made" ; exit 0 ;;
+    *"{{.Name}} {{.Created}}"*)             echo "dejima-run-old \$made_go" ; exit 0 ;;
 esac
 exit 0
 EOF
