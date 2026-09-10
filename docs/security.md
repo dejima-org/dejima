@@ -1036,6 +1036,14 @@ reasoning below is what both are built on.
   Nothing a session runs ever executes in the filter container. It holds the
   privilege; the one beside it holds the session. Each launch gets a network of
   its own, so concurrent sessions are separated at the link layer as well.
+
+  A launch removes both on the way out, and reconciles at the start against
+  whatever a `SIGKILL` or a restarted host left behind - a filter container
+  with no session in its namespace, older than the window in which a pair is
+  still being built. What that reclaims is address space rather than safety: a
+  leaked filter container filters a namespace nothing is in, and Docker's
+  address pool is finite enough that exhausting it fails a later launch with an
+  error naming neither cause nor remedy.
 - The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
   `entrypoint.sh` runs as root, prepares the session's own state, then drops to

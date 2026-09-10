@@ -3146,6 +3146,88 @@ fi
 SANDBOX_RUN_NETWORK="dejima-run-$DEJIMA_RUN_ID"
 SANDBOX_FILTER_CONTAINER="dejima-filter-$DEJIMA_RUN_ID"
 
+# A launch removes its own pair on the way out, which covers every exit the
+# trap reaches. It does not cover SIGKILL, a host reboot, or a docker daemon
+# restart, and each of those leaves a filter container holding a network open.
+#
+# The leak is inert - a filter container filters a namespace nothing is in - so
+# this is hygiene rather than a second control. What makes it worth doing is
+# the address pool: Docker carves a bounded number of networks out of its
+# default pool, and exhausting it fails a launch with an error about address
+# space that says nothing about the cause.
+#
+# Never fatal. A daemon that cannot answer any of this is one that is about to
+# fail the launch a few lines down for a reason worth reporting, and a tidy-up
+# pass should not be what reports it.
+
+# How old a filter container or network has to be before an absent session
+# counts as abandoned rather than as not started yet.
+#
+# Between `docker run` for the filter container and `docker compose run` for
+# the session there is a window in which a healthy pair has no joiner, and it
+# lasts as long as the firewall takes to come up - seconds, or half a minute
+# when the GitHub ranges fetch retries. The same window exists for a network
+# between its creation and its first endpoint. Minutes against seconds, because
+# reaping a concurrent launch out from under itself costs that launch, while
+# waiting costs one more pass.
+DEJIMA_ORPHAN_GRACE=300
+
+# Seconds since $1, an RFC 3339 timestamp, or nothing if it does not parse.
+#
+# `docker ps --format {{.CreatedAt}}` and `docker network ls` both print a
+# trailing timezone NAME ("-0700 PDT") that date(1) refuses outright. Every
+# caller here therefore reads .Created out of `inspect`, which is RFC 3339 -
+# and an unparseable value yields no age rather than a huge one, so the
+# failure is "nothing was reaped" and never "everything was".
+_epoch_age() {
+    local made
+    made="$(date -d "$1" +%s 2>/dev/null)" || return 1
+    [ -n "$made" ] || return 1
+    printf '%s' "$(( $(date +%s) - made ))"
+}
+
+reconcile_orphans() {
+    local candidates joined id name created age
+
+    # The candidates first, so a host with no filter containers at all asks one
+    # question and stops. The query below is the expensive one - it inspects
+    # every running container on the host, dejima's or not - and there is no
+    # point paying for it to answer about nothing.
+    candidates="$(docker ps -aq --filter 'label=dejima.filter' 2>/dev/null \
+        | xargs -r docker inspect -f '{{.Id}} {{.Name}} {{.Created}}' 2>/dev/null)"
+
+    if [ -n "$candidates" ]; then
+        # Whose namespace something is still in. Read once: asking per
+        # candidate would be a docker call per candidate, on every launch.
+        #
+        # NetworkMode is `container:<id>` for a joiner - the id, even where the
+        # launcher passed a name, so what is compared below are ids.
+        joined="$(docker ps -q 2>/dev/null | xargs -r docker inspect \
+            -f '{{.HostConfig.NetworkMode}}' 2>/dev/null | sed -n 's/^container://p')"
+    fi
+
+    while read -r id name created; do
+        [ -n "$id" ] && [ -n "$created" ] || continue
+        grep -qxF "$id" <<< "${joined:-}" && continue
+        age="$(_epoch_age "$created")" || continue
+        [ "$age" -gt "$DEJIMA_ORPHAN_GRACE" ] || continue
+        echo "dejima: removing a filter container an earlier session left behind (${name#/})" >&2
+        docker rm -f "$id" >/dev/null 2>&1 || true
+    done <<< "$candidates"
+
+    # Networks defend themselves twice over: `docker network rm` refuses one
+    # that still has an endpoint, and the grace covers the moment between a
+    # network being created and its filter container attaching to it.
+    while read -r name created; do
+        [ -n "$name" ] && [ -n "$created" ] || continue
+        age="$(_epoch_age "$created")" || continue
+        [ "$age" -gt "$DEJIMA_ORPHAN_GRACE" ] || continue
+        docker network rm "$name" >/dev/null 2>&1 || true
+    done < <(docker network ls -q --filter 'label=dejima.run' 2>/dev/null \
+             | xargs -r docker network inspect -f '{{.Name}} {{.Created}}' 2>/dev/null)
+}
+reconcile_orphans || true
+
 # One network per launch, for two reasons, and the first is not optional:
 # Docker's embedded resolver at 127.0.0.11 exists only on a user-defined
 # network, and dns-proxy.sh forwards to it. The second is that concurrent
