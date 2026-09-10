@@ -1214,20 +1214,28 @@ session_pid() {
     # That is not hypothetical arithmetic: `docker compose build sandbox` run
     # by hand fails today on four `${VAR:?}` volume entries, which is correct
     # and is why nothing had ever checked this.
-    #
+
+    # The compose PLUGIN, not just the docker CLI. The privileged runner has
+    # the CLI and a socket and no compose at all, so this skips there - and it
+    # skips out loud, because what that absence means is larger than this test:
+    # no CI job runs `docker compose`, so no CI job exercises the launch path
+    # bin/dejima actually takes. It runs on a host that has the plugin.
+    docker compose version >/dev/null 2>&1 \
+        || skip "no docker compose plugin here, so the compose file goes unparsed"
+
+    # Not $SANDBOX_DIR: that is assigned in setup_file, which bats runs in a
+    # different shell from a test body.
+    local compose="$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
+
     # Every name the file interpolates WITHOUT a default, read out of the file
     # rather than listed here, so one added tomorrow is supplied rather than
     # turning this red against a launcher that sets it properly. Two shapes,
     # and both matter: `${VAR:?}` fails the parse outright, and a bare `${VAR}`
     # resolves to the empty string, which is a volume line with no source.
     #
-    # Values only have to exist; `config` validates and starts nothing.
-    #
-    # HOME is excluded: it is always set, and pointing it somewhere else here
-    # would only move where docker looks for its own client config.
-    # Not $SANDBOX_DIR: that is assigned in setup_file, which bats runs in a
-    # different shell from a test body.
-    local compose="$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
+    # Values only have to exist; `config` validates and starts nothing. HOME is
+    # excluded: it is always set, and pointing it elsewhere here would only
+    # move where docker looks for its own client config.
     local -a env_args=()
     local v
     while IFS= read -r v; do
