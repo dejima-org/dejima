@@ -1204,6 +1204,59 @@ session_pid() {
         || { echo "the filter is not in the state this test assumed: $output"; return 1; }
 }
 
+@test "the compose file parses, and defaults to no network when nothing supplies one" {
+    # Nothing in this repo runs `docker compose` against a real daemon: this
+    # suite builds with plain `docker build`, and every launch test elsewhere
+    # stubs docker entirely. So a compose file that stopped interpolating would
+    # reach an operator before it reached a test - and it would present as a
+    # failing BUILD, because `build` and `run` both parse the whole file first.
+    #
+    # That is not hypothetical arithmetic: `docker compose build sandbox` run
+    # by hand fails today on four `${VAR:?}` volume entries, which is correct
+    # and is why nothing had ever checked this.
+
+    # The compose PLUGIN, not just the docker CLI. The privileged runner has
+    # the CLI and a socket and no compose at all, so this skips there - and it
+    # skips out loud, because what that absence means is larger than this test:
+    # no CI job runs `docker compose`, so no CI job exercises the launch path
+    # bin/dejima actually takes. It runs on a host that has the plugin.
+    docker compose version >/dev/null 2>&1 \
+        || skip "no docker compose plugin here, so the compose file goes unparsed"
+
+    # Not $SANDBOX_DIR: that is assigned in setup_file, which bats runs in a
+    # different shell from a test body.
+    local compose="$BATS_TEST_DIRNAME/../docker/docker-compose.yml"
+
+    # Every name the file interpolates WITHOUT a default, read out of the file
+    # rather than listed here, so one added tomorrow is supplied rather than
+    # turning this red against a launcher that sets it properly. Two shapes,
+    # and both matter: `${VAR:?}` fails the parse outright, and a bare `${VAR}`
+    # resolves to the empty string, which is a volume line with no source.
+    #
+    # Values only have to exist; `config` validates and starts nothing. HOME is
+    # excluded: it is always set, and pointing it elsewhere here would only
+    # move where docker looks for its own client config.
+    local -a env_args=()
+    local v
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        [ "$v" != HOME ] || continue
+        env_args+=("$v=/tmp")
+    done < <(grep -oE '\$\{[A-Z_]+(:\?|\})' "$compose" \
+             | sed 's/^\${//; s/:?$//; s/}$//' | sort -u)
+    [ "${#env_args[@]}" -gt 0 ] \
+        || { echo "found no undefaulted variables to supply - is the file still interpolated?"; return 1; }
+
+    run env "${env_args[@]}" docker compose -f "$compose" config
+    [ "$status" -eq 0 ] || { echo "the compose file does not parse:"; echo "$output"; return 1; }
+
+    # SANDBOX_NETNS_CONTAINER is deliberately NOT supplied above, so this is
+    # the default resolving. `none` is a sandbox that visibly cannot work;
+    # any real network is one that works and has unfiltered egress.
+    grep -qE '^\s*network_mode:\s*"?none"?\s*$' <<< "$output" \
+        || { echo "the default network_mode is not none:"; grep -i network <<< "$output"; return 1; }
+}
+
 @test "the session container inherits the namespace's unprivileged port floor" {
     # docker-compose.yml declares no sysctls: this one is a property of a
     # network namespace, and the session container does not own the one it is

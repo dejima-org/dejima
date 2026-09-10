@@ -3172,16 +3172,30 @@ SANDBOX_FILTER_CONTAINER="dejima-filter-$DEJIMA_RUN_ID"
 # waiting costs one more pass.
 DEJIMA_ORPHAN_GRACE=300
 
-# Seconds since $1, an RFC 3339 timestamp, or nothing if it does not parse.
+# Seconds since $1, a timestamp as Docker rendered it, or nothing at all if it
+# cannot be read as one.
 #
-# `docker ps --format {{.CreatedAt}}` and `docker network ls` both print a
-# trailing timezone NAME ("-0700 PDT") that date(1) refuses outright. Every
-# caller here therefore reads .Created out of `inspect`, which is RFC 3339 -
-# and an unparseable value yields no age rather than a huge one, so the
-# failure is "nothing was reaped" and never "everything was".
+# Two renderings arrive here and only one is RFC 3339, because the field is not
+# the same type on both of the structs this asks about: a container's `Created`
+# is a string, a network's is a `time.Time`. A Go template prints a `time.Time`
+# through String(), which appends a timezone NAME - "+0000 UTC" - and date(1)
+# refuses that outright.
+#
+# So the name is stripped rather than the format assumed. Assuming the format
+# is what broke this: the comment here used to say every caller read RFC 3339,
+# which was true of one of them, and the network half therefore reaped nothing
+# at all while looking exactly like the half that worked.
+#
+# An unparseable value still yields no age rather than a huge one, so the
+# failure stays "nothing was reaped" and never becomes "everything was".
 _epoch_age() {
-    local made
-    made="$(date -d "$1" +%s 2>/dev/null)" || return 1
+    local made stamp="$1"
+    # "2026-09-09 18:00:00.1 +0000 UTC" -> "2026-09-09 18:00:00.1 +0000", and
+    # an RFC 3339 stamp, which has no spaces, through unchanged.
+    case "$stamp" in
+        *' '[A-Z]*) stamp="${stamp% *}" ;;
+    esac
+    made="$(date -d "$stamp" +%s 2>/dev/null)" || return 1
     [ -n "$made" ] || return 1
     printf '%s' "$(( $(date +%s) - made ))"
 }

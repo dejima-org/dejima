@@ -97,6 +97,14 @@ log_pos() { grep -n -- "$1" "$LAUNCH_DIR/docker-log" | tail -1 | cut -d: -f1; }
     grep -qE '^\s*network_mode: \$\{SANDBOX_NETNS_CONTAINER' "$SANDBOX_DIR/docker-compose.yml" \
         || { echo "the compose file does not join a namespace"; return 1; }
 
+    # And what it falls back to when nothing supplies one. Only a `docker
+    # compose` invocation by hand reaches this, but a default naming a real
+    # network is a sandbox that comes up working with unfiltered egress, and
+    # nothing about it looks wrong. `none` fails the same case visibly.
+    grep -qE '^\s*network_mode: \$\{SANDBOX_NETNS_CONTAINER:-none\}\s*$' \
+        "$SANDBOX_DIR/docker-compose.yml" \
+        || { echo "the network_mode default is not fail-closed"; return 1; }
+
     local run; run="$(log_line 'run -d --init')"
     local id; id="$(sed -E 's/.*--name dejima-filter-([0-9a-f]{16}).*/\1/' <<< "$run")"
     [ -n "$id" ]
@@ -245,6 +253,36 @@ EOF
 
     [ -z "$missing" ] \
         || { echo "the firewall path reads these, and the filter container is not given them:$missing"; return 1; }
+
+    # And the other half of the same failure, which the flag alone cannot show.
+    # `docker run -e NAME` takes the value from the launcher's environment, so
+    # a name that is assigned but never exported passes an empty one - the
+    # filter container then allowlists less than it was told to, and what an
+    # operator sees is a domain they approved being unreachable, with nothing
+    # pointing here.
+    #
+    # Not hypothetical: `export DEJIMA_FORGE_HOSTS` is a line that had to be
+    # added by hand when the filter container was introduced, because until
+    # then that variable had only ever needed to reach the sandbox as
+    # `-e NAME=value`, which carries its own value.
+    #
+    # Continuations are flattened first, because the exports here run to
+    # several lines; and `export` is matched anywhere on a line rather than at
+    # its start, because two of these are exported after a `;` on the line that
+    # assigns them.
+    local exported unexported=""
+    exported="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima" \
+        | grep -oE 'export [A-Za-z_][A-Za-z0-9_ ]*')"
+    [ -n "$exported" ] || { echo "found no exports in bin/dejima at all"; return 1; }
+
+    while read -r v; do
+        [ -n "$v" ] || continue
+        grep -qE "(^|[[:space:]])$v([[:space:]]|\$)" <<< "$exported" \
+            || unexported="$unexported $v"
+    done < <(grep -oE '^\s+-e [A-Z_]+' "$REPO_ROOT/bin/dejima" | awk '{print $2}' | sort -u)
+
+    [ -z "$unexported" ] \
+        || { echo "passed as -e NAME but never exported, so the value is empty:$unexported"; return 1; }
 }
 
 # A `docker` that reports one filter container and one network, with whatever
@@ -256,10 +294,17 @@ EOF
 stub_orphan() {  # <age-seconds> <joined-by|"">
     local age="$1" joiner="$2"
     stub_launch
+    # Each query answers in the format Docker really answers it in, and the two
+    # differ: `Created` is a string field on a container and a time.Time on a
+    # network, so a template prints the second through String() and appends a
+    # timezone NAME. One format for both is what let the network half of the
+    # reconciler pass a test while reaping nothing.
     cat > "$LAUNCH_DIR/docker" <<EOF
 #!/bin/bash
 echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
-made=\$(date -u -d "@\$(( \$(date +%s) - $age ))" +%Y-%m-%dT%H:%M:%S.000000000Z)
+epoch=\$(( \$(date +%s) - $age ))
+made=\$(date -u -d "@\$epoch" +%Y-%m-%dT%H:%M:%S.000000000Z)
+made_go=\$(date -u -d "@\$epoch" '+%Y-%m-%d %H:%M:%S.000000000 +0000 UTC')
 case "\$*" in
     # The running containers, and what namespace each is in.
     "ps -q")                       [ -n "$joiner" ] && echo j0 ; exit 0 ;;
@@ -268,7 +313,7 @@ case "\$*" in
     *"ps -aq --filter label=dejima.filter"*) echo orphan0 ; exit 0 ;;
     *"{{.Id}} {{.Name}} {{.Created}}"*)     echo "orphan0 /dejima-filter-old \$made" ; exit 0 ;;
     *"network ls -q --filter label=dejima.run"*) echo net0 ; exit 0 ;;
-    *"{{.Name}} {{.Created}}"*)             echo "dejima-run-old \$made" ; exit 0 ;;
+    *"{{.Name}} {{.Created}}"*)             echo "dejima-run-old \$made_go" ; exit 0 ;;
 esac
 exit 0
 EOF
