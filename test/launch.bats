@@ -96,6 +96,13 @@ log_pos() { grep -n -- "$1" "$LAUNCH_DIR/docker-log" | tail -1 | cut -d: -f1; }
     # arrangement where the session still has a network of its own.
     grep -qE '^\s*network_mode: \$\{SANDBOX_NETNS_CONTAINER' "$SANDBOX_DIR/docker-compose.yml" \
         || { echo "the compose file does not join a namespace"; return 1; }
+    # And what it falls back to when nothing supplies one. Only a `docker
+    # compose` invocation by hand reaches this, but a default naming a real
+    # network is a sandbox that comes up working with unfiltered egress, and
+    # nothing about it looks wrong. `none` fails the same case visibly.
+    grep -qE '^\s*network_mode: \$\{SANDBOX_NETNS_CONTAINER:-none\}\s*$' \
+        "$SANDBOX_DIR/docker-compose.yml" \
+        || { echo "the network_mode default is not fail-closed"; return 1; }
 
     local run; run="$(log_line 'run -d --init')"
     local id; id="$(sed -E 's/.*--name dejima-filter-([0-9a-f]{16}).*/\1/' <<< "$run")"

@@ -54,11 +54,16 @@ services:
     # capability to reach. bin/dejima starts that container and passes its name
     # here; see the block above its compose invocation, and docs/security.md.
     #
-    # The default is what a `docker compose` invocation by hand gets, and it is
-    # a network with no filter on it. This file's first line says it is not
-    # meant to be run that way, but it is worth naming here: the value that
-    # makes a session safe arrives from outside this file.
-    network_mode: ${SANDBOX_NETNS_CONTAINER:-bridge}
+    # The default is for a `docker compose` invocation by hand, which this
+    # file's first line says is not how to run it. It is `network_mode: none`
+    # rather than any real network, because the value that makes a session safe
+    # arrives from outside this file, and the question a default answers is
+    # what happens when it does not arrive: no network at all is a sandbox that
+    # visibly cannot work, where a real one is a sandbox that works and has
+    # unfiltered egress.
+    #
+    # It does not affect `docker compose build`, which reads `build.network`.
+    network_mode: ${SANDBOX_NETNS_CONTAINER:-none}
     # An explicit floor rather than Docker's default set. The default carries
     # about fourteen capabilities; this container writes and chowns files and
     # drops privilege once, to the session user. FSETID, MKNOD, SETFCAP,
