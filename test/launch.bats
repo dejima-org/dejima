@@ -96,6 +96,7 @@ log_pos() { grep -n -- "$1" "$LAUNCH_DIR/docker-log" | tail -1 | cut -d: -f1; }
     # arrangement where the session still has a network of its own.
     grep -qE '^\s*network_mode: \$\{SANDBOX_NETNS_CONTAINER' "$SANDBOX_DIR/docker-compose.yml" \
         || { echo "the compose file does not join a namespace"; return 1; }
+
     # And what it falls back to when nothing supplies one. Only a `docker
     # compose` invocation by hand reaches this, but a default naming a real
     # network is a sandbox that comes up working with unfiltered egress, and
@@ -252,6 +253,36 @@ EOF
 
     [ -z "$missing" ] \
         || { echo "the firewall path reads these, and the filter container is not given them:$missing"; return 1; }
+
+    # And the other half of the same failure, which the flag alone cannot show.
+    # `docker run -e NAME` takes the value from the launcher's environment, so
+    # a name that is assigned but never exported passes an empty one - the
+    # filter container then allowlists less than it was told to, and what an
+    # operator sees is a domain they approved being unreachable, with nothing
+    # pointing here.
+    #
+    # Not hypothetical: `export DEJIMA_FORGE_HOSTS` is a line that had to be
+    # added by hand when the filter container was introduced, because until
+    # then that variable had only ever needed to reach the sandbox as
+    # `-e NAME=value`, which carries its own value.
+    #
+    # Continuations are flattened first, because the exports here run to
+    # several lines; and `export` is matched anywhere on a line rather than at
+    # its start, because two of these are exported after a `;` on the line that
+    # assigns them.
+    local exported unexported=""
+    exported="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima" \
+        | grep -oE 'export [A-Za-z_][A-Za-z0-9_ ]*')"
+    [ -n "$exported" ] || { echo "found no exports in bin/dejima at all"; return 1; }
+
+    while read -r v; do
+        [ -n "$v" ] || continue
+        grep -qE "(^|[[:space:]])$v([[:space:]]|\$)" <<< "$exported" \
+            || unexported="$unexported $v"
+    done < <(grep -oE '^\s+-e [A-Z_]+' "$REPO_ROOT/bin/dejima" | awk '{print $2}' | sort -u)
+
+    [ -z "$unexported" ] \
+        || { echo "passed as -e NAME but never exported, so the value is empty:$unexported"; return 1; }
 }
 
 # A `docker` that reports one filter container and one network, with whatever
