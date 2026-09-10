@@ -3174,14 +3174,32 @@ filter_env=(
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET
 )
 
+# The capabilities the egress control needs, and the sysctl the namespace it
+# owns needs. Every one of these used to be in docker-compose.yml, and none of
+# them belongs to a container running a session:
+#
+#   NET_ADMIN, NET_RAW   the packet filter and the ipsets
+#   KILL                 dnsmasq drops to its own user, and dejima-allow
+#                        signals it to add a domain mid-session
+#   CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID
+#                        dns-proxy.sh's log file, and the two daemons that
+#                        drop privilege after opening what they need
+#   SETPCAP              spent taking the rest away from log-shipper.sh
+#
+# The sysctl lets the credential proxy's TLS terminator bind :443 as the
+# unprivileged sandbox user. It is a property of the network namespace rather
+# than of a container, so it is set here, by the container that owns one, and
+# it applies to the session container that joins it.
 docker run -d --init \
     --name "$SANDBOX_FILTER_CONTAINER" \
     --label "dejima.filter=$DEJIMA_RUN_ID" \
     --network "$SANDBOX_RUN_NETWORK" \
     --cap-drop ALL \
-    --cap-add NET_ADMIN --cap-add NET_RAW --cap-add KILL \
+    --cap-add NET_ADMIN --cap-add NET_RAW \
+    --cap-add KILL \
     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
-    --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+    --cap-add SETUID --cap-add SETGID \
+    --cap-add SETPCAP \
     --security-opt no-new-privileges:true \
     --sysctl net.ipv4.ip_unprivileged_port_start=0 \
     ${filter_env[@]+"${filter_env[@]}"} \
