@@ -246,3 +246,92 @@ EOF
     [ -z "$missing" ] \
         || { echo "the firewall path reads these, and the filter container is not given them:$missing"; return 1; }
 }
+
+# A `docker` that reports one filter container and one network, with whatever
+# age, joiner and identity a test needs, and records every removal.
+#
+# Each of these tests is about a branch that decides NOT to remove something,
+# and a reconciler that removed nothing at all would pass every one of them -
+# so the first test here is the one that proves the mechanism fires.
+stub_orphan() {  # <age-seconds> <joined-by|"">
+    local age="$1" joiner="$2"
+    stub_launch
+    cat > "$LAUNCH_DIR/docker" <<EOF
+#!/bin/bash
+echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+made=\$(date -u -d "@\$(( \$(date +%s) - $age ))" +%Y-%m-%dT%H:%M:%S.000000000Z)
+case "\$*" in
+    # The running containers, and what namespace each is in.
+    "ps -q")                       [ -n "$joiner" ] && echo j0 ; exit 0 ;;
+    *HostConfig.NetworkMode*)      [ -n "$joiner" ] && echo "container:$joiner" ; exit 0 ;;
+    # The candidates.
+    *"ps -aq --filter label=dejima.filter"*) echo orphan0 ; exit 0 ;;
+    *"{{.Id}} {{.Name}} {{.Created}}"*)     echo "orphan0 /dejima-filter-old \$made" ; exit 0 ;;
+    *"network ls -q --filter label=dejima.run"*) echo net0 ; exit 0 ;;
+    *"{{.Name}} {{.Created}}"*)             echo "dejima-run-old \$made" ; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+}
+
+@test "a filter container nothing is joined to, left over from before, is removed" {
+    stub_orphan 6000 ""
+    launch "$PROJ"
+    grep -q -- 'rm -f orphan0' "$LAUNCH_DIR/docker-log" \
+        || { echo "the orphaned filter container was left running"; return 1; }
+    grep -q -- 'network rm dejima-run-old' "$LAUNCH_DIR/docker-log" \
+        || { echo "its network was left behind"; return 1; }
+}
+
+@test "the reconcile says what it removed, so a leak is not silently routine" {
+    stub_orphan 6000 ""
+    run launch "$PROJ"
+    [[ "$output" == *"left behind"* ]] \
+        || { echo "an orphan was removed with nothing said about it: $output"; return 1; }
+}
+
+@test "a filter container with a session still in its namespace is left alone" {
+    # The one that matters on a host running several sessions: reaping this is
+    # taking the network out from under somebody's running agent.
+    stub_orphan 6000 orphan0
+    launch "$PROJ"
+    run grep -c -- 'rm -f orphan0' "$LAUNCH_DIR/docker-log"
+    [ "$output" = "0" ] \
+        || { echo "a filter container with a live session was removed"; return 1; }
+}
+
+@test "a filter container younger than the grace is left alone" {
+    # A pair being built right now by a concurrent launch: between `docker run`
+    # for the filter and `docker compose run` for the session, a healthy filter
+    # container has no joiner. Age is what tells that apart from abandonment.
+    stub_orphan 5 ""
+    launch "$PROJ"
+    run grep -c -- 'rm -f orphan0' "$LAUNCH_DIR/docker-log"
+    [ "$output" = "0" ] \
+        || { echo "a filter container still being paired was removed"; return 1; }
+    run grep -c -- 'network rm dejima-run-old' "$LAUNCH_DIR/docker-log"
+    [ "$output" = "0" ] \
+        || { echo "a network still being attached to was removed"; return 1; }
+}
+
+@test "a docker that cannot answer the reconcile does not fail the launch" {
+    # It runs before the launch's own network and container, so an error here
+    # would refuse a session over tidying up. The launch that follows reports
+    # its own failures.
+    stub_launch
+    cat > "$LAUNCH_DIR/docker" <<'EOF'
+#!/bin/bash
+echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+case "$*" in
+    ps*|*inspect*|*network\ ls*) echo "Cannot connect to the Docker daemon" >&2; exit 1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$LAUNCH_DIR/docker"
+    run launch "$PROJ"
+    [ "$status" -eq 0 ] \
+        || { echo "a failing reconcile refused the launch: $output"; return 1; }
+    grep -q -- ' run --rm ' "$LAUNCH_DIR/docker-log" \
+        || { echo "the session never started"; return 1; }
+}
