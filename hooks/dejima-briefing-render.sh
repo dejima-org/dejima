@@ -35,11 +35,16 @@ session_id="${1:-}"
 resume_id="${session_id:-<your session id>}"
 project_dir="${2:-$PWD}"
 
-# /etc/hostname in a docker container is the container's own ID, which
-# docker exec accepts directly - substituting it into the briefing below
-# means the agent states its real container instead of guessing (a wrong
-# guess that matches *another* running sandbox makes dejima-allow
-# "succeed" against the wrong container).
+# The id of this launch, read from the only place a session can see one.
+#
+# Not this container's own id, and worth being exact about: Docker names a
+# container that joined another's network namespace after the container it
+# joined, so what a session reads here is its FILTER container's id. That is
+# still the right thing to put in the briefing - `dejima-allow` takes either
+# half of the pair and derives the other - and it is what the agent has, so
+# substituting it means stating a real id rather than guessing one. A wrong
+# guess that matched another running sandbox would make dejima-allow "succeed"
+# against somebody else's session.
 container_id=$(cat /etc/hostname 2>/dev/null)
 container_id="${container_id:-<container-id>}"
 

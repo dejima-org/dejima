@@ -275,18 +275,49 @@ if [ "$session_wanted" -eq 1 ]; then
     # runs in the session's own container - because that is the container whose
     # reachability this command claims to have changed.
     #
-    # Derived from the session container rather than recorded anywhere: Docker
-    # already knows, because joining a namespace is how the pair is built.
-    # `container:<name>` is what bin/dejima passes, and Docker may report it
-    # back as an id; `docker exec` takes either.
-    filter="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$container" 2>/dev/null)" || filter=""
-    case "$filter" in
-        container:*) filter="${filter#container:}" ;;
+    # Both are derived from whichever one the caller named, rather than
+    # recorded anywhere: Docker already knows the pairing, because joining a
+    # namespace is how the pair is built.
+    #
+    # Naming either half has to work, and not as a convenience. A session that
+    # is asked for its own container id reads /etc/hostname, and Docker names a
+    # container that JOINED another's network namespace after the container it
+    # joined - so the id in a briefing, the one an agent hands its operator, is
+    # the filter container's. Nothing about the pair is worth making an
+    # operator hold in their head to type one command.
+    mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$container" 2>/dev/null)" || mode=""
+    case "$mode" in
+        container:*)
+            # A session container: it names its own filter.
+            filter="${mode#container:}"
+            ;;
         *)
-            echo "$container does not share another container's network namespace, so" >&2
-            echo "there is no filter container to add this domain to. It may predate the" >&2
-            echo "split into a session container and a filter container - relaunch it." >&2
-            exit 1
+            # Then it is a filter container, or not part of a pair at all.
+            # `docker exec` takes a name or an id; NetworkMode reports the id,
+            # so the search below compares ids.
+            filter_id="$(docker inspect -f '{{.Id}}' "$container" 2>/dev/null)" || filter_id=""
+            session=""
+            if [ -n "$filter_id" ]; then
+                while IFS=' ' read -r _id _mode; do
+                    [ "$_mode" = "container:$filter_id" ] || continue
+                    session="$_id"
+                    break
+                done < <(docker ps -q 2>/dev/null | xargs -r docker inspect \
+                    -f '{{.Id}} {{.HostConfig.NetworkMode}}' 2>/dev/null)
+            fi
+            if [ -z "$session" ]; then
+                echo "$container is neither a running session nor the filter container of" >&2
+                echo "one, so there is no allowlist to add this domain to." >&2
+                echo "" >&2
+                echo "A session's own id is in its startup context, or from 'cat /etc/hostname'" >&2
+                echo "inside it - either half of the pair is accepted here. If the session has" >&2
+                echo "already exited, record the domain for the next one instead:" >&2
+                echo "" >&2
+                echo "  dejima-allow --project $domain" >&2
+                exit 1
+            fi
+            filter="$container"
+            container="$session"
             ;;
     esac
 
@@ -306,7 +337,8 @@ if [ "$session_wanted" -eq 1 ]; then
         kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"
     ' -- "$domain"
 
-    echo "Resolving $domain inside $container..."
+    # Named for where the lookup happens, which is where the DNS allowlist is.
+    echo "Resolving $domain in $filter, this session's egress control..."
     ips=$(docker exec "$filter" dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
     if [ -z "$ips" ]; then
         # An internally-routed name can't be added to a *running* session at
