@@ -532,7 +532,12 @@ start_pair() {  # <purpose|""> <image> [docker run args...]
         "$image" >/dev/null
     wait_filter "$filter" || return 1
 
-    docker run -d --name "$session" \
+    # --init, because docker-compose.yml sets `init: true` and the difference
+    # is not cosmetic: it makes PID 1 an init that forwards signals to the
+    # session rather than the session itself. Every fixture here ran without
+    # one, so nothing in this suite had a tini to fail - which is how a floor
+    # that left tini unable to signal its own child shipped green.
+    docker run -d --init --name "$session" \
         --cap-drop=ALL "${scaps[@]}" \
         --security-opt=no-new-privileges:true \
         --network "container:$filter" \
@@ -590,8 +595,8 @@ dexec_node() {
 #
 # `sleep infinity` is entrypoint.sh's SANDBOX_TEST_MODE exec, matched the way
 # wait_ready matches it.
-session_pid() {
-    docker exec "$(container_name)" pgrep -x -f 'sleep infinity' 2>/dev/null | head -1
+session_pid() {  # [container], defaulting to the file-wide one
+    docker exec "${1:-$(container_name)}" pgrep -x -f 'sleep infinity' 2>/dev/null | head -1
 }
 
 @test "the container's user actually matches overridden SANDBOX_USER/UID/GID/HOME build args, not just the defaults" {
@@ -634,16 +639,21 @@ session_pid() {
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro"
 
-    # A fresh `docker exec` is a sibling of PID 1, not a descendant of the
-    # exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
-    # that export the way a real session's nvim/terminal children would
-    # (nvim itself *is* that same process, continued via exec, not a
-    # separate one) - read the value back out of PID 1's own environment
-    # instead of assuming docker exec sees it.
-    run docker exec -u node "$test_container" sh -c '
-        export SSH_AUTH_SOCK=$(cat /proc/1/environ | tr "\0" "\n" | grep ^SSH_AUTH_SOCK= | cut -d= -f2-)
+    # A fresh `docker exec` is a sibling of the session, not a descendant of
+    # the exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
+    # that export the way a real session's nvim/terminal children would (nvim
+    # itself *is* that same process, continued via exec, not a separate one) -
+    # read the value back out of the SESSION's environment instead of assuming
+    # docker exec sees it.
+    #
+    # The session's, specifically, and not PID 1's. Under `init: true` PID 1 is
+    # the init, and this variable is not one Docker passed in: entrypoint.sh
+    # creates it, by starting an agent, in a process that is tini's CHILD. So
+    # PID 1 is the one process in the container that has never heard of it.
+    run docker exec -u node "$test_container" sh -c "
+        export SSH_AUTH_SOCK=\$(cat /proc/$(session_pid "$test_container")/environ | tr '\0' '\n' | grep ^SSH_AUTH_SOCK= | cut -d= -f2-)
         ssh-add -l
-    '
+    "
     [ "$status" -eq 0 ]
     [ -n "$output" ]
 
@@ -1257,6 +1267,49 @@ session_pid() {
         || { echo "the default network_mode is not none:"; grep -i network <<< "$output"; return 1; }
 }
 
+@test "PID 1 can forward a signal to the session, so a resize does not kill it" {
+    # The exact failure an operator hits, reproduced: splitting a tmux pane
+    # resizes the pty, the kernel sends SIGWINCH to its foreground process
+    # group - tini included - and tini forwards it to the session. tini is
+    # uid 0; the session's real AND saved uids are the sandbox user's, because
+    # the entrypoint changed uid in place before exec'ing it. kill(2) allows
+    # that only with CAP_KILL or a uid match, and there is no match.
+    #
+    # tini treats a failed forward as fatal, so the symptom is not a dropped
+    # signal: PID 1 exits and the container goes with it, mid-session.
+    #
+    # `docker kill --signal` delivers to PID 1, which is the same door the
+    # kernel uses - so this asks the question without needing a pty to resize.
+    # Its own pair, because the assertion is that a container is still alive
+    # and a failure would take every later test in this file with it.
+    local c; c="$(test_container_name winch)"
+    start_pair winch "$SESSION_IMAGE" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e GH_TOKEN="${GH_TOKEN:-}"
+
+    # PID 1 really is an init here, or this asks nothing: without one the
+    # session is PID 1 and signals it early enough never to be forwarded.
+    run docker exec "$c" sh -c 'cat /proc/1/comm'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *sleep* ]] \
+        || { echo "PID 1 is the session, so nothing forwards: $output"; return 1; }
+
+    docker kill --signal=WINCH "$c"
+    sleep 2
+    run docker inspect -f '{{.State.Running}}' "$c"
+    [ "$output" = true ] || {
+        echo "the container died forwarding a signal to its own session:"
+        docker logs "$c" 2>&1 | tail -5
+        return 1
+    }
+
+    # And the session itself survived it, rather than the container outliving
+    # a session the signal killed.
+    run docker exec "$c" pgrep -x -f 'sleep infinity'
+    [ "$status" -eq 0 ] \
+        || { echo "the container is up but the session is gone"; return 1; }
+}
+
 @test "the session container inherits the namespace's unprivileged port floor" {
     # docker-compose.yml declares no sysctls: this one is a property of a
     # network namespace, and the session container does not own the one it is
@@ -1571,14 +1624,16 @@ EOF'
 @test "empty ANTHROPIC_* env vars are unset before the session command runs" {
     # Compose always sends the pair (possibly empty); entrypoint.sh must
     # unset empties so a disabled proxy is indistinguishable from today.
-    # /proc/1/environ is the post-entrypoint exec'd process's environment.
+    # The SESSION's environment, not PID 1's: `init: true` makes PID 1 an init
+    # holding the environment Docker gave the container, which still has the
+    # empty ANTHROPIC_* pair this is asserting the entrypoint unset.
     # Must read as -u node (matching dexec's convention below): once
     # entrypoint.sh's gosu drops privilege, the kernel clears that
     # process's dumpable flag, and root (docker exec's default, lacking
     # CAP_SYS_PTRACE here) can no longer read another uid's environ at
     # all - reading as the same uid the process actually runs as is what
-    # every other /proc/1/environ read in this file already does.
-    run docker exec -u node "$(container_name)" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
+    # every other environment read in this file already does.
+    run docker exec -u node "$(container_name)" sh -c "tr '\0' '\n' < /proc/$(session_pid)/environ | grep -c '^ANTHROPIC' || true"
     [ "$output" = "0" ]
 }
 
@@ -1628,7 +1683,7 @@ EOF
     # the real token never appears in the container environment - read as
     # -u node, matching the test above: root can't see another uid's
     # environ once gosu has dropped privilege (dumpable flag cleared).
-    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/$(session_pid "$container")/environ | grep -c real-access-token || true"
     env_hits=$output
 
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -1962,7 +2017,7 @@ EOF
     # NODE_EXTRA_CA_CERTS has to be passed explicitly: docker exec starts from
     # the image's ENV, not from the entrypoint process's exported environment.
     # The session command itself is a child of the entrypoint and does inherit
-    # it - which is what the /proc/1/environ check below confirms.
+    # it - which is what the environment check below confirms.
     run docker exec -e NODE_EXTRA_CA_CERTS=/etc/dejima-credential-tls/cert.pem \
         "$container" node -e '
         fetch("https://api.anthropic.com/v1/messages", {method: "POST", body: "{}"})
@@ -1970,11 +2025,11 @@ EOF
           .catch(e => { console.error(e); process.exit(1); })'
     status_tls=$status; output_tls=$output
 
-    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c '^ANTHROPIC' || true"
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/$(session_pid "$container")/environ | grep -c '^ANTHROPIC' || true"
     env_anthropic=$output
-    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c NODE_EXTRA_CA_CERTS || true"
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/$(session_pid "$container")/environ | grep -c NODE_EXTRA_CA_CERTS || true"
     env_ca=$output
-    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/1/environ | grep -c real-access-token || true"
+    run docker exec -u node "$container" sh -c "tr '\0' '\n' < /proc/$(session_pid "$container")/environ | grep -c real-access-token || true"
     env_token=$output
     run docker exec "$container" grep -c '127.0.0.1 api.anthropic.com' /etc/hosts
     hosts_hits=$output

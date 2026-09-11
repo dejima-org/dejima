@@ -4835,19 +4835,29 @@ STUB
     # else is arranged - and would do so silently, since the launch keeps
     # working either way.
     #
-    # KILL travels with dnsmasq: it exists so `dejima-allow --container` can
-    # signal it, and dnsmasq is in the filter container.
+    # KILL is NOT in this list, and that is the point of the exception: the
+    # filter container needs it for dnsmasq, and the session container needs it
+    # for tini, which forwards signals to a child whose uid it does not match.
+    # Removing it from here once already shipped a session that died on a
+    # terminal resize.
     #
     # Both directions for each, or "the session declares none of them" is
     # satisfied just as well by a launch with no filter container to hold them.
     local c="$SANDBOX_DIR/docker-compose.yml" cap
-    for cap in NET_ADMIN NET_RAW KILL; do
+    for cap in NET_ADMIN NET_RAW; do
         run grep -nE "^\s*- $cap\s*$" "$c"
         [ "$status" -ne 0 ] \
             || { echo "the session container declares $cap, so it can reach the filter"; return 1; }
         grep -q -- "--cap-add $cap" "$REPO_ROOT/bin/dejima" \
             || { echo "$cap left the session container without arriving at the filter"; return 1; }
     done
+
+    # KILL is the exception, declared on both: tini needs it here to forward a
+    # signal to the session, dnsmasq needs it there to be signalled.
+    grep -qE '^\s*- KILL\s*$' "$c" \
+        || { echo "the session container cannot signal its own session - see tini"; return 1; }
+    grep -q -- '--cap-add KILL' "$REPO_ROOT/bin/dejima" \
+        || { echo "the filter container cannot signal dnsmasq"; return 1; }
 
     # The same split for the one sysctl: a property of a namespace the session
     # container does not own, so it is set by the container that does.

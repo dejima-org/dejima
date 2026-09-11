@@ -78,11 +78,26 @@ services:
     # those rules even at uid 0. NET_RAW goes with it - a raw socket is the
     # other way to speak past a filter, and nothing here opens one.
     #
-    # KILL is gone for a reason worth keeping, because it was here for
-    # something real: `dejima-allow --container` adds a domain to a RUNNING
-    # session by signalling dnsmasq, which drops to its own user, so whoever
-    # signals it needs CAP_KILL. dnsmasq is in the filter container, so that is
-    # where the capability belongs and where bin/dejima declares it.
+    # KILL is here for tini, and for nothing else in this container.
+    #
+    # `init: true` above makes PID 1 the init that reaps for the session, and
+    # tini forwards every signal it receives to its child. That child is the
+    # entrypoint, which changes uid in place before exec'ing the session - so
+    # tini is uid 0 signalling a process whose real AND saved uids are the
+    # sandbox user's. kill(2) permits that only with CAP_KILL or a uid match,
+    # and there is no match, so without this every forwarded signal is EPERM.
+    #
+    # tini treats a failed forward as fatal, and PID 1 exiting ends the
+    # container. The signal that arrives in practice is SIGWINCH: the kernel
+    # sends it to the pty's foreground process group on any terminal resize,
+    # which includes tini. So without this line, splitting a tmux pane kills
+    # the session with `[FATAL tini (1)] Unexpected error when forwarding
+    # signal: 'Operation not permitted'`.
+    #
+    # It used to be here for `dejima-allow --container`, which signals dnsmasq;
+    # that reason moved to the filter container with dnsmasq, and this one was
+    # not noticed until the capability went away. Nothing in the suite ran an
+    # init at all - see runtime.bats.
     #
     # The general lesson, since the next capability will be the same shape:
     # what a container needs is not only what its entrypoint does. Things reach
@@ -107,6 +122,7 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      - KILL
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
