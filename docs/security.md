@@ -271,7 +271,7 @@ In that configuration the provider directories are in the exit-time audit's
 TCB list, alongside `bin/`, `hooks/`, `docker/`, `test/` and `tools/`. They
 hold no code and nothing executes them, but what they hold decides what the
 next launch permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`,
-which `entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so
+which `firewall-up.sh` joins into the domains `init-firewall.sh` allowlists, so
 a line added to a manifest widens the egress boundary on the next run.
 `tools/*/tool.conf` is the same class, and is read by the host rather than the
 container: it names a tarball URL, the sha256 checked against it and the
