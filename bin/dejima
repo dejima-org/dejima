@@ -645,6 +645,10 @@ unset _tools_wanted _tool
 
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
+# Read before either guard runs, because what this list declares becomes
+# something the other two lists are refused for naming - see PP_PROJECT_ROOTS.
+SANDBOX_RW_PP_MOUNTS="$(config_get mounts read_write_per_project)"
+
 SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
 SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
     ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
@@ -745,12 +749,58 @@ _harness_host_config
 # arrives at ~/shared without going through this list; naming the root that
 # holds every project's would put the pile back, which is the thing the split
 # removed.
+# Refuse $2 if it reaches a per-project root. Its own check rather than a row
+# in GUARDED_STORES, because the generic refusal there is about approval and
+# audit stores and says so - an operator who wrote the same path into two
+# mount lists would be told their specs directory lets a session approve its
+# own domains, which is both untrue and no help.
+_refuse_pp_root() {
+    local label="$1" path="$2" real root root_real
+    _pp_project_roots
+    [ ${#PP_PROJECT_ROOTS[@]} -gt 0 ] || return 0
+    real="$(readlink -m "$path")"
+    for root in "${PP_PROJECT_ROOTS[@]}"; do
+        root_real="$(readlink -m "$root")"
+        _paths_overlap "$real" "$root_real" || continue
+        echo "Refusing $label: $path" >&2
+        echo "It reaches $root_real, which holds one directory per project for a" >&2
+        echo "[mounts] read_write_per_project entry." >&2
+        echo "" >&2
+        echo "Handing that over is handing over every project's, which is the pile" >&2
+        echo "slicing it removed. If this path is meant to be shared by every" >&2
+        echo "project, it belongs in one list or the other and not in both." >&2
+        exit 1
+    done
+}
+
 GUARDED_STORES=()
 _guarded_stores() {
     [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
     GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
                     "$(config_get epitaph dir)" \
                     "$(share_projects_root "$(config_get core share_dir)")")
+}
+
+# The `projects` subdirectory of every read_write_per_project root: the
+# directory that holds one slice per project, exactly as share_dir's does.
+#
+# Guarded separately from the stores above because the two lists need
+# different answers. For `readonly` and `read_write`, naming one of these is
+# the mistake the share guard already names: handing over the root that holds
+# every project's directory puts back the pile the split removed. For the
+# per-project list itself it is not a mistake at all - it is where that list
+# puts things - so that loop consults GUARDED_STORES alone.
+PP_PROJECT_ROOTS=()
+_pp_project_roots() {
+    [ ${#PP_PROJECT_ROOTS[@]} -eq 0 ] || return 0
+    local path
+    [ -n "$SANDBOX_RW_PP_MOUNTS" ] || return 0
+    IFS=':' read -ra _pp_declared <<< "$SANDBOX_RW_PP_MOUNTS"
+    for path in "${_pp_declared[@]}"; do
+        [ -n "$path" ] || continue
+        PP_PROJECT_ROOTS+=("$(projects_root "$path")")
+    done
+    unset _pp_declared
 }
 
 # Refuse $2 if it overlaps any of the paths in $3.., in either direction: an
@@ -802,6 +852,7 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
         # epitaph store be mountable from here after it was added to one of
         # them. A store added to _guarded_stores is now guarded on both
         # paths without anyone remembering to do it twice.
+        _refuse_pp_root "$(_mount_label "$path" "[mounts] read_write entry" "--extra-read-write path")" "$path"
         _guarded_stores
         for guarded in ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"} \
             ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"} \
@@ -834,6 +885,78 @@ if [ -n "$SANDBOX_RW_MOUNTS" ]; then
         fi
         RW_MOUNT_PATHS+=("$path")
         DEJIMA_RW_MOUNTS="${DEJIMA_RW_MOUNTS:+$DEJIMA_RW_MOUNTS }$path"
+    done
+fi
+
+# [mounts] read_write_per_project: the same idea as read_write, sliced the way
+# [core] share_dir is. An operator declares ~/specs; the container gets ~/specs,
+# backed by ~/specs/projects/<slug> on the host rather than by the whole thing.
+#
+# Which keeps the property that separates these lists from share_dir - a mount
+# arrives at the host path it names, so a project instruction saying "put specs
+# in ~/specs" goes on working - while removing the one share_dir was split to
+# remove: every session seeing every other project's, across projects. A spec
+# is written to be read as background, which makes that threat-model item 4
+# with nobody attacking anything.
+#
+# Its own key rather than a marker on read_write, and that is what makes it
+# small: a key that did not previously parse has nothing in it on the day it
+# lands. Nothing moves, nothing is stranded, and there is no migration. Some
+# writable mounts are meant to be shared - a cache, a bin directory - and
+# read_write stays right for those.
+RW_PP_MOUNT_SOURCES=()
+RW_PP_MOUNT_TARGETS=()
+DEJIMA_RW_PP_MOUNTS=""
+# Every host path this launch makes writable, which for a plain read_write
+# entry is the path itself and for a per-project one is the slice. The audit
+# reads this; the briefing reads the two target lists.
+DEJIMA_RW_SOURCES="$DEJIMA_RW_MOUNTS"
+if [ -n "$SANDBOX_RW_PP_MOUNTS" ]; then
+    IFS=':' read -ra rw_pp_paths <<< "$SANDBOX_RW_PP_MOUNTS"
+    for path in "${rw_pp_paths[@]}"; do
+        [ -n "$path" ] || continue
+        # The declared root must exist, like a read_write entry: dejima creates
+        # the slice below it, never the root itself, so a typo stays a typo
+        # rather than becoming a new empty directory nobody meant.
+        if [ ! -d "$path" ]; then
+            echo "[mounts] read_write_per_project entry is not an existing directory: $path" >&2
+            echo "dejima creates the per-project directory inside it, but not the" >&2
+            echo "directory itself - so a path that is not there is a typo, not a" >&2
+            echo "layout to be built." >&2
+            exit 1
+        fi
+        pp_real="$(readlink -m "$path")"
+        # GUARDED_STORES alone, deliberately: PP_PROJECT_ROOTS holds this
+        # list's own `projects` directories, which the other two lists are
+        # refused for naming and this one exists to write into.
+        _guarded_stores
+        for guarded in ${GUARDED_STORES[@]+"${GUARDED_STORES[@]}"} \
+            ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"} \
+            "$HOME/.local/bin" "$REPO_ROOT" "$WORKSPACE_DIR"; do
+            guarded_real="$(readlink -m "$guarded")"
+            _paths_overlap "$pp_real" "$guarded_real" || continue
+            echo "Refusing [mounts] read_write_per_project entry: $path" >&2
+            echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
+            echo "Slicing it per project does not change what the session could reach" >&2
+            echo "through it - only how much of it there is." >&2
+            exit 1
+        done
+        # Resolved here and created later, on the launch path. This block runs
+        # before --print-briefing so the briefing it composes names the same
+        # mounts a launch would, and a diagnostic that prints something should
+        # not leave a directory behind - which is why share_dir's own mkdir
+        # sits after that exit too.
+        pp_source="$(project_dir_for "$path" "$WORKSPACE_DIR")"
+        RW_PP_MOUNT_TARGETS+=("$path")
+        RW_PP_MOUNT_SOURCES+=("$pp_source")
+        # Two lists, because the two readers want different answers and for a
+        # per-project mount they differ. The briefing tells the SESSION what it
+        # can write, which is the path inside the container. The exit audit
+        # tells the OPERATOR what on their host this session could reach, and
+        # naming the root there would claim a blast radius this feature exists
+        # to have narrowed.
+        DEJIMA_RW_PP_MOUNTS="${DEJIMA_RW_PP_MOUNTS:+$DEJIMA_RW_PP_MOUNTS }$path"
+        DEJIMA_RW_SOURCES="${DEJIMA_RW_SOURCES:+$DEJIMA_RW_SOURCES }$pp_source"
     done
 fi
 
@@ -1457,7 +1580,11 @@ cleanup() {
     # read it, so this function's own cleanup can't race the audit that
     # needs it - and its removal is guarded too, so it stays truly last.
     exit_step "checking what changed on the host while it ran"
-    DEJIMA_RW_MOUNTS="$DEJIMA_RW_MOUNTS" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    # DEJIMA_RW_SOURCES, not DEJIMA_RW_MOUNTS: this report names what on the
+    # HOST the session could have written, and for a per-project mount that is
+    # the slice rather than the root it sits in. Naming the root would claim a
+    # blast radius the per-project split exists to have narrowed.
+    DEJIMA_RW_MOUNTS="$DEJIMA_RW_SOURCES" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
@@ -2284,6 +2411,7 @@ if [ -n "$SANDBOX_EXTRA_MOUNTS" ]; then
         # [mounts] read_write has been guarded since it was added; this one
         # never was, so `readonly = ~/.config/dejima` mounted the approval
         # store into the container and nothing said a word (#15).
+        _refuse_pp_root "$(_mount_label "$path" "[mounts] readonly entry" "--extra-readonly path")" "$path"
         _guarded_stores
         _refuse_guarded_mount "$(_mount_label "$path" "[mounts] readonly entry" "--extra-readonly path")" \
             "$path" "${GUARDED_STORES[@]}"
@@ -2306,6 +2434,17 @@ fi
 for path in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
     extra_mounts+=(-v "$path:$path")
 done
+# And the per-project ones, which are the only mounts in dejima whose source
+# and target differ on purpose: the slice on the host, the declared path in
+# the container. Indices are paired, filled together in one loop above.
+for _i in ${RW_PP_MOUNT_TARGETS[@]+"${!RW_PP_MOUNT_TARGETS[@]}"}; do
+    # dejima's own layout below a directory the operator made, so the slice is
+    # created and the root never is. Here rather than where it was resolved,
+    # because this is the launch path and that was also --print-briefing's.
+    mkdir -p "${RW_PP_MOUNT_SOURCES[$_i]}"
+    extra_mounts+=(-v "${RW_PP_MOUNT_SOURCES[$_i]}:${RW_PP_MOUNT_TARGETS[$_i]}")
+done
+unset _i
 
 # The session briefing, composed host-side from the core text and the
 # selected workflow/harness fragments (see briefing_compose) and mounted
