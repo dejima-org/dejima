@@ -639,16 +639,21 @@ session_pid() {  # [container], defaulting to the file-wide one
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -v "$key_dir/testkey:/root/.ssh-sandbox-key-src:ro"
 
-    # A fresh `docker exec` is a sibling of PID 1, not a descendant of the
-    # exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
-    # that export the way a real session's nvim/terminal children would
-    # (nvim itself *is* that same process, continued via exec, not a
-    # separate one) - read the value back out of PID 1's own environment
-    # instead of assuming docker exec sees it.
-    run docker exec -u node "$test_container" sh -c '
-        export SSH_AUTH_SOCK=$(cat /proc/1/environ | tr "\0" "\n" | grep ^SSH_AUTH_SOCK= | cut -d= -f2-)
+    # A fresh `docker exec` is a sibling of the session, not a descendant of
+    # the exec chain entrypoint.sh set SSH_AUTH_SOCK in, so it doesn't inherit
+    # that export the way a real session's nvim/terminal children would (nvim
+    # itself *is* that same process, continued via exec, not a separate one) -
+    # read the value back out of the SESSION's environment instead of assuming
+    # docker exec sees it.
+    #
+    # The session's, specifically, and not PID 1's. Under `init: true` PID 1 is
+    # the init, and this variable is not one Docker passed in: entrypoint.sh
+    # creates it, by starting an agent, in a process that is tini's CHILD. So
+    # PID 1 is the one process in the container that has never heard of it.
+    run docker exec -u node "$test_container" sh -c "
+        export SSH_AUTH_SOCK=\$(cat /proc/$(session_pid "$test_container")/environ | tr '\0' '\n' | grep ^SSH_AUTH_SOCK= | cut -d= -f2-)
         ssh-add -l
-    '
+    "
     [ "$status" -eq 0 ]
     [ -n "$output" ]
 
