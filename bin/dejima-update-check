@@ -33,7 +33,7 @@ dejima-update-check - say when this dejima checkout is behind its remote
 Usage: dejima-update-check
 
 Compares the checkout bin/dejima runs from against the branch it tracks and
-prints one line when the remote has commits this checkout does not. Run at
+prints a notice when the remote has commits this checkout does not. Run at
 startup by bin/dejima; safe to run by hand.
 
 Silent when the checkout is current or ahead, when [core] update_check is off,
@@ -175,16 +175,25 @@ color_init
 # fire on the terminal of the operator this is trying to inform.
 _remote_shown="$(sanitize "$remote")"
 _branch_shown="$(sanitize "${upstream#refs/heads/}")"
+# A blank line either side, the indent the other startup warnings carry, and
+# C_WARN: a launch prints this between its startup lines and the image build,
+# which starts scrolling immediately after, and two plain lines there are
+# indistinguishable from either.
+printf '\n' >&2
 # The count only when it is known. It is not, whenever the remote's tip is a
 # commit this checkout has never fetched, which is the common case - and a
 # number invented for those would be the number of commits it can see, not the
 # number there are.
 if [ -n "$count" ] && [ "$count" != "0" ]; then
     if [ "$count" = "1" ]; then noun="commit"; else noun="commits"; fi
-    printf '%sdejima%s: %s/%s has %s %s this checkout does not.\n' \
-        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" "$C_INFO$count$C_RESET" "$noun" >&2
+    printf '  %sdejima: %s/%s has %s %s this checkout does not.%s\n' \
+        "$C_WARN" "$_remote_shown" "$_branch_shown" "$count" "$noun" "$C_RESET" >&2
 else
-    printf '%sdejima%s: %s/%s has commits this checkout does not.\n' \
-        "$C_KEY" "$C_RESET" "$_remote_shown" "$_branch_shown" >&2
+    printf '  %sdejima: %s/%s has commits this checkout does not.%s\n' \
+        "$C_WARN" "$_remote_shown" "$_branch_shown" "$C_RESET" >&2
 fi
-printf '  Update with %sgit -C %s pull%s\n' "$C_KEY" "$REPO_ROOT" "$C_RESET" >&2
+# install.sh is safe to re-run, and a release can change what it links on PATH,
+# so pulling is only half the update. Both paths absolute because the operator
+# reading this is not necessarily standing in this checkout.
+printf '    Update with %sgit -C %s pull && %s/install.sh%s\n\n' \
+    "$C_KEY" "$REPO_ROOT" "$REPO_ROOT" "$C_RESET" >&2

@@ -271,7 +271,7 @@ In that configuration the provider directories are in the exit-time audit's
 TCB list, alongside `bin/`, `hooks/`, `docker/`, `test/` and `tools/`. They
 hold no code and nothing executes them, but what they hold decides what the
 next launch permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`,
-which `entrypoint.sh` joins into the domains `init-firewall.sh` allowlists, so
+which `firewall-up.sh` joins into the domains `init-firewall.sh` allowlists, so
 a line added to a manifest widens the egress boundary on the next run.
 `tools/*/tool.conf` is the same class, and is read by the host rather than the
 container: it names a tarball URL, the sha256 checked against it and the
@@ -1017,15 +1017,52 @@ reasoning below is what both are built on.
   SSH-agent/token story documented above. Keep credentials out of your
   global gitconfig, or expect them to be reachable from inside the
   sandbox.
+- **The egress filter is not in the container the session runs in.** A launch
+  starts two: a filter container that owns the network namespace and installs
+  the packet filter, and the sandbox, which joins that namespace with
+  `network_mode: container:` rather than getting one of its own. Capabilities
+  are per process rather than per namespace, so the sandbox cannot alter the
+  filter bounding it even at uid 0 - measured, not reasoned: `iptables` and
+  `ipset` both return `Operation not permitted` to a joiner that lacks
+  `NET_ADMIN`.
+
+  Two things follow. The namespace has its rules before anything is created in
+  it, so there is no window in which a session holds an interface and no
+  filter; `bin/dejima` waits for the filter container to say it is up and
+  refuses the launch otherwise. And killing the filter container leaves the
+  sandbox holding loopback alone - no network at all, rather than an unfiltered
+  one.
+
+  Nothing a session runs ever executes in the filter container. It holds the
+  privilege; the one beside it holds the session. Each launch gets a network of
+  its own, so concurrent sessions are separated at the link layer as well.
+
+  A launch removes both on the way out, and reconciles at the start against
+  whatever a `SIGKILL` or a restarted host left behind - a filter container
+  with no session in its namespace, older than the window in which a pair is
+  still being built. What that reclaims is address space rather than safety: a
+  leaked filter container filters a namespace nothing is in, and Docker's
+  address pool is finite enough that exhausting it fails a later launch with an
+  error naming neither cause nor remedy.
 - The sandbox's own user (matching your host user; see "Config parity" in
   the README) has no `sudo`/setuid path back to root once the container is up:
-  `entrypoint.sh` runs as root, sets up the firewall directly, then drops to
-  that user via `gosu` before execing the configured command (`[core] command`,
-  or the selected harness's own if that is unset). A compromised session can't
+  `entrypoint.sh` runs as root, prepares the session's own state, then drops to
+  that user before execing the configured command (`[core] command`, or the
+  selected harness's own if that is unset). A compromised session can't
   re-run `init-firewall.sh` with a wider allowlist to open its own
-  exfiltration path. Verified: capabilities (`NET_ADMIN`/`NET_RAW`) are
-  cleared from the effective/permitted sets on the `gosu` drop, and that
-  user gets a permission error running `iptables` directly.
+  exfiltration path: that script runs in the container beside it, so there is
+  no copy of the allowlist within reach to re-run against. Verified: that user
+  gets a permission error running `iptables` directly.
+- **The session's capability bounding set is empty**, not merely its effective
+  one. The distinction is the whole of it: an empty effective set is what
+  changing uid gives you anyway, while the bounding set is what a process that
+  reached uid 0 in that tree would recover its capabilities from. So the two
+  claims above - no path back to root, and no capability if there were one -
+  hold separately rather than one resting on the other. The drop and the uid
+  change happen in one `capsh` process because they have to: the bounding set
+  can only be reduced while `CAP_SETPCAP` is still held, and changing uid first
+  gives it away. The same applies to `log-shipper.sh`, the one root process
+  that outlives the entrypoint.
 - A forge credential reaches the container as `-e NAME`, never
   `-e NAME=value`. The value comes from the launcher's own environment, so it
   sits in `/proc/<pid>/environ` (mode 0400, owner only) rather than in
@@ -1033,17 +1070,45 @@ reasoning below is what both are built on.
   anyone. `docker inspect` still shows the resolved value to whoever can
   reach the daemon - that is daemon access rather than any process at all,
   and it is not something the launcher can change.
-- The container runs with `no-new-privileges` and an explicit capability
-  floor - `cap_drop: ALL` plus the ones it actually uses: what the
-  entrypoint's root phase needs, and `KILL`. `KILL` is there for
-  `dejima-allow --container`, not for the entrypoint - adding a domain to a
-  running session signals dnsmasq, and dnsmasq runs as its own user. The list
-  itself is in `docker/docker-compose.yml`, which is where it stays correct. The first means a setuid binary or a file capability cannot raise
+- **Each container runs with `no-new-privileges` and a capability floor of its
+  own**, `cap_drop: ALL` plus what that container actually uses. The two lists
+  are the arrangement stated as configuration:
+
+  The session container declares **no network capability at all** - not
+  `NET_ADMIN`, not `NET_RAW`. It is inside a namespace the filter container
+  owns and has already installed the rules in, and capabilities are per
+  process, so uid 0 in there is refused by the kernel rather than by policy.
+  What it keeps is what its root phase does before the session starts: write
+  and chown files, and drop privilege once. `SETPCAP` is there to spend rather
+  than to use - it is what lets the entrypoint take the rest of the list away
+  again before execing the session, and since Linux 4.3 it grants nothing a
+  process does not already hold.
+
+  The filter container holds the network capabilities. The session's list is in
+  `docker/docker-compose.yml` and the filter's is in `bin/dejima`, each beside
+  the container it describes.
+
+  `KILL` is on both lists, for unrelated reasons, and it is the one worth
+  reading twice. The filter container needs it because adding a domain to a
+  running session signals dnsmasq, which runs as its own user. The session
+  container needs it because `init: true` makes PID 1 an init that forwards
+  signals to the session - and the entrypoint changes uid in place before
+  exec'ing it, so that is uid 0 signalling a process whose real and saved uids
+  are the sandbox user's. Without the capability every forwarded signal is
+  `EPERM`, tini treats a failed forward as fatal, and an ordinary terminal
+  resize ends the session.
+
+  `no-new-privileges` means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
-  would have to take; the second means the capabilities nothing here uses were
-  never in the bounding set to be regained. Both are asserted against a running
-  container rather than against the compose file, and the capability list the
-  test uses is read out of that file so the two cannot drift.
+  would have to take. The floor means the capabilities nothing uses were never
+  in the bounding set to be regained. Both are asserted against running
+  containers rather than against the files, and both lists the tests use are
+  read out of those files so neither can drift.
+
+  What a floor describes is a container's **root phase**. A launch runs with
+  `init: true`, so PID 1 is the init that reaps for the session and it holds
+  that container's floor for as long as the container lives; the session is its
+  child and holds nothing.
 - The approval store (`${DEJIMA_CONFIG_DIR:-$HOME/.config/dejima}`,
   see
   [Global and per-project domains and dependencies](../README.md#global-and-per-project-domains-and-dependencies)

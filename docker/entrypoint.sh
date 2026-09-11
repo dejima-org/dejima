@@ -8,56 +8,30 @@ set -Eeuo pipefail
 # refuse deliberately, and say so (#59).
 trap 'status=$?; echo "ERROR: entrypoint.sh aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
 
-# DEJIMA_FORGE_HOSTS is resolved host-side by bin/dejima (forge_hosts, in
-# dejima-provider-lib.sh) from whichever forge is configured, so this file
-# does not derive or name any one forge's hostnames itself.
+# drop_caps and require_setpcap, shared with the filter container's entrypoint.
+# Sourced rather than defined here because the callers must not drift: what
+# `drop_caps` does is the difference between a session holding nothing and a
+# session holding the whole floor, and that is not a thing to have two of.
+# shellcheck source=caps-lib.sh
+source /usr/local/bin/caps-lib.sh
+require_setpcap
+
+# The egress control for this namespace is already up: the filter container
+# that owns it installed the rules, and bin/dejima waited for that before
+# starting this container. Nothing here brings it up, and nothing here could -
+# this container declares none of the capabilities it would take.
 #
-# LOKI_URL (a full URL) still needs its own derivation here - Loki's host
-# has to be reachable for log-shipper.sh to actually deliver anything.
-loki_host=""
-if [ -n "${LOKI_URL:-}" ]; then
-    loki_host=$(echo "$LOKI_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')
-fi
-
-extra_domains="${DEJIMA_FORGE_HOSTS:-} ${loki_host} ${ALLOWED_DOMAINS:-}"
-
+# What this container does need is to be pointed at the resolver enforcing the
+# name allowlist. /etc/resolv.conf is per container even when the namespace is
+# shared, so dns-proxy.sh repointing the filter container's file says nothing
+# about this one - which Docker generated pointing straight at its embedded
+# resolver. Left alone, every lookup the session makes would go around dnsmasq
+# and the DNS allowlist would apply to nothing.
+#
+# The same value dns-proxy.sh writes for itself, at the same loopback address,
+# because loopback is shared with the container the resolver runs in.
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
-    # dns-proxy.sh must run first: it repoints /etc/resolv.conf at a local
-    # dnsmasq that only resolves allowlisted names, so init-firewall.sh's own
-    # dig calls (and everything afterward) go through the same restriction.
-    EXTRA_ALLOWED_DOMAINS="${extra_domains}" /usr/local/bin/dns-proxy.sh
-    EXTRA_ALLOWED_DOMAINS="${extra_domains}" /usr/local/bin/init-firewall.sh
-
-    # NFLOG groups only exist once init-firewall.sh has run, so ulogd2 (the
-    # NFLOG consumer) and the Loki shipper start after it. Both are
-    # best-effort visibility on top of the enforcement above, not required
-    # for it - log-shipper.sh itself no-ops if LOKI_URL isn't set. Runs as
-    # its own unprivileged `ulogd` user (opens the NFLOG socket and output
-    # files first, then drops), not root - it's parsing headers from
-    # attacker-influenceable packets (whatever a compromised session sends),
-    # so a bug in it shouldn't be a path back to root in the container.
-    #
-    # `ulogd -d` daemonizes immediately and always exits 0 from this shell's
-    # point of view, regardless of whether the daemon itself goes on to
-    # start successfully - so `set -e` above won't catch a failure here (nor
-    # should it: logging is best-effort, not something worth failing the
-    # whole container over). Check separately so a failure is at least
-    # visible instead of silently producing no logs.
-    /usr/sbin/ulogd -d -u ulogd -c /etc/ulogd-sandbox.conf
-    sleep 0.5
-    if ! pgrep -x ulogd >/dev/null; then
-        echo "WARNING: ulogd2 failed to start - connection logging will be unavailable (see /var/log/ulogd.log)" >&2
-    fi
-    # Unlike ulogd2 above, this one stays root - deliberately, not an
-    # oversight. What it ships is an oversight log of the session running
-    # beside it, and letting the sandbox user own the shipper would let a
-    # compromised session tamper with or kill its own logging. Root buys
-    # tamper-resistance that a security log needs and a best-effort netflow
-    # counter does not.
-    #
-    # What it reads is dnsmasq's query log and ulogd2's output, both written
-    # by root-owned daemons here and neither session-writable.
-    /usr/local/bin/log-shipper.sh &
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
 fi
 
 # A normal login/ssh session always chowns the allocated pty to the logging
@@ -538,12 +512,18 @@ fi
 # exercising the actual code path instead of a reimplementation of it that
 # could drift out of sync.
 if [ "${SANDBOX_TEST_MODE:-0}" = "1" ]; then
-    exec gosu "$SANDBOX_USER" sleep infinity
+    drop_caps --user="$SANDBOX_USER" -- -c 'exec "$@"' dejima sleep infinity
 fi
 
 # Drop root -> the sandbox user for the actual session; that user has no
 # sudo/setuid path back to root after this, so it can't re-run
 # init-firewall.sh itself to widen the allowlist mid-session.
+#
+# And drop the bounding set with it, so "no path back to root" and "no
+# capability if there were one" are two separate things rather than one
+# resting on the other. capsh does both in one process because it has to: the
+# bounding set can only be reduced while CAP_SETPCAP is still held, and
+# changing uid first gives it away.
 #
 # SANDBOX_CMD is what actually runs as that user - the selected harness's
 # own command unless [core] command overrides it (e.g. to `nvim`) for an
@@ -560,4 +540,4 @@ if [ -z "${SANDBOX_CMD:-}" ]; then
     echo "command: docker run --entrypoint sh ..." >&2
     exit 1
 fi
-exec gosu "$SANDBOX_USER" $SANDBOX_CMD "$@"
+drop_caps --user="$SANDBOX_USER" -- -c 'exec "$@"' dejima $SANDBOX_CMD "$@"

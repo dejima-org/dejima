@@ -95,9 +95,11 @@ if docker info >/dev/null 2>&1; then
 else
     fail "no Docker here - test/runtime.bats did NOT run"
     echo "           It is the only thing that exercises mounts, the firewall and"
-    echo "           the entrypoint end to end. Run it on the host, or check that"
-    echo "           the privileged CI job RAN rather than queued: it is pinned to"
-    echo "           one self-hosted runner and queues silently when that is down."
+    echo "           the entrypoint end to end. Run it on the host, or read the"
+    echo "           pull request's checks: GREEN means every job finished and"
+    echo "           passed, this one among them. Yellow or grey means the"
+    echo "           privileged job is still queued - it is pinned to one"
+    echo "           self-hosted runner and queues silently when that is down."
 fi
 
 # --- what a person has to do, chosen by what the release touches -------------
@@ -241,6 +243,7 @@ else
 fi
 
 note "Then"
-echo "   Say in the release PR what was run and what was not. A privileged job"
-echo "   that queued is not a job that passed."
+echo "   Say in the release PR what was run and what was not. Green checks mean"
+echo "   the privileged job ran; a queued one is yellow or grey, and is not a"
+echo "   job that passed."
 exit "$status"

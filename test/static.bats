@@ -51,9 +51,40 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
 }
 
 @test "entrypoint.sh drops privilege via SANDBOX_USER, not a literal node" {
-    run grep -E 'gosu node\b' "$SANDBOX_DIR/entrypoint.sh"
+    run grep -E 'gosu "?node\b|--user="?node\b' "$SANDBOX_DIR/entrypoint.sh"
     [ "$status" -ne 0 ]
+    # Both spellings, because the session's own drop is not the gosu one: it
+    # goes through capsh, which reduces the bounding set in the same process
+    # that changes uid. A check that only knew about gosu would keep passing
+    # while the line it is really about named a literal user.
     grep -q 'gosu "$SANDBOX_USER"' "$SANDBOX_DIR/entrypoint.sh"
+    grep -q -- '--user="$SANDBOX_USER"' "$SANDBOX_DIR/entrypoint.sh"
+}
+
+@test "nothing that outlives the entrypoint is started without dropping capabilities" {
+    # The session and log-shipper.sh are the two processes that survive the
+    # root phase, and the point of drop_caps is that neither inherits the
+    # bounding set that phase needed. A `gosu`/bare exec creeping back in for
+    # either is the regression, and it is invisible at runtime: the container
+    # comes up and works, holding capabilities nothing asked for.
+    grep -q 'drop_caps --user="$SANDBOX_USER" -- -c .exec "\$@". dejima \$SANDBOX_CMD' \
+        "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "the session is not exec'd through drop_caps"; return 1; }
+    grep -q 'drop_caps .*log-shipper\.sh &' "$SANDBOX_DIR/firewall-up.sh" \
+        || { echo "log-shipper.sh is not started through drop_caps"; return 1; }
+    run grep -nE '^\s*(exec )?gosu "\$SANDBOX_USER" (\$SANDBOX_CMD|sleep)' \
+        "$SANDBOX_DIR/entrypoint.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "a session exec still goes through gosu: $output"; return 1; }
+}
+
+@test "capsh is a declared package, not a dependency of something else" {
+    # entrypoint.sh refuses to start without it, so an image built without it
+    # is a container that never appears. It arrived here as a dependency of
+    # iproute2, which is exactly the kind of thing an unrelated package change
+    # takes away.
+    grep -qE '^\s+libcap2-bin \\$' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "libcap2-bin is not in the Dockerfile's package list"; return 1; }
 }
 
 @test "Playwright is installed and require()-able globally" {
@@ -830,6 +861,67 @@ _declared_config_dirs() {
     done
 }
 
+@test "every path cleanup() removes is one dejima bound, never one the environment did" {
+    # A different invariant from the test above, and the `${NAME:-}` form that
+    # satisfies that one is no help here. Guarding against UNBOUND stops set -u
+    # aborting the trap; it does nothing about a name that arrives from the
+    # caller's environment already carrying a value, which the trap then
+    # removes. bin/dejima's own comment states this - "every name cleanup()
+    # removes but does not itself create belongs here" - and until the run-id
+    # change nothing checked it, so three names had drifted out of it, one of
+    # them an `rm -rf` argument.
+    #
+    # An exit between the trap and a name's first assignment is what makes it
+    # reachable. SANDBOX_GITCONFIG_DIR is the one name assigned below the trap,
+    # and its window holds no exit; anything else below the trap is a finding.
+    local d="$REPO_ROOT/bin/dejima"
+    local trap_line; trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    [ -n "$trap_line" ]
+
+    # Only the rm lines, and only their arguments - cleanup() reads plenty it
+    # never deletes, and those are the other test's business.
+    local removed
+    removed="$(sed -n '/^cleanup() {/,/^}/p' "$d" \
+        | grep -E '^[[:space:]]*rm -' \
+        | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*' | tr -d '${' | sort -u)"
+    [ -n "$removed" ] || { echo "found no rm arguments in cleanup() at all"; return 1; }
+
+    local v asg
+    for v in $removed; do
+        [ "$v" != "SANDBOX_GITCONFIG_DIR" ] || continue
+        asg="$(grep -nE "^[[:space:]]*(export )?$v=" "$d" | head -1 | cut -d: -f1)"
+        [ -n "$asg" ] || { echo "cleanup() removes \$$v, which is never assigned"; return 1; }
+        [ "$asg" -lt "$trap_line" ] || {
+            echo "cleanup() removes \$$v, first assigned at line $asg - below the trap at"
+            echo "$trap_line, so an exit in between removes whatever the environment held."
+            return 1
+        }
+    done
+}
+
+@test "the one name assigned below the trap still has no exit to fire on" {
+    # SANDBOX_GITCONFIG_DIR is exempted above on a claim about its window, not
+    # on a claim about the name. The claim is what needs checking: an `exit`
+    # appearing between the trap and that assignment turns the exemption into
+    # the bug it is exempted from, and nothing about that edit would look like
+    # it touched this.
+    local d="$REPO_ROOT/bin/dejima"
+    local trap_line asg
+    trap_line="$(grep -n '^trap cleanup EXIT' "$d" | cut -d: -f1)"
+    asg="$(grep -nE '^[[:space:]]*SANDBOX_GITCONFIG_DIR=' "$d" | head -1 | cut -d: -f1)"
+    [ -n "$trap_line" ] && [ -n "$asg" ]
+    [ "$asg" -gt "$trap_line" ] \
+        || skip "SANDBOX_GITCONFIG_DIR is now assigned above the trap; drop the exception"
+
+    run awk -v a="$trap_line" -v b="$asg" 'NR>a && NR<b && /^[[:space:]]*exit [0-9]/ {print NR": "$0}' "$d"
+    [ -z "$output" ] || {
+        echo "an exit now sits between the trap at $trap_line and the assignment at $asg:"
+        echo "$output"
+        echo "so bind SANDBOX_GITCONFIG_DIR above the trap like the rest."
+        return 1
+    }
+}
+
 @test "docker-compose.yml never hardcodes /home/node - the container home is host-parametrized" {
     # ${HOME:-/home/node} (the SANDBOX_HOME build arg's own default value,
     # mirroring the Dockerfile's default) is the one legitimate exception -
@@ -1545,6 +1637,41 @@ _reference_has_key() {  # <doc> <section> <leaf>
     done
 }
 
+@test "CI runs every confined suite, not just the ones someone remembered" {
+    # The matrix in tests.yml is enumerated by hand, and test/run-confined.sh
+    # discovers suites from the directory. So a suite added to the tree runs
+    # locally and never runs in CI - a green set of checks covering less than
+    # it appears to, which is this repo's least acceptable failure and one
+    # nothing was watching for.
+    #
+    # Which suites are confined is run-confined.sh's own declaration, read
+    # rather than restated: runtime and ci-runner are privileged and have their
+    # own jobs elsewhere in this workflow, and a list here would be a second
+    # place for that to be true.
+    local matrix privileged f n
+    matrix="$(sed -n '/^        suite:/,/^    name:/p' "$REPO_ROOT/.gitea/workflows/tests.yml" \
+        | grep -oE '^          - [a-z-]+' | sed 's/^          - //')"
+    [ -n "$matrix" ] || { echo "found no suite matrix in tests.yml"; return 1; }
+    privileged="$(grep -oE '^PRIVILEGED=" [a-z -]+"' "$REPO_ROOT/test/run-confined.sh" \
+        | sed -E 's/^PRIVILEGED=" //; s/ "$//')"
+    [ -n "$privileged" ] || { echo "could not read the privileged list"; return 1; }
+
+    for f in "$REPO_ROOT"/test/*.bats; do
+        n="$(basename "$f" .bats)"
+        [[ " $privileged " == *" $n "* ]] && continue
+        grep -qx "$n" <<< "$matrix" \
+            || { echo "test/$n.bats is a confined suite and CI never runs it"; return 1; }
+    done
+
+    # And the other direction, or the matrix names a job that fails on a
+    # missing file rather than covering anything.
+    while read -r n; do
+        [ -n "$n" ] || continue
+        [ -f "$REPO_ROOT/test/$n.bats" ] \
+            || { echo "CI runs a suite that does not exist: $n"; return 1; }
+    done <<< "$matrix"
+}
+
 @test "the changed lane's map names only suites that exist" {
     # The map is what --changed selects with, so a suite renamed out from under
     # it stops being selected silently: the run still says green, having
@@ -1603,6 +1730,92 @@ _reference_has_key() {  # <doc> <section> <leaf>
         bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "bin/harness/$name.sh" \
             || { echo "bin/harness/$name.sh is not shellchecked"; return 1; }
     done < <(lib provider_list harness)
+}
+
+@test "shellcheck covers every docker/ script, sourced fragments included" {
+    # Same failure as the plugins above and a worse place for it: caps-lib.sh
+    # is sourced, so it has no shebang, and it holds the drop that decides what
+    # capabilities a session runs with. fixed-domains.sh is the seam holding
+    # the DNS allowlist and the ipset allowlist together.
+    #
+    # Enumerated from the tree rather than from a list here, so a fragment
+    # added tomorrow is covered without anyone remembering this test.
+    local f
+    for f in "$SANDBOX_DIR"/*.sh; do
+        [ -e "$f" ] || continue
+        bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "docker/${f##*/}" \
+            || { echo "docker/${f##*/} is not shellchecked"; return 1; }
+    done
+}
+
+@test "the filter entrypoint brings the firewall up, and lets a failure stop it" {
+    # Exactly one caller, and it is the one in the container that holds the
+    # capabilities. A second caller in the session's container would try to
+    # install rules in a namespace that already has them, and start a second
+    # dnsmasq on an address the first one is already bound to.
+    grep -qE '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/filter-entrypoint.sh" \
+        || { echo "filter-entrypoint.sh does not call firewall-up.sh, or guards the call"; return 1; }
+    # Code, not prose: the entrypoint may well go on mentioning the script in a
+    # comment, and a check that could not tell the two apart would be one
+    # nobody could satisfy while explaining why the call is absent.
+    run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/entrypoint.sh' | grep -n 'firewall-up'"
+    [ "$status" -ne 0 ] \
+        || { echo "the session's entrypoint still brings the firewall up: $output"; return 1; }
+
+    # Unguarded is the point: under `set -e` a firewall that failed to come up
+    # takes the container with it, and the readiness marker below it is never
+    # written, so bin/dejima refuses the launch. `|| true`, an `if`, or a
+    # background `&` would each turn that into a session running unfiltered.
+    run grep -nE 'firewall-up\.sh.*(\|\||&|;)|(if|while).*firewall-up\.sh' \
+        "$SANDBOX_DIR/filter-entrypoint.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "the firewall-up call is guarded or backgrounded: $output"; return 1; }
+
+    # And the marker is written after it, never before: it is what the launcher
+    # waits on, so writing it first would announce a filter that is not there.
+    local up_at ready_at
+    up_at="$(grep -n '^/usr/local/bin/firewall-up\.sh$' "$SANDBOX_DIR/filter-entrypoint.sh" | cut -d: -f1)"
+    ready_at="$(grep -n 'dejima-firewall-ready' "$SANDBOX_DIR/filter-entrypoint.sh" | grep -v '^ *#' | tail -1 | cut -d: -f1)"
+    [ -n "$up_at" ] && [ -n "$ready_at" ] && [ "$up_at" -lt "$ready_at" ] \
+        || { echo "the readiness marker is not written after the firewall comes up"; return 1; }
+}
+
+@test "the session container points itself at the namespace's resolver" {
+    # /etc/resolv.conf is per container even when the network namespace is
+    # shared - measured, and the reason this line has to exist at all.
+    # dns-proxy.sh repoints the filter container's copy; Docker generated this
+    # container's pointing straight at its embedded resolver.
+    #
+    # Left alone, every name the session looks up goes around dnsmasq and the
+    # DNS allowlist applies to nothing - while the packet filter still holds,
+    # so nothing fails and nothing says so.
+    grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/entrypoint.sh" \
+        || { echo "the session container never points itself at the allowlisting resolver"; return 1; }
+
+    # The same address dns-proxy.sh binds and writes for itself, or the two
+    # halves of one arrangement disagree about where the resolver is.
+    grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/dns-proxy.sh" \
+        || { echo "dns-proxy.sh no longer writes that address; the two have drifted"; return 1; }
+}
+
+@test "dejima-allow changes the allowlist where it lives, and checks where it matters" {
+    # The dnsmasq and the ipsets are in the filter container. Every mutation
+    # has to go there; the reachability probe has to stay in the session's
+    # container, because that is the container whose reachability the command
+    # claims to have changed. A probe that ran in the filter container would
+    # pass on an arrangement where the session still could not reach the host.
+    local a="$REPO_ROOT/bin/dejima-allow"
+    grep -q 'docker exec -u root "$filter" bash -c' "$a" \
+        || { echo "the dnsmasq reload does not target the filter container"; return 1; }
+    grep -q 'docker exec -u root "$filter" ipset add' "$a" \
+        || { echo "the ipset add does not target the filter container"; return 1; }
+    grep -q 'docker exec "$container" curl' "$a" \
+        || { echo "the reachability check no longer runs in the session's container"; return 1; }
+
+    # Derived from Docker rather than recorded, so nothing has to be kept in
+    # step with it.
+    grep -q "HostConfig.NetworkMode" "$a" \
+        || { echo "the filter container is not derived from the session's namespace"; return 1; }
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {
@@ -2485,8 +2698,18 @@ _install_forge_bins() {
     # And it must say what it could not run, rather than reporting a pass.
     grep -q 'did NOT run' "$script" \
         || { echo "a gate that could not run is reported as passing"; return 1; }
-    grep -q 'queued is not a job that passed' "$script" \
-        || { echo "nothing warns that a queued CI job is not a green one"; return 1; }
+    # Both halves of the rule, because reporting only one of them is how this
+    # goes wrong in each direction: a queued job read as a pass, or a green one
+    # hedged as though it might be queued.
+    #
+    # Matched against the script flattened to one line, so rewrapping a message
+    # does not fail a test about what it says.
+    local flat_script
+    flat_script="$(tr '\n' ' ' < "$script" | tr -s ' ')"
+    [[ "$flat_script" == *"queued one is yellow or grey"* ]] \
+        || { echo "nothing says a queued CI job is not a passing one"; return 1; }
+    [[ "$flat_script" == *"GREEN means"* ]] \
+        || { echo "nothing says what green means, so a green run gets hedged"; return 1; }
 }
 
 @test "docs/release.md exists and is pointed at from where a release starts" {
@@ -4588,43 +4811,103 @@ STUB
     grep -qE '^\s*- ALL\s*$' "$c" || { echo "cap_drop does not drop ALL"; return 1; }
     grep -qE '^\s*- no-new-privileges:true\s*$' "$c" \
         || { echo "no-new-privileges is gone"; return 1; }
-    # The two the firewall needs are still declared, or the container cannot
-    # bring its own egress control up at all.
-    local cap
-    for cap in NET_ADMIN NET_RAW; do
-        grep -qE "^\s*- $cap\s*$" "$c" || { echo "$cap is no longer added"; return 1; }
-    done
+    # SETPCAP is declared, and it is the one whose use is not a line of the
+    # startup sequence: it is spent taking the rest of this list away again
+    # before the session starts. Declared without that, it is a capability
+    # nothing uses - so the two are asserted together, in both directions.
+    grep -qE '^\s*- SETPCAP\s*$' "$c" \
+        || { echo "SETPCAP is gone, so the bounding set cannot be emptied"; return 1; }
+    grep -q 'exec capsh --drop=all' "$SANDBOX_DIR/caps-lib.sh" \
+        || { echo "SETPCAP is declared but nothing drops with it"; return 1; }
+
     # And nothing the entrypoint does not use has been added back.
-    for cap in SYS_ADMIN MKNOD SETPCAP SETFCAP SYS_CHROOT SYS_PTRACE; do
+    local cap
+    for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
         run grep -nE "^\s*- $cap\s*$" "$c"
         [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
     done
 }
 
-@test "the runtime suite's session container reads the capability floor rather than copying it" {
-    # Only the container that stands in for a real session. The suite also
-    # starts ad-hoc containers to exercise the firewall in isolation, and those
-    # legitimately pass NET_ADMIN/NET_RAW by hand - they are testing a
-    # component, not the posture a session runs under.
+@test "the session container declares no network capability, and the filter declares them" {
+    # The arrangement's whole point, asserted where each list is written.
+    # Capabilities are per process, so a session container that declares
+    # NET_ADMIN can alter the filter bounding it however carefully everything
+    # else is arranged - and would do so silently, since the launch keeps
+    # working either way.
     #
-    # The one in setup_file is different: a hand-written list there would drift
-    # from the compose file, and the container under test would stop being the
-    # container a session gets.
+    # KILL is NOT in this list, and that is the point of the exception: the
+    # filter container needs it for dnsmasq, and the session container needs it
+    # for tini, which forwards signals to a child whose uid it does not match.
+    # Removing it from here once already shipped a session that died on a
+    # terminal resize.
+    #
+    # Both directions for each, or "the session declares none of them" is
+    # satisfied just as well by a launch with no filter container to hold them.
+    local c="$SANDBOX_DIR/docker-compose.yml" cap
+    for cap in NET_ADMIN NET_RAW; do
+        run grep -nE "^\s*- $cap\s*$" "$c"
+        [ "$status" -ne 0 ] \
+            || { echo "the session container declares $cap, so it can reach the filter"; return 1; }
+        grep -q -- "--cap-add $cap" "$REPO_ROOT/bin/dejima" \
+            || { echo "$cap left the session container without arriving at the filter"; return 1; }
+    done
+
+    # KILL is the exception, declared on both: tini needs it here to forward a
+    # signal to the session, dnsmasq needs it there to be signalled.
+    grep -qE '^\s*- KILL\s*$' "$c" \
+        || { echo "the session container cannot signal its own session - see tini"; return 1; }
+    grep -q -- '--cap-add KILL' "$REPO_ROOT/bin/dejima" \
+        || { echo "the filter container cannot signal dnsmasq"; return 1; }
+
+    # The same split for the one sysctl: a property of a namespace the session
+    # container does not own, so it is set by the container that does.
+    run grep -nE '^\s*sysctls:' "$c"
+    [ "$status" -ne 0 ] \
+        || { echo "the session container declares a sysctl for a namespace it does not own"; return 1; }
+    grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing sets the unprivileged port floor the TLS terminator needs"; return 1; }
+}
+
+@test "the runtime suite's containers read both capability floors rather than copying them" {
+    # start_pair builds the pair a launch actually starts, so it is where both
+    # floors have to come from the code that declares each: the session's from
+    # docker-compose.yml, the filter's from bin/dejima's own `docker run`. A
+    # hand-written list in either place would drift, and the containers under
+    # test would stop being the containers a launch gets.
+    #
+    # The suite still starts two containers by hand - one that must refuse to
+    # start, one that must abort at a check before the network matters. Both
+    # say so at the call site; neither stands in for a session.
     local rt="$REPO_ROOT/test/runtime.bats"
     grep -q '^compose_cap_add()' "$rt" \
-        || { echo "runtime.bats no longer derives the capability list"; return 1; }
+        || { echo "runtime.bats no longer derives the session capability list"; return 1; }
+    grep -q '^launcher_filter_cap_add()' "$rt" \
+        || { echo "runtime.bats no longer derives the filter capability list"; return 1; }
+
+    local pair
+    pair="$(sed -n '/^start_pair()/,/^}/p' "$rt")"
+    [ -n "$pair" ] || { echo "no start_pair in runtime.bats"; return 1; }
+    grep -q 'compose_cap_add' <<< "$pair" \
+        || { echo "the session container no longer derives its capabilities"; return 1; }
+    grep -q 'launcher_filter_cap_add' <<< "$pair" \
+        || { echo "the filter container no longer derives its capabilities"; return 1; }
+
+    # Both halves, twice each: an empty set to start from, and no way back up.
+    [ "$(grep -c -- '--cap-drop=ALL' <<< "$pair")" = 2 ] \
+        || { echo "a container in the pair does not start from an empty set"; return 1; }
+    [ "$(grep -c -- '--security-opt=no-new-privileges:true' <<< "$pair")" = 2 ] \
+        || { echo "a container in the pair runs without no-new-privileges"; return 1; }
+
+    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$pair"
+    [ "$status" -ne 0 ] \
+        || { echo "a capability is hardcoded in the pair:"; echo "$output"; return 1; }
+
+    # And the fixture that stands in for a session goes through it, or the
+    # derivation above is true of a helper nothing calls.
     local setup_block
     setup_block="$(sed -n '/^setup_file()/,/^}/p' "$rt")"
-    [ -n "$setup_block" ] || { echo "no setup_file in runtime.bats"; return 1; }
-    grep -q 'compose_cap_add' <<< "$setup_block" \
-        || { echo "the session container no longer derives its capabilities"; return 1; }
-    grep -q -- '--cap-drop=ALL' <<< "$setup_block" \
-        || { echo "the session container does not start from an empty set"; return 1; }
-    grep -q -- '--security-opt=no-new-privileges:true' <<< "$setup_block" \
-        || { echo "the session container does not run with no-new-privileges"; return 1; }
-    run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$setup_block"
-    [ "$status" -ne 0 ] \
-        || { echo "a capability is hardcoded for the session container:"; echo "$output"; return 1; }
+    grep -q 'start_pair ""' <<< "$setup_block" \
+        || { echo "setup_file no longer starts the pair a launch starts"; return 1; }
 }
 
 @test "dejima writes host state under one root, not a new base directory per file" {
@@ -6311,12 +6594,19 @@ q
     grep -q 'echo "\$openssl_err" >&2' "$SANDBOX_DIR/entrypoint.sh"
 }
 
-@test "compose passes the transport through and lets an unprivileged process bind :443" {
+@test "the transport is passed through, and an unprivileged process can bind :443" {
     grep -qE '^\s*SANDBOX_CREDENTIAL_TRANSPORT:\s*\$\{SANDBOX_CREDENTIAL_TRANSPORT:-\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
     # Docker already defaults this to 0, but the terminator runs as the
     # unprivileged sandbox user: pinning it means a future default change
     # fails at launch instead of silently breaking the credential path.
-    grep -qE '^\s*net\.ipv4\.ip_unprivileged_port_start:\s*0\s*$' "$SANDBOX_DIR/docker-compose.yml"
+    #
+    # Pinned on the filter container, because it is a property of a network
+    # namespace and that is the container that owns one. The terminator binds
+    # in the session container, which joins that namespace - so this is
+    # asserted here as a declaration and in runtime.bats by reading the value
+    # back from the container that has to have it.
+    grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing pins the unprivileged port floor"; return 1; }
 }
 
 @test "compose does not pin api.anthropic.com to loopback unconditionally" {
@@ -6536,6 +6826,13 @@ _provider_proxied_domain() {
                 # of which forge is configured, not a coupling to one. Same
                 # feature the "GitHub read-only" prose exception below names.
                 matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                # `network_mode: none` is Docker's own value for "no network",
+                # which collides with a shipped forge's name and with nothing
+                # else about it. Scoped to the key AND the value, not to either
+                # alone: excluding every `network_mode` line would hide a real
+                # forge name written on one, and excluding the bare word would
+                # hide it anywhere in the file.
+                matches="$(grep -vE 'network_mode: .*none' <<< "$matches" || true)"
                 ;;
             */hooks/sandbox-context.sh)
                 # A citation of Anthropic's own devcontainer, not a forge.
@@ -7014,7 +7311,8 @@ _provider_proxied_domain() {
     # shipping went, which is worth keeping.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-    grep -q 'neither session-writable' "$SANDBOX_DIR/entrypoint.sh"
+    # And the claim that makes root safe, where the shipper is now started.
+    grep -q 'neither session-writable' "$SANDBOX_DIR/firewall-up.sh"
 }
 
 @test ".dejima.md says to cut what the code replaced, not just how it was found" {

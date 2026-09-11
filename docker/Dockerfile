@@ -28,6 +28,11 @@ ENV TZ="$TZ"
 # hardening). Whichever harness has one, its plugin's harness_prepare_config
 # turns it off in the override layer, so there is nothing here to satisfy.
 # Claude Code's is the "sandbox" block in settings.json.
+#
+# libcap2-bin is capsh, which entrypoint.sh uses to hand the session a
+# container it holds no capabilities in. It was already here as a dependency of
+# iproute2; a security control resting on another package's dependency graph is
+# one an unrelated package change removes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
   git \
@@ -41,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iptables \
   ipset \
   iproute2 \
+  libcap2-bin \
   dnsutils \
   aggregate \
   jq \
@@ -266,8 +272,11 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
 # are supplied at runtime, not baked into the image - see
 # docker-compose.yml/entrypoint.sh.
 COPY docker/fixed-domains.sh /usr/local/bin/
+COPY docker/caps-lib.sh /usr/local/bin/
 COPY docker/dns-proxy.sh /usr/local/bin/
 COPY docker/init-firewall.sh /usr/local/bin/
+COPY docker/firewall-up.sh /usr/local/bin/
+COPY docker/filter-entrypoint.sh /usr/local/bin/
 COPY docker/log-shipper.sh /usr/local/bin/
 COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 # Into $VIMRUNTIME/plugin, not /etc/xdg/nvim - see the file's own comment.
@@ -323,7 +332,7 @@ RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr
 # and describes what a page should look like instead of going and seeing.
 RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
+RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
   echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall

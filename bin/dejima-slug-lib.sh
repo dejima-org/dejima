@@ -17,16 +17,28 @@
 # runs inside the container, the other is a separate library).
 ws_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
-# Every per-project share directory lives under this one subdirectory of
-# `[core] share_dir` rather than directly in it, which is what makes "left
-# over from before the split" a decidable question: anything at share_dir's
-# top level other than this directory predates the layout, because nothing
-# writes there any more. It is also the directory to mount over sshfs - one
-# entry per project, with no loose files mixed in.
-share_projects_root() { printf '%s/projects' "${1%/}"; }
+# The per-project layout, and there is one of it because there is more than one
+# caller: `[core] share_dir` slices this way, and so does every
+# `[mounts] read_write_per_project` entry. A host directory sliced per project
+# holds one `projects` subdirectory, and one directory per slug inside it.
+#
+# Everything lives under that single subdirectory rather than directly in the
+# root, which is what makes "left over from before, or put there by hand" a
+# decidable question: anything at the root's top level other than this
+# directory was not written by dejima. It is also the directory to mount over
+# sshfs - one entry per project, with no loose files mixed in.
+projects_root() { printf '%s/projects' "${1%/}"; }
+
+# The directory a launch against $2 gets from a root sliced this way.
+project_dir_for() { printf '%s/%s' "$(projects_root "$1")" "$(ws_slug "$2")"; }
+
+# share_dir's own spelling of the two above. `[core] share_dir` is one
+# instance of the layout, and these names are what let bin/dejima-share go on
+# talking about a share rather than about "a per-project root".
+share_projects_root() { projects_root "$1"; }
 
 # The host directory mounted at ~/shared for a launch against $2.
-share_dir_for() { printf '%s/%s' "$(share_projects_root "$1")" "$(ws_slug "$2")"; }
+share_dir_for() { project_dir_for "$1" "$2"; }
 
 # The slugs belonging to $1: its own, plus one per live git worktree nested
 # underneath it. One per line, sorted, no duplicates.

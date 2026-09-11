@@ -215,6 +215,30 @@ run_line() { grep -- ' run --rm ' "$LAUNCH_DIR/docker-log" | tail -1; }
     rm -rf "$PROJ"
 }
 
+@test "an inherited state dir and run id are not what the exit trap deletes" {
+    # cleanup() removes "$DEJIMA_STATE_DIR/debounce/$DEJIMA_RUN_ID-{waiting,done}".
+    # With remote access off nothing used to assign either name, so both came
+    # from the caller's environment if it had them - and the trap then removed
+    # a path of the environment's choosing. Both are bound by dejima before the
+    # trap is installed now, so the join can only ever name a path it made.
+    #
+    # Two canaries, because either name alone being dejima's is enough to miss
+    # the path: the removal needs both halves to come from the environment.
+    stub_launch
+    local canary="$LAUNCH_DIR/canary"
+    mkdir -p "$canary/debounce"
+    : > "$canary/debounce/deadbeefdeadbeef-waiting"
+    : > "$canary/debounce/deadbeefdeadbeef-done"
+
+    DEJIMA_STATE_DIR="$canary" DEJIMA_RUN_ID=deadbeefdeadbeef launch "$PROJ"
+
+    [ -f "$canary/debounce/deadbeefdeadbeef-waiting" ] \
+        || { echo "the trap removed a file named by the environment"; return 1; }
+    [ -f "$canary/debounce/deadbeefdeadbeef-done" ] \
+        || { echo "the trap removed a file named by the environment"; return 1; }
+    rm -rf "$PROJ"
+}
+
 @test "with remote access configured a registry entry is written and removed on exit" {
     stub_launch
     write_remote_config
@@ -420,11 +444,21 @@ EOF
     write_remote_config
     # The EXIT trap removes the entry, so snapshot it from inside the run:
     # the stub stands in for the container, and runs while it still exists.
+    #
+    # Matched on the session's own compose run rather than on every docker
+    # call. A launch makes several - a build, this launch's filter container,
+    # and two removals from the exit trap - and snapshotting on each meant the
+    # last one won. Those two removals run after the entry is gone, so what
+    # this read was an empty directory.
     cat > "$LAUNCH_DIR/docker" <<EOF
 #!/bin/bash
 echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
-rm -rf "$LAUNCH_DIR/sessions-snapshot"
-cp -r "$RUNTIME_DIR/dejima/sessions" "$LAUNCH_DIR/sessions-snapshot" 2>/dev/null || true
+case "\$*" in
+    *" run --rm "*)
+        rm -rf "$LAUNCH_DIR/sessions-snapshot"
+        cp -r "$RUNTIME_DIR/dejima/sessions" "$LAUNCH_DIR/sessions-snapshot" 2>/dev/null || true
+        ;;
+esac
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"

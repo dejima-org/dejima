@@ -27,12 +27,17 @@ list_scripts() {
         ls test/*.sh 2>/dev/null || true
     } | sort -u | while read -r f; do
         [ -f "$f" ] || continue
-        # Harness plugins are sourced, not executed, so they carry no shebang
-        # and the discovery below would drop them - silently, which is the
-        # worst version of that. They are in the trusted computing base, so
-        # they are included by name and the -s bash below tells shellcheck
-        # what they are.
-        case "$f" in bin/harness/*.sh) printf '%s\n' "$f"; continue ;; esac
+        # Sourced fragments are not executed, so they carry no shebang and the
+        # discovery below would drop them - silently, which is the worst
+        # version of that. Harness plugins are one kind; docker/ has two more,
+        # and they are not incidental: caps-lib.sh holds the drop that decides
+        # what a session's capability set is, and fixed-domains.sh is the seam
+        # keeping the DNS allowlist and the ipset allowlist from drifting.
+        #
+        # Matched by directory rather than by name, because a list is a thing
+        # to forget to add to. Everything under docker/ is in the trusted
+        # computing base; the -s bash below tells shellcheck what these are.
+        case "$f" in bin/harness/*.sh|docker/*.sh) printf '%s\n' "$f"; continue ;; esac
         head -1 "$f" | grep -qE '^#!.*(bash|sh)' && printf '%s\n' "$f"
     done
 }
