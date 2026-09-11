@@ -6816,6 +6816,13 @@ _provider_proxied_domain() {
                 # of which forge is configured, not a coupling to one. Same
                 # feature the "GitHub read-only" prose exception below names.
                 matches="$(grep -vE 'github\.com' <<< "$matches" || true)"
+                # `network_mode: none` is Docker's own value for "no network",
+                # which collides with a shipped forge's name and with nothing
+                # else about it. Scoped to the key AND the value, not to either
+                # alone: excluding every `network_mode` line would hide a real
+                # forge name written on one, and excluding the bare word would
+                # hide it anywhere in the file.
+                matches="$(grep -vE 'network_mode: .*none' <<< "$matches" || true)"
                 ;;
             */hooks/sandbox-context.sh)
                 # A citation of Anthropic's own devcontainer, not a forge.

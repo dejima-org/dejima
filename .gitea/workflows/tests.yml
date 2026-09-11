@@ -328,9 +328,30 @@ jobs:
             echo "resolves for this architecture." >&2
             exit 1
           }
+          # compose, from the same place and for a reason of the same kind: it
+          # is a plugin, so without it `docker compose` is not a command at
+          # all. Every launch on a real host goes through one, and nothing in
+          # CI did - so the compose file was the one input to a launch that no
+          # job had ever parsed.
+          #
+          # Its assets are named for `uname -m`, like the CLI tarball above and
+          # unlike buildx, which uses the Debian architecture name.
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+            "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-$(uname -m)"
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          # Checked for the same reason buildx is: an error page chmods just as
+          # well as a binary, and the symptom would be a test that skips rather
+          # than one that fails.
+          docker compose version || {
+            echo "The compose plugin did not load, so the compose-file test will skip" >&2
+            echo "instead of running. Check the download URL above still resolves for" >&2
+            echo "this architecture." >&2
+            exit 1
+          }
         env:
           DOCKER_CLI_VERSION: 27.5.1
           BUILDX_VERSION: 0.36.0
+          COMPOSE_VERSION: 5.5.1
 
       # Fails here, with the fix in the message, rather than thirty tests deep
       # in a suite that cannot work. Both of these are runner configuration,
