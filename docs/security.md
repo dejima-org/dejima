@@ -1084,11 +1084,19 @@ reasoning below is what both are built on.
   again before execing the session, and since Linux 4.3 it grants nothing a
   process does not already hold.
 
-  The filter container holds the network capabilities, and `KILL` with them:
-  adding a domain to a running session signals dnsmasq, dnsmasq runs as its own
-  user, and dnsmasq is in there. The session's list is in
+  The filter container holds the network capabilities. The session's list is in
   `docker/docker-compose.yml` and the filter's is in `bin/dejima`, each beside
   the container it describes.
+
+  `KILL` is on both lists, for unrelated reasons, and it is the one worth
+  reading twice. The filter container needs it because adding a domain to a
+  running session signals dnsmasq, which runs as its own user. The session
+  container needs it because `init: true` makes PID 1 an init that forwards
+  signals to the session - and the entrypoint changes uid in place before
+  exec'ing it, so that is uid 0 signalling a process whose real and saved uids
+  are the sandbox user's. Without the capability every forwarded signal is
+  `EPERM`, tini treats a failed forward as fatal, and an ordinary terminal
+  resize ends the session.
 
   `no-new-privileges` means a setuid binary or a file capability cannot raise
   privileges on exec, which is the shape any escalation from the session user
