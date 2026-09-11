@@ -2002,6 +2002,16 @@ _briefing_resolve_key() {
             if [ -n "${DEJIMA_RW_MOUNTS:-}" ]; then
                 printf '\n  These host directories are bind-mounted read-write at their own paths and\n  outlive the container too: %s.\n ' "$DEJIMA_RW_MOUNTS"
             fi
+            # A separate sentence, because the first one is not true of these.
+            # A per-project mount arrives at the path it names, like the
+            # others, but what is behind it is this project's own slice of
+            # that directory rather than the directory - so "these host
+            # directories ... at their own paths" would tell a session it can
+            # see something it cannot, and imply the next project's session
+            # will read what it leaves.
+            if [ -n "${DEJIMA_RW_PP_MOUNTS:-}" ]; then
+                printf '\n  These are bind-mounted read-write too and also outlive the container, but\n  each is THIS project'"'"'s own directory rather than one every project shares -\n  the same arrangement as ~/shared: %s.\n ' "$DEJIMA_RW_PP_MOUNTS"
+            fi
             ;;
         *)
             echo "internal error: no resolver for whitelisted briefing key: $key" >&2

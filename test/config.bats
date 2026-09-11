@@ -2221,6 +2221,139 @@ EOF
     rm -rf "$workspace" "$RW_HOME"
 }
 
+@test "a read_write_per_project entry mounts this project's slice at the path it names" {
+    _rw_setup
+    pp="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write_per_project = $pp"
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    # The container gets the path the operator named; the host gives it one
+    # directory of that path, keyed the same way share_dir and the audit store
+    # are. Both halves asserted, because either alone is satisfied by the
+    # arrangement this replaces.
+    slug="$(printf '%s' "$workspace" | sed 's/[^a-zA-Z0-9]/-/g')"
+    grep -qxF "$pp/projects/$slug:$pp" "$docker_log" \
+        || { echo "not mounted as a per-project slice:"; grep "$pp" "$docker_log"; return 1; }
+    run grep -qxF "$pp:$pp" "$docker_log"
+    [ "$status" -ne 0 ] \
+        || { echo "the whole directory was handed over as well"; return 1; }
+    [ -d "$pp/projects/$slug" ] || { echo "the slice was never created"; return 1; }
+    rm -rf "$pp" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "two projects get different slices of one read_write_per_project entry" {
+    # The whole point, and not deducible from one launch: the same declared
+    # directory has to give two workspaces two directories, or it is a shared
+    # pile with extra steps.
+    _rw_setup
+    pp="$(mktemp -d)"
+    ws_a="$(mktemp -d)"; ws_b="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write_per_project = $pp"
+    _rw_launch "$ws_a"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    a_log="$docker_log"
+    _rw_launch "$ws_b"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    a="$(grep -oE "$pp/projects/[^:]+" "$a_log" | head -1)"
+    b="$(grep -oE "$pp/projects/[^:]+" "$docker_log" | head -1)"
+    [ -n "$a" ] && [ -n "$b" ] || { echo "no slice mounted for one of them"; return 1; }
+    [ "$a" != "$b" ] \
+        || { echo "both projects were given the same directory: $a"; return 1; }
+    rm -rf "$pp" "$ws_a" "$ws_b" "$RW_HOME" "$a_log" "$docker_log"
+}
+
+@test "read_write is refused when it names a read_write_per_project root" {
+    # The share guard's reason, one directory over: handing over the root that
+    # holds every project's slice puts back the pile the slicing removed.
+    _rw_setup
+    pp="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    mkdir -p "$pp/projects"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $pp/projects" "read_write_per_project = $pp"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "the pile was handed back: $output"; return 1; }
+    [[ "$output" == *"holds one directory per project"* ]] || { echo "$output"; return 1; }
+    rm -rf "$pp" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "readonly is refused when it names a read_write_per_project root" {
+    _rw_setup
+    pp="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    mkdir -p "$pp/projects"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "readonly = $pp/projects" "read_write_per_project = $pp"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "every project's slice was readable: $output"; return 1; }
+    rm -rf "$pp" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "a read_write_per_project entry overlapping a protected path is refused" {
+    # Slicing does not make a guarded store safe to hand over - it only makes
+    # less of it reachable, which is not the property the guard is about.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write_per_project = $CONFIG_DIR"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "the approval store was mounted: $output"; return 1; }
+    [[ "$output" == *"only how much of it there is"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "the same path in read_write and read_write_per_project is refused" {
+    # Not by a duplicate check: the two mean different things, so naming a path
+    # in both makes it an ancestor of its own per-project root, and the refusal
+    # that fires is the one about handing over every project's directory. That
+    # is the right answer, and it says which list the path belongs in.
+    _rw_setup
+    pp="$(mktemp -d)"
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $pp" "read_write_per_project = $pp"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"holds one directory per project"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"one list or the other and not in both"* ]] || { echo "$output"; return 1; }
+    rm -rf "$pp" "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "a read_write_per_project entry that is not an existing directory is refused" {
+    # The slice is dejima's to create; the root is not. A path that is not
+    # there is a typo, and creating it would turn the typo into a directory.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write_per_project = /nonexistent/specs"
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not an existing directory"* ]] || { echo "$output"; return 1; }
+    [ ! -d /nonexistent/specs ]
+    rm -rf "$workspace" "$RW_HOME" "$docker_log"
+}
+
+@test "--print-briefing names a per-project mount as this project's own" {
+    # A separate sentence from the read_write one, because the read_write
+    # sentence is not true of these: a session told "these host directories at
+    # their own paths" would believe the whole directory is behind the mount.
+    pp="$(mktemp -d)"
+    rw="$(mktemp -d)"
+    write_config '[core]' 'forge = none' 'workflow = local-only' \
+                 '[mounts]' "read_write = $rw" "read_write_per_project = $pp"
+    run "$REPO_ROOT/bin/dejima" --print-briefing
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"at their own paths"*"$rw"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"THIS project's own directory"*"$pp"* ]] || { echo "$output"; return 1; }
+    # And composing a briefing leaves nothing behind: the slice belongs to a
+    # launch, not to a diagnostic that prints one.
+    [ ! -d "$pp/projects" ] || { echo "--print-briefing created the slice"; return 1; }
+    rm -rf "$pp" "$rw"
+}
+
 @test "a path in both read_write and readonly is refused rather than resolved by mount order" {
     _rw_setup
     d="$(mktemp -d)"

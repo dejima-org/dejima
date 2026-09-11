@@ -53,6 +53,7 @@ core.known_hosts	path	~/.ssh/known_hosts
 github.token_file	path	~/.config/gh/sandbox-token
 mounts.readonly	?list:path
 mounts.read_write	?list:path
+mounts.read_write_per_project	?list:path
 mounts.nvim_config	?path
 credentials.proxy	bool	on
 credentials.transport	enum:tls|loopback	tls
