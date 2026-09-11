@@ -444,11 +444,21 @@ EOF
     write_remote_config
     # The EXIT trap removes the entry, so snapshot it from inside the run:
     # the stub stands in for the container, and runs while it still exists.
+    #
+    # Matched on the session's own compose run rather than on every docker
+    # call. A launch makes several - a build, this launch's filter container,
+    # and two removals from the exit trap - and snapshotting on each meant the
+    # last one won. Those two removals run after the entry is gone, so what
+    # this read was an empty directory.
     cat > "$LAUNCH_DIR/docker" <<EOF
 #!/bin/bash
 echo "\$*" >> "\${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
-rm -rf "$LAUNCH_DIR/sessions-snapshot"
-cp -r "$RUNTIME_DIR/dejima/sessions" "$LAUNCH_DIR/sessions-snapshot" 2>/dev/null || true
+case "\$*" in
+    *" run --rm "*)
+        rm -rf "$LAUNCH_DIR/sessions-snapshot"
+        cp -r "$RUNTIME_DIR/dejima/sessions" "$LAUNCH_DIR/sessions-snapshot" 2>/dev/null || true
+        ;;
+esac
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
