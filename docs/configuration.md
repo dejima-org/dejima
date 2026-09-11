@@ -163,7 +163,8 @@ you selected, the second is push access when GitHub *is* your forge.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `readonly` | unset | extra host paths (colon-separated) a personal config needs, mounted read-only at their own path |
-| `read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session; refused if they overlap anything dejima needs out of a session's reach |
+| `read_write` | unset | host paths (colon-separated) mounted **read-write** at their own path: for directories meant to outlive the session and be shared by every project; refused if they overlap anything dejima needs out of a session's reach |
+| `read_write_per_project` | unset | the same, mounted at the path named but backed by `<path>/projects/<slug>` - one directory per project rather than one for the host. For anything a session writes to be read later as background, where another project reading it would be a channel rather than a convenience |
 | `nvim_config` | unset | nvim config dir, used when `[core] command = nvim` |
 
 ### `[audit]` - the exit-time audit
@@ -842,14 +843,40 @@ session is meant to write to and whose contents should outlive the container:
 
 ```
 [mounts]
-read_write = ~/specs
+read_write = ~/.cache/shared-toolchain
 ```
 
-Both lists mount at the host path they name, so a convention that says
+`[mounts] read_write_per_project` mounts at the same path, but backs it with
+one directory per project instead of the whole thing:
+
+```
+[mounts]
+read_write_per_project = ~/specs
+```
+
+The container sees `~/specs` either way. Behind it, `read_write` puts the
+directory itself - every session's contents, including other projects' - and
+`read_write_per_project` puts `~/specs/projects/<slug>`, keyed the same way
+`[core] share_dir` and the audit store are.
+
+**Which to reach for is decided by one question: should another project's
+session read what this one leaves there?** For a build cache or a directory of
+scripts, yes, and `read_write` is right. For design docs, scratch notes,
+anything an agent writes to be read later as background - no, and that is what
+`read_write_per_project` is for. A spec is written to be read as context, so a
+shared one is a channel from any project into every other.
+
+All three lists mount at the host path they name, so a convention that says
 "specs live in `~/specs`" keeps working inside the container without being
 rewritten. That is the difference from `[core] share_dir`, which is
 mounted at `~/shared` regardless of where it lives on the host because its job
 is to be a well-known handoff point.
+
+dejima creates the per-project directory; it never creates the one you named,
+so a path that is not there is refused as the typo it is. Naming a
+`read_write_per_project` root's `projects` directory in either of the other
+two lists is refused as well - handing that over is handing over every
+project's.
 
 An entry is **refused, not warned about**, if it overlaps anything dejima
 relies on being out of a session's reach: the approval store, either audit
@@ -958,13 +985,14 @@ Treat it as a handoff point, not as general-purpose storage. If your own
 project instructions tell agents to write somewhere at a fixed host path -
 design docs, scratch notes, anything meant to outlive the session but stay out
 of the project checkout - mount that directory instead, with
-`[mounts] read_write`. It arrives at its own absolute path, so a convention
-that says "put specs in `~/specs`" keeps working inside the container without
-being rewritten to point at `~/shared`.
+`[mounts] read_write_per_project`. It arrives at its own absolute path, so a
+convention that says "put specs in `~/specs`" keeps working inside the
+container without being rewritten to point at `~/shared` - and, like `~/shared`
+itself, what a session finds there is this project's and not every project's.
 
-`~/shared`, the project mount, and anything in `[mounts] read_write` are the
-only writable host paths in the container. Everything else a session writes
-goes away with it.
+`~/shared`, the project mount, and anything in `[mounts] read_write` or
+`[mounts] read_write_per_project` are the only writable host paths in the
+container. Everything else a session writes goes away with it.
 
 **Clear it out periodically.** The per-project split bounds which sessions can
 read what you left, and bounds nothing about how long. A project's share
