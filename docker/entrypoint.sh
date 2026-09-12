@@ -31,9 +31,10 @@ require_setpcap
 # It would not silently succeed, either: the policy restricts which uids may
 # reach a resolver outside this namespace, and the session user is not one of
 # them - so a session left pointing at the embedded resolver resolves nothing
-# at all rather than resolving anything it likes. The value
-# below is the same one egress-policy writes for itself, at the same loopback
-# address, because loopback is shared with the container the resolver runs in.
+# at all rather than resolving anything it likes.
+#
+# The value below is the same one egress-policy writes for itself, at the same
+# loopback address, because loopback is shared with the resolver's container.
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     echo "nameserver 127.0.0.1" > /etc/resolv.conf
 fi
@@ -510,7 +511,8 @@ if [ -n "${DEJIMA_NOTIFY_DIR:-}" ]; then
 fi
 
 # Test harness hook (test/): everything above this point is the real
-# startup sequence - resolver, packet filter, logging, privilege-drop prep. Skip execing $SANDBOX_CMD so the suite can `docker
+# startup sequence - resolver, packet filter, logging, privilege-drop prep.
+# Skip execing $SANDBOX_CMD so the suite can `docker
 # exec` into a live, fully-initialized container and assert against it,
 # exercising the actual code path instead of a reimplementation of it that
 # could drift out of sync.

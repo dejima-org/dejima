@@ -1651,11 +1651,26 @@ session_pid() {  # [container], defaulting to the file-wide one
     # account is load-bearing - and it must be an account nothing else uses,
     # because a permission keyed to a shared one is granted to everything that
     # lands there.
-    run dexec_filter ps -eo user,comm
-    [[ "$output" == *"egress-resolver dnsmasq"* ]] || [[ "$output" == *$'\negress-resolver '* ]] \
-        || { echo "the resolver is not running as egress-resolver: $output"; return 1; }
-    ! [[ "$output" == *$'\nnobody '* ]] \
-        || { echo "something is running as nobody, which the rule must not be keyed to: $output"; return 1; }
+    # Compared by uid, not by name. `ps -eo user` pads the column to eight
+    # characters and truncates anything longer to "egress-+", which is not a
+    # string any assertion about this account can match - and the account is
+    # deliberately named for what it is rather than for what fits.
+    local want
+    want=$(dexec_filter id -u egress-resolver)
+    [ -n "$want" ] || { echo "the image has no egress-resolver account"; return 1; }
+
+    run dexec_filter sh -c 'ps -eo uid,comm | awk "\$2 == \"dnsmasq\" { print \$1 }"'
+    [ "$status" -eq 0 ]
+    [ -n "$output" ] || { echo "no dnsmasq process in the filter container"; return 1; }
+    [ "$output" = "$want" ] \
+        || { echo "the resolver runs as uid $output, and the rule is keyed to $want"; return 1; }
+
+    # And nothing is running as the account the rule must NOT be keyed to,
+    # because a permission keyed to a shared one is granted to everything that
+    # lands there.
+    run dexec_filter sh -c 'ps -eo uid,comm | awk "\$1 == \"65534\" { print \$2 }"'
+    [ -z "$output" ] \
+        || { echo "something runs as nobody, which the rule must not be keyed to: $output"; return 1; }
 }
 
 @test "every connection attempt is recorded with its verdict" {
@@ -2228,7 +2243,12 @@ EOF
     [ "$env_ca" = "1" ]
     [ "$env_token" = "0" ]
     [ "$hosts_hits" = "1" ]
-    [[ "$dig_output" == *"status: REFUSED"* ]]
+    # NXDOMAIN or REFUSED: the resolver answers for permitted names and refuses
+    # everything else, and which of the two it says is a property of how the
+    # refusal is expressed rather than of whether the name is permitted. What
+    # matters here is that a lookup of this name yields no address.
+    [[ "$dig_output" == *"status: NXDOMAIN"* || "$dig_output" == *"status: REFUSED"* ]] \
+        || { echo "api.anthropic.com resolved despite not being permitted: $dig_output"; return 1; }
 }
 
 @test "the kill switch leaves api.anthropic.com unpinned, so the real API stays reachable" {
