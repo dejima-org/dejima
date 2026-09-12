@@ -645,6 +645,26 @@ start_resolver() {
   stop_daemon "$RESOLVER_PID" dnsmasq
   dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
   wait_for_daemon dnsmasq
+
+  # Waiting for the process is not waiting for the resolver. dnsmasq
+  # daemonizes and the parent returns almost immediately, so `pgrep` succeeds
+  # while the child is still binding - and a query sent into that window gets
+  # a connection refused rather than an answer, which every check after this
+  # would read as the policy refusing a name it in fact permits.
+  #
+  # Answering is the condition, not reachability: the probe name must NOT
+  # resolve, so any response at all - including the NXDOMAIN it is supposed to
+  # get - proves the resolver is up and deciding. A name that should resolve
+  # would conflate "the resolver is ready" with "the forward worked".
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if dig +time=1 +tries=1 @127.0.0.1 "$PROBE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    [ "$i" -lt 20 ] || die "the resolver is running but did not answer on 127.0.0.1 within 10s"
+    sleep 0.5
+  done
+
   # From here the policy container resolves through its own resolver too, so the
   # self-checks below test what the session container will experience rather
   # than a privileged shortcut.
@@ -781,7 +801,7 @@ verify() {
 
   answer=$(resolve_one "$forge_host") || true
   [ -n "$answer" ] \
-    || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted"
+    || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$forge_host")"
 
   # The resolver is also what puts a permitted name's addresses into the
   # allow-list, and which set it uses is the name's class. Checking membership
@@ -873,6 +893,48 @@ check_permitted_names() {
   if [ ${#silent[@]} -ne 0 ]; then
     say "note: permitted names that returned no address: ${silent[*]} - not a policy refusal (they are in the permitted set); the name may not exist or its upstream may be unreachable"
   fi
+}
+
+# Why a permitted name came back empty, in the two ways it can.
+#
+# The resolver either never forwarded the query - a configuration fault, and it
+# says so in its own log - or forwarded it and got nothing back, which on a
+# fresh namespace almost always means the packet filter refused the forward.
+# Both present identically as an empty answer, and the difference is the whole
+# distance between "the config is wrong" and "the rule permitting the forwarder
+# to reach an upstream did not match its socket".
+#
+# Worth building into the failure rather than leaving to whoever reads it: this
+# runs unattended during container startup, the container is gone by the time
+# anyone looks, and the log it would have needed goes with it.
+why_no_answer() {
+  local name=$1 out="" tail_log="" refuse_counts=""
+  tail_log=$(grep -F "$name" "$RESOLVER_LOG" 2>/dev/null | tail -5) || true
+  out="$out"$'\n'"  the resolver's own log for $name:"
+  if [ -n "$tail_log" ]; then
+    out="$out"$'\n'"$(sed 's/^/    /' <<< "$tail_log")"
+  else
+    out="$out"$'\n'"    (nothing - the query never reached it)"
+  fi
+
+  # A forward that was refused leaves a count on the chain that refused it.
+  refuse_counts=$(nft -a list chain inet "$TABLE" refuse 2>/dev/null | grep -F 'counter' | tail -3) || true
+  out="$out"$'\n'"  what the policy permitted it to do:"
+  out="$out"$'\n'"$(grep -E '^(server=|address=|no-resolv)' "$RESOLVER_CONF" 2>/dev/null | grep -F "$name" | sed 's/^/    /' || true)"
+  out="$out"$'\n'"  upstream resolvers discovered at start: $(tr '\n' ' ' < "$UPSTREAM_FILE" 2>/dev/null)"
+  out="$out"$'\n'"  the forwarder runs as $RESOLVER_USER (uid $(id -u "$RESOLVER_USER" 2>/dev/null || echo '?')), and only that uid may reach them"
+  [ -n "$refuse_counts" ] && out="$out"$'\n'"  refuse chain: $refuse_counts"
+
+  # The uid the kernel will actually match on, which is the question and not
+  # the same as the uid the process runs as: `meta skuid` reads the socket's
+  # owner, and a socket opened before a daemon dropped privilege keeps the uid
+  # it was opened with. /proc/net/udp reports it per socket, in its uid column.
+  local socks
+  socks=$( { cat /proc/net/udp /proc/net/udp6 2>/dev/null || true; } \
+      | awk 'NR > 1 && $1 != "sl" { print "    uid " $8 "  local " $2 "  remote " $3 }' \
+      | sort -u) || true
+  [ -n "$socks" ] && out="$out"$'\n'"  UDP sockets in this namespace, by owning uid:"$'\n'"$socks"
+  printf '%s' "$out"
 }
 
 # First address of either family that the local resolver will admit to.

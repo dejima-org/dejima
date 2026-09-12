@@ -4187,6 +4187,28 @@ registered_commands() {
         || { echo "nothing checks the resolver actually runs as that account"; return 1; }
 }
 
+@test "the policy waits for the resolver to answer, not just to exist" {
+    # dnsmasq daemonizes and its parent returns almost immediately, so a check
+    # on the process succeeds while the child is still binding. A query sent
+    # into that window is refused by the kernel rather than answered, and every
+    # check after it reads that as the policy refusing a name it permits - a
+    # container that fails to start, intermittently, over nothing.
+    local p="$SANDBOX_DIR/egress-policy"
+    local block
+    block=$(sed -n '/^start_resolver()/,/^}/p' "$p")
+    grep -q 'dig ' <<< "$block" \
+        || { echo "start_resolver never asks the resolver whether it is answering"; return 1; }
+    # The probe has to be a name that must NOT resolve. Waiting on one that
+    # should would conflate "the resolver is up" with "the forward worked",
+    # which is the next check's question and a different failure.
+    grep -q 'PROBE_NAME' <<< "$block" \
+        || { echo "the readiness probe uses a name whose answer depends on the forward"; return 1; }
+    # And a bound, so a resolver that never answers fails loudly rather than
+    # hanging a container start forever.
+    grep -q 'did not answer' <<< "$block" \
+        || { echo "the wait has no bound, so a dead resolver hangs the start"; return 1; }
+}
+
 
 @test "an address family the policy cannot express is refused, not left unfiltered" {
     # The old shape blocked IPv6 outright and had a branch that printed
