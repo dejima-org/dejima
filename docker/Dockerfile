@@ -356,6 +356,14 @@ RUN grep -q 'bash.bashrc.d' /etc/bash.bashrc || \
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
   echo 'export PATH="/opt/node-tools/bin:$PATH"' > /etc/profile.d/node-tools-path.sh
 
+# Last instruction that changes the filesystem, and it has to stay last: it
+# removes every setuid bit, setgid bit and file capability in the image and
+# fails the build if one survives, which only holds for what already exists
+# when it runs. A derived per-project layer runs it again at its own end, for
+# the packages it installs after this point - see bin/dejima-project-lib.sh.
+COPY docker/strip-privilege-bits.sh /usr/local/sbin/strip-privilege-bits
+RUN chmod +x /usr/local/sbin/strip-privilege-bits && /usr/local/sbin/strip-privilege-bits
+
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
 # directly, with no sudo/setuid escalation path available to node at any
 # point afterward. It drops to node itself via gosu before execing

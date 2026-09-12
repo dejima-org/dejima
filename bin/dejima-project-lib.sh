@@ -574,6 +574,12 @@ generate_spec_dockerfile() {
     # above left behind - entrypoint.sh must still start as root and drop
     # via gosu, with no escalation path for the session user.
     printf 'USER root\n'
+    # The base image swept its own setuid bits and file capabilities, and then
+    # the apt/pip/tarball layers above installed more software on top. Sweep
+    # again here, so a project declaring a dependency that happens to ship a
+    # setuid binary fails its build rather than handing every session on that
+    # project an escalation path the base image was careful not to have.
+    printf 'RUN /usr/local/sbin/strip-privilege-bits\n'
     printf 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n'
     return 0
 }
