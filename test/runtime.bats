@@ -1636,13 +1636,33 @@ session_pid() {  # [container], defaulting to the file-wide one
 }
 
 
-@test "the connection logger runs as its own unprivileged user, not root" {
-    # It parses headers from packets whose contents the session decides, which
-    # is the last thing in this container that should hold privilege. It opens
-    # its netlink socket and output files first, so the drop costs it nothing.
-    run dexec_filter ps -eo user,comm
-    [[ "$output" == *"ulogd    ulogd"* ]] || [[ "$output" == *$'\nulogd '* ]]
-    ! [[ "$output" == *$'\nroot     ulogd'* ]]
+
+
+@test "both log producers run as their own unprivileged user, not root" {
+    # Between them they parse packet headers and resolver log lines, both
+    # decided by what the session sends and asks for, so neither should be
+    # holding privilege. Each opens what it needs first, so the drop costs it
+    # nothing.
+    #
+    # Read from /proc rather than matched in ps output, because ps truncates
+    # in two places that both bite here: `user` to eight characters, which is
+    # how an assertion about egress-resolver came to be unsatisfiable, and
+    # `comm` to fifteen, which dns-lookup-log fits inside today by one
+    # character. The uid in /proc/<pid>/status is neither truncated nor
+    # ambiguous, and each process is found by the pid its own producer
+    # recorded rather than by matching text.
+    local want
+    want=$(dexec_filter id -u ulogd)
+    [ -n "$want" ] || { echo "the image has no ulogd account"; return 1; }
+
+    local pid uid
+    for pid in "$(dexec_filter pgrep -x ulogd)" \
+               "$(dexec_filter cat /run/egress-policy/lookup-log.pid)"; do
+        [ -n "$pid" ] || { echo "one of the log producers is not running"; return 1; }
+        uid=$(dexec_filter awk '/^Uid:/ { print $2 }' "/proc/$pid/status")
+        [ "$uid" = "$want" ] \
+            || { echo "pid $pid runs as uid $uid, not $want ($(dexec_filter cat "/proc/$pid/cmdline" | tr '\0' ' '))"; return 1; }
+    done
 }
 
 @test "the resolver runs as the account the upstream rule is keyed to" {

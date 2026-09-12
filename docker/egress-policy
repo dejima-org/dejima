@@ -79,11 +79,11 @@ readonly NFLOG_REFUSE=22
 # a permission off it grants that permission to whatever else ends up there.
 readonly RESOLVER_USER=egress-resolver
 
-# The account the connection logger drops to after opening its netlink socket
-# and output files. Unlike RESOLVER_USER this is not load-bearing for the
-# policy - no rule matches on it - but the logger parses headers from packets
-# the session's own traffic decides, so a bug in it should not be a way back to
-# root in this container.
+# The account both log producers drop to. Unlike RESOLVER_USER this is not
+# load-bearing for the policy - no rule matches on it - but between them they
+# parse packet headers and resolver log lines, both decided by what the session
+# sends and asks for, so a bug in either should not be a way back to root in
+# this container.
 readonly LOGGER_USER=ulogd
 
 # How long an address resolved from a permitted name stays in the allow-list.
@@ -159,7 +159,7 @@ need_root() {
 
 need_tools() {
   local missing=() t
-  for t in nft dnsmasq ulogd curl jq dig pgrep python3 cidr-collapse; do
+  for t in nft dnsmasq ulogd curl jq dig pgrep python3 gosu cidr-collapse; do
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   [ -x "$LOOKUP_LOGGER" ] || missing+=("$LOOKUP_LOGGER")
@@ -806,8 +806,18 @@ start_lookup_log() {
   if [ -s "$LOOKUP_PID" ] && kill -0 "$(cat "$LOOKUP_PID")" 2>/dev/null; then
     return 0
   fi
-  touch "$RESOLVER_LOG" "$LOOKUP_LOG"
-  nohup "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
+  touch "$RESOLVER_LOG" "$LOOKUP_LOG" "$LOGDIR/lookup-log.err"
+  # Its own output and its own errors, so it can write them after the drop
+  # below. The resolver's log it only ever reads, and that stays root's.
+  chown "$LOGGER_USER" "$LOOKUP_LOG" "$LOGDIR/lookup-log.err" \
+    || die "could not give $LOGGER_USER its own log files"
+
+  # Dropped, for the same reason the connection logger is: it parses content
+  # the session decides - the names it queries, arriving as lines of the
+  # resolver's log - and that is the last thing in this container that should
+  # be running with privilege. It opens two files and then only reads and
+  # writes them, so the drop costs it nothing.
+  nohup gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
     >/dev/null 2>>"$LOGDIR/lookup-log.err" &
   echo $! > "$LOOKUP_PID"
   sleep 0.3
