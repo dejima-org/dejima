@@ -79,18 +79,20 @@ the security invariants the README states, not a substitute for reading it,
 but a way to actually catch a future change silently breaking one of them
 instead of finding out the hard way.
 
-`static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
-no `docker.sock`/host-credential mounts, the
-`~/.claude` mount inventory is exactly what it should be, `dejima-allow`
-rejects a malicious domain argument. `runtime.bats` builds the image, boots
-a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
-env var makes it stop just short of execing the session's command, so the suite can attach
-to a fully-initialized container instead of reimplementing its own copy of
-the setup sequence), and asserts against it: IPv6 blocked, DNS/IP allowlist
-enforcement in both directions, GitHub read-only, no working `sudo`/
-the packet filter as `node`, capabilities actually stripped
-(not just absent from a `docker exec` that doesn't have them to begin
-with), the connection logger unprivileged, and the address-set CDN-rotation fix.
+`static.bats` greps the repo's own files - no sudo in the `Dockerfile`, no
+`docker.sock` or host-credential mounts, the `~/.claude` mount inventory is
+exactly what it should be, `dejima-allow` rejects a malicious domain argument.
+
+`runtime.bats` builds the image, boots a real container running the actual
+`entrypoint.sh` (a `SANDBOX_TEST_MODE` env var makes it stop just short of
+execing the session's command, so the suite can attach to a fully-initialized
+container instead of reimplementing its own copy of the setup sequence), and
+asserts against it: both address families under one allowlist with a closed
+default, name and address enforcement in both directions, inbound and
+forwarded traffic dropped, GitHub reachable on 443 and not on 22, no working
+`sudo` and no way to change the packet filter as `node`, capabilities actually
+stripped (not just absent from a `docker exec` that doesn't have them to begin
+with), both log producers unprivileged, and the address-set CDN-rotation fix.
 
 `project.bats`, `remote.bats` and `audit.bats` need no Docker either.
 `project.bats` covers the
