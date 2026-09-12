@@ -4276,6 +4276,39 @@ registered_commands() {
         || { echo "nothing confirms the default is closed"; return 1; }
 }
 
+@test "inbound and forwarded traffic default to drop, like outbound" {
+    # The firewall this replaced set INPUT and FORWARD to DROP, in both address
+    # families, and the replacement's first version had only an output hook -
+    # so a session process binding 0.0.0.0 became reachable from the bridge,
+    # where it had not been. Nothing about the launcher's one-network-per-pair
+    # arrangement is what makes that safe; this is.
+    local p="$SANDBOX_DIR/egress-policy" chain
+    for chain in inbound forwarding; do
+        grep -qE "^  chain $chain \{$" "$p" \
+            || { echo "there is no $chain chain in the generated ruleset"; return 1; }
+    done
+    grep -q 'type filter hook input priority filter; policy drop;' "$p" \
+        || { echo "the input hook does not default to drop"; return 1; }
+    grep -q 'type filter hook forward priority filter; policy drop;' "$p" \
+        || { echo "the forward hook does not default to drop"; return 1; }
+
+    # Replies to what the session legitimately started, and loopback, which is
+    # where the resolver and the credential forwarder both listen.
+    local block
+    block=$(sed -n '/chain inbound {/,/^  }/p' "$p")
+    grep -q 'ct state established,related' <<< "$block" \
+        || { echo "inbound replies are dropped, so nothing the session starts can answer"; return 1; }
+    grep -q 'iifname "lo"' <<< "$block" \
+        || { echo "loopback is dropped, so the resolver and the forwarder are unreachable"; return 1; }
+    grep -q 'ip saddr @host_v4' <<< "$block" \
+        || { echo "the container's own host cannot reach it, which it could before"; return 1; }
+
+    # And all three defaults are checked after loading, not just the outbound
+    # one - a chain that failed to come up closed is the case this is about.
+    grep -q 'for name in egress inbound forwarding' "$p" \
+        || { echo "the self-check does not verify every chain's default"; return 1; }
+}
+
 @test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
     # Same persistence-path rationale as the hooks mount: these carry
     # executable skill scripts / injectable command, agent, and output-style

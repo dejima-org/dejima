@@ -2179,6 +2179,44 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     [ "$status" -ne 0 ]
 }
 
+
+@test "a session port bound to every interface is still unreachable from the bridge" {
+    # The other direction, and the one a filter with only an output hook lets
+    # through: a session process that binds 0.0.0.0 - by accident, or because a
+    # dev server defaults to it - would be reachable from anything sharing the
+    # bridge. The launch puts each pair on a network of its own, so today there
+    # is nothing else on it; that is a property of the launcher and this is the
+    # filter's own answer.
+    #
+    # Bound in the SESSION container and dialled from a third container on the
+    # same network, which is the shape of the exposure. Loopback has to keep
+    # working throughout - the resolver and the credential forwarder both
+    # listen there - so it is asserted on the way past.
+    local addr
+    addr=$(docker inspect -f \
+        '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(filter_name)")
+    [ -n "$addr" ] || { echo "could not find the pair's address on its network"; return 1; }
+
+    dexec_node bash -c 'nohup python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1'
+
+    # Both probes run before anything is asserted, so the listener is always
+    # cleaned up - a leaked one would sit in the shared container for every
+    # test after this.
+    local from_lo from_bridge
+    docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099' \
+        >/dev/null 2>&1 && from_lo=0 || from_lo=$?
+    docker run --rm --network "$(network_name)" --entrypoint bash "$SESSION_IMAGE" \
+        -c "timeout 5 bash -c 'exec 3<>/dev/tcp/$addr/8099'" >/dev/null 2>&1 \
+        && from_bridge=0 || from_bridge=$?
+    dexec_node bash -c 'pkill -f "http.server 8099" || true'
+
+    # It really was listening, or the refusal below proves nothing.
+    [ "$from_lo" -eq 0 ] \
+        || { echo "the probe server is not up on loopback, so this test cannot tell"; return 1; }
+    [ "$from_bridge" -ne 0 ] \
+        || { echo "a session port bound to 0.0.0.0 was reachable from the bridge"; return 1; }
+}
+
 @test "tls transport: https://api.anthropic.com from inside the container reaches the host proxy" {
     TD="$BATS_TEST_TMPDIR"
     python3 "$BATS_TEST_DIRNAME/fixtures/fake-anthropic.py" > "$TD/port" &

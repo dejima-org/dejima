@@ -1254,6 +1254,17 @@ Everything else is rejected. Run `dejima-allow --global <domain>`
 `crates.io` for a Rust project), or `dejima --no-firewall` to disable the
 firewall entirely for one launch (debugging only).
 
+Inbound and forwarded traffic default to drop as well, in both families, with
+narrow exceptions for loopback, replies to connections the container itself
+started, and the container's own host. Nothing in either container is meant to
+be reachable from the bridge - the resolver and the credential forwarder both
+bind loopback - and a session process that binds every interface is binding one
+by accident. A launch puts each pair on a network of its own, so there is
+rarely anything else on that bridge to reach it, but that is a property of the
+launcher; this is the filter's own answer to the same question. Dropped rather
+than refused, which is the opposite of the outbound decision and deliberate: a
+refusal is a courtesy to a caller that is supposed to be there.
+
 IPv6 is covered by the same allowlist, not blocked. One `inet` table carries
 both families, so there is no state in which one is filtered and the other is
 not, and AAAA answers are resolved and land in the v6 sets like any other. An

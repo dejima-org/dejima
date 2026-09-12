@@ -466,6 +466,33 @@ apply_ruleset() {
     reject with icmpx type admin-prohibited
   }
 
+  # Inbound, with the same closed default the outbound chain has. Nothing in
+  # either container is meant to be reachable from the bridge: the resolver and
+  # the credential forwarder both bind loopback, and a session process that
+  # binds 0.0.0.0 is binding it by accident. The launch puts each pair on a
+  # network of its own, so the only neighbours are the host and the session -
+  # but "there is nothing else on the bridge today" is a fact about the
+  # launcher, and this is the filter's own answer to the same question.
+  #
+  # Dropped rather than refused, which is the opposite of the outbound
+  # decision and deliberate: a refusal is a courtesy to a caller that is
+  # supposed to be there, and an unsolicited inbound connection is not.
+  chain inbound {
+    type filter hook input priority filter; policy drop;
+    ct state established,related counter accept
+    iifname "lo" counter accept
+    # The container's own host, which could already initiate inbound under the
+    # firewall this replaced and still can.
+    ip saddr @host_v4 counter accept
+    ip6 saddr @host_v6 counter accept
+  }
+
+  # Neither container routes for anything. Stated rather than left to the
+  # kernel's default, which is accept.
+  chain forwarding {
+    type filter hook forward priority filter; policy drop;
+  }
+
   chain egress {
     type filter hook output priority filter; policy drop;
 
@@ -583,11 +610,13 @@ EOF
   # kernel in this namespace could not express it - no inet family, no reject
   # support - there is no degraded mode to fall back to.
   nft list table inet "$TABLE" >/dev/null 2>&1 || die "table inet $TABLE is not present after loading"
-  local chain
-  chain=$(nft list chain inet "$TABLE" egress) \
-    || die "the egress chain is not present after loading the ruleset"
-  [[ "$chain" == *"policy drop"* ]] \
-    || die "the egress chain came up without a default-drop policy: $chain"
+  local chain name
+  for name in egress inbound forwarding; do
+    chain=$(nft list chain inet "$TABLE" "$name") \
+      || die "the $name chain is not present after loading the ruleset"
+    [[ "$chain" == *"policy drop"* ]] \
+      || die "the $name chain came up without a default-drop policy: $chain"
+  done
 }
 
 # --------------------------------------------------------------------------
