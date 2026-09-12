@@ -1,9 +1,3 @@
-# Loosely inspired by the general shape of Anthropic's public reference dev
-# container (https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-# substantially extended and reworked for this project's own sandboxing model
-# (parametrized SANDBOX_USER, DNS proxy + ulogd2 logging, gosu-based privilege
-# drop, nvim/Playwright/tree-sitter toolchain, gitea-pr helper, etc).
-#
 # What belongs in here is what the sandbox itself needs, plus the editor and
 # browser tooling that has no route through the dependency mechanism. Language
 # toolchains and per-project utilities do have one - `dejima-dep`, including
@@ -237,9 +231,13 @@ ENV PATH=/opt/node-tools/bin:$PATH
 # out in session-bashrc.sh instead, where it can be read.
 ENV SHELL=/bin/bash
 
-# Set the default editor and visual
+# Anything that spawns an editor - `git commit` with no message, an interactive
+# rebase - reads these. Unset, git falls back to whatever /usr/bin/editor points
+# at, and an unattended session that lands in a modal editor it cannot name the
+# exit key for will sit there until something kills it. nano prints its own.
 ENV EDITOR=nano
 ENV VISUAL=nano
+ENV PAGER=less
 
 # No harness here. The image is shared by every project on the host, and
 # baking one harness into it means every sandbox carries it whether or not it
