@@ -12,13 +12,26 @@
 # below is added for every project, forever, with no review anywhere.
 FROM node:22
 
-ARG TZ
+# Timestamps inside the container match the ones outside it. Validated rather
+# than trusted: an unknown zone leaves the container silently on UTC, and a log
+# line an hour out of step with the operator's own is harder to distrust than a
+# build that refused. /etc/localtime covers everything that reads the system
+# zone; TZ in the environment covers what consults it directly, Node among them.
+ARG TZ=Etc/UTC
+RUN [ -f "/usr/share/zoneinfo/$TZ" ] || { echo "unknown timezone: $TZ" >&2; exit 1; }; \
+  ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && \
+  echo "$TZ" > /etc/timezone
 ENV TZ="$TZ"
 
-# Install basic development tools, iptables/ipset (for the egress firewall),
-# openssh-client (for git-over-ssh and agent forwarding), and the toolchain a
-# typical nvim plugin set (telescope/treesitter/mason) expects, since
-# SANDBOX_NVIM_CONFIG can point a session's editor at one.
+# What a session is expected to have without installing anything: git and a
+# forge client, tools to read and search a tree, an editor, the network tools
+# the firewall is written against, and enough of a toolchain to build a small
+# thing. Sorted, so adding one is a one-line diff rather than a judgement about
+# where it goes.
+#
+# bash-completion rather than a shell framework: the session shell is the base
+# image's bash, configured by this image in /etc/bash.bashrc.d rather than by an
+# installer fetched at build time. See the shell section below.
 #
 # Deliberately NOT installing bubblewrap/socat: they exist to let a harness's
 # own internal per-command sandboxing run, and that inner sandbox is redundant
@@ -34,32 +47,32 @@ ENV TZ="$TZ"
 # iproute2; a security control resting on another package's dependency graph is
 # one an unrelated package change removes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  less \
-  git \
-  openssh-client \
-  procps \
+  aggregate \
+  bash-completion \
+  build-essential \
+  dnsmasq \
+  dnsutils \
+  fd-find \
   fzf \
-  zsh \
-  unzip \
-  gnupg2 \
   gh \
-  iptables \
+  git \
+  gnupg2 \
   ipset \
   iproute2 \
-  libcap2-bin \
-  dnsutils \
-  aggregate \
+  iptables \
   jq \
-  openssl \
-  dnsmasq \
-  ulogd2 \
-  ulogd2-json \
+  less \
+  libcap2-bin \
   nano \
-  ripgrep \
-  fd-find \
-  build-essential \
+  openssh-client \
+  openssl \
+  procps \
   python3 \
   python3-pip \
+  ripgrep \
+  ulogd2 \
+  ulogd2-json \
+  unzip \
   xz-utils \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && ln -s "$(command -v fdfind)" /usr/local/bin/fd
