@@ -180,11 +180,16 @@ ENV SANDBOX_HOME=$SANDBOX_HOME
 RUN mkdir -p /opt/node-tools/bin /opt/node-tools/lib/node_modules && \
   chown -R $SANDBOX_USER:$SANDBOX_USER /opt/node-tools
 
-# Persist bash history. The env vars that actually wire history up to this
-# file are set below via zsh-in-docker's -a flag.
-RUN mkdir /commandhistory && \
-  touch /commandhistory/.bash_history && \
-  chown -R $SANDBOX_USER /commandhistory
+# Shell history, on a named volume (docker-compose.yml) so a session started
+# tomorrow sees what was typed today. Created here so the directory exists with
+# the right owner and mode even on a run with nothing mounted over it - Docker
+# seeds a fresh named volume from what is already at the mount path, ownership
+# included, so this is also what keeps the volume writable by that user rather
+# than root. The shell that reads it is configured below.
+RUN mkdir -p /var/opt/shell-history && \
+  touch /var/opt/shell-history/.bash_history && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /var/opt/shell-history && \
+  chmod 0700 /var/opt/shell-history
 
 # Create the ssh directory and set permissions. The project directory itself
 # is bind-mounted at runtime at its real host path (see docker-compose.yml),
@@ -225,7 +230,7 @@ ENV EDITOR=nano
 ENV VISUAL=nano
 
 # Default powerline10k theme, git/fzf oh-my-zsh plugins, fzf's own key
-# bindings, and wiring HISTFILE to the persisted /commandhistory volume -
+# bindings, and wiring HISTFILE to the persisted history volume -
 # see https://github.com/deluan/zsh-in-docker for the installer's own flags.
 #
 # Downloaded to a file and then run, rather than upstream's documented
@@ -241,7 +246,7 @@ RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
   sh /tmp/zsh-in-docker.sh \
   -p fzf \
   -p git \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
+  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/var/opt/shell-history/.bash_history" \
   -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
   -a "source /usr/share/doc/fzf/examples/completion.zsh" \
   -x && \

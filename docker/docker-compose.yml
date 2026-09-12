@@ -282,7 +282,9 @@ services:
       # launch (it inspects the symlinks and appends the exact mounts
       # needed), not listed statically here, since this repo can't assume
       # what else might be installed on a given host.
-      - dejima-bashhistory:/commandhistory
+      # Same volume as before this path moved, so an operator's existing
+      # history carries over rather than being orphaned under the old name.
+      - dejima-bashhistory:/var/opt/shell-history
       - nvim-data:${HOME}/.local/share/nvim
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim
