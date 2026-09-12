@@ -1,17 +1,26 @@
-# Sourced by both init-firewall.sh (IP-based ipset allowlist) and
-# dns-proxy.sh (name-based DNS allowlist) so the two can't drift apart.
+# Composes the permitted set egress-policy is given, from what the sandbox's
+# own machinery needs plus what this launch was configured with.
 #
-# What belongs here is what the sandbox's own machinery cannot run without -
-# the release CDN the tools baked into the image fetch binaries from, the npm
-# registry those tools update through, and whatever the SELECTED HARNESS
-# declared it needs (api_domains in its manifest, arriving as
+# Sourced by firewall-up.sh. Exports three lists, because a destination's
+# permitted ports are a property of the destination and not of how it was
+# named:
+#
+#   DEJIMA_FORGE_CLASS     reachable on HTTPS only, plus SSH with the opt-in
+#   DEJIMA_OPEN_CLASS      reachable on any port but the DNS ports
+#   DEJIMA_INTERNAL_CLASS  entries whose answers may point inside a private
+#                          network; every one must also be in a list above
+#
+# What belongs in the built-in part of these lists is what the sandbox cannot
+# run without - the release CDN the tools baked into the image fetch binaries
+# from, the npm registry those tools update through, and whatever the SELECTED
+# HARNESS declared it needs (api_domains in its manifest, arriving as
 # SANDBOX_HARNESS_DOMAINS). Nothing else.
 #
 # The harness's names are not written here because they are the harness's: a
 # name built in is inherited by every harness while a second one still lacks
-# its own. registry.npmjs.org stays, because it is not only the
-# harness's - nvim's mason fetches language servers through it, and
-# [core] command = nvim is a supported way to run a session.
+# its own. registry.npmjs.org stays, because it is not only the harness's -
+# nvim's mason fetches language servers through it, and [core] command = nvim
+# is a supported way to run a session.
 #
 # Language ecosystems and editor tooling deliberately do not: a Python, Go or
 # Rust project reaches its own package host through an approval, either
@@ -21,78 +30,100 @@
 # use for it, and - since a project's declaration is also what a hardened CI
 # runner reads its allowlist from (docs/ci.md) - a name that is granted by
 # being built in is a name nobody ever reviewed.
-FIXED_DOMAINS=(
-    "registry.npmjs.org"
-    "release-assets.githubusercontent.com"
-)
-# Split on spaces explicitly, not on whatever IFS the caller happens to have.
-# init-firewall.sh sources this file with IFS=$'\n\t' set, dns-proxy.sh with
-# the default - so an unquoted expansion gives the two consumers different
-# lists from the same value, which is the drift this shared file exists to
-# prevent. A harness declaring two api_domains would reach init-firewall as
-# one glued element and fail its DNS check fatally, refusing to start.
-# init-firewall.sh already restores IFS=' ' around its own extra-domains loop
-# for exactly this reason.
-if [ -n "${SANDBOX_HARNESS_DOMAINS:-}" ]; then
-    IFS=' ' read -ra _dejima_harness_domains <<< "$SANDBOX_HARNESS_DOMAINS"
-    FIXED_DOMAINS+=(${_dejima_harness_domains[@]+"${_dejima_harness_domains[@]}"})
-fi
 
-# The harness's API endpoint is allowlisted only when this session has no
-# credential proxy (kill switch or API-key auth), where DNS is the only path
-# to it. With the proxy on, the session reaches the API through the forwarder
-# rather than by resolving this name (under the tls transport, via
-# entrypoint.sh's /etc/hosts pin), so leaving it unresolvable defeats a bypass
-# that looks the name up by DNS. It is not a route block: the API's address
-# stays reachable as an IP literal for as long as another allowlisted name
-# resolves to the same one.
+# Forge class. GitHub is reachable for reading - clone, fetch, gh over HTTPS -
+# and never for pushing, and the port restriction is what makes that a fact
+# rather than a policy: with 22 closed there is no transport left for the
+# forwarded agent's real key to authenticate a push with, whatever a hook does
+# or does not catch. ALLOW_GITHUB_PUSH=1 is the only thing that opens it.
 #
-# Appended here rather than to EXTRA_ALLOWED_DOMAINS because it is a public
-# SaaS name: dns-proxy.sh exempts the extra list from stop-dns-rebind, and
-# init-firewall.sh downgrades a failed lookup there to a warning.
-#
-# Which name this is comes from the provider (proxied_domain); the rule
-# about when to allowlist it is dejima's, and stays here.
-if [ -z "${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" ] \
-    && [ -n "${SANDBOX_BACKEND_PROXIED_DOMAIN:-}" ]; then
-    FIXED_DOMAINS+=("$SANDBOX_BACKEND_PROXIED_DOMAIN")
-fi
-
-# GitHub itself is allowlisted by IP range (see github-domains ipset,
-# populated from api.github.com/meta), never by resolving these names to
-# specific IPs - but the container's own tools (git, gh, curl) still need to
-# resolve these names to *something* before connecting, so the DNS proxy
-# needs to know they're allowed even though init-firewall.sh never digs them.
-# Suffix matching means these also cover their actual subdomains in use
-# (api.github.com, codeload.github.com, objects.githubusercontent.com, etc.)
-# without enumerating each one.
-GITHUB_DNS_SUFFIXES=(
+# Suffix entries, because dnsmasq matches a domain and everything under it: one
+# line covers api.github.com, codeload.github.com and the rest without
+# enumerating them. Stating the class here is what keeps the restriction
+# attached to the destination - an address reached by resolving one of these
+# names gets the same ports as one reached from the published ranges, so a name
+# cannot be the way around the range's restriction.
+DEJIMA_FORGE_CLASS=(
     "github.com"
     "githubusercontent.com"
     "githubassets.com"
 )
 
-# Which ipset an allowlisted name's addresses belong in.
+# Open class: reachable on any port, because these are destinations whose
+# protocol dejima does not get to decide.
+DEJIMA_OPEN_CLASS=(
+    "registry.npmjs.org"
+    "release-assets.githubusercontent.com"
+)
+
+DEJIMA_INTERNAL_CLASS=()
+
+# release-assets.githubusercontent.com is under a forge-class suffix, and the
+# forge class wins wherever the two overlap - by design, not by accident. It is
+# fetched over HTTPS like everything else under that suffix, so the narrower
+# class costs it nothing and the alternative would be a name that quietly
+# widened the forge.
+
+# Split on spaces explicitly, not on whatever IFS the caller happens to have,
+# so every consumer gets the same list from the same value. A harness declaring
+# two api_domains would otherwise arrive as one glued element and fail its
+# lookup, refusing to start.
+if [ -n "${SANDBOX_HARNESS_DOMAINS:-}" ]; then
+    IFS=' ' read -ra _dejima_harness_domains <<< "$SANDBOX_HARNESS_DOMAINS"
+    DEJIMA_OPEN_CLASS+=(${_dejima_harness_domains[@]+"${_dejima_harness_domains[@]}"})
+fi
+
+# The harness's API endpoint is permitted only when this session has no
+# credential proxy (kill switch or API-key auth), where DNS is the only path to
+# it. With the proxy on, the session reaches the API through the forwarder
+# rather than by resolving this name (under the tls transport, via
+# entrypoint.sh's /etc/hosts pin), so leaving it unresolvable defeats a bypass
+# that looks the name up by DNS. It is not a route block: the API's address
+# stays reachable as an IP literal for as long as another permitted name
+# resolves to the same one.
 #
-# GitHub's are restricted to port 443 by init-firewall.sh, and that
-# restriction IS the read-only guarantee: no transport is left for a
-# forwarded agent key to push with. allowed-domains has no port restriction,
-# so a GitHub address landing there silently undoes the arrangement.
+# Open class and not exempted from the answer check, because it is a public
+# SaaS name: an answer for it pointing inside the operator's network is the
+# thing that check exists to refuse.
 #
-# dnsmasq applies the longest matching ipset= line, so dns-proxy.sh gets this
-# right for free. Every other path has to ask, and two did not - the
-# extra-domains loop and bin/dejima-allow's live add both appended
-# unconditionally. A project declaring github.com therefore opened port 22 to
-# whatever address was cached at container start, presenting as an
-# intermittent startup failure because the self-check re-resolves and only
-# sees the hole when the second answer matches the first.
-ipset_for_domain() {
+# Which name this is comes from the provider (proxied_domain); the rule about
+# when to permit it is dejima's, and stays here.
+if [ -z "${SANDBOX_CREDENTIAL_PROXY_SOCKET:-}" ] \
+    && [ -n "${SANDBOX_BACKEND_PROXIED_DOMAIN:-}" ]; then
+    DEJIMA_OPEN_CLASS+=("$SANDBOX_BACKEND_PROXIED_DOMAIN")
+fi
+
+# Adds one entry to the open class, marking it exempt from the answer check
+# when it is a destination dejima already knows is inside the operator's own
+# network. That exemption is not handed out to approved domains in general:
+# `.dejima/allowed-domains` is reviewed with the project and is expected to
+# carry public names, and exempting a public name is what turns one
+# attacker-influenced answer into egress to an internal host. A self-hosted
+# forge or log sink is different - the operator configured its address, so
+# there is nothing for an answer to decide.
+dejima_permit_open() {
+    local entry="$1" internal="${2:-}"
+    [ -n "$entry" ] || return 0
+    DEJIMA_OPEN_CLASS+=("$entry")
+    [ "$internal" = internal ] && DEJIMA_INTERNAL_CLASS+=("$entry")
+    return 0
+}
+
+# Which class a name belongs to, by suffix. Anything under a forge-class entry
+# is forge class, whoever is asking and however it arrived.
+#
+# This is why the file is shared rather than restated: bin/dejima-allow adds a
+# domain to a session that is already running, and a forge name added to the
+# open class there would be reachable on every port - the read-only guarantee
+# gone, from a command whose whole output says it granted one domain. It went
+# wrong exactly that way when the answer lived in two places.
+dejima_class_for() {
     local domain="$1" suffix
-    for suffix in "${GITHUB_DNS_SUFFIXES[@]}"; do
+    for suffix in ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}; do
         if [ "$domain" = "$suffix" ] || [[ "$domain" == *".$suffix" ]]; then
-            printf 'github-domains'
+            printf 'forge'
             return 0
         fi
     done
-    printf 'allowed-domains'
+    printf 'open'
 }
