@@ -53,9 +53,30 @@ done
 # Declared internal destinations, for the case the check above names: an
 # operator whose approved domain genuinely points inside their network says so
 # here rather than losing the check for every other name.
+#
+# This exempts; it does not permit. Reaching a destination is an approval and
+# lives in the lists above, and a key that did both would make naming a host
+# here enough to reach it - which is not what it says it does, and is a grant
+# nobody reviewing an allowlist would think to look for.
+#
+# Naming something nothing permitted is a disagreement inside the operator's
+# own configuration, so it stops the container here rather than leaving a
+# destination silently unreachable and an exemption silently unused.
+_unknown=""
 for _domain in ${DEJIMA_INTERNAL_DOMAINS:-}; do
-    dejima_permit_open "$_domain" internal
+    dejima_mark_internal "$_domain" || _unknown="$_unknown $_domain"
 done
+if [ -n "$_unknown" ]; then
+    echo "ERROR: [core] internal_domains names destinations nothing permits:$_unknown" >&2
+    echo "That key exempts a name from the check that refuses an answer pointing" >&2
+    echo "inside a private network. It does not make the name reachable - approve" >&2
+    echo "it as well, per project or globally:" >&2
+    echo "" >&2
+    for _domain in $_unknown; do
+        echo "  dejima-allow --global $_domain" >&2
+    done
+    exit 1
+fi
 
 _join() { local IFS=' '; echo "${*:-}"; }
 

@@ -109,6 +109,30 @@ dejima_permit_open() {
     return 0
 }
 
+# Exempts an entry from the answer check WITHOUT permitting it. The two are
+# separate decisions and only one of them is a grant: whether a destination may
+# be reached is an approval, and whether an answer for it may point inside the
+# operator's network is this. A key that did both would mean naming a host in
+# [core] internal_domains was enough to make it reachable, which is not what
+# the key says it does and not what anyone reviewing an allowlist would expect
+# to find in it.
+#
+# Returns non-zero for an entry nothing has permitted, so the caller can say
+# which one rather than leaving it to be discovered as a destination that is
+# quietly unreachable.
+dejima_mark_internal() {
+    local entry="$1" known
+    [ -n "$entry" ] || return 0
+    for known in ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"} \
+                 ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}; do
+        if [ "$known" = "$entry" ]; then
+            DEJIMA_INTERNAL_CLASS+=("$entry")
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Which class a name belongs to, by suffix. Anything under a forge-class entry
 # is forge class, whoever is asking and however it arrived.
 #

@@ -2266,9 +2266,11 @@ LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 # public names.
 #
 # This is for the case where that expectation is wrong on purpose - an internal
-# mirror, a service on the operator's LAN. Colon-separated in the config file
-# like every other list; space-separated from here on, which is what the
-# firewall scripts read.
+# mirror, a service on the operator's LAN. It exempts and does not grant: a
+# name here is reachable only if it is also approved, and firewall-up.sh stops
+# the launch when one is not, rather than leaving an exemption attached to
+# nothing. Colon-separated in the config file like every other list;
+# space-separated from here on, which is what the firewall scripts read.
 DEJIMA_INTERNAL_DOMAINS="$(config_get core internal_domains | tr ':' ' ')"
 export DEJIMA_INTERNAL_DOMAINS
 
