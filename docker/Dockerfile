@@ -19,9 +19,24 @@ ENV TZ="$TZ"
 
 # What a session is expected to have without installing anything: git and a
 # forge client, tools to read and search a tree, an editor, the network tools
-# the firewall is written against, and enough of a toolchain to build a small
-# thing. Sorted, so adding one is a one-line diff rather than a judgement about
-# where it goes.
+# the egress policy is written against, and enough of a toolchain to build a
+# small thing. Sorted, so adding one is a one-line diff rather than a judgement
+# about where it goes.
+#
+# nftables rather than iptables and ipset. One tool covers both packet
+# filtering and the named address sets the policy needs; one inet table covers
+# v4 and v6, so an allowlist cannot cover one family and silently ignore the
+# other; sets take CIDR intervals directly; and a whole ruleset loads as a
+# single transaction, so the namespace is never left half-filtered. See
+# docker/egress-policy.
+#
+# dnsmasq-base rather than dnsmasq: the binary without the init script, service
+# user and default configuration, none of which apply - there is no init system
+# here to run them, and egress-policy generates the configuration per launch.
+#
+# No CIDR aggregation package. Collapsing a list of ranges is a few lines of the
+# Python standard library, which is here anyway, and the packaged option
+# predates IPv6 - see docker/cidr-collapse.
 #
 # bash-completion rather than a shell framework: the session shell is the base
 # image's bash, configured by this image in /etc/bash.bashrc.d rather than by an
@@ -41,23 +56,21 @@ ENV TZ="$TZ"
 # iproute2; a security control resting on another package's dependency graph is
 # one an unrelated package change removes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  aggregate \
   bash-completion \
+  bind9-dnsutils \
   build-essential \
-  dnsmasq \
-  dnsutils \
+  dnsmasq-base \
   fd-find \
   fzf \
   gh \
   git \
   gnupg2 \
-  ipset \
   iproute2 \
-  iptables \
   jq \
   less \
   libcap2-bin \
   nano \
+  nftables \
   openssh-client \
   openssl \
   procps \
@@ -82,11 +95,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # container rather than directly on the host.
 ENV DEJIMA=1
 
-# Dedicated unprivileged user for ulogd2 (see entrypoint.sh) - unlike
-# dnsmasq, the ulogd2 Debian package doesn't create one of its own. ulogd2
-# opens its log/output files and the NFLOG netlink socket before dropping to
-# this user, so it doesn't need to own anything itself.
+# Dedicated unprivileged user for ulogd2 (see firewall-up.sh) - the ulogd2
+# Debian package doesn't create one of its own. ulogd2 opens its log/output
+# files and the NFLOG netlink socket before dropping to this user, so it
+# doesn't need to own anything itself.
 RUN useradd -r -s /usr/sbin/nologin ulogd
+
+# The account the DNS forwarder drops to, and nothing else ever runs as.
+# Permission to speak to a resolver outside this network namespace is a uid
+# match in the packet filter (docker/egress-policy), so this account IS that
+# permission: anything else running as it would inherit the one route out that
+# the name allowlist exists to close.
+#
+# `nobody` would be the obvious choice and is the wrong one. It is where every
+# unprivileged program lands when it drops privilege without having an account
+# of its own, so a permission keyed to it is a permission granted to all of
+# them. Created here rather than by a package, so nothing else can be given it.
+RUN useradd -r -M -s /usr/sbin/nologin egress-resolver
 
 # Every fetch from here down retries. What matters is not the odds of one
 # download failing but of ANY of them failing, and without retries a single
@@ -278,12 +303,12 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
 COPY docker/session-bashrc.sh /etc/bash.bashrc.d/10-session.bash
 COPY docker/fixed-domains.sh /usr/local/bin/
 COPY docker/caps-lib.sh /usr/local/bin/
-COPY docker/dns-proxy.sh /usr/local/bin/
-COPY docker/init-firewall.sh /usr/local/bin/
+COPY docker/egress-policy /usr/local/sbin/egress-policy
+COPY docker/dns-lookup-log /usr/local/sbin/dns-lookup-log
+COPY docker/cidr-collapse /usr/local/bin/cidr-collapse
 COPY docker/firewall-up.sh /usr/local/bin/
 COPY docker/filter-entrypoint.sh /usr/local/bin/
 COPY docker/log-shipper.sh /usr/local/bin/
-COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 # Into $VIMRUNTIME/plugin, not /etc/xdg/nvim - see the file's own comment.
 COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua
 COPY docker/entrypoint.sh /usr/local/bin/
@@ -351,7 +376,7 @@ RUN grep -q 'bash.bashrc.d' /etc/bash.bashrc || \
     > "$SANDBOX_HOME/.bashrc" && \
   chown "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME/.bashrc"
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
+RUN chmod +x /usr/local/sbin/egress-policy /usr/local/sbin/dns-lookup-log /usr/local/bin/cidr-collapse /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
   echo 'export PATH="/opt/node-tools/bin:$PATH"' > /etc/profile.d/node-tools-path.sh
 
 # Last instruction that changes the filesystem, and it has to stay last: it

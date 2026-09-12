@@ -16,7 +16,7 @@ case $- in *i*) ;; *) return 0 ;; esac
 # Debian's /etc/profile rewrites PATH from scratch for login shells: it drops
 # the global Node tool directory the image put in the environment, and it leaves
 # out the sbin directories, where the network tools a session is expected to use
-# (ip, iptables, ipset, dnsmasq) all live. Put them back, without duplicating an
+# (ip, nft, dnsmasq) all live. Put them back, without duplicating an
 # entry when this file is sourced twice.
 case ":$PATH:" in
   *":/opt/node-tools/bin:"*) ;;

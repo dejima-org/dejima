@@ -17,7 +17,12 @@ list_scripts() {
     cd "$root"
     {
         ls bin/dejima bin/dejima-* bin/harness/*.sh 2>/dev/null || true
-        ls hooks/*.sh docker/*.sh install.sh 2>/dev/null || true
+        # docker/* rather than docker/*.sh: the scripts installed into the
+        # image as commands carry no extension, and the shebang filter below
+        # is what separates them from the Dockerfile, the compose file and the
+        # Python and Lua that live here too. Missing one of them would leave
+        # the egress policy itself unchecked.
+        ls hooks/*.sh docker/* install.sh 2>/dev/null || true
         ls forges/*/bin/* 2>/dev/null || true
         # test/, for the reason .dejima.md gives for being careful what goes
         # there: CI checks the commit out on a host and runs it, so a helper
@@ -32,7 +37,8 @@ list_scripts() {
         # version of that. Harness plugins are one kind; docker/ has two more,
         # and they are not incidental: caps-lib.sh holds the drop that decides
         # what a session's capability set is, and fixed-domains.sh is the seam
-        # keeping the DNS allowlist and the ipset allowlist from drifting.
+        # keeping the permitted set's classes from drifting between the
+        # container that enforces them and the host command that adds to them.
         #
         # Matched by directory rather than by name, because a list is a thing
         # to forget to add to. Everything under docker/ is in the trusted

@@ -271,7 +271,7 @@ In that configuration the provider directories are in the exit-time audit's
 TCB list, alongside `bin/`, `hooks/`, `docker/`, `test/` and `tools/`. They
 hold no code and nothing executes them, but what they hold decides what the
 next launch permits: a forge's `fixed_hosts` reaches `DEJIMA_FORGE_HOSTS`,
-which `firewall-up.sh` joins into the domains `init-firewall.sh` allowlists, so
+which `firewall-up.sh` joins into the permitted set the egress policy is given, so
 a line added to a manifest widens the egress boundary on the next run.
 `tools/*/tool.conf` is the same class, and is read by the host rather than the
 container: it names a tarball URL, the sha256 checked against it and the
@@ -1023,7 +1023,7 @@ reasoning below is what both are built on.
   `network_mode: container:` rather than getting one of its own. Capabilities
   are per process rather than per namespace, so the sandbox cannot alter the
   filter bounding it even at uid 0 - measured, not reasoned: `iptables` and
-  `ipset` both return `Operation not permitted` to a joiner that lacks
+  `nft` returns `Operation not permitted` to a joiner that lacks
   `NET_ADMIN`.
 
   Two things follow. The namespace has its rules before anything is created in
@@ -1049,7 +1049,7 @@ reasoning below is what both are built on.
   `entrypoint.sh` runs as root, prepares the session's own state, then drops to
   that user before execing the configured command (`[core] command`, or the
   selected harness's own if that is unset). A compromised session can't
-  re-run `init-firewall.sh` with a wider allowlist to open its own
+  re-run the egress policy with a wider allowlist to open its own
   exfiltration path: that script runs in the container beside it, so there is
   no copy of the allowlist within reach to re-run against. Verified: that user
   gets a permission error running `iptables` directly.
@@ -1212,9 +1212,10 @@ the window this closes.
 
 ## Network egress firewall
 
-On start, the container runs an allowlist-only `iptables`/`ipset` firewall
-(`init-firewall.sh`), matching the reference dev container. Allowed by
-default:
+On start, the filter container establishes an allowlist-only egress policy
+(`docker/egress-policy`): one `nftables` inet table covering both address
+families, with a closed default and everything the session may reach expressed
+as named sets. Allowed by default:
 
 - DNS resolution via a local proxy (see "DNS is allowlisted too")
 - the Docker host itself (not its whole subnet)
@@ -1270,14 +1271,37 @@ Docker host itself can resolve it: containers inherit the host's resolver.
 ### DNS is allowlisted too
 
 Resolution itself is restricted, not just the IP connections made
-afterward: `dns-proxy.sh` runs a local `dnsmasq` with no fallback resolver,
-and `/etc/resolv.conf` is repointed at it. Only names on the same allowlist
-above (plus `github.com`/`githubusercontent.com`/`githubassets.com`, needed
-since GitHub itself is allowlisted by IP range; see `fixed-domains.sh`) get
-forwarded to Docker's real resolver; anything else gets no upstream
-configured at all and is refused outright. Without this, a compromised
-session could exfiltrate data by encoding it into query names to an
-attacker-controlled domain, even with no direct connection ever possible.
+afterward: the policy runs a local `dnsmasq` with no fallback resolver, and
+`/etc/resolv.conf` in both containers is repointed at it. Only permitted names
+are forwarded to Docker's real resolver; everything else gets NXDOMAIN.
+Without this, a compromised session could exfiltrate data by encoding it into
+query names to an attacker-controlled domain, even with no direct connection
+ever possible.
+
+Two rules make that hold rather than merely intend it. Reaching a resolver
+outside the namespace is restricted by uid: the forwarder, running as an
+account the image creates for that and nothing else, and root, because the
+container runtime's own embedded resolver forwards onwards from inside this
+namespace on some versions and every lookup fails without it. The session user
+is neither - uid 1000, no sudo, no setuid binary, no capability to change uid -
+so the only resolver it can address is the restricting one, which is what
+closes the query-name channel. Root in the session container would be a way
+around it; that is the same posture the firewall this replaced had, and
+narrowing it further needs a discriminator finer than uid, which the packet
+filter cannot express between two containers sharing one namespace. And an answer for
+a permitted name that points at a private, loopback or link-local address is
+refused, because an answer decides what the allowlist contains and an answer
+comes from outside: one influenced reply for a public name would otherwise be
+egress to a host on your own network. That refusal is stated twice, once in
+the resolver and once independently in the packet filter, so it does not rest
+on one component being configured correctly. Destinations you configured
+yourself - the forge, Loki, and anything in `[core] internal_domains` - are
+exempt, because you chose their addresses and there is nothing for an answer
+to decide.
+
+Every lookup is recorded, with its outcome and - for a refusal - its reason.
+A refused lookup never becomes a connection, so it would otherwise leave no
+trace at all, and it is the query itself that carries data out.
 
 ### Adding a domain to a running session
 
@@ -1290,13 +1314,20 @@ dejima-allow crates.io                    # this running session only
 dejima-allow --container <id> crates.io   # a specific session, if more than one is running
 ```
 
-It first adds the domain to the running dnsmasq's allowlist (appends a
-`server=` line to its servers-file and sends `SIGHUP` to reload just that
-file - no restart), then resolves it through the now-unblocked container
-resolver and adds the IP(s) to the running firewall's `ipset`, all via
-`docker exec -u root`. It finishes by checking the domain is actually
-reachable from inside that same container and prints a definitive verdict:
+It runs `egress-policy permit` in the filter container via `docker exec -u
+root`, which records the entry, regenerates the resolver's configuration and
+restarts it (under a second, losing only its cache), then proves the change:
+it resolves the name through the policy's own resolver and confirms the
+address reached the set its class uses. If any of that fails it puts the
+permitted set back the way it was, so there is no half-added name that
+resolves and is then refused. It finishes by checking the domain is actually
+reachable from inside the session container and prints a definitive verdict:
 exit code 2 if it isn't.
+
+The class comes from the same file the container composes its own lists from,
+so a name under a forge suffix is added to the forge class and stays confined
+to 443 - adding a domain cannot widen how a destination is reachable, only
+whether.
 
 `--global` and `--project` are the opposite of this: they record an approval
 for *future* sessions and deliberately do not touch a running container, even
@@ -1321,11 +1352,11 @@ sandbox, so there is no need for it to guess one and risk "successfully"
 updating someone else's session instead.
 
 A domain allowed this way stays allowed for the rest of the session even
-if its CDN later rotates edge IPs: `dns-proxy.sh` tops up the firewall's
-`ipset` from every DNS answer it serves, not just the one resolved at
+if its CDN later rotates edge IPs: the resolver writes every answer it serves
+into the address set its entry's class names, not just the one resolved at
 allow-time, since only allowlisted names get an upstream to answer from in
 the first place. GitHub's own domains sit outside this - their existing
-port-443-only `ipset` entries still win by dnsmasq's longest-match rule -
+port-443-only entries still win by dnsmasq's longest-match rule -
 so that restriction is unaffected.
 
 One gap remains: allowing an *internal* hostname (one that resolves to an
@@ -1432,9 +1463,10 @@ If `[logging] loki_url` is set (see Prerequisites in the README), every DNS quer
 outbound connection attempt - allowed or rejected - is shipped to that Loki
 endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
 
-- `dns-proxy.sh`'s dnsmasq logs every query and whether it was forwarded
+- the resolver's queries are recorded as one JSON object per lookup, with
+  its outcome, and whether it was forwarded
   (allowed) or refused (not on the allowlist) - labeled `job=dejima-dns`.
-- `init-firewall.sh` tags its terminal ACCEPT/REJECT rules with `NFLOG`
+- the policy tags its terminal permit/refuse rules with `NFLOG`
   (group 1 for allowed, group 2 for rejected), which `ulogd2`
   (`ulogd.conf`) turns into JSON lines with source/dest IP, port, and an
   `action` field - labeled `job=dejima-net`. Only new connection
@@ -1657,9 +1689,9 @@ token there would make HTTPS push possible independent of
   every change, and `runtime.bats` asserts against a real running container
   rather than a mock: IPv6 blocked, a non-allowlisted domain refused and a
   non-allowlisted destination unreachable, `node` unable to re-run
-  `init-firewall.sh`, no working `sudo`. Coverage is not completeness: the
+  the egress policy, no working `sudo`. Coverage is not completeness: the
   reasoning here is judgement, nothing tests it, and a property nobody wrote
-  a test for can regress quietly. A missing `ipset` dedup flag broke firewall
+  a test for can regress quietly. A missing address-set dedup flag broke firewall
   startup twice before anyone caught it; there is a test for that now, which
   is the pattern to expect - each of these exists because something was got
   wrong first.

@@ -23,13 +23,18 @@ require_setpcap
 #
 # What this container does need is to be pointed at the resolver enforcing the
 # name allowlist. /etc/resolv.conf is per container even when the namespace is
-# shared, so dns-proxy.sh repointing the filter container's file says nothing
+# shared, so egress-policy repointing the filter container's file says nothing
 # about this one - which Docker generated pointing straight at its embedded
-# resolver. Left alone, every lookup the session makes would go around dnsmasq
-# and the DNS allowlist would apply to nothing.
+# resolver. Left alone, every lookup the session makes would go around the
+# restricted resolver and the name allowlist would apply to nothing.
 #
-# The same value dns-proxy.sh writes for itself, at the same loopback address,
-# because loopback is shared with the container the resolver runs in.
+# It would not silently succeed, either: the policy restricts which uids may
+# reach a resolver outside this namespace, and the session user is not one of
+# them - so a session left pointing at the embedded resolver resolves nothing
+# at all rather than resolving anything it likes.
+#
+# The value below is the same one egress-policy writes for itself, at the same
+# loopback address, because loopback is shared with the resolver's container.
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
     echo "nameserver 127.0.0.1" > /etc/resolv.conf
 fi
@@ -506,8 +511,8 @@ if [ -n "${DEJIMA_NOTIFY_DIR:-}" ]; then
 fi
 
 # Test harness hook (test/): everything above this point is the real
-# startup sequence - DNS proxy, firewall, IPv6 block, logging,
-# privilege-drop prep. Skip execing $SANDBOX_CMD so the suite can `docker
+# startup sequence - resolver, packet filter, logging, privilege-drop prep.
+# Skip execing $SANDBOX_CMD so the suite can `docker
 # exec` into a live, fully-initialized container and assert against it,
 # exercising the actual code path instead of a reimplementation of it that
 # could drift out of sync.
@@ -516,8 +521,10 @@ if [ "${SANDBOX_TEST_MODE:-0}" = "1" ]; then
 fi
 
 # Drop root -> the sandbox user for the actual session; that user has no
-# sudo/setuid path back to root after this, so it can't re-run
-# init-firewall.sh itself to widen the allowlist mid-session.
+# sudo/setuid path back to root after this, so it can't re-run the egress
+# policy itself to widen the allowlist mid-session. It could not anyway: the
+# policy is installed from the container beside this one, which holds the
+# capability, and this one declares none.
 #
 # And drop the bounding set with it, so "no path back to root" and "no
 # capability if there were one" are two separate things rather than one

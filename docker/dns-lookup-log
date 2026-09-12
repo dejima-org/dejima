@@ -1,0 +1,241 @@
+#!/usr/bin/python3
+"""Turn the resolver's query log into one JSON record per name lookup.
+
+A lookup that is refused never becomes a connection, so the packet log cannot
+account for it - and a refused lookup is the interesting event, because the
+query itself is what carries data out. This follows dnsmasq's own log and emits
+one record per lookup, with its outcome, next to the connection log.
+
+dnsmasq has no structured output of its own, so its text log is parsed here
+rather than in whatever reads the result: the parsing then lives in one place
+and is tested once, instead of in every supervisor.
+
+Outcomes:
+  answered     the name was permitted and the resolver returned addresses
+  refused      not-permitted       the name is not in the permitted set
+               non-global-answer   permitted, but answered with a private,
+                                   loopback or link-local address, which the
+                                   resolver would not hand out
+               no-such-name        permitted, upstream says it does not exist
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timezone
+
+# "Sep 12 00:45:07 dnsmasq[4553]: " - dropped; the record is stamped when the
+# line is read, which is accurate to well within the resolution that matters and
+# does not depend on a log format that carries no year.
+PREFIX = re.compile(r"^\w{3}\s+\d+\s+[\d:]+\s+\S*dnsmasq\[\d+\]:\s*")
+
+PATTERNS = {
+    "query": re.compile(r"^query\[(?P<type>[^\]]+)\]\s+(?P<name>\S+)\s+from\s+(?P<client>\S+)"),
+    "not-permitted": re.compile(r"^config\s+(?P<name>\S+)\s+is\s+NXDOMAIN"),
+    "non-global-answer": re.compile(r"^possible DNS-rebind attack detected:\s*(?P<name>\S+)"),
+    "forwarded": re.compile(r"^forwarded\s+(?P<name>\S+)\s+to\s+(?P<server>\S+)"),
+    "reply": re.compile(r"^(?:reply|cached)\s+(?P<name>\S+)\s+is\s+(?P<value>.+?)\s*$"),
+}
+
+IDLE_FLUSH = 1.0  # seconds a lookup waits for further lines before it is written
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+# Outcomes, worst last. A lookup is written with the highest-ranked outcome its
+# lines reported: a name answered on one query type and refused on another is a
+# refusal, and the reason a supervisor would want to be woken for outranks the
+# rest.
+RANK = {
+    None: 0,
+    # Below "answered" on purpose: a name with an A record and no AAAA is
+    # answered and reports NODATA for the other query, and that is the ordinary
+    # case, not a failure.
+    ("refused", "no-such-name"): 1,
+    ("answered", None): 2,
+    ("refused", "not-permitted"): 3,
+    ("refused", "non-global-answer"): 4,
+}
+
+
+class Lookups:
+    """Open lookups, keyed by name, flushed when they stop changing.
+
+    One lookup produces several log lines - query, forwarded, one reply per
+    address - and a resolver library asking for A and AAAA emits two queries for
+    the same name before either is answered, which is what a C library's stub
+    does by default. So a second query for a name already open joins it rather
+    than closing it: closing would write the first out as unanswered while its
+    reply was still in flight, and a routine event that reads as a failure is
+    worse in an alerting log than no event at all.
+
+    Keying by name and type instead would be the obvious alternative and does
+    not work: the lines that report a refusal carry no query type, so there is
+    nothing to attribute them to. Name is the only key every line has.
+    """
+
+    def __init__(self, out):
+        self.out = out
+        self.open = {}
+
+    def blank(self, name):
+        return {
+            "ts": now(),
+            "name": name,
+            "types": [],
+            "queries": 0,
+            "client": None,
+            "outcome": None,
+            "reason": None,
+            "addresses": [],
+            "upstream": None,
+            "rank": 0,
+            "touched": time.monotonic(),
+        }
+
+    def start(self, name, fields):
+        entry = self.open.setdefault(name, self.blank(name))
+        if fields.get("type") and fields["type"] not in entry["types"]:
+            entry["types"].append(fields["type"])
+        entry["client"] = entry["client"] or fields.get("client")
+        # How many query lines this record stands for. Merging by name means a
+        # name asked for twice in the same second is one record; the count keeps
+        # that from reading as one lookup.
+        entry["queries"] += 1
+        entry["touched"] = time.monotonic()
+
+    def get(self, name):
+        entry = self.open.setdefault(name, self.blank(name))
+        entry["touched"] = time.monotonic()
+        return entry
+
+    def outcome(self, entry, outcome, reason=None):
+        rank = RANK[(outcome, reason)]
+        if rank >= entry["rank"]:
+            entry["rank"] = rank
+            entry["outcome"] = outcome
+            entry["reason"] = reason
+
+    def flush_name(self, name):
+        entry = self.open.pop(name, None)
+        if entry is None:
+            return
+        entry.pop("touched", None)
+        entry.pop("rank", None)
+        if entry["outcome"] is None:
+            # A query whose outcome never appeared: the upstream did not answer
+            # in time, or dnsmasq logged something this does not recognise.
+            entry["outcome"] = "unanswered"
+        for field in ("types", "addresses", "upstream", "reason"):
+            if not entry[field]:
+                entry.pop(field)
+        self.out.write(json.dumps(entry) + "\n")
+        self.out.flush()
+
+    def flush_idle(self, force=False):
+        cutoff = time.monotonic() - IDLE_FLUSH
+        for name in [n for n, e in self.open.items() if force or e["touched"] < cutoff]:
+            self.flush_name(name)
+
+
+def handle(line, lookups):
+    line = PREFIX.sub("", line.rstrip("\n"))
+
+    match = PATTERNS["query"].match(line)
+    if match:
+        lookups.start(match.group("name"), match.groupdict())
+        return
+
+    for reason in ("not-permitted", "non-global-answer"):
+        match = PATTERNS[reason].match(line)
+        if match:
+            entry = lookups.get(match.group("name"))
+            lookups.outcome(entry, "refused", reason)
+            # A name nobody was allowed to ask for is noise; a permitted name
+            # answered with an address pointing inside the operator's own
+            # network is someone trying to steer the policy, and is marked so a
+            # supervisor can alert on it without parsing reasons.
+            if reason == "non-global-answer":
+                entry["severity"] = "alert"
+            # Not written out here: the client's other query for the same name
+            # may still be in flight, and these lines arrive once per query.
+            return
+
+    match = PATTERNS["forwarded"].match(line)
+    if match:
+        lookups.get(match.group("name"))["upstream"] = match.group("server")
+        return
+
+    match = PATTERNS["reply"].match(line)
+    if match:
+        entry = lookups.get(match.group("name"))
+        value = match.group("value")
+        if value in ("NXDOMAIN", "NODATA") or value.startswith("NODATA"):
+            lookups.outcome(entry, "refused", "no-such-name")
+        else:
+            lookups.outcome(entry, "answered")
+            if value not in entry["addresses"]:
+                entry["addresses"].append(value)
+        return
+
+
+def follow(path, lookups):
+    """Read the log as it is appended to, across restarts of the writer.
+
+    The resolver is restarted when a name is added to a running session; it
+    reopens the same file in append mode, so following the path rather than the
+    handle keeps working. A file that shrank was truncated by something else and
+    is read again from the start.
+    """
+    handle_ = None
+    position = 0
+    last_flush = 0.0
+    while True:
+        try:
+            if handle_ is None:
+                handle_ = open(path, "r", errors="replace")
+                handle_.seek(position)
+            if os.path.getsize(path) < position:
+                position = 0
+                handle_.seek(0)
+            line = handle_.readline()
+            if line:
+                position = handle_.tell()
+                try:
+                    handle(line, lookups)
+                except Exception as exc:  # one bad line must not end the log
+                    print(f"dns-lookup-log: {exc}", file=sys.stderr, flush=True)
+                # Busy periods must not starve the flush: a steady stream of
+                # queries would otherwise hold every record open indefinitely.
+                if time.monotonic() - last_flush > IDLE_FLUSH:
+                    lookups.flush_idle()
+                    last_flush = time.monotonic()
+                continue
+        except FileNotFoundError:
+            handle_ = None
+        lookups.flush_idle()
+        last_flush = time.monotonic()
+        time.sleep(0.2)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, help="the resolver's query log")
+    parser.add_argument("--output", required=True, help="where to write the JSON records")
+    args = parser.parse_args()
+
+    with open(args.output, "a", buffering=1) as out:
+        lookups = Lookups(out)
+        try:
+            follow(args.source, lookups)
+        except KeyboardInterrupt:
+            lookups.flush_idle(force=True)
+
+
+if __name__ == "__main__":
+    main()

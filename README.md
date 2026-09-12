@@ -398,11 +398,12 @@ behind each of these, and the fork-and-review workflow in full.
 
 ## Network egress firewall
 
-Outbound access is default-deny: the container builds an allowlist-only
-`iptables`/`ipset` firewall at start, and anything not explicitly allowed is
-rejected outright rather than left to time out, so a session is told when
-something doesn't connect. IPv6 is blocked outright, with no allowlist
-equivalent for it.
+Outbound access is default-deny: the filter container establishes an
+allowlist-only `nftables` policy at start, and anything not explicitly allowed
+is rejected outright rather than left to time out, so a session is told when
+something doesn't connect rather than waiting out a timeout and reporting a
+broken tool. One table covers IPv4 and IPv6, so an allowlist cannot cover one
+family and silently ignore the other.
 
 The allowlist covers what the sandbox needs to function - DNS, the Docker host,
 GitHub on port 443 for read access whichever forge is selected, whatever the
@@ -428,8 +429,8 @@ the one that patches a live session. `dejima --no-firewall` disables the
 firewall for one launch (debugging only).
 
 **→ [docs/security.md](docs/security.md#network-egress-firewall)** - how the
-ipsets are built, how `dnsmasq` is configured, and the NFLOG groups behind the
-request log below.
+address sets are built, how the resolver is restricted, and the two records
+behind the request log below.
 
 ## Global and per-project domains and dependencies
 
@@ -531,13 +532,14 @@ name, on a queue its maintainers are already drowning in.
 
 The sandbox can always read from GitHub. By default it can never push there:
 GitHub's IP ranges are only allowlisted on port 443, so port 22 is physically
-unreachable rather than merely discouraged by a hook. That rests on **two**
-properties, both worth naming because the claim stays readable if either
-quietly stops being true. The allowlist decides what is reachable over IPv4;
-what makes port 22 unreachable *at all* is that the container also blocks IPv6
-outright, since an allowlist naming one address family says nothing about the
-other. `init-firewall.sh` refuses to start rather than run with IPv6 live and
-unfilterable.
+unreachable rather than merely discouraged by a hook. Two properties carry
+that, both worth naming because the claim stays readable if either quietly
+stops being true. The restriction belongs to the *destination* rather than to
+the path it was reached by, so resolving a GitHub name cannot open a port its
+published ranges do not have. And the allowlist covers both address families
+in one table, so there is no state in which one is filtered and the other is
+not - an allowlist naming one family says nothing about the other, and the
+policy refuses to start rather than come up half-applied.
 
 `--allow-github-push` opens port 22 for one launch, paired with a repo-scoped
 deploy key in `[core] ssh_key` rather than a forwarded personal agent. The one
@@ -710,6 +712,3 @@ The dejima wordmark and logo are not code and are not covered by that licence.
 They are trademarks; who holds them and what may be done with them is stated
 once for the organisation, in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-The egress firewall's original shape came from
-[Anthropic's reference dev container](https://github.com/anthropics/claude-code/tree/main/.devcontainer).
-`docker/init-firewall.sh` records what it kept and what it did not.

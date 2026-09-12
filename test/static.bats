@@ -139,62 +139,60 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     }
 }
 
-@test "the GitHub ranges fetch reports its own failure instead of letting set -e swallow it" {
-    # init-firewall.sh runs under `set -euo pipefail`, so a bare
-    # `var=$(curl ...)` that fails takes the whole script down ON THE
-    # ASSIGNMENT - before any of the diagnostics written for exactly that case
-    # can run. The container then exits having printed nothing after "Looking
-    # up GitHub's IP ranges...", and the only symptom anyone sees is that the
+
+@test "the forge ranges fetch reports its own failure instead of letting set -e swallow it" {
+    # egress-policy runs under `set -Eeuo pipefail`, so a bare `var=$(curl ...)`
+    # that fails takes the whole script down ON THE ASSIGNMENT - before any of
+    # the diagnostics written for exactly that case can run. The container then
+    # exits having printed nothing, and the only symptom anyone sees is that the
     # sandbox did not start. It cost two CI rounds to not diagnose (#59).
     #
     # The fix is to capture curl's status rather than let set -e have it, so
     # this checks the fetch is not a bare assignment again.
-    grep -q 'set -euo pipefail' "$SANDBOX_DIR/init-firewall.sh"
-    # Continuations are joined before matching: the fetch spans two lines, and
-    # the `||` that makes it safe is on the second one - so a line-at-a-time
+    grep -q 'set -Eeuo pipefail' "$SANDBOX_DIR/egress-policy"
+    # Continuations are joined before matching: the fetch spans several lines,
+    # and the `||` that makes it safe is on the last one - so a line-at-a-time
     # pass would report the correct form as the broken one.
     local bare
     bare=$(awk '
         /^[[:space:]]*#/ { next }
         {
             line = $0
-            start = FNR
-            while (line ~ /\\$/ && (getline) > 0) {
-                sub(/\\$/, "", line)
-                line = line $0
+            while (line ~ /\\[[:space:]]*$/) {
+                sub(/\\[[:space:]]*$/, "", line)
+                if ((getline nxt) <= 0) break
+                line = line nxt
             }
-            if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(curl/ && line !~ /\|\|/)
-                print start": "line
+            if (line ~ /[a-z_]+=\$\(curl/ && line !~ /\|\|/) print FNR": "line
         }
-    ' "$SANDBOX_DIR/init-firewall.sh")
+    ' "$SANDBOX_DIR/egress-policy")
     [ -z "$bare" ] || {
-        echo "this fetch is a bare assignment, so set -e will kill the script before it can report:" >&2
+        echo "a curl is still assigned directly, so set -e can kill the script:" >&2
         echo "$bare" >&2
         false
     }
-    # And that the failure path actually says something. The message is what
-    # separates "GitHub was unreachable" from "the sandbox is broken".
-    grep -q "could not fetch GitHub's IP ranges" "$SANDBOX_DIR/init-firewall.sh"
 }
+
 
 @test "every startup script reports where it aborted instead of dying silently" {
     # `set -e` alone aborts with no output whatsoever. For a script that runs
     # during container startup that is the worst possible failure mode: the
-    # container just never appears, and every cause - a failed lookup, a full
-    # ipset, an unreachable API - presents identically, as "the sandbox is
-    # broken". Three CI failures were spent on two different instances of it.
+    # container just never appears, and every cause - a failed lookup, a
+    # rejected ruleset, an unreachable API - presents identically, as "the
+    # sandbox is broken". Three CI failures were spent on two different
+    # instances of it.
     #
     # log-shipper.sh is deliberately absent: it does not use -e at all, on
     # purpose, because one bad line should not kill the tailer.
     local script
-    for script in init-firewall.sh dns-proxy.sh entrypoint.sh; do
+    for script in egress-policy firewall-up.sh filter-entrypoint.sh entrypoint.sh; do
         # -E, not just -e: without errtrace the handler does not fire inside
         # functions or subshells, which is where the fetch and the loops live.
         grep -qE '^set -Eeuo pipefail$' "$SANDBOX_DIR/$script" \
             || { echo "$script does not set -E, so its ERR trap would not fire in functions" >&2; false; }
         grep -q "trap .*ERR" "$SANDBOX_DIR/$script" \
             || { echo "$script has no ERR trap - a set -e abort in it would be silent" >&2; false; }
-        # Naming itself matters: three scripts run back to back into the same
+        # Naming itself matters: several scripts run back to back into the same
         # log, and "aborted at line 128" is useless without knowing whose.
         grep -q "aborted at line" "$SANDBOX_DIR/$script"
         grep -q "$script aborted" "$SANDBOX_DIR/$script" \
@@ -202,31 +200,65 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     done
 }
 
+@test "nothing in the container's startup path pipes into an early-exiting reader" {
+    # `producer | grep -q PATTERN` under `set -o pipefail` fails when it
+    # SUCCEEDS: grep -q leaves the moment it matches, the producer takes
+    # SIGPIPE and exits 141, and pipefail makes that the pipeline's status. It
+    # is invisible while the output is small enough that the producer finishes
+    # writing first, which is why it shipped - and it appeared the moment a
+    # ruleset carried a forge's published ranges, as a policy that had been
+    # applied correctly refusing to confirm its own default-drop.
+    #
+    # `head -N` and `grep -m N` have the same shape for the same reason.
+    #
+    # Matched on joined continuations, because these pipelines wrap.
+    local offenders
+    offenders=$(awk '
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            while (line ~ /(\||\\)[[:space:]]*$/) {
+                if ((getline nxt) <= 0) break
+                sub(/\\[[:space:]]*$/, "", line)
+                line = line nxt
+            }
+            if (line ~ /\|[[:space:]]*(grep[^|]*-[a-zA-Z]*q|head[[:space:]]|head$|grep[^|]*-m[[:space:]]*[0-9])/)
+                print FILENAME": "FNR": "line
+        }
+    ' "$SANDBOX_DIR"/*.sh "$SANDBOX_DIR/egress-policy")
+    [ -z "$offenders" ] || {
+        echo "these pipelines fail when they match, under pipefail:" >&2
+        echo "$offenders" >&2
+        echo "capture the output first, or use a herestring - see docker/egress-policy." >&2
+        false
+    }
+}
+
+
 @test "the ERR trap actually resolves the line and the command" {
     # Extracted from the real file rather than retyped, so a trap that has been
     # broken into single quotes - which would expand $LINENO and $BASH_COMMAND
     # at definition time and report the trap's own line forever - fails here.
     local trapline
-    trapline=$(grep -m1 "trap .*ERR" "$SANDBOX_DIR/init-firewall.sh")
+    trapline=$(grep -m1 "trap .*ERR" "$SANDBOX_DIR/egress-policy")
     cat > "$BATS_TEST_TMPDIR/probe.sh" <<EOF
 set -Eeuo pipefail
 $trapline
-echo "Looking up files.pythonhosted.org..."
+echo "applying the policy..."
 false
 echo "should not be reached"
 EOF
     run bash "$BATS_TEST_TMPDIR/probe.sh"
     [ "$status" -ne 0 ]
     [[ "$output" != *"should not be reached"* ]]
-    [[ "$output" == *"init-firewall.sh aborted at line 4"* ]] \
+    [[ "$output" == *"egress-policy aborted at line 4"* ]] \
         || { echo "trap did not report the failing line:" >&2; echo "$output" >&2; false; }
     [[ "$output" == *"false"* ]] \
         || { echo "trap did not report the failing command:" >&2; echo "$output" >&2; false; }
 }
-
-# The behaviour behind the two greps above, driven for real. init-firewall.sh
-# cannot be sourced - it flushes iptables at the top level - so the function is
-# extracted and run against a stubbed curl. No container, no network.
+# The behaviour behind the two greps above, driven for real. egress-policy
+# cannot be sourced - it would try to change the packet filter - so the function
+# is extracted and run against a stubbed curl. No container, no network.
 #
 # `sleep` is shadowed by a no-op: the retry delays are deliberate in production
 # and pure cost here.
@@ -238,26 +270,47 @@ run_fetch() {
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
     sleep() { :; }
-    eval "$(sed -n '/^fetch_github_ranges()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
-    gh_auth=()
-    fetch_github_ranges
+    say() { printf '%s\n' "$*" >&2; }
+    die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
+    FORGE_META_URL="https://forge.example/meta"
+    FORGE_META_FILTER='[.git[]?, .api[]?, .web[]?] | unique | .[]'
+    FORGE_META_AUTH=""
+    FETCH_ATTEMPTS=3
+    FETCH_TIMEOUT=5
+    eval "$(sed -n '/^fetch_forge_ranges()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
+    fetch_forge_ranges "$BATS_TEST_TMPDIR/meta" && cat "$BATS_TEST_TMPDIR/meta"
 }
 
-# A minimal but structurally valid /meta response - enough for the .web/.api/
-# .git check the function makes.
+# A minimal but structurally valid /meta response - enough for the filter the
+# function applies to decide the body carried ranges.
 meta_json() {
     printf '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}'
 }
 
-@test "the ranges fetch returns the body when GitHub answers" {
-    cat > "$BATS_TEST_TMPDIR/ok" <<EOF
+# Writes a body to wherever curl was told to --output, and prints the status
+# code curl's --write-out would have. Both are what the real fetch reads.
+stub_curl() {
+    local status_code="$1" body="$2" extra="${3:-}"
+    cat > "$BATS_TEST_TMPDIR/stubsrc" <<EOF
 #!/bin/bash
-printf '%s' '$(meta_json)'
+$extra
+out=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in --output) out="\$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s' '$body' > "\$out"
+printf '%s' '$status_code'
 EOF
-    run run_fetch "$BATS_TEST_TMPDIR/ok"
-    [ "$status" -eq 0 ]
-    [ "$output" = "$(meta_json)" ]
+    printf '%s' "$BATS_TEST_TMPDIR/stubsrc"
 }
+
+
+@test "the ranges fetch returns the body when the forge answers" {
+    run run_fetch "$(stub_curl 200 "$(meta_json)")"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$(meta_json)"* ]]
+}
+
 
 @test "the ranges fetch reports a failing curl rather than dying on the assignment" {
     # 28 is curl's operation-timeout. Before the fix this case never reached a
@@ -269,27 +322,36 @@ exit 28
 EOF
     run run_fetch "$BATS_TEST_TMPDIR/timeout"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"attempt 1/3: curl exited 28"* ]]
-    [[ "$output" == *"attempt 3/3: curl exited 28"* ]]
+    [[ "$output" == *"attempt 1/3"* ]]
+    [[ "$output" == *"attempt 3/3"* ]]
+    [[ "$output" == *"curl exit 28"* ]]
     # curl's own reason has to survive too - it is the difference between
-    # "GitHub was slow" and "DNS is broken in here".
+    # "the forge was slow" and "DNS is broken in here".
     [[ "$output" == *"Operation timed out"* ]]
 }
 
+
 @test "the ranges fetch retries an API error body and surfaces its message" {
-    # A rate limit answers 200-with-a-message or 403-with-a-message, not a
-    # transport error, so curl exits 0 and only the response check catches it.
-    # A burst of container starts is exactly what trips it, and it clears on
-    # its own - so it has to be retried, which curl's own --retry would not do.
-    cat > "$BATS_TEST_TMPDIR/ratelimited" <<'EOF'
-#!/bin/bash
-printf '%s' '{"message":"API rate limit exceeded"}'
-EOF
-    run run_fetch "$BATS_TEST_TMPDIR/ratelimited"
+    # A rate limit answers with a message and no ranges, sometimes over a 200,
+    # so curl exits 0 and only a check on the BODY catches it. A burst of
+    # container starts is exactly what trips it, and it clears on its own - so
+    # it has to be retried, which curl's own --retry could not do. That is why
+    # the body check lives inside the retry loop rather than after it.
+    run run_fetch "$(stub_curl 200 '{"message":"API rate limit exceeded"}')"
     [ "$status" -ne 0 ]
     [[ "$output" == *"API rate limit exceeded"* ]]
     [[ "$output" == *"attempt 3/3"* ]]
 }
+
+@test "a 403 rate limit is retried and reported by status, not treated as fatal" {
+    # The other spelling of the same thing: the primary limit answers 403 with
+    # the message in the body, so the status check catches it first.
+    run run_fetch "$(stub_curl 403 '{"message":"API rate limit exceeded"}')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"http 403"* ]]
+    [[ "$output" == *"attempt 3/3"* ]]
+}
+
 
 @test "the ranges fetch recovers when a later attempt succeeds" {
     # The point of retrying at all: one blip must cost seconds, not the launch.
@@ -298,117 +360,201 @@ EOF
 n="\$BATS_TEST_TMPDIR/attempts"
 count=\$(cat "\$n" 2>/dev/null || echo 0)
 echo \$((count + 1)) > "\$n"
+out=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in --output) out="\$2"; shift 2 ;; *) shift ;; esac
+done
 if [ "\$count" -lt 1 ]; then exit 7; fi
-printf '%s' '$(meta_json)'
+printf '%s' '$(meta_json)' > "\$out"
+printf '200'
 EOF
     run run_fetch "$BATS_TEST_TMPDIR/flaky"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"attempt 1/3: curl exited 7"* ]]
+    [[ "$output" == *"attempt 1/3"* ]]
+    [[ "$output" == *"curl exit 7"* ]]
     [[ "$output" == *"$(meta_json)"* ]]
 }
-
-# Same harness, for the domain loop - the other place a silent `set -e` abort
-# stopped a container mid-startup, at a different domain each time.
-run_resolve() {
-    local behaviour="$1" domain="${2:-files.pythonhosted.org}"
+# The same harness for the other half: what happens to a permitted name that
+# does not come back the way the policy needs. Two outcomes have to stay
+# distinct, and conflating them is how a container either dies over nothing or
+# survives having quietly lost a destination.
+#
+#   the name returns nothing        reported, and the session continues - the
+#                                   world is allowed to be down
+#   the policy refused the answer   the container stops, naming the entry - two
+#                                   halves of the operator's own configuration
+#                                   disagree, and that does not fix itself
+#
+# check_permitted_names is extracted and run against a stubbed dig and a
+# hand-written resolver log, which is exactly what it reads.
+run_check_names() {
+    local entries="$1" resolver_log="$2" dig_behaviour="$3"
     STUB_DIR="$BATS_TEST_TMPDIR/stub"
     mkdir -p "$STUB_DIR"
-    cp "$behaviour" "$STUB_DIR/dig"
+    cp "$dig_behaviour" "$STUB_DIR/dig"
     chmod +x "$STUB_DIR/dig"
     PATH="$STUB_DIR:$PATH"
-    sleep() { :; }
-    eval "$(sed -n '/^resolve_domain()/,/^}/p' "$SANDBOX_DIR/init-firewall.sh")"
-    resolve_domain "$domain"
+    say() { printf '%s\n' "$*" >&2; }
+    die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
+    ENTRIES_FILE="$entries"
+    RESOLVER_LOG="$resolver_log"
+    eval "$(sed -n '/^resolve_one()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
+    eval "$(sed -n '/^check_permitted_names()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
+    check_permitted_names "check N"
 }
 
-@test "domain resolution returns the A records dig answered with" {
-    cat > "$BATS_TEST_TMPDIR/ok" <<'EOF'
+
+@test "a permitted name that resolves leaves the check with nothing to say" {
+    printf 'open name strict files.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    cat > "$BATS_TEST_TMPDIR/dig" <<'EOF'
 #!/bin/bash
-echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
-echo "files.pythonhosted.org.	60	IN	A	151.101.128.223"
+echo "192.0.2.7"
 EOF
-    run run_resolve "$BATS_TEST_TMPDIR/ok"
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" "$BATS_TEST_TMPDIR/dig"
     [ "$status" -eq 0 ]
-    [ "$output" = "151.101.64.223
-151.101.128.223" ]
+    [[ "$output" != *"FAILED"* ]]
+    [[ "$output" != *"returned no address"* ]]
 }
 
-@test "a failing dig is reported rather than killing the script on the assignment" {
-    # This is the one that aborted CI: `ips=$(dig ... | awk ...)` under
-    # pipefail, with dig exiting non-zero. No message, no container.
-    cat > "$BATS_TEST_TMPDIR/servfail" <<'EOF'
+
+@test "a permitted name that resolves nowhere is reported, and the session continues" {
+    # The world is allowed to be down. A name whose host is unreachable, or
+    # which simply does not exist yet, must not cost the launch - the sandbox
+    # would be refusing to start over something outside the operator's control.
+    printf 'open name strict gone.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    cat > "$BATS_TEST_TMPDIR/dig" <<'EOF'
 #!/bin/bash
-echo ";; connection timed out; no servers could be reached" >&2
 exit 9
 EOF
-    run run_resolve "$BATS_TEST_TMPDIR/servfail"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
-    [[ "$output" == *"attempt 3/3: dig exited 9"* ]]
-    [[ "$output" == *"no servers could be reached"* ]]
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" "$BATS_TEST_TMPDIR/dig"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+    [[ "$output" == *"gone.example.com"* ]]
+    [[ "$output" == *"returned no address"* ]]
+    # And it must say which condition this is, because the other one below
+    # looks identical from an empty answer and has a completely different fix.
+    [[ "$output" == *"not a policy refusal"* ]]
 }
 
-@test "an answer with no A records is distinguished from a failing lookup" {
-    # A CNAME-only answer, or one dnsmasq's stop-dns-rebind refused. Both look
-    # like an empty A list, and the raw answer is what tells them apart.
-    cat > "$BATS_TEST_TMPDIR/cname" <<'EOF'
+
+
+@test "a permitted name the policy itself refuses stops the container, naming it" {
+    # The other condition: the name resolved, and the policy refused the answer
+    # because it points inside a private network. That is two halves of the
+    # operator's own configuration disagreeing, it does not fix itself, and
+    # left to runtime it surfaces hours later as one tool mysteriously failing.
+    #
+    # The stub appends the refusal as it answers, which is the real ordering -
+    # the resolver logs it while serving the very lookup this check makes. A
+    # fixture that wrote the line beforehand would be testing nothing, because
+    # the check deliberately reads only what its own sweep produced.
+    printf 'open name strict mirror.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    cat > "$BATS_TEST_TMPDIR/dig" <<EOF
 #!/bin/bash
-echo "release-assets.githubusercontent.com. 60 IN CNAME example.map.fastly.net."
-EOF
-    run run_resolve "$BATS_TEST_TMPDIR/cname" release-assets.githubusercontent.com
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"no A records"* ]]
-    [[ "$output" == *"CNAME"* ]]
-    [[ "$output" != *"dig exited"* ]]
-}
-
-@test "domain resolution recovers when a later attempt answers" {
-    cat > "$BATS_TEST_TMPDIR/flaky" <<'EOF'
-#!/bin/bash
-n="$BATS_TEST_TMPDIR/digs"
-count=$(cat "$n" 2>/dev/null || echo 0)
-echo $((count + 1)) > "$n"
-if [ "$count" -lt 1 ]; then exit 9; fi
-echo "files.pythonhosted.org.	60	IN	A	151.101.64.223"
-EOF
-    run run_resolve "$BATS_TEST_TMPDIR/flaky"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"attempt 1/3: dig exited 9"* ]]
-    [[ "$output" == *"151.101.64.223"* ]]
-}
-
-@test "each dig attempt is bounded, so one unanswered lookup cannot eat the budget" {
-    # dig's defaults are 5s x 3 tries. Three attempts of that is 45s spent on
-    # one domain, inside a startup the test suite gives 120s in total.
-    grep -qE 'dig .*\+time=[0-9]+ \+tries=[0-9]+' "$SANDBOX_DIR/init-firewall.sh"
-}
-
-@test "the extra-domains loop resolves through the same path, so non-fatal is true" {
-    # Its comment says failures there are non-fatal. With a bare
-    # `ips=$(dig ... | awk ...)` that held for a domain that resolved to
-    # nothing and not for one whose lookup errored - pipefail took the whole
-    # script down instead of warning and skipping.
-    local bare
-    bare=$(awk '
-        /^[[:space:]]*#/ { next }
-        /^[[:space:]]*ips=\$\(dig/ { print FNR": "$0 }
-    ' "$SANDBOX_DIR/init-firewall.sh")
-    [ -z "$bare" ] || {
-        echo "a dig is still assigned directly, so pipefail can kill the script:" >&2
-        echo "$bare" >&2
-        false
-    }
-    grep -q 'if ! ips=$(resolve_domain "$domain"); then' "$SANDBOX_DIR/init-firewall.sh"
-}
-
-@test "an empty response is reported as empty, not as a missing field" {
-    cat > "$BATS_TEST_TMPDIR/empty" <<'EOF'
-#!/bin/bash
+echo "Sep 12 01:02:03 dnsmasq[7]: possible DNS-rebind attack detected: mirror.example.com" \
+    >> "$BATS_TEST_TMPDIR/resolver.log"
 exit 0
 EOF
-    run run_fetch "$BATS_TEST_TMPDIR/empty"
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" "$BATS_TEST_TMPDIR/dig"
+    [ "$status" -ne 0 ] || { echo "a refused answer did not stop the container:" >&2; echo "$output" >&2; false; }
+    [[ "$output" == *"mirror.example.com"* ]]
+    [[ "$output" == *"EGRESS_INTERNAL_OK"* ]] \
+        || { echo "the refusal does not name the remedy:" >&2; echo "$output" >&2; false; }
+}
+
+
+
+@test "the refusal check reads only the lines this run produced" {
+    # The resolver log outlives an earlier apply in the same container, so a
+    # refusal already in it must not fail a launch that is fine. Same fixture
+    # as the test above except for WHEN the line is written, which is the whole
+    # difference between a stale record and a live one.
+    printf 'open name strict mirror.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    cat > "$BATS_TEST_TMPDIR/resolver.log" <<'EOF'
+Sep 12 00:00:01 dnsmasq[7]: possible DNS-rebind attack detected: mirror.example.com
+EOF
+    cat > "$BATS_TEST_TMPDIR/dig" <<'EOF'
+#!/bin/bash
+echo "192.0.2.9"
+EOF
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" "$BATS_TEST_TMPDIR/dig"
+    [ "$status" -eq 0 ] \
+        || { echo "a stale refusal from an earlier run failed this one:" >&2; echo "$output" >&2; false; }
+}
+
+
+@test "each lookup is bounded, so one unanswered name cannot eat the startup budget" {
+    # dig's defaults are 5s x 3 tries. Every permitted name is resolved at
+    # start, so unbounded lookups turn a handful of slow ones into a startup
+    # the test suite's 120s does not cover.
+    grep -qE 'dig .*\+time=[0-9]+ \+tries=[0-9]+' "$SANDBOX_DIR/egress-policy"
+}
+
+
+@test "the permitted names are resolved before the session starts, not on first use" {
+    # Two things at once: a disagreement inside the operator's configuration is
+    # found while there is still something to report it to, and the address
+    # sets are warm, so the first thing the agent does is not waiting on a cold
+    # lookup. Both are properties of doing it during apply.
+    grep -q 'check_permitted_names' "$SANDBOX_DIR/egress-policy" \
+        || { echo "nothing checks the permitted names at start" >&2; false; }
+    local in_verify
+    in_verify=$(sed -n '/^verify()/,/^}/p' "$SANDBOX_DIR/egress-policy" | grep -c 'check_permitted_names')
+    [ "$in_verify" -ge 1 ] \
+        || { echo "check_permitted_names is defined but never run from verify()" >&2; false; }
+}
+
+
+@test "an empty response is reported as carrying no ranges, not as a transport failure" {
+    # curl exits 0 and the status is 200; only the body says anything is wrong.
+    run run_fetch "$(stub_curl 200 '')"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"empty response"* ]]
+    [[ "$output" == *"carried no ranges"* ]]
+}
+
+@test "the ranges fetch sends the launcher's credential when it has one" {
+    # Unauthenticated, the default endpoint is rate-limited per source address
+    # across everything on the host, so a host starting sandboxes in a loop
+    # exhausts it and every launch after that fails on a credential that was
+    # available.
+    cat > "$BATS_TEST_TMPDIR/echoargs" <<'EOF'
+#!/bin/bash
+out=""
+argv="$*"
+while [ $# -gt 0 ]; do
+    case "$1" in --output) out="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s' "$argv" > "$BATS_TEST_TMPDIR/seen-args"
+printf '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}' > "$out"
+printf '200'
+EOF
+    FORGE_META_AUTH_OVERRIDE="Authorization: Bearer probe-token" \
+        run bash -c '
+            source "$1"
+            FORGE_META_AUTH="Authorization: Bearer probe-token"
+            run_fetch "$2" >/dev/null 2>&1 || true
+            cat "$BATS_TEST_TMPDIR/seen-args"
+        ' -- /dev/null "$BATS_TEST_TMPDIR/echoargs" 2>/dev/null || true
+    # Driven directly rather than through run_fetch, which pins the header empty.
+    STUB_DIR="$BATS_TEST_TMPDIR/stub2"; mkdir -p "$STUB_DIR"
+    cp "$BATS_TEST_TMPDIR/echoargs" "$STUB_DIR/curl"; chmod +x "$STUB_DIR/curl"
+    (
+        PATH="$STUB_DIR:$PATH"
+        sleep() { :; }
+        say() { :; }
+        die() { exit 1; }
+        FORGE_META_URL="https://forge.example/meta"
+        FORGE_META_FILTER='[.git[]?, .api[]?, .web[]?] | unique | .[]'
+        FORGE_META_AUTH="Authorization: Bearer probe-token"
+        FETCH_ATTEMPTS=1
+        FETCH_TIMEOUT=5
+        eval "$(sed -n '/^fetch_forge_ranges()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
+        fetch_forge_ranges "$BATS_TEST_TMPDIR/meta2"
+    )
+    grep -q 'Authorization: Bearer probe-token' "$BATS_TEST_TMPDIR/seen-args" \
+        || { echo "the credential never reached curl: $(cat "$BATS_TEST_TMPDIR/seen-args")" >&2; false; }
 }
 
 @test "no build step pipes a download straight into a shell" {
@@ -475,23 +621,6 @@ EOF
         || { echo "the last filesystem-changing instruction is not the sweep: $last"; return 1; }
     grep -q 'strip-privilege-bits' "$REPO_ROOT/bin/dejima-project-lib.sh" \
         || { echo "a derived project layer installs packages and never sweeps them"; return 1; }
-}
-
-@test "every ipset add in init-firewall.sh is duplicate-safe" {
-    # Same bug class that broke firewall startup twice (718f6b7, a86fefc):
-    # ipset add without -exist errors on a duplicate entry, and set -e turns
-    # that into the whole firewall - and thus the whole container - failing
-    # to start with no clear error surfaced to the user. Every "ipset add"
-    # line must either pass -exist or already be wrapped so a failure can't
-    # propagate (e.g. `|| true`).
-    while IFS= read -r line; do
-        case "$line" in
-            *-exist*) continue ;;
-            *"|| true"*) continue ;;
-        esac
-        echo "unsafe ipset add: $line"
-        return 1
-    done < <(grep "ipset add" "$SANDBOX_DIR/init-firewall.sh")
 }
 
 @test "docker-compose.yml runs an init so orphaned processes get reaped" {
@@ -1783,7 +1912,7 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # Same failure as the plugins above and a worse place for it: caps-lib.sh
     # is sourced, so it has no shebang, and it holds the drop that decides what
     # capabilities a session runs with. fixed-domains.sh is the seam holding
-    # the DNS allowlist and the ipset allowlist together.
+    # the name allowlist and the address allowlist together.
     #
     # Enumerated from the tree rather than from a list here, so a fragment
     # added tomorrow is covered without anyone remembering this test.
@@ -1827,35 +1956,37 @@ _reference_has_key() {  # <doc> <section> <leaf>
         || { echo "the readiness marker is not written after the firewall comes up"; return 1; }
 }
 
+
 @test "the session container points itself at the namespace's resolver" {
     # /etc/resolv.conf is per container even when the network namespace is
     # shared - measured, and the reason this line has to exist at all.
-    # dns-proxy.sh repoints the filter container's copy; Docker generated this
+    # egress-policy repoints the filter container's copy; Docker generated this
     # container's pointing straight at its embedded resolver.
     #
-    # Left alone, every name the session looks up goes around dnsmasq and the
-    # DNS allowlist applies to nothing - while the packet filter still holds,
-    # so nothing fails and nothing says so.
+    # Left alone, every name the session looks up would go around the
+    # restricted resolver. It would not silently succeed either - the policy
+    # refuses this namespace's traffic to any resolver but its own - so the
+    # symptom is a session that resolves nothing, which is why both halves have
+    # to name the same address.
     grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/entrypoint.sh" \
-        || { echo "the session container never points itself at the allowlisting resolver"; return 1; }
+        || { echo "the session container never points itself at the restricting resolver"; return 1; }
 
-    # The same address dns-proxy.sh binds and writes for itself, or the two
-    # halves of one arrangement disagree about where the resolver is.
-    grep -q 'echo "nameserver 127.0.0.1" > /etc/resolv.conf' "$SANDBOX_DIR/dns-proxy.sh" \
-        || { echo "dns-proxy.sh no longer writes that address; the two have drifted"; return 1; }
+    grep -q "printf 'nameserver 127.0.0.1" "$SANDBOX_DIR/egress-policy" \
+        || { echo "egress-policy no longer writes that address; the two have drifted"; return 1; }
+    grep -q 'listen-address=127.0.0.1' "$SANDBOX_DIR/egress-policy" \
+        || { echo "the resolver does not bind the address both halves name"; return 1; }
 }
 
+
 @test "dejima-allow changes the allowlist where it lives, and checks where it matters" {
-    # The dnsmasq and the ipsets are in the filter container. Every mutation
-    # has to go there; the reachability probe has to stay in the session's
-    # container, because that is the container whose reachability the command
-    # claims to have changed. A probe that ran in the filter container would
-    # pass on an arrangement where the session still could not reach the host.
+    # The resolver and the packet filter are in the filter container. Every
+    # mutation has to go there; the reachability probe has to stay in the
+    # session's container, because that is the container whose reachability the
+    # command claims to have changed. A probe that ran in the filter container
+    # would pass on an arrangement where the session still could not reach it.
     local a="$REPO_ROOT/bin/dejima-allow"
-    grep -q 'docker exec -u root "$filter" bash -c' "$a" \
-        || { echo "the dnsmasq reload does not target the filter container"; return 1; }
-    grep -q 'docker exec -u root "$filter" ipset add' "$a" \
-        || { echo "the ipset add does not target the filter container"; return 1; }
+    grep -q 'docker exec -u root "$filter" /usr/local/sbin/egress-policy' "$a" \
+        || { echo "the permitted-set change does not target the filter container"; return 1; }
     grep -q 'docker exec "$container" curl' "$a" \
         || { echo "the reachability check no longer runs in the session's container"; return 1; }
 
@@ -1863,6 +1994,30 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # step with it.
     grep -q "HostConfig.NetworkMode" "$a" \
         || { echo "the filter container is not derived from the session's namespace"; return 1; }
+}
+
+@test "dejima-allow states the class, so a forge name cannot be widened by adding it" {
+    # The open class carries no port restriction. A forge name added to it
+    # would be reachable on 22 as well, which is the read-only guarantee gone -
+    # from a command whose entire output says it granted one domain. It went
+    # wrong exactly that way when the answer lived in two places, so the class
+    # comes from the same file the container composes its own lists from.
+    local a="$REPO_ROOT/bin/dejima-allow"
+    grep -q 'source "$SCRIPT_DIR/../docker/fixed-domains.sh"' "$a" \
+        || { echo "dejima-allow no longer shares the class rule with the container"; return 1; }
+    grep -q 'dejima_class_for "$domain"' "$a" \
+        || { echo "dejima-allow does not ask which class the domain belongs to"; return 1; }
+    grep -q 'permit_args+=(--forge)' "$a" \
+        || { echo "a forge-class domain is not added to the forge class"; return 1; }
+
+    # And the rule itself still answers correctly, driven rather than grepped.
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" api.github.com
+    [ "$output" = forge ] || { echo "a subdomain of a forge suffix came back as $output"; return 1; }
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" crates.io
+    [ "$output" = open ] || { echo "an unrelated domain came back as $output"; return 1; }
+    # The suffix must not match a name that merely ends in the same letters.
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" notgithub.com
+    [ "$output" = open ] || { echo "notgithub.com was treated as the forge"; return 1; }
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {
@@ -2119,33 +2274,54 @@ _reference_has_key() {  # <doc> <section> <leaf>
     [ "$status" -eq 0 ]
 }
 
-@test "init-firewall.sh sends GH_TOKEN on its GitHub API fetch when one is set" {
-    # Unauthenticated /meta is capped at 60 requests/hour per source IP,
-    # shared across every container start; exhausting it fails the launch.
-    grep -q 'gh_auth=(-H "Authorization: Bearer \$GH_TOKEN")' "$SANDBOX_DIR/init-firewall.sh"
-    # The array reaching the request to /meta is the property; the flags around
-    # it are no longer pinned here, because they now have tests of their own
-    # ("every fetch in the container's startup path has a deadline" and the
-    # behavioural ones above). Pinning the whole invocation twice made adding a
-    # timeout to it fail a test about the token.
-    grep -q '\${gh_auth\[@\]+"\${gh_auth\[@\]}"} https://api.github.com/meta' "$SANDBOX_DIR/init-firewall.sh"
+
+@test "the ranges fetch is given GH_TOKEN when one is set" {
+    # Unauthenticated /meta is capped at 60 requests/hour per source IP, shared
+    # across every container start; exhausting it fails the launch. The token
+    # is composed into a whole header by the launch path and read by the policy
+    # as one, so the scheme stays the caller's to choose.
+    grep -q 'EGRESS_FORGE_META_AUTH="Authorization: Bearer \$GH_TOKEN"' "$SANDBOX_DIR/firewall-up.sh" \
+        || { echo "firewall-up.sh does not pass GH_TOKEN to the ranges fetch"; return 1; }
+    grep -q 'FORGE_META_AUTH=\${EGRESS_FORGE_META_AUTH:-}' "$SANDBOX_DIR/egress-policy" \
+        || { echo "egress-policy does not read the credential it is given"; return 1; }
+    grep -q 'auth=(-H "\$FORGE_META_AUTH")' "$SANDBOX_DIR/egress-policy" \
+        || { echo "the credential never becomes a request header"; return 1; }
 }
+
 
 @test "ALLOW_GITHUB_PUSH defaults to 0 everywhere it's read" {
     grep -qE '^\s*ALLOW_GITHUB_PUSH:\s*\$\{ALLOW_GITHUB_PUSH:-0\}\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    grep -q '\${ALLOW_GITHUB_PUSH:-0}' "$SANDBOX_DIR/init-firewall.sh"
+    grep -q 'EGRESS_FORGE_SSH="\${ALLOW_GITHUB_PUSH:-0}"' "$SANDBOX_DIR/firewall-up.sh"
+    grep -q 'FORGE_SSH=\${EGRESS_FORGE_SSH:-0}' "$SANDBOX_DIR/egress-policy"
 }
 
-@test "init-firewall.sh only opens port 22 to GitHub inside the ALLOW_GITHUB_PUSH conditional" {
-    # The unconditional port-443-only rule must still be present unchanged;
-    # the port-22 rule must only appear inside the new if-block, never as a
-    # second unconditional rule alongside it.
-    grep -q -- '-A OUTPUT -p tcp --dport 443 -m set --match-set github-domains dst -j ACCEPT' "$SANDBOX_DIR/init-firewall.sh"
-    port22_line=$(grep -n -- '-A OUTPUT -p tcp --dport 22 -m set --match-set github-domains dst -j ACCEPT' "$SANDBOX_DIR/init-firewall.sh" | cut -d: -f1)
-    [ -n "$port22_line" ]
-    if_line=$(grep -n 'ALLOW_GITHUB_PUSH:-0.*=.*1' "$SANDBOX_DIR/init-firewall.sh" | head -1 | cut -d: -f1)
-    [ -n "$if_line" ]
-    [ "$port22_line" -gt "$if_line" ]
+
+@test "port 22 to the forge opens only under the push opt-in, and 443 always" {
+    # The read-only guarantee: with 22 closed there is no transport left for a
+    # forwarded agent key to authenticate a push with, whatever a hook does or
+    # does not catch. So 443 is unconditional and 22 exists only inside the
+    # opt-in - never as a second unconditional rule beside it.
+    local clamp
+    clamp=$(sed -n '/^emit_forge_clamp()/,/^}/p' "$SANDBOX_DIR/egress-policy")
+    grep -q "tcp dport 443 goto permit" <<< "$clamp" \
+        || { echo "the forge class is not permitted on 443"; return 1; }
+    # Everything else about the class is refused, which is what makes the
+    # restriction hold however the address was arrived at.
+    grep -q 'daddr @%s goto refuse' <<< "$clamp" \
+        || { echo "the forge class is not refused on other ports"; return 1; }
+
+    local port22_line if_line
+    port22_line=$(grep -n 'tcp dport 22 goto permit' <<< "$clamp" | head -1 | cut -d: -f1)
+    [ -n "$port22_line" ] || { echo "port 22 cannot be opened at all"; return 1; }
+    if_line=$(grep -n 'FORGE_SSH" = 1' <<< "$clamp" | head -1 | cut -d: -f1)
+    [ -n "$if_line" ] || { echo "port 22 is not behind the opt-in"; return 1; }
+    [ "$port22_line" -gt "$if_line" ] \
+        || { echo "the port 22 rule is outside the opt-in conditional"; return 1; }
+
+    # The self-check proves it at runtime rather than trusting the rules, and
+    # only when the opt-in is off - with it on there is nothing to assert.
+    grep -q 'verify_port_refused "\$answer" 22' "$SANDBOX_DIR/egress-policy" \
+        || { echo "nothing checks that 22 is actually refused without the opt-in"; return 1; }
 }
 
 @test "git-push-guard.sh blocks direct pushes to a branch named in DEJIMA_BLOCKED_BRANCHES" {
@@ -3954,55 +4130,142 @@ registered_commands() {
     [ -z "$output" ]
 }
 
-@test "dns-proxy.sh enables dnsmasq's stop-dns-rebind protection" {
-    grep -qE '^stop-dns-rebind\s*$' "$SANDBOX_DIR/dns-proxy.sh"
-    grep -q 'rebind-domain-ok=/\$domain/' "$SANDBOX_DIR/dns-proxy.sh"
-}
 
-@test "dns-proxy.sh refuses to start without Docker's embedded resolver, rather than falling back" {
-    # The allowlist only works because every forward goes to 127.0.0.11 on
-    # loopback; init-firewall.sh has no egress rule for UDP/53 anywhere else
-    # on purpose. Resolving via the host's nameservers instead would be an
-    # unrestricted-destination DNS channel, so absence must be fatal.
-    grep -q "nameserver.*127\\\\.0\\\\.0\\\\.11" "$SANDBOX_DIR/dns-proxy.sh"
-    grep -q '/etc/resolv.conf' "$SANDBOX_DIR/dns-proxy.sh"
-}
-
-@test "IPv6 blocking fails loud instead of silently swallowing errors once ip6tables is confirmed usable" {
-    run grep -E 'ip6tables -P (INPUT|OUTPUT|FORWARD) DROP 2>/dev/null \|\| true' "$SANDBOX_DIR/init-firewall.sh"
-    [ "$status" -ne 0 ]
-    grep -q 'ip6tables -L >/dev/null 2>&1' "$SANDBOX_DIR/init-firewall.sh"
-}
-
-@test "an unusable ip6tables is not read as IPv6 being absent" {
-    # The branch used to print "assuming IPv6 is unavailable at the kernel
-    # level" and continue, which inferred a fact about the world from a fact
-    # about a tool. A container whose kernel lacks ip6_tables, on a host with
-    # IPv6 enabled, took it and ran with IPv6 live and unfiltered - and nothing
-    # failed, because all that had happened was a check that could not tell.
+@test "an answer pointing into a private network is refused, in two places" {
+    # An answer decides what the allow-list contains, and an answer comes from
+    # outside: a permitted public name answered with an internal address would
+    # be egress to a host on the operator's own network, on every port, granted
+    # by something neither the operator nor the session chose.
     #
-    # Raised by the dejima-devbox-hardener review, where the same shape had
-    # just been found twice: an audit reporting PASS from a probe that only
-    # looked at IPv4.
-    local f="$SANDBOX_DIR/init-firewall.sh"
-    run grep -n 'assuming IPv6 is unavailable' "$f"
-    [ "$status" -ne 0 ] || { echo "the inference is back:"; echo "$output"; return 1; }
+    # Stated twice on purpose. The resolver refuses the answer before handing
+    # it out; the packet filter refuses the address independently, so the guard
+    # does not rest on one component being configured correctly.
+    grep -qE '^stop-dns-rebind$' "$SANDBOX_DIR/egress-policy" \
+        || { echo "the resolver does not refuse an answer pointing inside"; return 1; }
+    grep -q "rebind-domain-ok=/%s/" "$SANDBOX_DIR/egress-policy" \
+        || { echo "there is no per-entry exemption, so the check is all or nothing"; return 1; }
+    grep -q 'daddr @nonglobal_v4 ip daddr != @internal_ok_v4 goto refuse' "$SANDBOX_DIR/egress-policy" \
+        || { echo "the packet filter does not state the rule independently"; return 1; }
 
-    # It asks the kernel instead, and loopback does not count - refusing over
-    # ::1 would refuse every container with no IPv6 connectivity at all.
-    grep -q '/proc/net/if_inet6' "$f" \
-        || { echo "nothing checks whether IPv6 is actually up"; return 1; }
-    grep -q 'lo' "$f" || { echo "the check no longer excludes loopback"; return 1; }
+    # And the guard has to sit above the loopback pass, or an answer of
+    # 127.0.0.1 reaches its destination without ever meeting it.
+    local chain guard lo
+    chain=$(sed -n '/chain egress {/,/^  }/p' "$SANDBOX_DIR/egress-policy")
+    guard=$(grep -n 'nonglobal_v4' <<< "$chain" | head -1 | cut -d: -f1)
+    lo=$(grep -n 'oifname "lo" accept' <<< "$chain" | head -1 | cut -d: -f1)
+    [ -n "$guard" ] && [ -n "$lo" ] || { echo "could not find both rules in the chain"; return 1; }
+    [ "$guard" -lt "$lo" ] \
+        || { echo "the non-global guard is below the loopback pass, so a loopback answer skips it"; return 1; }
+}
 
-    # And it can refuse. A branch that only logs is the thing being replaced,
-    # so the exit has to be reachable from it.
-    local branch
-    branch="$(sed -n '/^elif _ipv6_off_box/,/^else$/p' "$f")"
-    [ -n "$branch" ] || { echo "the live-IPv6 branch is gone"; return 1; }
-    grep -q 'exit 1' <<< "$branch" \
-        || { echo "the branch cannot refuse to start"; return 1; }
-    grep -q 'disable_ipv6' <<< "$branch" \
-        || { echo "it refuses without first trying to turn the family off"; return 1; }
+
+
+@test "the session user cannot address a resolver outside this namespace" {
+    # The name allow-list only means anything if the session cannot pick its
+    # own resolver. An arbitrary name sent to an arbitrary resolver carries data
+    # out in the query itself, whether or not the connection that would follow
+    # is ever permitted.
+    #
+    # Restricted by uid rather than refused outright, and the exception is not
+    # an oversight: the container runtime's own embedded resolver forwards
+    # onwards from inside this namespace on some versions, as root, and without
+    # that every lookup times out having been permitted. The session user is
+    # uid 1000 with no sudo, no setuid binary and no way to change uid, so the
+    # channel stays closed for the thing this exists to contain.
+    local p="$SANDBOX_DIR/egress-policy"
+    grep -q 'meta skuid \$resolver_uid ip daddr @upstream_v4 goto permit' "$p" \
+        || { echo "the forwarder has no route to an upstream resolver"; return 1; }
+    grep -q 'meta skuid 0 udp dport 53 goto permit' "$p" \
+        || { echo "the runtime's own resolver cannot forward, so every lookup will time out"; return 1; }
+    grep -q 'ip daddr @upstream_v4 goto refuse' "$p" \
+        || { echo "an unprivileged process can still reach the upstream resolver"; return 1; }
+    grep -qE '^\s+udp dport \{ 53, 853 \} goto refuse$' "$p" \
+        || { echo "DNS to an arbitrary destination is not refused"; return 1; }
+
+    # The uid exception must be exactly root and the forwarder - a third one
+    # would be a widening with no stated reason.
+    local uids
+    uids=$(grep -oE 'meta skuid [^ ]+' "$p" | sort -u)
+    [ "$(wc -l <<< "$uids")" -eq 2 ] \
+        || { echo "unexpected set of uids may reach a resolver:"; echo "$uids"; return 1; }
+
+    # And the cost of the root exception is stated where the rule is, rather
+    # than left for a reader to work out.
+    grep -q 'Root in the session container' "$p" \
+        || { echo "the root exception does not say what it costs"; return 1; }
+
+    # The permission is a uid match, so the account it names has to be one
+    # nothing else runs as - and the image is what guarantees that.
+    grep -q 'RESOLVER_USER=egress-resolver' "$p" \
+        || { echo "the resolver account is not the dedicated one"; return 1; }
+    grep -q 'useradd -r -M -s /usr/sbin/nologin egress-resolver' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "the image does not create the account the rule is keyed to"; return 1; }
+
+    # And it is verified at runtime, because a resolver that failed to drop
+    # would leave the rule keyed to an account nothing is using.
+    grep -q 'not \$RESOLVER_USER, so the rule permitting it to reach an upstream' "$p" \
+        || { echo "nothing checks the resolver actually runs as that account"; return 1; }
+}
+
+@test "the policy waits for the resolver to answer, not just to exist" {
+    # dnsmasq daemonizes and its parent returns almost immediately, so a check
+    # on the process succeeds while the child is still binding. A query sent
+    # into that window is refused by the kernel rather than answered, and every
+    # check after it reads that as the policy refusing a name it permits - a
+    # container that fails to start, intermittently, over nothing.
+    local p="$SANDBOX_DIR/egress-policy"
+    local block
+    block=$(sed -n '/^start_resolver()/,/^}/p' "$p")
+    grep -q 'dig ' <<< "$block" \
+        || { echo "start_resolver never asks the resolver whether it is answering"; return 1; }
+    # The probe has to be a name that must NOT resolve. Waiting on one that
+    # should would conflate "the resolver is up" with "the forward worked",
+    # which is the next check's question and a different failure.
+    grep -q 'PROBE_NAME' <<< "$block" \
+        || { echo "the readiness probe uses a name whose answer depends on the forward"; return 1; }
+    # And a bound, so a resolver that never answers fails loudly rather than
+    # hanging a container start forever.
+    grep -q 'did not answer' <<< "$block" \
+        || { echo "the wait has no bound, so a dead resolver hangs the start"; return 1; }
+}
+
+
+@test "an address family the policy cannot express is refused, not left unfiltered" {
+    # The old shape blocked IPv6 outright and had a branch that printed
+    # "assuming IPv6 is unavailable at the kernel level" and continued, which
+    # inferred a fact about the world from a fact about a tool. A container
+    # whose kernel lacked the v6 filtering module, on a host with IPv6 enabled,
+    # took it and ran with IPv6 live and unfiltered - and nothing failed,
+    # because all that had happened was a check that could not tell.
+    #
+    # The answer now is structural rather than a branch: one table covering
+    # both families, so there is no state in which one is filtered and the
+    # other is not. What is left to assert is that it is that kind of table,
+    # that its default is closed, and that failing to install it stops the
+    # container instead of being reported and survived.
+    local p="$SANDBOX_DIR/egress-policy"
+    grep -q 'table inet \$TABLE' "$p" \
+        || { echo "the table is not inet, so one family could go unfiltered"; return 1; }
+    grep -q 'policy drop' "$p" \
+        || { echo "the chain does not default to drop"; return 1; }
+
+    # Both families are actually written into the ruleset, not just available
+    # to it - an inet table with no ip6 rules covers v6 with the policy alone,
+    # which is a different and much weaker thing than an allow-list.
+    local chain
+    chain=$(sed -n '/chain egress {/,/^  }/p' "$p")
+    grep -q 'ip6 daddr' <<< "$chain" \
+        || { echo "no v6 rules in the chain"; return 1; }
+
+    # And it is verified after loading: if the kernel in this namespace could
+    # not express it there is no degraded mode to fall back to.
+    grep -q 'not present after loading' "$p" \
+        || { echo "nothing confirms the table came up"; return 1; }
+    # Matched on the phrase the two failures share rather than either whole
+    # sentence: which of them fired is a diagnostic that gets reworded, and the
+    # property is that the default is checked at all.
+    grep -q 'default-drop policy' "$p" \
+        || { echo "nothing confirms the default is closed"; return 1; }
 }
 
 @test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
@@ -4385,7 +4648,7 @@ sandbox_context() {
 
 @test "bin/dejima-allow ends with a real reachability check, not just config changes" {
     # "It said allowed but the sandbox still can't reach it" was a real
-    # failure mode (wrong container targeted / stale ipset) - the script
+    # failure mode (wrong container targeted / stale address set) - the script
     # must verify from inside the target container and say so definitively.
     grep -q 'connect-timeout' "$REPO_ROOT/bin/dejima-allow"
     grep -q 'Verified:' "$REPO_ROOT/bin/dejima-allow"
@@ -4699,7 +4962,7 @@ STUB
 }
 
 @test "every container runtime.bats starts is attached to a user-defined network" {
-    # On the default bridge there's no 127.0.0.11, so dns-proxy.sh aborts and
+    # On the default bridge there's no 127.0.0.11, so the policy aborts and
     # the container dies mid-startup - which used to surface as flaky,
     # sometimes vacuous tests rather than an obvious failure. See runtime.bats'
     # wait_ready comment.
@@ -4709,7 +4972,7 @@ STUB
     # every bit as much as the detached ones.
     #
     # Exempted: runs that replace the entrypoint with a plain shell. Those
-    # never reach dns-proxy.sh, so there is nothing for a resolver to be
+    # never reach the resolver, so there is nothing for it to be
     # missing from - the image/checkout comparison in setup_file is one, and it
     # only runs md5sum.
     local runs networks
@@ -4724,10 +4987,10 @@ STUB
 }
 
 @test "runtime.bats readiness waits for the final sleep infinity, not any startup sleep" {
-    # A bare `pgrep -x sleep` also matches dns-proxy.sh's dig-retry sleep and
+    # A bare `pgrep -x sleep` also matches the policy's own retry sleeps and
     # entrypoint.sh's forwarder-bind sleep, both of which run before
-    # init-firewall.sh has installed anything - asserting there would find
-    # OUTPUT ACCEPT and no ipsets, passing egress tests for the wrong reason.
+    # the egress policy has installed anything - asserting there would find
+    # an open namespace, passing egress tests for the wrong reason.
     grep -qF "pgrep -x -f 'sleep infinity'" "$REPO_ROOT/test/runtime.bats"
     run grep -nE 'docker exec.*pgrep -x sleep' "$REPO_ROOT/test/runtime.bats"
     [ "$status" -ne 0 ]
@@ -5012,14 +5275,24 @@ STUB
     # grep BRE, where an unescaped "." matches any character: a project could
     # declare "aexample.com" and have the hook match the server= line for an
     # already-approved "a.example.com", reporting an unapproved domain as
-    # allowed. Anchored to the matching line itself - the servers file is an
-    # absolute path only the container has, so this can't be driven from a
-    # host-side test, and a file-wide grep would be satisfied by the same
-    # expression appearing anywhere else.
-    run grep -n 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
-    [ "$status" -eq 0 ]
-    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
-    [[ "$output" == *'grep -q "^server=/${dom//./\\.}/"'* ]]
+    # allowed.
+    #
+    # That whole class of question went away with the probe: the hook now asks
+    # the resolver whether the name answers, rather than pattern-matching a
+    # configuration file. It had to, because that file is in the FILTER
+    # container and the session cannot read it - so the grep found nothing and
+    # every declared domain was reported missing, including ones the session
+    # could plainly reach. What is left to pin is that it does not go back to
+    # reading a file it has no access to.
+    run grep -n 'dnsmasq\|servers.conf\|/run/egress-policy' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    [ "$status" -ne 0 ] \
+        || { echo "the probe reads the filter container's files again:"; echo "$output"; return 1; }
+    grep -q 'dig +short' "$REPO_ROOT/hooks/dejima-briefing-render.sh" \
+        || { echo "nothing asks the resolver whether a declared domain is permitted"; return 1; }
+    # Bounded, because an agent is waiting on this and one unanswered name
+    # would otherwise spend dig's default 15s on its own.
+    grep -qE 'dig \+short \+time=[0-9]+ \+tries=[0-9]+' "$REPO_ROOT/hooks/dejima-briefing-render.sh" \
+        || { echo "the lookup is unbounded, so a slow name stalls the briefing"; return 1; }
 }
 
 @test "sandbox-context reads its stdin payload once" {
@@ -5037,7 +5310,7 @@ STUB
     grep -q 'cargo install --list' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
     # domains are checked against what this container actually resolves,
     # not against the host-side approval store it cannot see
-    grep -q 'dnsmasq-sandbox-servers.conf' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
+    grep -q 'dig +short' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
     grep -q 'dejima-project approve' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
 }
 
@@ -6401,11 +6674,23 @@ EOF
 SCANNED_PATHS=(README.md SECURITY.md ATTRIBUTION.md docs docker bin forges workflows harnesses hooks install.sh systemd .gitea)
 
 @test "no private or link-local address is used as a documentation example" {
+    # The canonical network identifiers - 10.0.0.0/8 and the rest, written out
+    # in full with their own prefix length - are excluded, because a tool that
+    # refuses traffic to private space has to be able to name the space it
+    # refuses (docker/egress-policy). A leak is a HOST address inside one of
+    # these ranges, which is a different string: the operator's Loki box was
+    # 10.x.y.z with no prefix, not the range it sits in. So the exclusion is
+    # exact-match on the range identifier and nothing near it - 10.0.0.0/9,
+    # or 10.0.0.1, is still caught.
     run grep -rnIE '\b(10|127\.0\.0\.[2-9]|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' \
         "${SCANNED_PATHS[@]/#/$REPO_ROOT/}"
-    [ "$status" -ne 0 ] || {
+    local leaks
+    leaks=$(printf '%s\n' "$output" | grep -v '^$' \
+        | grep -vE '(^|[^0-9.])(10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16|169\.254\.0\.0/16|127\.0\.0\.0/8)([^0-9/]|$)' \
+        || true)
+    [ -z "$leaks" ] || {
         echo "use an RFC 5737 documentation address instead:" >&2
-        echo "$output" >&2
+        echo "$leaks" >&2
         false
     }
 }
@@ -6739,8 +7024,9 @@ _provider_proxied_domain() {
     sed -n 's/^proxied_domain *= *//p' "$REPO_ROOT/backends/anthropic/backend.conf"
 }
 
-@test "the selected harness's own domains are in the fixed list, not built into the image" {
-    # A harness's own api_domains reach the fixed list through its manifest.
+
+@test "the selected harness's own domains are in the permitted set, not built into the image" {
+    # A harness's own api_domains reach the permitted set through its manifest.
     # A name built into fixed-domains.sh instead would be inherited by every
     # harness while a second one still lacked its own.
     [ -n "$(_harness_api_domains)" ] || { echo "the harness declares no api_domains"; return 1; }
@@ -6748,44 +7034,47 @@ _provider_proxied_domain() {
     # to explain why they are not written in, which is prose, not a value.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/fixed-domains.sh' | grep -n 'platform\.claude\.com\|api\.anthropic\.com'"
     [ "$status" -ne 0 ] || { echo "a harness's domain is still built in:"; echo "$output"; return 1; }
-    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS='$(_harness_api_domains)'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
     # And a harness declaring none gets none, rather than the last one's.
-    run bash -c "set -u; SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS=''; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "set -u; SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/p.sock; SANDBOX_HARNESS_DOMAINS=''; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'platform.claude.com' <<< "$output" || { echo "$output"; return 1; }
 }
 
-@test "api.anthropic.com is in the fixed domains only when the proxy is off" {
-    # Not unconditionally allowlisted: with the proxy on, the session reaches
-    # the API through the forwarder rather than by resolving this name, so
-    # leaving it unresolvable defeats a bypass that looks it up by DNS. When
-    # the proxy is off (kill
-    # switch or API-key auth) DNS is the only path to the API, so it has to be
-    # allowlisted - and in the *fixed* list, not EXTRA_ALLOWED_DOMAINS, which
-    # dns-proxy.sh exempts from stop-dns-rebind and init-firewall.sh treats as
-    # non-fatal when it fails to resolve.
+
+@test "api.anthropic.com is permitted only when the proxy is off" {
+    # Not unconditionally permitted: with the proxy on, the session reaches the
+    # API through the forwarder rather than by resolving this name, so leaving
+    # it unresolvable defeats a bypass that looks it up by DNS. When the proxy
+    # is off (kill switch or API-key auth) DNS is the only path to the API, so
+    # it has to be permitted - in the open class and NOT exempted from the
+    # answer check, because it is a public SaaS name and an answer for it
+    # pointing inside the operator's network is exactly what that check is for.
     local pd; pd="$(_provider_proxied_domain)"
     [ -n "$pd" ] || { echo "the harness declares no proxied_api_domain"; return 1; }
-    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=/tmp/proxy.sock; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     [ "$status" -eq 0 ]
     ! grep -qx 'api.anthropic.com' <<< "$output"
 
-    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    run bash -c "SANDBOX_CREDENTIAL_PROXY_SOCKET=; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
     # Unset (a bare `docker run` that passes no socket) must behave like empty.
-    # Under `set -u`, as both consumers run, so that dropping the `:-` default
-    # fails here rather than at container start.
-    run bash -c "set -u; unset SANDBOX_CREDENTIAL_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+    # Under `set -u`, as the real consumer runs, so that dropping the `:-`
+    # default fails here rather than at container start.
+    run bash -c "set -u; unset SANDBOX_CREDENTIAL_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     [ "$status" -eq 0 ]
     grep -qx 'api.anthropic.com' <<< "$output"
 
-    # ...and entrypoint.sh no longer adds it to the extra list, which would
-    # reinstate both of the exemptions above.
-    ! grep -q 'extra_domains.*api.anthropic.com' "$SANDBOX_DIR/entrypoint.sh"
+    # And it is never exempted from the answer check, which is the half that
+    # would make permitting it a way into the operator's own network.
+    run bash -c "set -u; unset SANDBOX_CREDENTIAL_PROXY_SOCKET; SANDBOX_BACKEND_PROXIED_DOMAIN='$pd'; source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_INTERNAL_CLASS[@]+\${DEJIMA_INTERNAL_CLASS[@]}}\""
+    [ "$status" -eq 0 ]
+    ! grep -qx 'api.anthropic.com' <<< "$output" \
+        || { echo "the proxied domain is exempt from the answer check"; return 1; }
 }
 
 @test "an unrecognised SANDBOX_CREDENTIAL_TRANSPORT is rejected, not silently treated as loopback" {
@@ -7267,7 +7556,7 @@ _provider_proxied_domain() {
     # They hold no code, which is why they were left out. What they hold
     # decides what the next launch permits: a forge's fixed_hosts reaches
     # DEJIMA_FORGE_HOSTS, which entrypoint.sh joins into the domains
-    # init-firewall.sh allowlists, so a manifest line widens the egress
+    # the egress policy permits, so a manifest line widens the egress
     # boundary on the next run. A briefing fragment is what the next session
     # is told it may do.
     local dirs
@@ -7362,17 +7651,30 @@ _provider_proxied_domain() {
     done < <(lib provider_list harness)
 }
 
+
 @test "the container's log shipper reads nothing the session writes" {
     # It runs as root, for tamper-resistance: an oversight log the surveilled
-    # user owns is one they can edit. That privilege is only safe while what
-    # it parses is not session-writable, which is what this holds - dnsmasq
-    # and ulogd2 output, both written by root-owned daemons.
+    # user owns is one they can edit. That privilege is only safe while what it
+    # parses is not session-writable, which is what this holds - the two
+    # records the policy produces, both written by daemons in the filter
+    # container, which the session has no way to reach.
     # Non-comment lines only: the comment there says where conversation
     # shipping went, which is worth keeping.
     run bash -c "grep -vE '^[[:space:]]*#' '$SANDBOX_DIR/log-shipper.sh' | grep -nE 'projects|[.]jsonl|transcript'"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    # Both streams come from the directory the policy owns, in the container
+    # the session is not in.
+    run bash -c "grep -E '^ship_stream ' '$SANDBOX_DIR/log-shipper.sh'"
+    [ "$status" -eq 0 ]
+    local line
+    while read -r line; do
+        [ -n "$line" ] || continue
+        grep -q '/var/log/egress-policy/' <<< "$line" \
+            || { echo "a stream reads outside the policy's own log directory: $line"; return 1; }
+    done <<< "$output"
     # And the claim that makes root safe, where the shipper is now started.
-    grep -q 'neither session-writable' "$SANDBOX_DIR/firewall-up.sh"
+    grep -q 'tamper-resistance' "$SANDBOX_DIR/firewall-up.sh" \
+        || { echo "firewall-up.sh no longer says why the shipper keeps root"; return 1; }
 }
 
 @test ".dejima.md says to cut what the code replaced, not just how it was found" {
@@ -7439,23 +7741,24 @@ _emit_mount_at() {
     [[ "$output" == *"containing a colon"* ]] || { echo "$output"; return 1; }
 }
 
+
 @test "the harness domain list splits the same for both consumers of it" {
-    # init-firewall.sh sources fixed-domains.sh with IFS=$'\n\t' and
-    # dns-proxy.sh with the default, so an unquoted expansion hands them
-    # different lists from one value - the drift that shared file exists to
-    # prevent. The single-domain real manifest cannot show it, which is why
-    # this uses two and reproduces init-firewall's IFS.
-    local two="a.example.com b.example.com" n_fw n_dns
-    n_fw="$(bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
-        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
-    n_dns="$(bash -c "SANDBOX_HARNESS_DOMAINS='$two'
-        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#FIXED_DOMAINS[@]}")"
-    [ "$n_fw" = "$n_dns" ] \
-        || { echo "firewall sees $n_fw entries, dns proxy sees $n_dns"; return 1; }
-    # And both as separate names, not one glued element that fails the
-    # firewall's DNS check fatally.
+    # firewall-up.sh sources fixed-domains.sh in the container and
+    # bin/dejima-allow sources it on the host, under whatever IFS each happens
+    # to have - so an unquoted expansion hands them different lists from one
+    # value, which is the drift that shared file exists to prevent. The
+    # single-domain real manifest cannot show it, which is why this uses two.
+    local two="a.example.com b.example.com" n_strict n_default
+    n_strict="$(bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#DEJIMA_OPEN_CLASS[@]}")"
+    n_default="$(bash -c "SANDBOX_HARNESS_DOMAINS='$two'
+        source '$SANDBOX_DIR/fixed-domains.sh'; echo \${#DEJIMA_OPEN_CLASS[@]}")"
+    [ "$n_strict" = "$n_default" ] \
+        || { echo "one consumer sees $n_strict entries, the other $n_default"; return 1; }
+    # And both as separate names, not one glued element that would be permitted
+    # as a single nonsense destination and fail the startup check.
     run bash -c "IFS=\$'\\n\\t'; SANDBOX_HARNESS_DOMAINS='$two'
-        source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${FIXED_DOMAINS[@]}\""
+        source '$SANDBOX_DIR/fixed-domains.sh'; printf '%s\n' \"\${DEJIMA_OPEN_CLASS[@]}\""
     grep -qx 'a.example.com' <<< "$output" || { echo "$output"; return 1; }
     grep -qx 'b.example.com' <<< "$output" || { echo "$output"; return 1; }
 }

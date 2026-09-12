@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""Collapse CIDRs into the smallest equivalent list.
+
+Reads networks from the arguments, or from stdin if there are none, separated
+by whitespace or commas. v4 and v6 may be mixed; each family is collapsed
+independently and printed v4 first.
+
+Every entry is validated on the way through, so a malformed range from an
+upstream document stops the caller rather than being loaded into a live
+allowlist. egress-policy relies on both halves of that: the collapse keeps the
+interval sets small, and the validation is the only thing checking what the
+forge's published document actually contained.
+"""
+import ipaddress
+import re
+import sys
+
+
+def main():
+    words = sys.argv[1:] or re.split(r"[\s,]+", sys.stdin.read())
+    families = {4: [], 6: []}
+    for word in words:
+        if not word:
+            continue
+        try:
+            net = ipaddress.ip_network(word, strict=False)
+        except ValueError as exc:
+            sys.exit(f"cidr-collapse: {exc}")
+        families[net.version].append(net)
+    for version in (4, 6):
+        for net in ipaddress.collapse_addresses(families[version]):
+            print(net)
+
+
+if __name__ == "__main__":
+    main()

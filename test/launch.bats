@@ -79,7 +79,7 @@ log_pos() { grep -n -- "$1" "$LAUNCH_DIR/docker-log" | tail -1 | cut -d: -f1; }
         || { echo "the filter container does not run the filter entrypoint: $run"; return 1; }
 
     # One network per launch, and the filter container on that one - not on
-    # whatever bridge Docker would have picked. dns-proxy.sh forwards to the
+    # whatever bridge Docker would have picked. The restricted resolver forwards to the
     # embedded resolver at 127.0.0.11, which only exists on a user-defined
     # network, so this is load-bearing rather than tidiness.
     local id; id="$(sed -E 's/.*dejima-run-([0-9a-f]{16}).*/\1/' <<< "$net")"
@@ -152,7 +152,7 @@ case "$*" in
     # what a firewall that refused to start leaves behind.
     *dejima-firewall-ready*) exit 1 ;;
     *inspect*State.Running*) echo false; exit 0 ;;
-    *logs*) echo "init-firewall.sh: DNS lookup for registry.npmjs.org failed"; exit 0 ;;
+    *logs*) echo "[egress-policy] FAILED: registry.npmjs.org did not resolve"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -225,31 +225,59 @@ EOF
     done
 }
 
+
 @test "every variable the firewall path reads is passed to the filter container" {
     # The drift guard this arrangement needs most. The sandbox gets its
     # environment from docker-compose.yml; the filter container is started with
     # `docker run` and gets nothing that is not named on that command line.
     #
     # So a firewall script that starts reading a new variable does not fail - it
-    # reads an empty one, and allowlists less than it was told to, which
-    # presents as a domain the operator approved being unreachable rather than
-    # as anything about this. Derived from the scripts rather than listed here,
-    # so the test cannot drift from them either.
+    # reads an empty one, and permits less than it was told to, which presents
+    # as a domain the operator approved being unreachable rather than as
+    # anything about this. Derived from the scripts rather than listed here, so
+    # the test cannot drift from them either.
     stub_launch
     launch "$PROJ"
     local run; run="$(log_line 'run -d --init')"
     [ -n "$run" ]
 
+    # A name these files ORIGINATE is their own working value, not something
+    # the launcher supplies, so only names they read without originating have
+    # to be passed in. Derived rather than listed, because a hand-kept
+    # exclusion list is the same drift this test exists to catch, one level up.
+    #
+    # `X="${X:-}"` does not count as originating X: it reads the launcher's
+    # value and supplies a default for its absence, which is the shape every
+    # variable here is consumed with. Counting it would have quietly dropped
+    # LOKI_URL out of the required set.
+    local scripts=("$SANDBOX_DIR/firewall-up.sh" "$SANDBOX_DIR/egress-policy"
+                   "$SANDBOX_DIR/fixed-domains.sh" "$SANDBOX_DIR/log-shipper.sh")
+    # The awk program is held in a variable rather than written inline: it
+    # contains a double quote, and bash mis-nests one inside a single-quoted
+    # program inside "$( )" - the whole file then fails to parse, as a syntax
+    # error pointing at an unrelated line much further down.
+    local prog assigned
+    prog=$(cat <<'AWK'
+match($0, /^[[:space:]]*(export |readonly |local )?[A-Z][A-Z0-9_]*\+?=/) {
+    decl = substr($0, RSTART, RLENGTH)
+    rest = substr($0, RSTART + RLENGTH)
+    gsub(/^[[:space:]]*(export|readonly|local)[[:space:]]+/, "", decl)
+    sub(/\+?=$/, "", decl)
+    if (rest ~ ("[$]{?" decl)) next
+    print decl
+}
+AWK
+)
+    assigned="$(cat "${scripts[@]}" | awk "$prog" | sort -u)"
     local v missing=""
     while read -r v; do
         [ -n "$v" ] || continue
+        grep -qxF "$v" <<< "$assigned" && continue
         [[ "$run" == *"-e $v"* ]] || missing="$missing $v"
-    done < <(cat "$SANDBOX_DIR/firewall-up.sh" "$SANDBOX_DIR/dns-proxy.sh" \
-                 "$SANDBOX_DIR/init-firewall.sh" "$SANDBOX_DIR/fixed-domains.sh" \
-                 "$SANDBOX_DIR/log-shipper.sh" \
+    done < <(cat "${scripts[@]}" \
              | grep -oE '\$\{?(ALLOW[A-Z_]*|DEJIMA_[A-Z_]*|ENABLE_[A-Z_]*|GH_TOKEN|LOKI_URL|SANDBOX_[A-Z_]*)' \
              | tr -d '${' | sort -u \
-             | grep -vE '^(EXTRA_ALLOWED_DOMAINS|SANDBOX_TEST.*)$')
+             | grep -vE '^(SANDBOX_TEST.*)$')
 
     [ -z "$missing" ] \
         || { echo "the firewall path reads these, and the filter container is not given them:$missing"; return 1; }
@@ -257,7 +285,7 @@ EOF
     # And the other half of the same failure, which the flag alone cannot show.
     # `docker run -e NAME` takes the value from the launcher's environment, so
     # a name that is assigned but never exported passes an empty one - the
-    # filter container then allowlists less than it was told to, and what an
+    # filter container then permits less than it was told to, and what an
     # operator sees is a domain they approved being unreachable, with nothing
     # pointing here.
     #
