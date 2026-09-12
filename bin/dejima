@@ -982,12 +982,12 @@ DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
 # A forge declaring hosts_allowlisted_by_core says its hosts are ones core
 # already allowlists in its own right - the GitHub ranges every session can
 # read from over 443. Those must NOT reach DEJIMA_FORGE_HOSTS, which
-# entrypoint.sh folds into EXTRA_ALLOWED_DOMAINS: that path resolves a name
-# into the port-UNRESTRICTED allowed-domains ipset and exempts it from
-# dnsmasq's stop-dns-rebind, both of which are deliberate for an internal,
-# self-hosted forge host and both of which are a widening for a public one.
-# It would also make init-firewall.sh's startup self-check ("port 22 was
-# reachable without the push grant") fail, killing the container outright.
+# firewall-up.sh puts in the open class: that path permits a name on every
+# port and exempts it from the check that refuses an answer pointing inside a
+# private network, both of which are deliberate for an internal, self-hosted
+# forge host and both of which are a widening for a public one. It would also
+# make the policy's startup self-check ("port 22 was reachable without the
+# push grant") fail, killing the container outright.
 #
 # They still reach DEJIMA_PUSH_HOSTS: git-push-guard.sh's allowlist is a
 # separate question from which names the firewall resolves, and a push to a
@@ -1021,7 +1021,7 @@ fi
 # --allow-github-push's actual effect: git-push-guard.sh only ever checks
 # DEJIMA_PUSH_HOSTS, so granting it a github.com push means adding these
 # hosts to that list, not just exporting ALLOW_GITHUB_PUSH - that variable
-# reaches only init-firewall.sh's port-22 grant and its startup self-check,
+# reaches only the egress policy's port-22 grant and its startup self-check,
 # never the guard. Keyed to the
 # flag alone, not to ALLOW_CORE_PUSH_GRANT: a forge whose own hosts these
 # are has already contributed them above, and adding them twice would leave
@@ -2254,6 +2254,24 @@ export SANDBOX_CMD
 ENABLE_FIREWALL="$(config_get_bool core firewall)"; export ENABLE_FIREWALL
 LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
 
+# Approved names that genuinely resolve inside the operator's own network.
+#
+# The egress policy refuses an answer for a permitted name that points at a
+# private address, because an answer decides what the allowlist contains and an
+# answer comes from outside - so one influenced reply for a public name would
+# otherwise be egress to an internal host. The configured forge and Loki are
+# exempt without being listed here: dejima resolves their addresses itself, so
+# there is nothing for an answer to decide. An approved domain is not, because
+# a project's declared domains are reviewed with the project and expected to be
+# public names.
+#
+# This is for the case where that expectation is wrong on purpose - an internal
+# mirror, a service on the operator's LAN. Colon-separated in the config file
+# like every other list; space-separated from here on, which is what the
+# firewall scripts read.
+DEJIMA_INTERNAL_DOMAINS="$(config_get core internal_domains | tr ':' ' ')"
+export DEJIMA_INTERNAL_DOMAINS
+
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
 # config/claude/hooks/ for deny-dangerous-bash.sh, if that's what a given
@@ -3383,7 +3401,8 @@ reconcile_orphans || true
 
 # One network per launch, for two reasons, and the first is not optional:
 # Docker's embedded resolver at 127.0.0.11 exists only on a user-defined
-# network, and dns-proxy.sh forwards to it. The second is that concurrent
+# network, and the restricted resolver forwards to it. The second is that
+# concurrent
 # sessions are then separated at the link layer as well, rather than only by
 # each namespace's own egress default-deny.
 docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK" >/dev/null
@@ -3404,6 +3423,7 @@ filter_env=(
     -e ALLOW_GITHUB_PUSH     # whether port 22 to GitHub opens
     -e GH_TOKEN              # authenticates the GitHub ranges fetch
     -e LOKI_URL              # its host is allowlisted, and the shipper needs it
+    -e DEJIMA_INTERNAL_DOMAINS  # approved names that really do resolve inside
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET
@@ -3413,12 +3433,13 @@ filter_env=(
 # owns needs. Every one of these used to be in docker-compose.yml, and none of
 # them belongs to a container running a session:
 #
-#   NET_ADMIN, NET_RAW   the packet filter and the ipsets
-#   KILL                 dnsmasq drops to its own user, and dejima-allow
-#                        signals it to add a domain mid-session
+#   NET_ADMIN, NET_RAW   the packet filter and its named address sets, which
+#                        the resolver also writes into as it answers
+#   KILL                 the resolver drops to its own user, and dejima-allow
+#                        restarts it to add a domain mid-session
 #   CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID
-#                        dns-proxy.sh's log file, and the two daemons that
-#                        drop privilege after opening what they need
+#                        the log files, and the daemons that drop privilege
+#                        after opening what they need
 #   SETPCAP              spent taking the rest away from log-shipper.sh
 #
 # The sysctl lets the credential proxy's TLS terminator bind :443 as the

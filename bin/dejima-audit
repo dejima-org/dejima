@@ -953,8 +953,8 @@ tcb_snapshot() {
         #
         # A forge's `fixed_hosts` and a harness's paths are resolved on the
         # host and handed to the container: fixed_hosts reaches
-        # DEJIMA_FORGE_HOSTS, which entrypoint.sh joins into extra_domains and
-        # init-firewall.sh allowlists. So a line added to a manifest widens the
+        # DEJIMA_FORGE_HOSTS, which firewall-up.sh puts into the permitted set
+        # the egress policy is given. So a line added to a manifest widens the
         # egress allowlist on the next launch - the boundary that bounds where
         # a compromised session can send anything.
         #

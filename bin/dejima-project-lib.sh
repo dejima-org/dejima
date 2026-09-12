@@ -481,7 +481,7 @@ _emit_tarball_layers() {
 # Installs run at BUILD time, where there's no egress firewall - which is
 # why this is a derived image rather than an install step in entrypoint.sh:
 # the latter would need apt/npm/PyPI/crates.io reachable as root before
-# init-firewall.sh locks egress down.
+# the egress policy locks egress down.
 generate_derived_dockerfile() {
     local base="$1" store="$2" entries
     entries="$(approved_entries "$store" dependencies)" \

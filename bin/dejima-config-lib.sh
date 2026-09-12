@@ -45,6 +45,7 @@ core.command	?identifier
 core.identity	?identifier
 core.tools	?list:identifier
 core.firewall	bool	on
+core.internal_domains	?list:hostname
 ui.banner	bool	on
 core.update_check	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
@@ -290,8 +291,9 @@ valid_tarball_spec() {
 # server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
 # there is one definition and no pair of them to drift apart.
 # A hostname, label by label. The matcher is a trust boundary: what it accepts
-# becomes a dnsmasq `server=` line and an ipset entry, so it should accept only
-# what it means to rather than only what it can see a use for.
+# becomes a dnsmasq `server=` line and an entry in the packet filter's address
+# sets, so it should accept only what it means to rather than only what it can
+# see a use for.
 #
 # The previous form allowed an EMPTY label - `a..b.com` matched - because its
 # repeated group could consume a dot having matched no characters before it.

@@ -5,8 +5,8 @@
 # systemd/dejima-ttyd.service.
 # See docs/remote-access.md.
 #
-# --interface 127.0.0.1 is a requirement, not a preference. init-firewall.sh
-# accepts container OUTPUT to the bridge gateway (the host), and attaching
+# --interface 127.0.0.1 is a requirement, not a preference. The egress policy
+# permits traffic to the container's own host, and attaching
 # tmux gives a HOST shell - the prefix key opens a window outside the
 # container. A listener on any address the container can route to is a
 # compromised session's escape hatch; loopback is not one of them. Put nginx
