@@ -52,7 +52,7 @@ running.
 
 ## The bind address is the one thing to get right
 
-`docker/init-firewall.sh` deliberately ACCEPTs OUTPUT to the session's
+`docker/egress-policy` deliberately permits traffic to the session's
 default-route address - the Docker bridge gateway, which is your host. That is
 the one host address a sandbox can reach at all. Combine it with the fact above
 (a tmux client is a host shell) and the consequence is direct: **a front door
