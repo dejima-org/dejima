@@ -2225,7 +2225,9 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     local from_lo from_bridge
     docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099' \
         >/dev/null 2>&1 && from_lo=0 || from_lo=$?
-    docker run --rm --network "$(network_name)" --entrypoint bash "$SESSION_IMAGE" \
+    docker run --rm \
+        --network "$(network_name)" \
+        --entrypoint bash "$SESSION_IMAGE" \
         -c "timeout 5 bash -c 'exec 3<>/dev/tcp/$addr/8099'" >/dev/null 2>&1 \
         && from_bridge=0 || from_bridge=$?
     dexec_node bash -c 'pkill -f "http.server 8099" || true'
