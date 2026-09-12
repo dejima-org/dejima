@@ -787,14 +787,15 @@ session_pid() {  # [container], defaulting to the file-wide one
 }
 
 @test "the session user cannot address a resolver directly, so the DNS allowlist is not bypassable" {
-    # The policy permits traffic to a resolver outside this namespace only
-    # from the uid the forwarder drops to, because that is what forwards
-    # permitted names and without it nothing in here resolves at all. This is
-    # the assertion that the opening stops there. `node` is the session user
-    # and there is no sudo in the image, so if it could reach a resolver of its
-    # own choosing it could carry data out in the query name itself - the exact
-    # thing the name allowlist exists to prevent, and something no allowlist of
-    # *names* can catch once the *resolver* is attacker-chosen.
+    # Reaching a resolver outside this namespace is restricted by uid: the
+    # forwarder, and root, because the container runtime's own resolver
+    # forwards onwards from in here and every lookup times out without it.
+    # `node` is neither - no sudo, no setuid binary, no way to change uid - so
+    # this is the assertion that the opening stops short of the session. If it
+    # could reach a resolver of its own choosing it could carry data out in the
+    # query name itself, which is the exact thing the name allowlist exists to
+    # prevent and something no allowlist of *names* can catch once the
+    # *resolver* is attacker-chosen.
     #
     # 1.1.1.1 rather than an unrouted address: it answers if it is reachable,
     # so a pass here means the packet was stopped and not that the probe was
@@ -804,6 +805,13 @@ session_pid() {  # [container], defaulting to the file-wide one
 
     run dexec_node dig +time=2 +tries=1 @1.1.1.1 definitely-not-allowed.example.org
     [ "$status" -ne 0 ]
+
+    # And the runtime's embedded resolver, which is on loopback and which the
+    # root exception does NOT reach past: the session user addressing it
+    # directly is the query-name channel, and it stays closed.
+    run dexec_node dig +time=2 +tries=1 @127.0.0.11 definitely-not-allowed.example.org
+    [ "$status" -ne 0 ] \
+        || { echo "the session user reached the runtime's resolver: $output"; return 1; }
 }
 
 @test "api.anthropic.com resolves in proxy-off mode (kill switch / API-key auth)" {

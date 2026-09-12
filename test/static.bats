@@ -4159,18 +4159,40 @@ registered_commands() {
 }
 
 
-@test "no resolver outside this namespace is reachable except by the forwarder" {
-    # The name allow-list only means anything if the policy's own resolver is
-    # the only one anything here can reach. An arbitrary name sent to an
-    # arbitrary resolver carries data out in the query itself, whether or not
-    # the connection that would follow is ever permitted.
+
+@test "the session user cannot address a resolver outside this namespace" {
+    # The name allow-list only means anything if the session cannot pick its
+    # own resolver. An arbitrary name sent to an arbitrary resolver carries data
+    # out in the query itself, whether or not the connection that would follow
+    # is ever permitted.
+    #
+    # Restricted by uid rather than refused outright, and the exception is not
+    # an oversight: the container runtime's own embedded resolver forwards
+    # onwards from inside this namespace on some versions, as root, and without
+    # that every lookup times out having been permitted. The session user is
+    # uid 1000 with no sudo, no setuid binary and no way to change uid, so the
+    # channel stays closed for the thing this exists to contain.
     local p="$SANDBOX_DIR/egress-policy"
     grep -q 'meta skuid \$resolver_uid ip daddr @upstream_v4 goto permit' "$p" \
         || { echo "the forwarder has no route to an upstream resolver"; return 1; }
+    grep -q 'meta skuid 0 udp dport 53 goto permit' "$p" \
+        || { echo "the runtime's own resolver cannot forward, so every lookup will time out"; return 1; }
     grep -q 'ip daddr @upstream_v4 goto refuse' "$p" \
-        || { echo "anything else can still reach the upstream resolver"; return 1; }
+        || { echo "an unprivileged process can still reach the upstream resolver"; return 1; }
     grep -qE '^\s+udp dport \{ 53, 853 \} goto refuse$' "$p" \
         || { echo "DNS to an arbitrary destination is not refused"; return 1; }
+
+    # The uid exception must be exactly root and the forwarder - a third one
+    # would be a widening with no stated reason.
+    local uids
+    uids=$(grep -oE 'meta skuid [^ ]+' "$p" | sort -u)
+    [ "$(wc -l <<< "$uids")" -eq 2 ] \
+        || { echo "unexpected set of uids may reach a resolver:"; echo "$uids"; return 1; }
+
+    # And the cost of the root exception is stated where the rule is, rather
+    # than left for a reader to work out.
+    grep -q 'Root in the session container' "$p" \
+        || { echo "the root exception does not say what it costs"; return 1; }
 
     # The permission is a uid match, so the account it names has to be one
     # nothing else runs as - and the image is what guarantees that.
@@ -4178,8 +4200,6 @@ registered_commands() {
         || { echo "the resolver account is not the dedicated one"; return 1; }
     grep -q 'useradd -r -M -s /usr/sbin/nologin egress-resolver' "$SANDBOX_DIR/Dockerfile" \
         || { echo "the image does not create the account the rule is keyed to"; return 1; }
-    grep -q 'nobody' "$p" \
-        || { echo "the reasoning for not using nobody has been dropped"; return 1; }
 
     # And it is verified at runtime, because a resolver that failed to drop
     # would leave the rule keyed to an account nothing is using.

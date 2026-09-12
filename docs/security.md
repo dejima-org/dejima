@@ -1278,10 +1278,17 @@ Without this, a compromised session could exfiltrate data by encoding it into
 query names to an attacker-controlled domain, even with no direct connection
 ever possible.
 
-Two rules make that hold rather than merely intend it. Nothing in the
-namespace may reach a resolver outside it except the forwarder itself, matched
-by the uid of an account the image creates for that and nothing else - so the
-only resolver a session can address is the restricting one. And an answer for
+Two rules make that hold rather than merely intend it. Reaching a resolver
+outside the namespace is restricted by uid: the forwarder, running as an
+account the image creates for that and nothing else, and root, because the
+container runtime's own embedded resolver forwards onwards from inside this
+namespace on some versions and every lookup fails without it. The session user
+is neither - uid 1000, no sudo, no setuid binary, no capability to change uid -
+so the only resolver it can address is the restricting one, which is what
+closes the query-name channel. Root in the session container would be a way
+around it; that is the same posture the firewall this replaced had, and
+narrowing it further needs a discriminator finer than uid, which the packet
+filter cannot express between two containers sharing one namespace. And an answer for
 a permitted name that points at a private, loopback or link-local address is
 refused, because an answer decides what the allowlist contains and an answer
 comes from outside: one influenced reply for a public name would otherwise be

@@ -443,7 +443,7 @@ apply_ruleset() {
   # prefix is there so a raw nft trace is still readable.
   chain permit {
     ct state new log prefix "egress allow " group $NFLOG_ALLOW
-    accept
+    counter accept
   }
 
   # Refused, not dropped: a caller must get an error immediately. A TCP reset
@@ -451,8 +451,11 @@ apply_ruleset() {
   # admin-prohibited, which surfaces as EHOSTUNREACH rather than a timeout.
   # Silently dropping would make every blocked destination look like a hang,
   # which is the failure mode this policy is meant to avoid.
+  # Counted as well as logged. The log needs a consumer and a reader; the
+  # counter is readable from the container at the moment something fails, which
+  # is what a startup self-check has to work with.
   chain refuse {
-    log prefix "egress refuse " group $NFLOG_REFUSE
+    counter log prefix "egress refuse " group $NFLOG_REFUSE
     meta l4proto tcp reject with tcp reset
     reject with icmpx type admin-prohibited
   }
@@ -465,21 +468,45 @@ apply_ruleset() {
     ct state invalid drop
 
     # DNS discipline, before the loopback pass below, because the runtime's own
-    # resolver lives on a loopback address too. A name that is not permitted
-    # must not resolve anywhere, so the only resolver reachable from this
-    # namespace is ours, and the only process that may speak to a resolver
-    # outside it is the forwarder - matched by the uid of the account created
-    # for it and used by nothing else. Without this, an agent could put whatever
-    # it liked in a query and send it straight to the runtime's resolver, which
-    # forwards off-box; the query itself is the exfiltration.
+    # resolver lives on a loopback address too. The session user must not be
+    # able to address a resolver of its own choosing: an arbitrary name sent to
+    # an arbitrary resolver carries data out in the query itself, whether or not
+    # the connection that would follow is ever permitted.
+    #
+    # Anything may reach OUR resolver, which is the point of having one.
     ip daddr 127.0.0.1 udp dport 53 goto permit
     ip daddr 127.0.0.1 tcp dport 53 goto permit
     ip6 daddr ::1 udp dport 53 goto permit
     ip6 daddr ::1 tcp dport 53 goto permit
+
+    # The forwarder reaching the resolvers this namespace was given, matched by
+    # the uid of the account created for it and used by nothing else. Any port,
+    # not just 53: the runtime reaches its embedded resolver through a DNAT rule
+    # that rewrites the port, so a port match would miss it.
     meta skuid $resolver_uid ip daddr @upstream_v4 goto permit
     meta skuid $resolver_uid ip6 daddr @upstream_v6 goto permit
-    # Any port, not just 53: the runtime reaches its embedded resolver through
-    # a DNAT rule that rewrites the port, so a port match would miss it.
+
+    # And the runtime's own embedded resolver forwarding onwards, which happens
+    # from inside THIS namespace on some versions and not on others - two hosts
+    # with byte-identical resolver configuration behaved differently, so it
+    # cannot be assumed either way. Those queries leave as root, to the host's
+    # real nameservers, on ports this chain otherwise refuses. Without this rule
+    # the forward above succeeds, the runtime's resolver can go no further, and
+    # every lookup in the container times out having been permitted.
+    #
+    # What it costs, stated plainly rather than left to be discovered: a process
+    # already running as root in this network namespace can address a resolver
+    # directly. The session user cannot - it is uid 1000 with no sudo, no setuid
+    # binary and no capability to change uid - so the query-name channel stays
+    # closed for the thing this exists to contain. Root in the session container
+    # would be a way around it, and that is the posture the firewall this
+    # replaced also had: it permitted uid 0 to reach port 53 anywhere, and
+    # accepted all loopback besides. Narrower here, not wider - but narrower is
+    # not closed, and closing it needs a discriminator finer than uid, which
+    # nftables cannot express for a sibling container sharing this namespace.
+    meta skuid 0 udp dport 53 goto permit
+    meta skuid 0 tcp dport 53 goto permit
+
     ip daddr @upstream_v4 goto refuse
     ip6 daddr @upstream_v6 goto refuse
     udp dport { 53, 853 } goto refuse

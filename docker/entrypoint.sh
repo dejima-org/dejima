@@ -28,9 +28,10 @@ require_setpcap
 # resolver. Left alone, every lookup the session makes would go around the
 # restricted resolver and the name allowlist would apply to nothing.
 #
-# It would not silently succeed, either: the policy refuses this namespace's
-# traffic to any resolver outside it except the forwarder's own, so a session
-# left pointing at the embedded resolver resolves nothing at all. The value
+# It would not silently succeed, either: the policy restricts which uids may
+# reach a resolver outside this namespace, and the session user is not one of
+# them - so a session left pointing at the embedded resolver resolves nothing
+# at all rather than resolving anything it likes. The value
 # below is the same one egress-policy writes for itself, at the same loopback
 # address, because loopback is shared with the container the resolver runs in.
 if [ "${ENABLE_FIREWALL:-1}" = "1" ]; then
