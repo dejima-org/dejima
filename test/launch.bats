@@ -36,6 +36,18 @@ stub_launch() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# `docker run -e NAME` carries the value in the environment rather than on the
+# command line, so the log above cannot show whether a flag had anything behind
+# it. Record what this process inherited, which is the same thing the flag
+# would forward. GH_TOKEN is deliberately not among them: it is a real
+# credential on a developer's machine and there is no reason to write one to
+# disk to test an unrelated variable.
+case "$*" in
+    "run -d --init"*)
+        env | grep -E '^(DEJIMA_|ALLOWED_DOMAINS=|ENABLE_FIREWALL=|ALLOW_GITHUB_PUSH=|LOKI_URL=|SANDBOX_)' \
+            > "${SANDBOX_TEST_FILTER_ENV:-/dev/null}" || true
+        ;;
+esac
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
@@ -52,6 +64,7 @@ launch() {
         "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
+        SANDBOX_TEST_FILTER_ENV="$LAUNCH_DIR/filter-env" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
         "${DEJIMA_BIN:-$REPO_ROOT/bin/dejima}" "$@"
 }
@@ -266,6 +279,7 @@ match($0, /^[[:space:]]*(export |readonly |local )?[A-Z][A-Z0-9_]*\+?=/) {
     if (rest ~ ("[$]{?" decl)) next
     print decl
 }
+
 AWK
 )
     assigned="$(cat "${scripts[@]}" | awk "$prog" | sort -u)"
@@ -311,6 +325,34 @@ AWK
 
     [ -z "$unexported" ] \
         || { echo "passed as -e NAME but never exported, so the value is empty:$unexported"; return 1; }
+}
+@test "a declared internal domain reaches the filter container as a value, not just a name" {
+    # The test above proves the flag is on the command line. `docker run -e
+    # NAME` takes the value from the launcher's environment, so a flag with
+    # nothing behind it passes an empty string - and this key decides whether a
+    # security check applies to a name, so an empty one silently applies it to
+    # every name the operator declared internal.
+    #
+    # Colon-separated in the file, space-separated in the environment, which is
+    # what firewall-up.sh splits on.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[core]\ninternal_domains = mirror.example:logs.example\n' >> "$conf"
+    launch "$PROJ"
+
+    local run; run="$(log_line 'run -d --init')"
+    [ -n "$run" ]
+    [[ "$run" == *"-e DEJIMA_INTERNAL_DOMAINS"* ]] \
+        || { echo "the flag is not on the filter container's command line"; return 1; }
+
+    # The value itself, read out of the environment the launcher handed over.
+    # The stub records it, because `-e NAME` puts the value nowhere the command
+    # line can show it - which is the whole reason this can go wrong quietly.
+    local seen; seen="$(cat "$LAUNCH_DIR/filter-env" 2>/dev/null || true)"
+    [[ "$seen" == *"DEJIMA_INTERNAL_DOMAINS=mirror.example logs.example"* ]] \
+        || { echo "the filter container was given: '$seen'"; return 1; }
 }
 
 # A `docker` that reports one filter container and one network, with whatever

@@ -4309,6 +4309,58 @@ registered_commands() {
         || { echo "the self-check does not verify every chain's default"; return 1; }
 }
 
+@test "a declared internal destination is exempted from the answer check, and not permitted by it" {
+    # The key exempts; it does not grant. A name listed there and approved
+    # nowhere is not reachable, and saying so is the launch's job rather than
+    # something for an operator to discover as a destination that quietly does
+    # not work.
+    local up="$SANDBOX_DIR/firewall-up.sh"
+    grep -q 'dejima_mark_internal "$_domain"' "$up" \
+        || { echo "internal_domains no longer goes through the exempt-only path"; return 1; }
+    grep -q 'dejima_permit_open "$_domain" internal' "$up" \
+        && { echo "internal_domains grants as well as exempts again"; return 1; }
+    grep -q 'names destinations nothing permits' "$up" \
+        || { echo "an entry nothing permits is accepted silently"; return 1; }
+
+    # Driven, not just grepped: the two functions have to actually behave that
+    # way, since the difference between them is the whole finding.
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        dejima_mark_internal registry.npmjs.org || echo "REFUSED-KNOWN"
+        dejima_mark_internal nothing.permits.this || echo "REFUSED-UNKNOWN"
+        printf "open:%s\n" "${DEJIMA_OPEN_CLASS[*]}"
+        printf "internal:%s\n" "${DEJIMA_INTERNAL_CLASS[*]:-}"
+    ' _ "$SANDBOX_DIR/fixed-domains.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"REFUSED-KNOWN"* ]] \
+        || { echo "an already-permitted name could not be exempted"; return 1; }
+    [[ "$output" == *"REFUSED-UNKNOWN"* ]] \
+        || { echo "an unpermitted name was exempted"; return 1; }
+    [[ "$output" == *"internal:registry.npmjs.org"* ]] \
+        || { echo "the exemption did not take: $output"; return 1; }
+    [[ "$output" != *"nothing.permits.this"* ]] \
+        || { echo "an unpermitted name reached a class: $output"; return 1; }
+}
+
+@test "a declared internal destination becomes an exemption the resolver and the filter both honour" {
+    # Two layers, because the check is stated twice on purpose. The resolver
+    # must stop refusing the answer, and the packet filter must stop refusing
+    # the address - an exemption that only reached one of them would leave the
+    # destination configured and unreachable.
+    local p="$SANDBOX_DIR/egress-policy"
+    grep -q 'rebind-domain-ok=/%s/' "$p" \
+        || { echo "an exempted name gets no resolver-side exemption"; return 1; }
+    grep -q 'internal_ok_v4' "$p" \
+        || { echo "an exempted name gets no filter-side exemption"; return 1; }
+    # The exemption reaches the filter by the resolver writing the answer into
+    # a second set, so both sets have to be fed from the same entry.
+    grep -q 'internal_ok_v4,6#inet#\$TABLE#internal_ok_v6' "$p" \
+        || { echo "the exempt sets are not both fed from the entry"; return 1; }
+    grep -q 'ip daddr != @internal_ok_v4 goto refuse' "$p" \
+        || { echo "the filter's own guard does not consult the exemption"; return 1; }
+}
+
 @test "~/.claude skills/commands/agents/output-styles are mounted read-only" {
     # Same persistence-path rationale as the hooks mount: these carry
     # executable skill scripts / injectable command, agent, and output-style

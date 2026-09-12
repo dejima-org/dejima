@@ -63,6 +63,46 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "core.internal_domains parses as a list of hostnames, and rejects what is not one" {
+    # The key gates whether a security check applies to a name, so a typo in it
+    # must not be read as a value. `?list:hostname` is what makes the whole
+    # file refuse rather than the entry being skipped.
+    run lib config_type core.internal_domains
+    [ "$output" = "?list:hostname" ]
+
+    write_config '[core]' 'internal_domains = mirror.example:logs.example'
+    run lib config_get core internal_domains
+    [ "$status" -eq 0 ]
+    [ "$output" = "mirror.example:logs.example" ]
+
+    # A colon-separated list, so the launch path's `tr ':' ' '` gets two
+    # entries rather than one nonsense destination.
+    local -a entries=()
+    IFS=':' read -ra entries <<< "$output"
+    [ "${#entries[@]}" -eq 2 ] \
+        || { echo "the list did not split into two entries: ${entries[*]}"; return 1; }
+
+    # And it comes back with no trailing newline, which every consumer that
+    # reads it line by line has to allow for: a `while read` over a
+    # single-entry list gets EOF on the only line and never runs its body.
+    # bin/dejima-allow was written without that guard and silently treated
+    # every declared name as undeclared.
+    run bash -c 'source "$1"; printf "[%s]" "$(config_get core internal_domains)"' _ "$LIB"
+    [ "$output" = "[mirror.example:logs.example]" ]
+
+    write_config '[core]' 'internal_domains = not a hostname'
+    run lib config_get core internal_domains
+    [ "$status" -ne 0 ] \
+        || { echo "a malformed entry was accepted: $output"; return 1; }
+
+    # Unset is the default and is not an error - most hosts have no internal
+    # destination to declare.
+    write_config '[core]' 'firewall = on'
+    run lib config_get core internal_domains
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "config_type and config_default split the spec" {
     run lib config_type audit.keep
     [ "$output" = "int:1:1000" ]
