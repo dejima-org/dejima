@@ -200,6 +200,40 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     done
 }
 
+@test "nothing in the container's startup path pipes into an early-exiting reader" {
+    # `producer | grep -q PATTERN` under `set -o pipefail` fails when it
+    # SUCCEEDS: grep -q leaves the moment it matches, the producer takes
+    # SIGPIPE and exits 141, and pipefail makes that the pipeline's status. It
+    # is invisible while the output is small enough that the producer finishes
+    # writing first, which is why it shipped - and it appeared the moment a
+    # ruleset carried a forge's published ranges, as a policy that had been
+    # applied correctly refusing to confirm its own default-drop.
+    #
+    # `head -N` and `grep -m N` have the same shape for the same reason.
+    #
+    # Matched on joined continuations, because these pipelines wrap.
+    local offenders
+    offenders=$(awk '
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            while (line ~ /(\||\\)[[:space:]]*$/) {
+                if ((getline nxt) <= 0) break
+                sub(/\\[[:space:]]*$/, "", line)
+                line = line nxt
+            }
+            if (line ~ /\|[[:space:]]*(grep[^|]*-[a-zA-Z]*q|head[[:space:]]|head$|grep[^|]*-m[[:space:]]*[0-9])/)
+                print FILENAME": "FNR": "line
+        }
+    ' "$SANDBOX_DIR"/*.sh "$SANDBOX_DIR/egress-policy")
+    [ -z "$offenders" ] || {
+        echo "these pipelines fail when they match, under pipefail:" >&2
+        echo "$offenders" >&2
+        echo "capture the output first, or use a herestring - see docker/egress-policy." >&2
+        false
+    }
+}
+
 
 @test "the ERR trap actually resolves the line and the command" {
     # Extracted from the real file rather than retyped, so a trap that has been
@@ -4183,9 +4217,12 @@ registered_commands() {
 
     # And it is verified after loading: if the kernel in this namespace could
     # not express it there is no degraded mode to fall back to.
-    grep -q 'is not present after loading' "$p" \
+    grep -q 'not present after loading' "$p" \
         || { echo "nothing confirms the table came up"; return 1; }
-    grep -q 'did not come up with a default-drop policy' "$p" \
+    # Matched on the phrase the two failures share rather than either whole
+    # sentence: which of them fired is a diagnostic that gets reworded, and the
+    # property is that the default is checked at all.
+    grep -q 'default-drop policy' "$p" \
         || { echo "nothing confirms the default is closed"; return 1; }
 }
 

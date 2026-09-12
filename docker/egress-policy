@@ -135,6 +135,18 @@ FETCH_TIMEOUT=${EGRESS_FETCH_TIMEOUT:-20}
 say() { printf '[egress-policy] %s\n' "$*" >&2; }
 die() { printf '[egress-policy] FAILED: %s\n' "$*" >&2; exit 1; }
 
+# Nothing in this file pipes into `grep -q`, and that is deliberate rather than
+# stylistic. grep -q exits the moment it matches, which closes the pipe; the
+# writer then takes SIGPIPE and exits 141, and `set -o pipefail` makes the
+# pipeline's status that 141 - so the check fails BECAUSE it succeeded. It is
+# invisible while the output is small enough that the writer finishes first,
+# and it appears once a ruleset carries a forge's published ranges. Replacing
+# the producer with `printf` does not help: the SIGPIPE just moves.
+#
+# So matches are `[[ ... ]]` where the pattern is a fixed string, and a
+# herestring where grep is genuinely needed - bash writes the whole string out
+# before grep runs, so there is no pipe for grep to leave early.
+
 need_root() {
   [ "$(id -u)" -eq 0 ] || die "must run as root (it changes the namespace's packet filter)"
 }
@@ -305,7 +317,11 @@ fetch_forge_ranges() {
       # empty body jq reads no input, produces none, and exits 0 having decided
       # nothing - so a status check reads an empty response as a good fetch and
       # the launch fails later, somewhere that cannot retry.
-      if [ -n "$(jq -r "$FORGE_META_FILTER" < "$out.part" 2>/dev/null | grep -v '^null$' | grep -m1 .)" ]; then
+      # grep -v reads to the end, so nothing here exits early on a producer
+      # that is still writing - see the note on pipefail above.
+      local produced
+      produced=$(jq -r "$FORGE_META_FILTER" < "$out.part" 2>/dev/null | grep -v '^null$') || produced=""
+      if [ -n "$produced" ]; then
         mv "$out.part" "$out"
         say "forge ranges fetched from $FORGE_META_URL on attempt $attempt"
         return 0
@@ -534,8 +550,11 @@ EOF
   # kernel in this namespace could not express it - no inet family, no reject
   # support - there is no degraded mode to fall back to.
   nft list table inet "$TABLE" >/dev/null 2>&1 || die "table inet $TABLE is not present after loading"
-  nft list chain inet "$TABLE" egress | grep -q 'policy drop' \
-    || die "the egress chain did not come up with a default-drop policy"
+  local chain
+  chain=$(nft list chain inet "$TABLE" egress) \
+    || die "the egress chain is not present after loading the ruleset"
+  [[ "$chain" == *"policy drop"* ]] \
+    || die "the egress chain came up without a default-drop policy: $chain"
 }
 
 # --------------------------------------------------------------------------
@@ -610,8 +629,16 @@ EOF
   # unpermitted name unresolvable rather than merely unreachable.
   printf 'address=/#/\n' >> "$RESOLVER_CONF"
 
-  dnsmasq --test -C "$RESOLVER_CONF" >/dev/null 2>&1 \
-    || die "the generated resolver configuration is not valid ($RESOLVER_CONF)"
+  # dnsmasq's own words, not just a status. The reason that matters most here
+  # is a build without nftset support: the whole arrangement rests on the
+  # resolver writing answers into the packet filter's sets, and a dnsmasq
+  # compiled without it rejects the line rather than ignoring it. That is the
+  # right behaviour and an opaque failure to diagnose, since every other line
+  # in the file is ordinary.
+  local complaint
+  if ! complaint=$(dnsmasq --test -C "$RESOLVER_CONF" 2>&1); then
+    die "the generated resolver configuration is not valid ($RESOLVER_CONF): $complaint"
+  fi
 }
 
 start_resolver() {
@@ -638,7 +665,12 @@ write_log_config() {
   local json_plugin plugin_dir
   # Globbed rather than hard-coded: the plugin directory carries the multiarch
   # triplet, which differs between the architectures this image is built for.
-  json_plugin=$(ls /usr/lib/*/ulogd/ulogd_output_JSON.so 2>/dev/null | head -1) || true
+  # A glob rather than `ls | head -1`: head leaves as soon as it has its line,
+  # which SIGPIPEs the producer, and under pipefail that is a failing pipeline.
+  for json_plugin in /usr/lib/*/ulogd/ulogd_output_JSON.so; do
+    [ -e "$json_plugin" ] && break
+    json_plugin=""
+  done
   [ -n "$json_plugin" ] || die "the ulogd JSON output plugin is not installed"
   plugin_dir=$(dirname "$json_plugin")
 
@@ -786,14 +818,16 @@ verify() {
   # address are different events.
   wait_for_log "$LOOKUP_LOG" "\"name\": \"$PROBE_NAME\"" \
     || die "check 9: the refused lookup of $PROBE_NAME is not in $LOOKUP_LOG"
-  grep -F "\"name\": \"$PROBE_NAME\"" "$LOOKUP_LOG" | grep -q '"reason": "not-permitted"' \
-    || die "check 9: the lookup of $PROBE_NAME was recorded, but not as refused for being unpermitted"
+  local recorded
+  recorded=$(grep -F "\"name\": \"$PROBE_NAME\"" "$LOOKUP_LOG")
+  [[ "$recorded" == *'"reason": "not-permitted"'* ]] \
+    || die "check 9: the lookup of $PROBE_NAME was recorded, but not as refused for being unpermitted: $recorded"
 
   verify_refused "https://$PROBE_ADDR4/" "check 10" "$PROBE_ADDR4"
 
   # Only meaningful where the namespace actually has v6 connectivity; where it
   # does, an address family the policy did not cover would show up here.
-  if ip -6 route show default 2>/dev/null | grep -q .; then
+  if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
     verify_refused "https://[$PROBE_ADDR6]/" "check 11" "$PROBE_ADDR6"
   fi
 
@@ -828,7 +862,7 @@ check_permitted_names() {
   since=$(tail -c "+$((mark + 1))" "$RESOLVER_LOG" 2>/dev/null) || true
   while read -r class kind exemption name; do
     [ "$kind" = name ] || continue
-    if printf '%s\n' "$since" | grep -qF "possible DNS-rebind attack detected: $name"; then
+    if [[ "$since" == *"possible DNS-rebind attack detected: $name"* ]]; then
       refused+=("$name ($class/$exemption)")
     fi
   done < "$ENTRIES_FILE"
@@ -842,10 +876,19 @@ check_permitted_names() {
 }
 
 # First address of either family that the local resolver will admit to.
+#
+# Read in full and filtered in bash rather than piped through `head -1`, which
+# would leave as soon as it had its line and SIGPIPE whatever was still writing
+# - a pipeline that fails when it succeeds, under pipefail. See the note above.
 resolve_one() {
-  dig +short +time=3 +tries=2 @127.0.0.1 "$1" A "$1" AAAA 2>/dev/null |
-    grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*' |
-    head -1
+  local answers line
+  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A "$1" AAAA 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [[ "$line" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)$ ]] || continue
+    printf '%s\n' "$line"
+    return 0
+  done <<< "$answers"
+  return 0
 }
 
 wait_for_log() {
@@ -906,7 +949,9 @@ cmd_apply() {
   build_entries "$forge_host"
   say "permitted: $(wc -l < "$ENTRIES_FILE") entries ($(entries_of forge name | wc -l) forge names, $(entries_of open name | wc -l) open names, $( { entries_of forge addr; entries_of open addr; } | wc -l) addresses)"
 
-  if awk '{ print $4 }' "$ENTRIES_FILE" | grep -qxF "$PROBE_NAME"; then
+  # A herestring, not a pipe: this one needs whole-line matching, which
+  # `[[ ]]` cannot express without anchoring by hand.
+  if grep -qxF -- "$PROBE_NAME" <<< "$(awk '{ print $4 }' "$ENTRIES_FILE")"; then
     die "the negative probe name $PROBE_NAME is also in the permitted set; set EGRESS_PROBE_NAME to a name that is not"
   fi
 
@@ -987,7 +1032,9 @@ cmd_permit() {
   # move into the narrower class would leave the wider permission standing for
   # up to the set lifetime. Refusing and saying why beats reporting a change
   # that has not happened.
-  existing=$(awk -v v="$value" '$4 == v { print $1 "/" $3 }' "$ENTRIES_FILE" | head -1)
+  # awk stops itself rather than being cut off by `head -1`, which would
+  # SIGPIPE it and fail the pipeline under pipefail.
+  existing=$(awk -v v="$value" '$4 == v { print $1 "/" $3; exit }' "$ENTRIES_FILE")
   if [ -n "$existing" ]; then
     if [ "$existing" = "$class/$exemption" ]; then
       say "$value is already permitted as $existing; nothing to do"
@@ -1045,8 +1092,9 @@ permit_name() {
     rollback_entries
     # The same two conditions apply/check 7 separates: the policy refusing the
     # answer, or the name simply not being there.
-    if tail -c "+$((mark + 1))" "$RESOLVER_LOG" 2>/dev/null |
-         grep -qF "possible DNS-rebind attack detected: $name"; then
+    local since
+    since=$(tail -c "+$((mark + 1))" "$RESOLVER_LOG" 2>/dev/null) || since=""
+    if [[ "$since" == *"possible DNS-rebind attack detected: $name"* ]]; then
       die "$name is answered with an address inside a private network, which this policy refuses; pass --internal-ok if that is what it is. Nothing was changed."
     fi
     die "$name returned no address - the name may not exist, or its upstream may be unreachable. Nothing was changed."
