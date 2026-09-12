@@ -197,9 +197,18 @@ if [ -f "$decl_dir/allowed-domains" ]; then
         # verbatim into the agent's context under a heading that reads as the
         # project speaking.
         [[ "$dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)+[a-zA-Z0-9-]{1,63}$ ]] || continue
-        # Every valid domain has a dot, a BRE metachar that would match any
-        # char - escape it so "a.b" can't false-positive against "aXb".
-        grep -q "^server=/${dom//./\\.}/" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null && continue
+        # Asked of the resolver rather than read out of its configuration.
+        # That configuration is in the FILTER container, which owns this
+        # namespace's egress control and which the session cannot read - so a
+        # probe that grepped it found nothing here and reported every declared
+        # domain as missing, including ones the session could plainly reach.
+        #
+        # Resolution is the right question anyway: the resolver answers for
+        # permitted names and returns NXDOMAIN for everything else, so "it
+        # resolves" and "it is permitted" are the same set, asked from where
+        # the answer actually matters. Bounded, because this runs while an
+        # agent waits for its briefing.
+        [ -n "$(dig +short +time=2 +tries=1 "$dom" 2>/dev/null)" ] && continue
         missing_domains_n=$((missing_domains_n + 1))
         [ "$missing_domains_n" -le "$MAX_LISTED" ] && missing_domains="$missing_domains $dom"
     done < <(read_declared_capped "$decl_dir/allowed-domains")
