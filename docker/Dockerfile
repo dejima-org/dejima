@@ -222,35 +222,20 @@ USER $SANDBOX_USER
 ENV NPM_CONFIG_PREFIX=/opt/node-tools
 ENV PATH=/opt/node-tools/bin:$PATH
 
-# Set the default shell to zsh rather than sh
-ENV SHELL=/bin/zsh
+# The session shell is the base image's own bash. It is what the sandbox user's
+# account is already set to, and configuring it costs this image one file
+# instead of a package and an installer downloaded at build time.
+#
+# That download is the reason, not the package. A build-time fetch of a script
+# that is then executed is a supply-chain surface, and this image is a security
+# boundary: whatever it installs runs in every sandbox on the host, forever,
+# with no review anywhere. What a prompt framework would have set up is written
+# out in session-bashrc.sh instead, where it can be read.
+ENV SHELL=/bin/bash
 
 # Set the default editor and visual
 ENV EDITOR=nano
 ENV VISUAL=nano
-
-# Default powerline10k theme, git/fzf oh-my-zsh plugins, fzf's own key
-# bindings, and wiring HISTFILE to the persisted history volume -
-# see https://github.com/deluan/zsh-in-docker for the installer's own flags.
-#
-# Downloaded to a file and then run, rather than upstream's documented
-# `sh -c "$(wget -O- ...)"`. In that form a failed download substitutes to an
-# empty string, `sh -c ""` exits 0, and the build goes green having installed
-# no zsh config at all - the failure only surfaces much later, as a shell that
-# is mysteriously unconfigured. Two steps make the download's exit status the
-# build's exit status.
-ARG ZSH_IN_DOCKER_VERSION=1.2.0
-RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
-    -O /tmp/zsh-in-docker.sh \
-    "https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh" && \
-  sh /tmp/zsh-in-docker.sh \
-  -p fzf \
-  -p git \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/var/opt/shell-history/.bash_history" \
-  -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
-  -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -x && \
-  rm /tmp/zsh-in-docker.sh
 
 # No harness here. The image is shared by every project on the host, and
 # baking one harness into it means every sandbox carries it whether or not it
@@ -288,6 +273,7 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
 # The launched application itself (SANDBOX_CMD) and any editor config for it
 # are supplied at runtime, not baked into the image - see
 # docker-compose.yml/entrypoint.sh.
+COPY docker/session-bashrc.sh /etc/bash.bashrc.d/10-session.bash
 COPY docker/fixed-domains.sh /usr/local/bin/
 COPY docker/caps-lib.sh /usr/local/bin/
 COPY docker/dns-proxy.sh /usr/local/bin/
@@ -349,6 +335,19 @@ RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr
 # concludes the image has no browser, and describes what a page should look
 # like instead of going and seeing.
 RUN ln -s /opt/node-tools/lib/node_modules /node_modules
+
+# Source the snippet directory from the system rc file, so every interactive
+# bash gets it, and from the sandbox user's own ~/.bashrc, so it is applied
+# after the Debian skeleton rc file rather than being undone by it. The guard on
+# the append keeps a rebuild on a changed base from adding the loop twice.
+RUN grep -q 'bash.bashrc.d' /etc/bash.bashrc || \
+    printf '\nfor __rc in /etc/bash.bashrc.d/*.bash; do\n  [ -r "$__rc" ] && . "$__rc"\ndone\nunset __rc\n' >> /etc/bash.bashrc; \
+  printf '%s\n' \
+    '# The sandbox shell configuration this image installs. Sourced here as well' \
+    '# as from /etc/bash.bashrc so it is applied last, after the Debian defaults.' \
+    '[ -r /etc/bash.bashrc.d/10-session.bash ] && . /etc/bash.bashrc.d/10-session.bash' \
+    > "$SANDBOX_HOME/.bashrc" && \
+  chown "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME/.bashrc"
 
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
   echo 'export PATH="/opt/node-tools/bin:$PATH"' > /etc/profile.d/node-tools-path.sh
