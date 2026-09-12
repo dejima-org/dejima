@@ -247,7 +247,7 @@ Worked example, `harnesses/claude-code/harness.conf`:
 
 ```
 command         = claude
-command_path    = /usr/local/share/npm-global/bin/claude
+command_path    = /opt/node-tools/bin/claude
 guards          = bash-deny push-guard merge-guard notify
 no_confirm_args = --dangerously-skip-permissions
 settings_args   = --settings /etc/dejima-settings.json

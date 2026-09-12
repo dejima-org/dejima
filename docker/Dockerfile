@@ -167,14 +167,18 @@ RUN userdel -r node 2>/dev/null; \
 ENV SANDBOX_USER=$SANDBOX_USER
 ENV SANDBOX_HOME=$SANDBOX_HOME
 
-# Ensure the sandbox user has access to /usr/local/share. The recursion is
-# scoped to npm-global: Neovim unpacks into /usr/local/share/nvim above this
-# line, and recursing from the parent would hand the sandbox user Neovim's
-# runtime files. /usr/local/share itself is still
-# chowned, so anything that expected to create entries in it still can.
-RUN mkdir -p /usr/local/share/npm-global && \
-  chown $SANDBOX_USER:$SANDBOX_USER /usr/local/share && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER /usr/local/share/npm-global
+# Where globally installed Node CLIs go: this image's own later stages, and an
+# operator's declared npm dependencies at launch. Both have to work as the
+# sandbox user, which has no sudo and never will, so the prefix has to be a
+# directory that user owns.
+#
+# A directory of its own rather than a subdirectory of a shared one, because
+# "owned by the sandbox user" and "put here by npm" then describe the same set
+# of files. Under /usr/local/share they do not: Neovim unpacks into
+# /usr/local/share/nvim, and one careless -R would hand the session write access
+# to the editor's own runtime.
+RUN mkdir -p /opt/node-tools/bin /opt/node-tools/lib/node_modules && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /opt/node-tools
 
 # Persist bash history. The env vars that actually wire history up to this
 # file are set below via zsh-in-docker's -a flag.
@@ -206,17 +210,12 @@ RUN mkdir -p $SANDBOX_HOME/.ssh && \
 RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SANDBOX_HOME/.cache/nvim && \
   chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.local $SANDBOX_HOME/.cache
 
-# Set up non-root user
+# Everything from here to the `USER root` below runs as the sandbox user, so
+# that global npm installs land in the prefix that user owns.
 USER $SANDBOX_USER
 
-# Install global packages
-ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH=$PATH:/usr/local/share/npm-global/bin
-# A global npm install only puts a package's CLI on PATH, not its module on
-# Node's require() resolution path - NODE_PATH is what makes `require
-# ("playwright")` work from any script anywhere, not just the project's own
-# node_modules (which it likely doesn't have without its own npm install).
-ENV NODE_PATH=/usr/local/share/npm-global/lib/node_modules
+ENV NPM_CONFIG_PREFIX=/opt/node-tools
+ENV PATH=/opt/node-tools/bin:$PATH
 
 # Set the default shell to zsh rather than sh
 ENV SHELL=/bin/zsh
@@ -334,19 +333,20 @@ COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
 RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
-# The other half of NODE_PATH, which only ever applied to require(): ESM
-# resolution ignores it entirely and walks up from the importing file looking
-# for node_modules, so `import { chromium } from "playwright"` fails from
-# every directory a script is likely to be written in while require() of the
-# same package succeeds. At the root, that walk always ends here.
+# What makes a globally installed package resolvable from a script in any
+# directory. Both of Node's resolvers find a bare specifier by walking
+# node_modules directories upwards from the importing file, and every path
+# bottoms out at /, so one here is visible everywhere - including from a
+# directory with no dependency tree of its own.
 #
-# It is worth a line because of how the failure reads. An agent writing the
-# modern form gets ERR_MODULE_NOT_FOUND, concludes the image has no browser,
-# and describes what a page should look like instead of going and seeing.
-RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
+# It is worth a line because of how the failure reads without it. An agent
+# writing `import { chromium } from "playwright"` gets ERR_MODULE_NOT_FOUND,
+# concludes the image has no browser, and describes what a page should look
+# like instead of going and seeing.
+RUN ln -s /opt/node-tools/lib/node_modules /node_modules
 
 RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
-  echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
+  echo 'export PATH="/opt/node-tools/bin:$PATH"' > /etc/profile.d/node-tools-path.sh
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
 # directly, with no sudo/setuid escalation path available to node at any
