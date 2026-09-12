@@ -77,8 +77,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && ln -s "$(command -v fdfind)" /usr/local/bin/fd
 
-# Set `DEVCONTAINER` environment variable to help with orientation
-ENV DEVCONTAINER=true
+# Deliberately NOT set: DEVCONTAINER, or any other variable announcing this as
+# a generic development container. It is not one - it is a sandbox with an
+# egress firewall and no path back to root - and tools change behaviour when
+# they see such a flag, on an assumption about their environment that does not
+# hold here. What a harness actually needs to know is below, and says the thing
+# that is true.
 
 # Lets the harness, and the SessionStart hook it runs, know it is inside this
 # container rather than directly on the host.
