@@ -87,13 +87,13 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
         || { echo "libcap2-bin is not in the Dockerfile's package list"; return 1; }
 }
 
-@test "Playwright is installed and require()-able globally" {
-    # A global npm install only puts the CLI on PATH, not the module on
-    # Node's require() resolution path - NODE_PATH is what makes
-    # require("playwright") work from any script, not just one with its own
-    # local node_modules (see runtime.bats for the actual launch test).
+@test "Playwright is installed and importable globally" {
+    # A global npm install only puts the CLI on PATH, not the module anywhere
+    # either of Node's resolvers will find from a script with no local
+    # node_modules of its own. The symlink at the filesystem root is what does
+    # that (see runtime.bats for the actual launch test).
     grep -q 'npm install -g playwright' "$SANDBOX_DIR/Dockerfile"
-    grep -qE '^\s*ENV\s+NODE_PATH=' "$SANDBOX_DIR/Dockerfile"
+    grep -qE '^\s*RUN ln -s \S+ /node_modules$' "$SANDBOX_DIR/Dockerfile"
 }
 
 # One awk pass rather than a grep chain: a filtering grep exits 1 when it
@@ -411,23 +411,70 @@ EOF
     [[ "$output" == *"empty response"* ]]
 }
 
-@test "the zsh installer runs from a file, so a failed download fails the build" {
-    # Upstream documents `sh -c "$(wget -O- ...)"`. In that form a failed
-    # download substitutes to an empty string and `sh -c ""` exits 0, so the
-    # build goes green having installed nothing - the kind of failure that
-    # only surfaces later, as a shell that is inexplicably unconfigured.
+@test "no build step pipes a download straight into a shell" {
+    # `sh -c "$(wget -O- ...)"` is the form every install-script README
+    # documents, and in it a failed download substitutes to an empty string,
+    # `sh -c ""` exits 0, and the build goes green having installed nothing -
+    # the kind of failure that only surfaces later, as something inexplicably
+    # unconfigured. It is also the shape that makes a build-time fetch
+    # unreviewable, which is why nothing in this image does it at all any more.
     local substituted
     substituted=$(awk '
         /^[[:space:]]*#/ { next }
-        /sh -c "\$\((wget|curl)/ { print FNR": "$0 }
+        /sh -c "\$\((wget|curl)/ || /(wget|curl)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash)([[:space:]]|$)/ { print FNR": "$0 }
     ' "$SANDBOX_DIR/Dockerfile")
     [ -z "$substituted" ] || {
-        echo "a failed download here would exit 0 and install nothing:" >&2
+        echo "a download is being executed directly, so a failed one installs nothing and exits 0:" >&2
         echo "$substituted" >&2
         false
     }
-    grep -q -- '-O /tmp/zsh-in-docker.sh' "$SANDBOX_DIR/Dockerfile"
-    grep -qE '^\s*sh /tmp/zsh-in-docker.sh' "$SANDBOX_DIR/Dockerfile"
+}
+
+@test "the session shell is configured by this repo, not by a fetched installer" {
+    # The configuration is a file here, so shellcheck covers it and a reader
+    # can see what their shell does - neither of which is true of a release
+    # tarball downloaded during the build and executed.
+    [ -f "$SANDBOX_DIR/session-bashrc.sh" ] \
+        || { echo "docker/session-bashrc.sh is gone; what configures the shell now?"; return 1; }
+    grep -qE '^\s*ENV SHELL=/bin/bash$' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "SHELL no longer names the shell session-bashrc.sh is written for"; return 1; }
+    grep -q 'COPY docker/session-bashrc.sh' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "session-bashrc.sh is not copied into the image, so nothing sources it"; return 1; }
+    # Sourced from both places on purpose: /etc/bash.bashrc covers every
+    # interactive shell, and the user's own rc file is what makes this win over
+    # the Debian skeleton, which resets PS1 and the history limits after it.
+    grep -q 'bash.bashrc.d' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "nothing sources the snippet directory from /etc/bash.bashrc"; return 1; }
+    grep -q '10-session.bash' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "the sandbox user's .bashrc does not source the snippet"; return 1; }
+}
+
+@test "history is written per command, onto the volume that persists it" {
+    # A sandbox session is killed far more often than it exits, and bash writes
+    # history on a clean exit only. Without the append there is no record of
+    # what a session did, which is the case the record exists for.
+    local rc="$SANDBOX_DIR/session-bashrc.sh"
+    grep -q "PROMPT_COMMAND='history -a'" "$rc" \
+        || { echo "history is not appended per command, so a killed session loses it"; return 1; }
+    grep -q 'HISTFILE=/var/opt/shell-history/' "$rc" \
+        || { echo "HISTFILE does not point at the persisted volume"; return 1; }
+    grep -q 'dejima-bashhistory:/var/opt/shell-history' "$SANDBOX_DIR/docker-compose.yml" \
+        || { echo "the history volume is not mounted where HISTFILE points"; return 1; }
+}
+
+@test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
+    # The sweep only covers what exists when it runs, so the base image's copy
+    # has to be the last thing that changes the filesystem, and the derived
+    # per-project layer - which installs apt/pip/tarball dependencies after the
+    # base image is finished - has to run it again at its own end.
+    local dockerfile="$SANDBOX_DIR/Dockerfile" last
+    [ -f "$SANDBOX_DIR/strip-privilege-bits.sh" ] \
+        || { echo "docker/strip-privilege-bits.sh is gone"; return 1; }
+    last=$(grep -nE '^(RUN|COPY|ADD) ' "$dockerfile" | tail -1)
+    [[ "$last" == *strip-privilege-bits* ]] \
+        || { echo "the last filesystem-changing instruction is not the sweep: $last"; return 1; }
+    grep -q 'strip-privilege-bits' "$REPO_ROOT/bin/dejima-project-lib.sh" \
+        || { echo "a derived project layer installs packages and never sweeps them"; return 1; }
 }
 
 @test "every ipset add in init-firewall.sh is duplicate-safe" {
@@ -2779,18 +2826,31 @@ _install_forge_bins() {
         || { echo "a tier rule is below the latch rules, so a latched key looks unlatched"; return 1; }
 }
 
-@test "a global package is importable in either module system, not just require()" {
-    # NODE_PATH only ever applied to require(). ESM resolution ignores it and
-    # walks up from the importing file looking for node_modules, so the modern
-    # form of the same import fails from every directory a script is likely to
-    # be written in - and what an agent sees is ERR_MODULE_NOT_FOUND, which
-    # reads as "this image has no browser" rather than "wrong module system".
-    # The root symlink is what ends that walk somewhere useful.
-    local dockerfile="$SANDBOX_DIR/Dockerfile"
-    grep -q 'ENV NODE_PATH=/usr/local/share/npm-global/lib/node_modules' "$dockerfile" \
-        || { echo "NODE_PATH is no longer set, so require() from anywhere is broken"; return 1; }
-    grep -q 'ln -s /usr/local/share/npm-global/lib/node_modules /node_modules' "$dockerfile" \
-        || { echo "no root node_modules, so an ESM import resolves nowhere"; return 1; }
+@test "a global package is importable in either module system" {
+    # Both of Node's resolvers find a bare specifier by walking node_modules
+    # directories upwards from the importing file, and every path bottoms out
+    # at /, so the symlink there is visible from a directory with no dependency
+    # tree of its own. What an agent sees without it is ERR_MODULE_NOT_FOUND,
+    # which reads as "this image has no browser" rather than "wrong path".
+    #
+    # NODE_PATH is deliberately not set: it only ever fed the CommonJS
+    # resolver, so it covered require() and left `import` of the same package
+    # failing - half a fix, and the half it did cover this symlink covers too.
+    local dockerfile="$SANDBOX_DIR/Dockerfile" prefix
+    prefix=$(sed -n 's/^ENV NPM_CONFIG_PREFIX=//p' "$dockerfile")
+    [ -n "$prefix" ] || { echo "no npm prefix is set, so nothing installs globally"; return 1; }
+    grep -qF "ln -s $prefix/lib/node_modules /node_modules" "$dockerfile" \
+        || { echo "no root node_modules pointing at $prefix, so an import resolves nowhere"; return 1; }
+    grep -qE '^\s*ENV\s+NODE_PATH=' "$dockerfile" \
+        && { echo "NODE_PATH is back; it covers require() only and the symlink already does that"; return 1; }
+    # The prefix is a contract: a harness manifest names an absolute path to
+    # the CLI it launches, and a prefix that moved without them is a harness
+    # that cannot be started.
+    local conf
+    for conf in "$REPO_ROOT"/harnesses/*/harness.conf; do
+        grep -qE "^command_path\s*=\s*$prefix/bin/" "$conf" \
+            || { echo "$conf names a command_path outside the npm prefix $prefix"; return 1; }
+    done
 }
 
 @test "the briefing says a browser is here, because agents keep concluding otherwise" {

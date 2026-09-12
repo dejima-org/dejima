@@ -1359,6 +1359,36 @@ session_pid() {  # [container], defaulting to the file-wide one
     [[ "$output" == *"1"* ]] || { echo "the session user's shell can: $output"; return 1; }
 }
 
+@test "the running image holds no setuid binary and no file capability" {
+    # no_new_privs above forbids one from taking effect; this asserts there is
+    # none to take effect, which is the half a misconfigured runtime cannot
+    # undo. Read from the running container rather than the build, because what
+    # matters is the image a session is actually handed - including the derived
+    # per-project layer, which installs its own packages after the base image
+    # is finished and sweeps them at its own end.
+    run dexec sh -c 'find / -xdev -type f -perm /6000 2>/dev/null'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "setuid or setgid binaries in the image:"; echo "$output"; return 1; }
+    run dexec sh -c 'getcap -r / 2>/dev/null'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "file capabilities in the image:"; echo "$output"; return 1; }
+}
+
+@test "the session shell is bash, configured by the image, with history appended" {
+    # A session is killed far more often than it exits, and bash writes history
+    # on a clean exit only - so without the per-command append there is no
+    # record of what a session did. Asserted in an interactive shell, because
+    # that is the only kind the configuration applies to.
+    run dexec_node bash -ic 'printf "%s|%s|%s\n" "$SHELL" "$HISTFILE" "$PROMPT_COMMAND"'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"/bin/bash|/var/opt/shell-history/.bash_history|history -a"* ]] \
+        || { echo "shell, history file or append is not as configured: $output"; return 1; }
+    # The volume is mounted and writable by the session user, so the file the
+    # variable names can actually be written.
+    run dexec_node sh -c 'touch /var/opt/shell-history/.bash_history && echo writable'
+    [[ "$output" == *writable* ]] || { echo "the history volume is not writable: $output"; return 1; }
+}
+
 @test "the capability bounding set is the declared floor and nothing more" {
     # cap_drop: ALL plus an explicit list, rather than Docker's default set
     # plus two. The entrypoint uses seven capabilities during its root phase and
@@ -1579,9 +1609,11 @@ EOF'
 
 @test "a global package imports as ESM too, from a directory of its own" {
     # The test above proves the browser works, in the module system that
-    # already resolved. NODE_PATH covers require() and nothing else: ESM walks
-    # up from the importing file, so the modern form failed everywhere while
-    # this suite stayed green. What an agent got was ERR_MODULE_NOT_FOUND,
+    # already resolved. Both resolvers walk up from the importing file looking
+    # for node_modules, and only the symlink at the filesystem root ends that
+    # walk somewhere useful; when the image relied on NODE_PATH instead, which
+    # feeds the CommonJS resolver alone, the modern form failed everywhere
+    # while this suite stayed green. What an agent got was ERR_MODULE_NOT_FOUND,
     # which reads as an image without a browser.
     #
     # Written somewhere with no node_modules of its own, because anywhere
