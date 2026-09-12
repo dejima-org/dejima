@@ -1394,8 +1394,8 @@ EOF
 
 @test "the github forge's hosts reach the push guard, never the extra-domains allowlist" {
     # entrypoint.sh folds DEJIMA_FORGE_HOSTS into EXTRA_ALLOWED_DOMAINS,
-    # which init-firewall.sh resolves into the port-UNRESTRICTED
-    # allowed-domains ipset and dns-proxy.sh exempts from stop-dns-rebind.
+    # which firewall-up.sh puts in the port-unrestricted open class and
+    # exempts from the check that refuses an answer pointing inside.
     # Right for a self-hosted forge host, a silent widening for GitHub's
     # public names - and the firewall's own startup self-check refuses to
     # bring the container up when github.com:22 is reachable without the
