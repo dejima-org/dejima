@@ -803,22 +803,45 @@ EOF
 }
 
 
-@test "an approved internal name is added to a running session, without a relaunch" {
+
+@test "a name declared internal is added to a running session, without a relaunch" {
     # This used to be impossible: the exemption could only be written at
     # startup, so an internally-routed name meant restarting the session. The
-    # permitted set is now regenerated in place, so the approval that carries
-    # the exemption applies to the session already running.
+    # permitted set is now regenerated in place, so a name the operator has
+    # declared internal can be added to the session already running.
+    printf '[core]\ninternal_domains = internal.example.com\n' > "$CONFIG_DIR/config"
     stub_docker_rebind
-    DOCKER_CALL_LOG="$STUB_DIR/calls" run env PATH="$STUB_DIR:$PATH" \
-        DOCKER_CALL_LOG="$STUB_DIR/calls" \
+    run env PATH="$STUB_DIR:$PATH" DOCKER_CALL_LOG="$STUB_DIR/calls" \
         "$REPO_ROOT/bin/dejima-allow" --global --container c1 internal.example.com
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx 'internal.example.com' "$CONFIG_DIR/allowed-domains"
-    # The exemption is what the approval buys, and it has to actually be sent.
     grep -q 'egress-policy permit internal.example.com.*--internal-ok' "$STUB_DIR/calls" \
-        || { echo "the approval did not carry the exemption:"; cat "$STUB_DIR/calls"; return 1; }
+        || { echo "the declaration did not carry the exemption:"; cat "$STUB_DIR/calls"; return 1; }
     [[ "$output" != *"Relaunch"* ]] \
         || { echo "still telling the operator to relaunch:"; echo "$output"; return 1; }
+}
+
+@test "an approval alone does not exempt a name from the answer check" {
+    # The rule a launch applies, applied here too. An approval says a
+    # destination may be reached; it does not say an answer for it may point
+    # inside the operator's network, and a project's declared domains are
+    # reviewed as public names. Exempting one on the strength of an approval is
+    # what the two halves used to disagree about - this side handed out the
+    # exemption, a launch withheld it, and the operator found out when the next
+    # launch refused to start on a name that had just worked.
+    stub_docker_rebind
+    run env PATH="$STUB_DIR:$PATH" DOCKER_CALL_LOG="$STUB_DIR/calls" \
+        "$REPO_ROOT/bin/dejima-allow" --global --container c1 internal.example.com
+    [ "$status" -ne 0 ] || { echo "an approval exempted a name by itself"; return 1; }
+    ! grep -q 'internal-ok' "$STUB_DIR/calls" \
+        || { echo "the exemption was sent without a declaration:"; cat "$STUB_DIR/calls"; return 1; }
+    # The approval is still recorded - it is a decision about reachability and
+    # this command does not get to discard it over a separate question.
+    grep -qx 'internal.example.com' "$CONFIG_DIR/allowed-domains"
+    # And the refusal names the key that fixes it, not the variable the
+    # container reads.
+    [[ "$output" == *"internal_domains = internal.example.com"* ]] \
+        || { echo "the refusal does not name the remedy:"; echo "$output"; return 1; }
 }
 
 @test "a session-only grant is never exempted from the answer check" {

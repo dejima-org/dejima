@@ -333,30 +333,57 @@ if [ "$session_wanted" -eq 1 ]; then
     # which is the read-only guarantee gone from a command whose whole output
     # says it granted one domain.
     #
-    # --internal-ok when the domain was also recorded as an approval: an
-    # approved host that resolves inside the operator's own network is a
-    # destination they configured, and without this the policy refuses the
-    # answer. A domain granted only for this one session does not get it, for
-    # the same reason the built-in list does not - an unreviewed public name
-    # answered with an internal address is the pivot the check exists to stop.
+    # --internal-ok for a name in [core] internal_domains, and for no other.
+    #
+    # The policy refuses an answer for a permitted name that points inside a
+    # private network, because an answer decides what the allowlist contains
+    # and comes from outside. An approval does not lift that: a project's
+    # declared domains are reviewed with the project and expected to be public,
+    # and exempting a public name is the pivot the check exists to stop. What
+    # lifts it is the operator saying a specific name really is internal.
+    #
+    # Read from the same key a launch reads, so the two cannot disagree. They
+    # did: this passed the exemption for any approval while firewall-up.sh
+    # withheld it, so a live add succeeded and the next launch refused to start
+    # on the same name - with the failed launch as the operator's first hint
+    # that the two commands had different ideas.
     #
     # $domain reaches the container as an argument rather than inside the
     # command string: it is validated above, and this keeps it that way if that
     # validation is ever loosened.
+    #
+    # Guarded on the file existing: config_get says so on stderr when it does
+    # not, which is right for a launch and noise for this, where a host with no
+    # configuration at all is an ordinary case and the answer is simply "not
+    # listed". A config that exists and is malformed still reports itself.
+    internal=0
+    if [ -f "$(config_path)" ]; then
+        # `|| [ -n "$_d" ]`, because config_get prints its value with no
+        # trailing newline - so a single-entry list is one line read never
+        # returns, and the loop body would not run at all.
+        while IFS= read -r _d || [ -n "$_d" ]; do
+            [ "$_d" = "$domain" ] && internal=1
+        done < <(config_get core internal_domains | tr ':' '\n')
+    fi
+
     permit_args=(permit "$domain")
     [ "$(dejima_class_for "$domain")" = forge ] && permit_args+=(--forge)
-    if [ -n "$project" ] || [ "$global" -eq 1 ]; then
-        permit_args+=(--internal-ok)
-    fi
+    [ "$internal" -eq 1 ] && permit_args+=(--internal-ok)
 
     echo "Permitting $domain in $filter, this session's egress control..."
     if ! docker exec -u root "$filter" /usr/local/sbin/egress-policy "${permit_args[@]}"; then
         echo "" >&2
         echo "The permitted set was left as it was - the reason is above." >&2
-        if [ -z "$project" ] && [ "$global" -ne 1 ]; then
+        if [ "$internal" -eq 0 ]; then
             echo "" >&2
-            echo "If $domain resolves inside your own network, record it as an approval" >&2
-            echo "so it is exempt from the check that refuses such answers:" >&2
+            echo "If $domain resolves inside your own network, say so in the config and" >&2
+            echo "relaunch - an answer pointing inside is refused for every name that is" >&2
+            echo "not listed there, whether or not it is approved:" >&2
+            echo "" >&2
+            echo "  [core]" >&2
+            echo "  internal_domains = $domain" >&2
+            echo "" >&2
+            echo "It still needs an approval to be reachable at all:" >&2
             echo "" >&2
             echo "  dejima-allow --global $domain" >&2
         fi

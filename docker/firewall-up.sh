@@ -62,7 +62,11 @@ _join() { local IFS=' '; echo "${*:-}"; }
 EGRESS_FORGE_NAMES="$(_join ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"})"
 EGRESS_ALLOWED_NAMES="$(_join ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"})"
 EGRESS_INTERNAL_OK="$(_join ${DEJIMA_INTERNAL_CLASS[@]+"${DEJIMA_INTERNAL_CLASS[@]}"})"
-export EGRESS_FORGE_NAMES EGRESS_ALLOWED_NAMES EGRESS_INTERNAL_OK
+# What the policy should call that list when it tells an operator to add
+# something to it. It knows the variable it reads; only dejima knows the
+# configuration key an operator actually sets.
+EGRESS_INTERNAL_OK_HINT='[core] internal_domains'
+export EGRESS_FORGE_NAMES EGRESS_ALLOWED_NAMES EGRESS_INTERNAL_OK EGRESS_INTERNAL_OK_HINT
 export EGRESS_FORGE_SSH="${ALLOW_GITHUB_PUSH:-0}"
 # The published-ranges endpoint is rate-limited per source address when
 # unauthenticated, across everything on the host - so a host starting sandboxes

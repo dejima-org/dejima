@@ -398,6 +398,10 @@ run_check_names() {
     die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
     ENTRIES_FILE="$entries"
     RESOLVER_LOG="$resolver_log"
+    # Taken from firewall-up.sh rather than written here, so the name the
+    # message offers an operator cannot drift from the one the launch supplies.
+    INTERNAL_OK_HINT="$(sed -n "s/^EGRESS_INTERNAL_OK_HINT='\(.*\)'$/\1/p" "$SANDBOX_DIR/firewall-up.sh")"
+    [ -n "$INTERNAL_OK_HINT" ] || { echo "firewall-up.sh supplies no name for the exemption list"; return 1; }
     eval "$(sed -n '/^resolve_one()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     eval "$(sed -n '/^check_permitted_names()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     check_permitted_names "check N"
@@ -460,8 +464,12 @@ EOF
     run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" "$BATS_TEST_TMPDIR/dig"
     [ "$status" -ne 0 ] || { echo "a refused answer did not stop the container:" >&2; echo "$output" >&2; false; }
     [[ "$output" == *"mirror.example.com"* ]]
-    [[ "$output" == *"EGRESS_INTERNAL_OK"* ]] \
-        || { echo "the refusal does not name the remedy:" >&2; echo "$output" >&2; false; }
+    # The remedy has to be something the operator can act on. The variable the
+    # policy reads is its interface with whatever launched it, and nobody sets
+    # it by hand - so the launcher supplies the name of the key they do set,
+    # and the message uses that.
+    [[ "$output" == *"[core] internal_domains"* ]] \
+        || { echo "the refusal does not name a remedy the operator can act on:" >&2; echo "$output" >&2; false; }
 }
 
 

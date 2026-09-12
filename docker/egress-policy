@@ -120,6 +120,12 @@ OPEN_ENTRIES=${EGRESS_ALLOWED_NAMES:-}
 # one of the two lists above; naming one that does not is a typo, and a typo
 # here silently weakens nothing but silently permits nothing either.
 INTERNAL_OK=${EGRESS_INTERNAL_OK:-}
+# What to call that list when telling an operator to add something to it. The
+# variable above is this component's interface with its launcher, and an
+# operator has no way to set it - they set whatever the launcher reads. A
+# message naming the variable sends them looking for something that is not
+# theirs, so the launcher supplies its own name for it.
+INTERNAL_OK_HINT=${EGRESS_INTERNAL_OK_HINT:-EGRESS_INTERNAL_OK}
 FORGE_SSH=${EGRESS_FORGE_SSH:-0}
 HOST_ADDR=${EGRESS_HOST_ADDR:-}
 # Self-check probes. example.com is reserved by RFC 2606 for documentation and
@@ -200,7 +206,7 @@ record_entries() {
     if [ "$exemption" = internal-ok ] && [ "$kind" = addr ]; then
       # Harmless, but say so: the check it exempts is a check on answers, and
       # an address the operator typed is not an answer.
-      say "note: $value is an address, so it is not subject to the answer check EGRESS_INTERNAL_OK exempts"
+      say "note: $value is an address, so it is not subject to the answer check $INTERNAL_OK_HINT exempts"
     fi
     printf '%s %s %s %s\n' "$class" "$kind" "$exemption" "$value" >> "$ENTRIES_FILE"
   done
@@ -223,7 +229,7 @@ build_entries() {
     [ -n "$listed" ] || missing+=("$value")
   done
   [ ${#missing[@]} -eq 0 ] \
-    || die "EGRESS_INTERNAL_OK names entries that are not permitted at all: ${missing[*]}"
+    || die "$INTERNAL_OK_HINT names entries that are not permitted at all: ${missing[*]}"
 
   grep -q . "$ENTRIES_FILE" || die "no permitted entries at all, not even the forge"
 }
@@ -915,7 +921,7 @@ check_permitted_names() {
   done < "$ENTRIES_FILE"
 
   if [ ${#refused[@]} -ne 0 ]; then
-    die "$label: these permitted names are answered with an address inside a private network, and this policy refuses such answers: ${refused[*]}. That is this configuration disagreeing with itself - list them in EGRESS_INTERNAL_OK if pointing inside is intended, or remove them."
+    die "$label: these permitted names are answered with an address inside a private network, and this policy refuses such answers: ${refused[*]}. That is this configuration disagreeing with itself - list them in $INTERNAL_OK_HINT if pointing inside is intended, or remove them."
   fi
   if [ ${#silent[@]} -ne 0 ]; then
     say "note: permitted names that returned no address: ${silent[*]} - not a policy refusal (they are in the permitted set); the name may not exist or its upstream may be unreachable"
