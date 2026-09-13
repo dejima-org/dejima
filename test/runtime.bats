@@ -1496,12 +1496,14 @@ session_pid() {  # [container], defaulting to the file-wide one
     # matters is the image a session is actually handed - including the derived
     # per-project layer, which installs its own packages after the base image
     # is finished and sweeps them at its own end.
-    run dexec sh -c 'find / -xdev -type f -perm /6000 2>/dev/null'
-    [ "$status" -eq 0 ]
-    [ -z "$output" ] || { echo "setuid or setgid binaries in the image:"; echo "$output"; return 1; }
-    run dexec sh -c 'getcap -r / 2>/dev/null'
-    [ "$status" -eq 0 ]
-    [ -z "$output" ] || { echo "file capabilities in the image:"; echo "$output"; return 1; }
+    #
+    # The image's own sweeper in --check mode, rather than a find and a getcap
+    # written out here: the two would then have to agree about which roots to
+    # walk, and a check that walks fewer than the sweeper passes for the wrong
+    # reason. --check changes nothing, so it is safe against the shared
+    # container.
+    run dexec /usr/local/sbin/strip-privilege-bits --check
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "the session shell is bash, configured by the image, with history appended" {
