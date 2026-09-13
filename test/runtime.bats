@@ -1519,6 +1519,29 @@ session_pid() {  # [container], defaulting to the file-wide one
     [[ "$output" == *writable* ]] || { echo "the history volume is not writable: $output"; return 1; }
 }
 
+@test "the wrapper's directory comes before the npm prefix on the session's PATH" {
+    # The wrapper in /usr/local/bin shadows the harness's real binary to pin
+    # --dangerously-skip-permissions, --settings and the briefing. That binary
+    # is npm-installed, so the order of these two directories decides whether
+    # any of those flags reach the session - and getting it wrong costs the
+    # sandbox its whole operating mode without erroring.
+    #
+    # Checked on the real PATH of both a login and a non-login shell, because
+    # Debian's /etc/profile rebuilds PATH from scratch for the first and the
+    # image's ENV supplies the second.
+    local shell_kind path lb np
+    for shell_kind in '-lc' '-c'; do
+        path=$(dexec_node bash "$shell_kind" 'printf "%s" "$PATH"')
+        [ -n "$path" ] || { echo "no PATH from bash $shell_kind"; return 1; }
+        lb=$(awk -v p="$path" 'BEGIN{n=split(p,a,":"); for(i=1;i<=n;i++) if(a[i]=="/usr/local/bin") {print i; exit}}')
+        np=$(awk -v p="$path" 'BEGIN{n=split(p,a,":"); for(i=1;i<=n;i++) if(a[i]=="/opt/node-tools/bin") {print i; exit}}')
+        [ -n "$lb" ] || { echo "bash $shell_kind: /usr/local/bin is not on PATH at all: $path"; return 1; }
+        [ -n "$np" ] || { echo "bash $shell_kind: the npm prefix is not on PATH at all: $path"; return 1; }
+        [ "$lb" -lt "$np" ] \
+            || { echo "bash $shell_kind: the npm prefix precedes /usr/local/bin, so the wrapper is shadowed: $path"; return 1; }
+    done
+}
+
 @test "the capability bounding set is the declared floor and nothing more" {
     # cap_drop: ALL plus an explicit list, rather than Docker's default set
     # plus two. The entrypoint uses seven capabilities during its root phase and

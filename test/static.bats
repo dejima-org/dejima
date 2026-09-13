@@ -7590,6 +7590,32 @@ _provider_proxied_domain() {
     [ "$status" -ne 0 ] || { echo "the old fixed-name copy is back"; return 1; }
 }
 
+@test "the wrapper's directory beats the one npm installs the real binary into" {
+    # The wrapper shadows the harness's real binary to pin
+    # --dangerously-skip-permissions, --settings and the briefing. That binary
+    # is npm-installed, so if the npm prefix comes first on PATH it wins and
+    # every one of those flags is dropped - silently, leaving a session that
+    # asks permission for everything and gets no briefing.
+    #
+    # It shipped that way once: moving the npm prefix carried a prepend over
+    # from elsewhere, and nothing here noticed.
+    local prefix
+    prefix=$(sed -n 's/^ENV NPM_CONFIG_PREFIX=//p' "$SANDBOX_DIR/Dockerfile")
+    [ -n "$prefix" ] || { echo "no npm prefix is set"; return 1; }
+
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            *"$prefix/bin:\$PATH"*)
+                echo "the npm prefix is prepended, so it shadows the wrapper: $line"
+                return 1 ;;
+        esac
+    done < <(grep -h -- "$prefix/bin" "$SANDBOX_DIR/Dockerfile" "$SANDBOX_DIR/session-bashrc.sh")
+
+    grep -q 'COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper' "$SANDBOX_DIR/Dockerfile" \
+        || { echo "the wrapper is not installed in /usr/local/bin"; return 1; }
+}
+
 @test "the entrypoint refuses a harness command name that is not a bare name" {
     # It becomes a path under /usr/local/bin. A value with a slash would
     # write the symlink somewhere else entirely, and this one arrives from

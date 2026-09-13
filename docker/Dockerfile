@@ -243,7 +243,11 @@ RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SA
 USER $SANDBOX_USER
 
 ENV NPM_CONFIG_PREFIX=/opt/node-tools
-ENV PATH=/opt/node-tools/bin:$PATH
+# Appended, not prepended. /usr/local/bin holds the harness wrapper, which
+# shadows the harness's real binary to pin the no-confirm, settings and
+# briefing flags - and the real binary is npm-installed, so putting this
+# directory first would let it win and drop every one of those flags silently.
+ENV PATH=$PATH:/opt/node-tools/bin
 
 # The session shell is the base image's own bash. It is what the sandbox user's
 # account is already set to, and configuring it costs this image one file
@@ -377,7 +381,7 @@ RUN grep -q 'bash.bashrc.d' /etc/bash.bashrc || \
   chown "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME/.bashrc"
 
 RUN chmod +x /usr/local/sbin/egress-policy /usr/local/sbin/dns-lookup-log /usr/local/bin/cidr-collapse /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
-  echo 'export PATH="/opt/node-tools/bin:$PATH"' > /etc/profile.d/node-tools-path.sh
+  echo 'export PATH="$PATH:/opt/node-tools/bin"' > /etc/profile.d/node-tools-path.sh
 
 # Last instruction that changes the filesystem, and it has to stay last: it
 # removes every setuid bit, setgid bit and file capability in the image and

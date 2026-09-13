@@ -18,9 +18,11 @@ case $- in *i*) ;; *) return 0 ;; esac
 # out the sbin directories, where the network tools a session is expected to use
 # (ip, nft, dnsmasq) all live. Put them back, without duplicating an
 # entry when this file is sourced twice.
+# Appended, for the reason the Dockerfile gives: the harness wrapper in
+# /usr/local/bin has to keep shadowing the npm-installed binary it wraps.
 case ":$PATH:" in
   *":/opt/node-tools/bin:"*) ;;
-  *) PATH="/opt/node-tools/bin:$PATH" ;;
+  *) PATH="$PATH:/opt/node-tools/bin" ;;
 esac
 for __dir in /usr/local/sbin /usr/sbin /sbin; do
   case ":$PATH:" in
