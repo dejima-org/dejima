@@ -4258,8 +4258,15 @@ registered_commands() {
 
     # And no v6 destination is named anywhere in the generated ruleset - not
     # just the egress chain, since a set or an inbound accept would do it too.
+    #
+    # Comment lines are excluded, and have to be: the check that enforces this
+    # at runtime explains itself by quoting the rule that regressed last time,
+    # which is exactly the kind of fact .dejima.md asks to be kept. A rule the
+    # script emits never begins with a '#', so nothing real hides behind this.
     local permits
-    permits=$(grep -nE '(ip6 |_v6|ipv6_addr)' "$p" | grep -v 'nfproto ipv6' || true)
+    permits=$(grep -nE '(ip6 |_v6|ipv6_addr)' "$p" \
+        | grep -v 'nfproto ipv6' \
+        | grep -vE '^[0-9]+: *#' || true)
     [ -z "$permits" ] \
         || { echo "IPv6 destinations are still named in the ruleset:"; echo "$permits"; return 1; }
 
