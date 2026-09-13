@@ -468,7 +468,20 @@ jobs:
       - name: Build the sandbox image
         run: docker build -t localhost/dejima:latest -f docker/Dockerfile .
 
-      - run: bats test/runtime.bats
+      # -T prints each test's duration. This job is the slow one and the only
+      # one nobody can run locally, so without it the cost of a test is
+      # guesswork - and the guess is wrong, because the expensive tests here are
+      # the ones that build an image rather than the ones that assert the most.
+      # Serial execution (see below) makes the numbers straightforwardly
+      # additive.
+      #
+      # Not --jobs, unlike the confined half. One container is shared across
+      # this file and a handful of tests mutate it - signalling dnsmasq,
+      # reloading the address sets - so running tests concurrently would have
+      # them racing over state the others read. Parallelising this suite means
+      # first separating the tests that only read the shared container from the
+      # ones that change it, which is a larger change than a flag.
+      - run: bats -T test/runtime.bats
         env:
           SKIP_BUILD: 1
           # Every container this suite starts fetches GitHub's IP ranges from
