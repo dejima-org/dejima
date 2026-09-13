@@ -4271,6 +4271,33 @@ registered_commands() {
         || { echo "resolve_one cannot signal 'no address', so retrying it does nothing"; return 1; }
 }
 
+@test "a retried check reports the status the command actually returned" {
+    # The failure this retry was written for was diagnosed by the exit code:
+    # 28 is a timeout, 7 is a refusal, and only the first means the network
+    # rather than the policy. A retry that swallows it and returns a bare 1
+    # leaves the message stating a code curl never returns, which is worse than
+    # saying nothing.
+    local block
+    block=$(sed -n '/^retry_positive()/,/^}/p' "$SANDBOX_DIR/egress-policy")
+    grep -q 'return "\$rc"' <<< "$block" \
+        || { echo "retry_positive returns a literal rather than the command's status"; return 1; }
+    grep -qE '^\s*"\$@" \|\| rc=\$\?' <<< "$block" \
+        || { echo "the status is discarded by an if, so there is none to return"; return 1; }
+
+    # Driven, because the shape is easy to get right and the behaviour is what
+    # matters.
+    run bash -c '
+        set -uo pipefail
+        say() { :; }
+        eval "$(sed -n "/^retry_positive()/,/^}/p" "$1")"
+        t() { return 28; }
+        rc=0; retry_positive 2 t || rc=$?
+        printf "%s" "$rc"
+    ' _ "$SANDBOX_DIR/egress-policy"
+    [ "$output" = "28" ] \
+        || { echo "a command exiting 28 was reported as $output"; return 1; }
+}
+
 
 
 @test "IPv6 is refused as a family, with no permit path anywhere in the ruleset" {
