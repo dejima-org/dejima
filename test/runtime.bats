@@ -750,16 +750,29 @@ session_pid() {  # [container], defaulting to the file-wide one
 
 
 
+
 @test "the resolver hands out no AAAA, so a permitted name cannot produce a v6 address" {
     # The second layer, and the one that decides what a client even tries. With
     # the filter refusing v6 and the resolver still answering AAAA, a permitted
     # name would cost every client a connection attempt to an address that can
-    # never work - which presents as a slow destination rather than as a
-    # policy.
+    # never work - which presents as a slow destination rather than as a policy.
     #
-    # Asked of a name that really does have AAAA records in the world, and one
-    # this session actually permits: a name with none anywhere would satisfy
-    # this by being unremarkable rather than by the policy doing anything.
+    # The upstream is asked first, because "no AAAA came back" is only evidence
+    # if there was an AAAA to come back. A probe name that quietly loses its
+    # records would otherwise turn this into a check that passes because the
+    # thing it depends on broke. Asked from the FILTER container, where root
+    # may reach a resolver directly; the session container may not, which is
+    # the point of the rule that says so.
+    local upstream truth
+    upstream=$(dexec_filter head -1 /run/egress-policy/upstream-resolvers)
+    [ -n "$upstream" ] || { echo "no upstream resolver recorded"; return 1; }
+    truth=$(dexec_filter dig +short +time=3 +tries=2 "@$upstream" AAAA registry.npmjs.org || true)
+    if [ -z "$truth" ]; then
+        skip "registry.npmjs.org has no AAAA upstream either; this check would prove nothing"
+    fi
+
+    # It does have them out there. So the resolver returning none is the policy
+    # doing something, not the name being unremarkable.
     run dexec dig +short AAAA registry.npmjs.org
     [ "$status" -eq 0 ]
     [ -z "$output" ] \

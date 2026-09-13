@@ -997,10 +997,33 @@ verify_ipv6_refused() {
 
   # And the resolver hands out no AAAA, which is the second layer: an address
   # never produced cannot become a packet to refuse.
-  local aaaa
-  aaaa=$(dig +short +time=3 +tries=2 @127.0.0.1 AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
-  [ -z "$aaaa" ] \
-    || die "$label: the resolver answered AAAA for $PROBE_AAAA_NAME ($aaaa), so a permitted name can still produce a v6 address"
+  #
+  # Asked of the upstream first, because "our resolver returned no AAAA" is
+  # only evidence if there was an AAAA to return. A probe name that quietly
+  # loses its records - or an upstream that filters them itself - would
+  # otherwise turn this into a check that passes because the thing it depends
+  # on broke, which is the shape this repository has been caught by before.
+  #
+  # root may reach a resolver directly (see the DNS rules), so the upstream can
+  # be asked what the truth is.
+  local upstream truth ours
+  upstream=$(head -1 "$UPSTREAM_FILE" 2>/dev/null) || true
+  truth=""
+  [ -n "$upstream" ] \
+    && truth=$(dig +short +time=3 +tries=2 "@$upstream" AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+
+  ours=$(dig +short +time=3 +tries=2 @127.0.0.1 AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  [ -z "$ours" ] \
+    || die "$label: the resolver answered AAAA for $PROBE_AAAA_NAME ($ours), so a permitted name can still produce a v6 address"
+
+  # Not fatal when the upstream has none either. That is the world changing -
+  # the name dropped its records, or the upstream strips them - rather than
+  # this configuration being wrong, and refusing to start a session over it
+  # would cost more than it prevents. But it is said, because a check that
+  # proved nothing must not read as one that passed.
+  if [ -z "$truth" ]; then
+    say "note: $PROBE_AAAA_NAME has no AAAA upstream either, so the check that the resolver strips them proved nothing this launch. Set EGRESS_PROBE_AAAA_NAME to a permitted name that still has AAAA records."
+  fi
 }
 
 # A permitted name that this policy's own configuration would refuse is a
