@@ -2197,7 +2197,16 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     # approved public name, so a self-hosted endpoint on their own network gets
     # the answer check meant for names nobody reviewed. dejima configured this
     # address; there is nothing for an answer to decide about it.
-    if config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1; then
+    #
+    # Only for a backend dejima does NOT stand in front of, which today is the
+    # same set as "has a base_url" and is guarded rather than assumed. A
+    # backend with both would be proxied AND have its host permitted and
+    # exempted: that re-opens the DNS bypass leaving a proxied name
+    # unresolvable exists to close, and hands a public SaaS name the exemption
+    # fixed-domains.sh withholds from it on purpose. No manifest declares both,
+    # and this is what keeps that from being a coincidence.
+    if [ -z "$SANDBOX_BACKEND_PROXIED_DOMAIN" ] \
+        && config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1; then
         DEJIMA_BACKEND_HOST="$(config_get "backend.$DEJIMA_BACKEND_NAME" base_url \
             | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')"
     fi

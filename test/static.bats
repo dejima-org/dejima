@@ -4452,6 +4452,32 @@ registered_commands() {
         || { echo "an empty backend host reached the exemption list: $output"; return 1; }
 }
 
+@test "no backend is both proxied and self-served" {
+    # The exemption above is safe because the two are disjoint: a backend
+    # dejima proxies has a proxied_domain and no base_url, so its host is never
+    # permitted-and-exempted. A backend declaring both would be proxied AND
+    # have its host exempted, which re-opens the DNS bypass that leaving a
+    # proxied name unresolvable exists to close, and hands a public SaaS name
+    # the exemption fixed-domains.sh withholds from it on purpose.
+    #
+    # bin/dejima guards it at the point of use; this is the other end, so a
+    # future backend that legitimately needs both has to come and change this
+    # deliberately rather than inheriting an exemption nobody meant to grant.
+    local f name
+    for f in "$REPO_ROOT"/backends/*/backend.conf; do
+        name="$(basename "$(dirname "$f")")"
+        if grep -qE '^keys[[:space:]]*=.*base_url' "$f" \
+            && grep -qE '^proxied_domain[[:space:]]*=' "$f"; then
+            echo "backend '$name' declares both base_url and proxied_domain" >&2
+            return 1
+        fi
+    done
+
+    # And the guard itself, so removing it fails here rather than silently.
+    grep -q 'if \[ -z "$SANDBOX_BACKEND_PROXIED_DOMAIN" \]' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima no longer withholds the host from a proxied backend"; return 1; }
+}
+
 @test "a declared internal destination becomes an exemption the resolver and the filter both honour" {
     # Two layers, because the check is stated twice on purpose. The resolver
     # must stop refusing the answer, and the packet filter must stop refusing
