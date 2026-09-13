@@ -2200,6 +2200,7 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
 }
 
 
+
 @test "a session port bound to every interface is still unreachable from the bridge" {
     # The other direction, and the one a filter with only an output hook lets
     # through: a session process that binds 0.0.0.0 - by accident, or because a
@@ -2209,19 +2210,29 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     # filter's own answer.
     #
     # Bound in the SESSION container and dialled from a third container on the
-    # same network, which is the shape of the exposure. Loopback has to keep
-    # working throughout - the resolver and the credential forwarder both
-    # listen there - so it is asserted on the way past.
+    # same network, which is the shape of the exposure - the two share a
+    # namespace, so the listener answers at the address the pair holds on that
+    # network. Loopback has to keep working throughout, since the resolver and
+    # the credential forwarder both listen there, so it is probed on the way
+    # past.
     local addr
     addr=$(docker inspect -f \
         '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(filter_name)")
     [ -n "$addr" ] || { echo "could not find the pair's address on its network"; return 1; }
 
-    dexec_node bash -c 'nohup python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1'
+    # Its pid is recorded rather than matched later. `pkill -f "http.server
+    # 8099"` matches the command line of the shell running pkill, so it kills
+    # itself, the exec comes back 143, and bats stops the test there - which it
+    # did, before either assertion below had run.
+    dexec_node bash -c \
+        'nohup python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 &
+         echo $! > /tmp/probe-8099.pid
+         sleep 1'
 
-    # Both probes run before anything is asserted, so the listener is always
-    # cleaned up - a leaked one would sit in the shared container for every
-    # test after this.
+    # Both probes run before anything is asserted, and the listener is stopped
+    # before that - a leaked one would sit in the shared container for every
+    # test after this, and a cleanup that can fail must not be what decides
+    # whether this test passes.
     local from_lo from_bridge
     docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099' \
         >/dev/null 2>&1 && from_lo=0 || from_lo=$?
@@ -2230,13 +2241,19 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
         --entrypoint bash "$SESSION_IMAGE" \
         -c "timeout 5 bash -c 'exec 3<>/dev/tcp/$addr/8099'" >/dev/null 2>&1 \
         && from_bridge=0 || from_bridge=$?
-    dexec_node bash -c 'pkill -f "http.server 8099" || true'
+    dexec_node bash -c \
+        'kill "$(cat /tmp/probe-8099.pid)" 2>/dev/null; rm -f /tmp/probe-8099.pid; true' || true
 
     # It really was listening, or the refusal below proves nothing.
     [ "$from_lo" -eq 0 ] \
         || { echo "the probe server is not up on loopback, so this test cannot tell"; return 1; }
     [ "$from_bridge" -ne 0 ] \
         || { echo "a session port bound to 0.0.0.0 was reachable from the bridge"; return 1; }
+
+    # And it is actually gone, so the next test does not inherit it.
+    run docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099'
+    [ "$status" -ne 0 ] \
+        || { echo "the probe listener survived the test"; return 1; }
 }
 
 @test "tls transport: https://api.anthropic.com from inside the container reaches the host proxy" {
