@@ -40,6 +40,12 @@ if [ -n "${LOKI_URL:-}" ]; then
     dejima_permit_open "$(echo "$LOKI_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')" internal
 fi
 
+# A model the operator serves themselves, from [backend.<name>] base_url. Same
+# class as the forge and Loki and exempted for the same reason: they configured
+# the address, so there is nothing for an answer to decide - and a self-served
+# endpoint is on their own network about as often as not.
+dejima_permit_open "${DEJIMA_BACKEND_HOST:-}" internal
+
 # Approved domains, from `dejima-allow --global` and the project's own
 # `.dejima/allowed-domains`. NOT marked internal: these are reviewed with the
 # project and expected to be public names, and the whole value of the answer

@@ -4351,6 +4351,46 @@ registered_commands() {
         || { echo "an unpermitted name reached a class: $output"; return 1; }
 }
 
+@test "a self-served model's host is permitted and exempted like the forge and Loki" {
+    # Where a self-hosted backend lives comes from [backend.<name>] base_url -
+    # the operator's own configuration, the same class of value as the forge's
+    # hosts and Loki's URL. So it gets the same treatment: permitted, and
+    # exempt from the check that refuses an answer pointing inside a private
+    # network, because they configured the address and there is nothing for an
+    # answer to decide.
+    #
+    # Without this the endpoint is reachable only if its name is ALSO approved
+    # as a domain, at which point it is indistinguishable from a public name
+    # nobody reviewed - and a self-served model on the operator's own network
+    # then fails the answer check and stops the launch. That is how it
+    # presented.
+    grep -q 'dejima_permit_open "${DEJIMA_BACKEND_HOST:-}" internal' "$SANDBOX_DIR/firewall-up.sh" \
+        || { echo "a self-served backend's host is not permitted-and-exempted"; return 1; }
+
+    # Derived from the URL host-side, with any scheme and port stripped, so the
+    # container is given a name and not a URL.
+    grep -q 'DEJIMA_BACKEND_HOST=' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima never derives the backend host"; return 1; }
+    run bash -c 'printf "%s" "$1" | sed -E "s#^[a-zA-Z]+://##; s#[:/].*##"' _ \
+        'https://llm.example.test:8443/v1'
+    [ "$output" = "llm.example.test" ] \
+        || { echo "the host derivation does not strip scheme and port: $output"; return 1; }
+
+    # Only backends that have one - every proxied backend leaves it empty, and
+    # an empty entry must be ignored rather than permitted.
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        before="${#DEJIMA_OPEN_CLASS[@]}"
+        dejima_permit_open "" internal
+        [ "${#DEJIMA_OPEN_CLASS[@]}" -eq "$before" ] || { echo "GREW"; exit 1; }
+        printf "internal:%s\n" "${DEJIMA_INTERNAL_CLASS[*]:-}"
+    ' _ "$SANDBOX_DIR/fixed-domains.sh"
+    [ "$status" -eq 0 ] || { echo "an empty backend host was permitted: $output"; return 1; }
+    [ "$output" = "internal:" ] \
+        || { echo "an empty backend host reached the exemption list: $output"; return 1; }
+}
+
 @test "a declared internal destination becomes an exemption the resolver and the filter both honour" {
     # Two layers, because the check is stated twice on purpose. The resolver
     # must stop refusing the answer, and the packet filter must stop refusing

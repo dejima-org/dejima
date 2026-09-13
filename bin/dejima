@@ -2012,6 +2012,9 @@ _suggest_backends() {  # <harness-section-name>
 # declare still stops the launch.
 DEJIMA_BACKEND_NAME=""
 SANDBOX_BACKEND_PROXIED_DOMAIN=""
+# The host of a backend the operator serves themselves, when the selected one
+# has a base_url. Empty for every backend dejima proxies.
+DEJIMA_BACKEND_HOST=""
 DEJIMA_BACKEND_CREDENTIAL_KIND=""
 DEJIMA_BACKEND_CREDENTIAL_FILE=""
 DEJIMA_BACKEND_CREDENTIAL_FIELD=""
@@ -2184,6 +2187,20 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     if config_type "backend.$DEJIMA_BACKEND_NAME.credential_field" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FIELD="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_field)"
     fi
+    # A backend the operator serves rather than one dejima stands in front of:
+    # where it is comes from their own config, and the sandbox has to be able
+    # to reach it or the session has no model at all.
+    #
+    # Handed to the firewall path the way the forge's hosts and Loki's are.
+    # Without this the endpoint is reachable only if the operator ALSO approves
+    # its name as a domain - which works, and then looks like any other
+    # approved public name, so a self-hosted endpoint on their own network gets
+    # the answer check meant for names nobody reviewed. dejima configured this
+    # address; there is nothing for an answer to decide about it.
+    if config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1; then
+        DEJIMA_BACKEND_HOST="$(config_get "backend.$DEJIMA_BACKEND_NAME" base_url \
+            | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')"
+    fi
 
 fi
 # Everything staged for the container, checked before anything is put back
@@ -2241,7 +2258,7 @@ SANDBOX_HARNESS_BRIEFING_PATH="$(manifest_get harness "$DEJIMA_HARNESS_NAME" bri
 export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
     SANDBOX_HARNESS_SETTINGS SANDBOX_HARNESS_DOMAINS \
     SANDBOX_BACKEND_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS \
-    SANDBOX_HARNESS_BRIEFING_PATH
+    SANDBOX_HARNESS_BRIEFING_PATH DEJIMA_BACKEND_HOST
 
 # [core] command defaults to the selected harness's own command rather than
 # to a literal in core's schema.
@@ -3426,6 +3443,7 @@ filter_env=(
     -e GH_TOKEN              # authenticates the GitHub ranges fetch
     -e LOKI_URL              # its host is allowlisted, and the shipper needs it
     -e DEJIMA_INTERNAL_DOMAINS  # approved names that really do resolve inside
+    -e DEJIMA_BACKEND_HOST   # a self-served model's host, from its base_url
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET
