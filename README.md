@@ -402,8 +402,9 @@ Outbound access is default-deny: the filter container establishes an
 allowlist-only `nftables` policy at start, and anything not explicitly allowed
 is rejected outright rather than left to time out, so a session is told when
 something doesn't connect rather than waiting out a timeout and reporting a
-broken tool. One table covers IPv4 and IPv6, so an allowlist cannot cover one
-family and silently ignore the other.
+broken tool. IPv6 is refused outright rather than allowlisted: a sandbox has no
+IPv6 egress at all, and one table states that in the same transaction as
+everything else, so there is no moment where the family is partly filtered.
 
 The allowlist covers what the sandbox needs to function - DNS, the Docker host,
 GitHub on port 443 for read access whichever forge is selected, whatever the
@@ -536,10 +537,12 @@ unreachable rather than merely discouraged by a hook. Two properties carry
 that, both worth naming because the claim stays readable if either quietly
 stops being true. The restriction belongs to the *destination* rather than to
 the path it was reached by, so resolving a GitHub name cannot open a port its
-published ranges do not have. And the allowlist covers both address families
-in one table, so there is no state in which one is filtered and the other is
-not - an allowlist naming one family says nothing about the other, and the
-policy refuses to start rather than come up half-applied.
+published ranges do not have. And IPv6 is refused as a whole family, because an
+allowlist naming one address family says nothing about the other - so "port 22
+is closed on those ranges" would mean nothing if a v6 route to the same host
+stayed open. The refusal is the first rule of the chain and there is no v6
+permit path anywhere in it, which the policy checks at startup rather than
+assuming.
 
 `--allow-github-push` opens port 22 for one launch, paired with a repo-scoped
 deploy key in `[core] ssh_key` rather than a forwarded personal agent. The one

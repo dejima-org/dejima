@@ -87,8 +87,9 @@ exactly what it should be, `dejima-allow` rejects a malicious domain argument.
 `entrypoint.sh` (a `SANDBOX_TEST_MODE` env var makes it stop just short of
 execing the session's command, so the suite can attach to a fully-initialized
 container instead of reimplementing its own copy of the setup sequence), and
-asserts against it: both address families under one allowlist with a closed
-default, name and address enforcement in both directions, inbound and
+asserts against it: IPv6 refused outright with no permit path in the chain and
+no AAAA from the resolver, name and address enforcement in both directions,
+inbound and
 forwarded traffic dropped, GitHub reachable on 443 and not on 22, no working
 `sudo` and no way to change the packet filter as `node`, capabilities actually
 stripped (not just absent from a `docker exec` that doesn't have them to begin

@@ -4238,42 +4238,43 @@ registered_commands() {
 }
 
 
-@test "an address family the policy cannot express is refused, not left unfiltered" {
-    # The old shape blocked IPv6 outright and had a branch that printed
-    # "assuming IPv6 is unavailable at the kernel level" and continued, which
-    # inferred a fact about the world from a fact about a tool. A container
-    # whose kernel lacked the v6 filtering module, on a host with IPv6 enabled,
-    # took it and ran with IPv6 live and unfiltered - and nothing failed,
-    # because all that had happened was a check that could not tell.
-    #
-    # The answer now is structural rather than a branch: one table covering
-    # both families, so there is no state in which one is filtered and the
-    # other is not. What is left to assert is that it is that kind of table,
-    # that its default is closed, and that failing to install it stops the
-    # container instead of being reported and survived.
-    local p="$SANDBOX_DIR/egress-policy"
-    grep -q 'table inet \$TABLE' "$p" \
-        || { echo "the table is not inet, so one family could go unfiltered"; return 1; }
-    grep -q 'policy drop' "$p" \
-        || { echo "the chain does not default to drop"; return 1; }
 
-    # Both families are actually written into the ruleset, not just available
-    # to it - an inet table with no ip6 rules covers v6 with the policy alone,
-    # which is a different and much weaker thing than an allow-list.
-    local chain
+@test "IPv6 is refused as a family, with no permit path anywhere in the ruleset" {
+    # dejima has no IPv6 egress, deliberately. This test used to require the
+    # opposite - it failed if the chain had no `ip6 daddr` rules - which is how
+    # a branch came to allow-list the family and stay green.
+    local p="$SANDBOX_DIR/egress-policy" chain
     chain=$(sed -n '/chain egress {/,/^  }/p' "$p")
-    grep -q 'ip6 daddr' <<< "$chain" \
-        || { echo "no v6 rules in the chain"; return 1; }
 
-    # And it is verified after loading: if the kernel in this namespace could
-    # not express it there is no degraded mode to fall back to.
-    grep -q 'not present after loading' "$p" \
-        || { echo "nothing confirms the table came up"; return 1; }
-    # Matched on the phrase the two failures share rather than either whole
-    # sentence: which of them fired is a diagnostic that gets reworded, and the
-    # property is that the default is checked at all.
-    grep -q 'default-drop policy' "$p" \
-        || { echo "nothing confirms the default is closed"; return 1; }
+    grep -q 'meta nfproto ipv6' <<< "$chain" \
+        || { echo "the egress chain does not refuse IPv6"; return 1; }
+    # First, because a refusal under the established or loopback passes is one
+    # a v6 packet can get past: loopback carries ::1, and a flow permitted once
+    # stays permitted.
+    local first
+    first=$(grep -vE '^\s*(#|$|chain |type filter hook)' <<< "$chain" | head -1)
+    [[ "$first" == *"meta nfproto ipv6"* ]] \
+        || { echo "the v6 refusal is not the first rule: $first"; return 1; }
+
+    # And no v6 destination is named anywhere in the generated ruleset - not
+    # just the egress chain, since a set or an inbound accept would do it too.
+    local permits
+    permits=$(grep -nE '(ip6 |_v6|ipv6_addr)' "$p" | grep -v 'nfproto ipv6' || true)
+    [ -z "$permits" ] \
+        || { echo "IPv6 destinations are still named in the ruleset:"; echo "$permits"; return 1; }
+
+    # The resolver is the second layer: an address never handed out cannot
+    # become a packet to refuse.
+    grep -qE '^filter-AAAA$' "$p" \
+        || { echo "the resolver can still hand out AAAA answers"; return 1; }
+    grep -q '6#inet#' "$p" \
+        && { echo "AAAA answers are still written into an address set"; return 1; }
+
+    # Checked at startup rather than assumed, and checked on the ruleset rather
+    # than by a connection: a v6 connection fails the same way on a host with
+    # no v6 route, so a probe alone cannot tell refusal from absence.
+    grep -q 'verify_ipv6_refused' "$p" \
+        || { echo "nothing verifies the v6 posture at startup"; return 1; }
 }
 
 @test "inbound and forwarded traffic default to drop, like outbound" {
@@ -4354,9 +4355,10 @@ registered_commands() {
     grep -q 'internal_ok_v4' "$p" \
         || { echo "an exempted name gets no filter-side exemption"; return 1; }
     # The exemption reaches the filter by the resolver writing the answer into
-    # a second set, so both sets have to be fed from the same entry.
-    grep -q 'internal_ok_v4,6#inet#\$TABLE#internal_ok_v6' "$p" \
-        || { echo "the exempt sets are not both fed from the entry"; return 1; }
+    # a second set, appended to the class set the entry already feeds. v4 only:
+    # IPv6 is refused as a family, so there is no v6 set to exempt into.
+    grep -q 'sets="\$sets,4#inet#\$TABLE#internal_ok_v4"' "$p" \
+        || { echo "the exempt set is not fed from the entry"; return 1; }
     grep -q 'ip daddr != @internal_ok_v4 goto refuse' "$p" \
         || { echo "the filter's own guard does not consult the exemption"; return 1; }
 }
@@ -5704,10 +5706,16 @@ EOF
         grep -qiE 'IPv6' <<< "$flat" \
             || { echo "$f argues about port 22 without naming the IPv6 half"; return 1; }
     done
-    # And the half that holds it up is the one that can fail closed.
+    # And the half that holds it up says how it is held, not just that it is.
+    # That used to be a fail-closed branch - the firewall had to work out
+    # whether the family was present before it could block it, and refused to
+    # start when it could not. There is no such branch now: the refusal loads
+    # in the same transaction as the rest of the ruleset, and the policy checks
+    # the result rather than assuming it. Either formulation satisfies this;
+    # an unsupported assertion does not.
     readme="$(tr '\n' ' ' < "$REPO_ROOT/README.md" | tr -d '*`')"
-    grep -q 'refuses to start' <<< "$readme" \
-        || { echo "nothing says what happens when IPv6 cannot be filtered"; return 1; }
+    grep -qE 'checks at startup|refuses to start' <<< "$readme" \
+        || { echo "the README asserts the IPv6 half without saying what enforces it"; return 1; }
 }
 
 @test "README and docs/security.md both disclose that push access is CI code execution" {

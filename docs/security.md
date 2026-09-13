@@ -1215,9 +1215,8 @@ the window this closes.
 ## Network egress firewall
 
 On start, the filter container establishes an allowlist-only egress policy
-(`docker/egress-policy`): one `nftables` inet table covering both address
-families, with a closed default and everything the session may reach expressed
-as named sets. Allowed by default:
+(`docker/egress-policy`): one `nftables` inet table with a closed default and
+everything the session may reach expressed as named sets. Allowed by default:
 
 - DNS resolution via a local proxy (see "DNS is allowlisted too")
 - the Docker host itself (not its whole subnet)
@@ -1265,21 +1264,31 @@ launcher; this is the filter's own answer to the same question. Dropped rather
 than refused, which is the opposite of the outbound decision and deliberate: a
 refusal is a courtesy to a caller that is supposed to be there.
 
-IPv6 is covered by the same allowlist, not blocked. One `inet` table carries
-both families, so there is no state in which one is filtered and the other is
-not, and AAAA answers are resolved and land in the v6 sets like any other. An
-allowlist naming one address family says nothing about the other, and the
-previous arrangement - block v6 outright, because the allowlist was v4-only -
-was the honest answer to a narrower allowlist rather than the better one.
+IPv6 is refused outright. Not filtered alongside IPv4, not allowlisted - a
+sandbox has no IPv6 egress at all. An allowlist naming one address family says
+nothing about the other, so every restriction above would be worth only as much
+as the v6 route to the same host.
 
-That also removes a check the old firewall needed and could get wrong. It had
-to decide whether IPv6 was live before deciding whether to block it, and the
-first version of that inferred "the tool will not run" as "the family is not
-there" - which ran with IPv6 unfiltered and said nothing. There is nothing left
-to infer: the table either loads with both families and a closed default, or
-the policy refuses to start. A tool that will not run and a family that is not
-there are different conditions, and reporting the second on evidence of the
-first is how a boundary comes to be described rather than held.
+It is said twice, pointing the same way. The first rule of the egress chain
+refuses the whole family, above even the established and loopback passes, since
+a rule below either is one a v6 packet can get past - loopback carries `::1`,
+and a flow permitted once stays permitted. And the resolver hands out no AAAA
+at all, so a permitted name never produces an address that could become such a
+packet. Either alone would hold; both is the posture.
+
+One table is what makes this cheaper to hold than it used to be, rather than a
+reason to hold something weaker. The firewall this replaced had to decide
+whether the family was even present before it could block it, and the first
+version of that read "the tool will not run" as "the family is not there" - so
+it ran with IPv6 live and unfiltered, and said nothing. There is nothing left
+to infer: the refusal loads in the same transaction as everything else, or none
+of it loads. A tool that will not run and a family that is not there are
+different conditions, and reporting the second on evidence of the first is how
+a boundary comes to be described rather than held.
+
+The startup self-check asserts the shape of the ruleset, not a connection that
+fails: a v6 connection fails identically on a host with no v6 route, so a probe
+alone would pass whether the family is refused or merely absent.
 
 If your Gitea host only resolves via a LAN-local DNS server, make sure the
 Docker host itself can resolve it: containers inherit the host's resolver.

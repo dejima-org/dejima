@@ -712,41 +712,79 @@ session_pid() {  # [container], defaulting to the file-wide one
 }
 
 
-@test "IPv6 is filtered by the same allow-list as IPv4, with a closed default" {
-    # One inet table covers both families, so there is no state in which one is
-    # filtered and the other is not. That replaced blocking v6 outright, which
-    # was the honest answer while the allow-list itself was v4-only.
+
+@test "IPv6 is refused outright, not allow-listed alongside IPv4" {
+    # The property, stated as the absence of a permit path rather than as a
+    # connection that fails. A connection to a v6 address fails identically on
+    # a host with no v6 route at all, so a probe alone passes whether the
+    # family is refused or merely absent - and inferring the second from the
+    # first is the bug the firewall this replaced spent two rounds on.
     run dexec_filter nft list chain inet egress_policy egress
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"policy drop"* ]] \
         || { echo "the egress chain does not default to drop: $output"; return 1; }
-    [[ "$output" == *"ip6 daddr"* ]] \
-        || { echo "no v6 rules in the chain, so v6 rests on the policy alone: $output"; return 1; }
+
+    # The refusal is there, and it is the first rule - below the established or
+    # loopback passes it would be a rule a v6 packet can get past, since
+    # loopback carries ::1 and a flow permitted once stays permitted.
+    local first
+    first=$(grep -vE '^\s*(table|chain|\}|#|type filter hook|$)' <<< "$output" | head -1)
+    [[ "$first" == *"meta nfproto ipv6"* ]] \
+        || { echo "the first rule is not the v6 refusal: $first"; return 1; }
+
+    # And nothing else in the chain names a v6 destination. That is what the
+    # regression looked like: not the refusal missing, but permit rules beside
+    # it - this test used to REQUIRE those rules and so asserted the
+    # regression.
+    local permits
+    permits=$(grep 'ip6 ' <<< "$output" | grep -v 'nfproto ipv6' || true)
+    [ -z "$permits" ] \
+        || { echo "the chain allow-lists IPv6 destinations:"; echo "$permits"; return 1; }
+
+    # Inbound too, where the refusal is a drop rather than a reject.
+    run dexec_filter nft list chain inet egress_policy inbound
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"meta nfproto ipv6"* ]] \
+        || { echo "inbound does not refuse v6: $output"; return 1; }
 }
 
 
-@test "an IPv6 destination that is not permitted is refused, not merely unrouted" {
-    # The closed default above is the good path. This asserts the container is
-    # actually ON it rather than simply having no IPv6, because the two are
-    # indistinguishable from the outside: a container with no v6 at all also
-    # reaches nothing over v6.
+
+@test "the resolver hands out no AAAA, so a permitted name cannot produce a v6 address" {
+    # The second layer, and the one that decides what a client even tries. With
+    # the filter refusing v6 and the resolver still answering AAAA, a permitted
+    # name would cost every client a connection attempt to an address that can
+    # never work - which presents as a slow destination rather than as a
+    # policy.
     #
-    # Only meaningful where the namespace has v6 connectivity, so the absence
-    # of a default route is a skip rather than a pass - a vacuous pass here is
-    # exactly the shape this test exists to rule out.
-    run dexec_filter sh -c 'ip -6 route show default'
+    # Asked of a name that really does have AAAA records in the world, and one
+    # this session actually permits: a name with none anywhere would satisfy
+    # this by being unremarkable rather than by the policy doing anything.
+    run dexec dig +short AAAA registry.npmjs.org
     [ "$status" -eq 0 ]
-    if [ -z "$output" ]; then
-        skip "no IPv6 default route in this namespace; nothing to refuse"
-    fi
-    # 2001:db8::/32 is RFC 3849 documentation space: it is not permitted, and
-    # a refusal is a fast error rather than a timeout.
-    run dexec sh -c 'curl -s -o /dev/null --connect-timeout 5 --max-time 8 "https://[2001:db8::1]/"; echo "rc=$?"'
+    [ -z "$output" ] \
+        || { echo "the resolver answered AAAA for a permitted name: $output"; return 1; }
+
+    # And the A record still comes back, or the check above passes because
+    # nothing resolves at all.
+    run dexec dig +short A registry.npmjs.org
+    [ -n "$output" ] \
+        || { echo "the name does not resolve at all, so the AAAA check proves nothing"; return 1; }
+}
+
+@test "a v6 address the session somehow learns is still refused by the filter" {
+    # Belt and braces for the layer above: if something got a v6 address by a
+    # route the resolver does not control - a literal in a config file, an
+    # address embedded in a URL - the packet filter is what stops it.
+    #
+    # Unconditional, and it does not assert the speed of the failure: on a host
+    # with no v6 route this fails before reaching the filter, which is a
+    # different mechanism with the same outcome, and the ruleset test above is
+    # what distinguishes them.
+    run dexec sh -c 'curl -s -o /dev/null --connect-timeout 5 --max-time 8 "https://[2606:4700:4700::1111]/"; echo "rc=$?"'
     [[ "$output" == *"rc="* ]]
     [[ "$output" != *"rc=0"* ]] \
-        || { echo "a documentation IPv6 address was reachable: $output"; return 1; }
-    [[ "$output" != *"rc=28"* ]] \
-        || { echo "the v6 destination timed out instead of being refused: $output"; return 1; }
+        || { echo "a v6 address was reachable: $output"; return 1; }
 }
 
 

@@ -100,8 +100,6 @@ readonly RESOLVER_MAX_TTL=300
 readonly NONGLOBAL_V4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, \
 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, \
 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4"
-readonly NONGLOBAL_V6="::/128, ::1/128, ::ffff:0:0/96, 64:ff9b::/96, 100::/64, \
-2001:db8::/32, fc00::/7, fe80::/10, ff00::/8"
 
 # --- launcher-supplied settings --------------------------------------------
 FORGE_META_URL=${EGRESS_FORGE_META_URL:-https://api.github.com/meta}
@@ -133,8 +131,11 @@ HOST_ADDR=${EGRESS_HOST_ADDR:-}
 # resolve here, the resolver is restricting names rather than simply broken.
 # 192.0.2.0/24 and 2001:db8::/32 are the equivalent reserved address ranges.
 PROBE_NAME=${EGRESS_PROBE_NAME:-example.com}
+# A PERMITTED name that really does have AAAA records, used to prove the
+# resolver hands none out. A name with no AAAA anywhere would satisfy that
+# check by being unremarkable rather than by the policy doing anything.
+PROBE_AAAA_NAME=${EGRESS_PROBE_AAAA_NAME:-registry.npmjs.org}
 PROBE_ADDR4=${EGRESS_PROBE_ADDR4:-192.0.2.1}
-PROBE_ADDR6=${EGRESS_PROBE_ADDR6:-2001:db8::1}
 FETCH_ATTEMPTS=${EGRESS_FETCH_ATTEMPTS:-5}
 FETCH_TIMEOUT=${EGRESS_FETCH_TIMEOUT:-20}
 
@@ -184,8 +185,13 @@ classify_entry() {
   # resolution. Anything else stops the container, quoted, rather than becoming
   # a line of resolver configuration that can never match - a destination that
   # looks configured and is silently refused is the worst of the three.
-  if python3 -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$value" 2>/dev/null; then
+  if python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_network(sys.argv[1], strict=False).version == 4 else 2)' "$value" 2>/dev/null; then
     printf 'addr\n'
+  elif python3 -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$value" 2>/dev/null; then
+    # A v6 address or prefix. Refused here rather than accepted and then never
+    # matched by anything: this policy refuses IPv6 as a family, so permitting
+    # a v6 destination cannot mean what whoever wrote it down meant.
+    die "permitted entry '$value' is an IPv6 address, and this policy refuses IPv6 outright"
   elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
     printf 'name\n'
   else
@@ -251,8 +257,12 @@ discover_upstreams() {
     return 0
   fi
   local found
-  found=$(awk '$1 == "nameserver" && $2 != "127.0.0.1" && $2 != "::1" { print $2 }' /etc/resolv.conf) || true
-  [ -n "$found" ] || die "no upstream resolver in /etc/resolv.conf; the policy has nothing to forward permitted names to"
+  # v4 only, for the same reason as everything else here - a v6 nameserver is
+  # one the forwarder would be refused on reaching, so recording it would turn
+  # "IPv6 is refused" into "DNS does not work".
+  found=$(awk '$1 == "nameserver" && $2 !~ /:/ && $2 != "127.0.0.1" { print $2 }' /etc/resolv.conf) || true
+  [ -n "$found" ] \
+    || die "no IPv4 upstream resolver in /etc/resolv.conf; the policy has nothing to forward permitted names to, and it refuses IPv6 outright"
   printf '%s\n' "$found" > "$UPSTREAM_FILE"
 }
 
@@ -267,12 +277,12 @@ discover_host_addr() {
     printf '%s\n' "${HOST_ADDR//,/ }" | tr ' ' '\n' | grep -v '^$' || true
     return 0
   fi
-  local v4 v6
+  # v4 only. A v6 gateway would be an address no rule consults, since IPv6 is
+  # refused as a family.
+  local v4
   v4=$(ip -4 route show default 2>/dev/null | awk '{ print $3; exit }') || true
-  v6=$(ip -6 route show default 2>/dev/null | awk '{ print $3; exit }') || true
-  [ -n "$v4$v6" ] || die "no default route, so the container's own host address cannot be determined; set EGRESS_HOST_ADDR (or EGRESS_HOST_ADDR=none)"
-  [ -n "$v4" ] && printf '%s\n' "$v4"
-  [ -n "$v6" ] && printf '%s\n' "$v6"
+  [ -n "$v4" ] || die "no IPv4 default route, so the container's own host address cannot be determined; set EGRESS_HOST_ADDR (or EGRESS_HOST_ADDR=none)"
+  printf '%s\n' "$v4"
   return 0
 }
 
@@ -394,18 +404,17 @@ emit_forge_clamp() {
 # and the resolver's uid. Shell syntax therefore applies to the comments in them
 # as well: no backticks, and no bare $, in the text that goes into the ruleset.
 apply_ruleset() {
-  local forge4=$1 forge6=$2 host_addrs=$3 resolver_uid=$4
-  local up4 up6 h4 h6 lit4 lit6 file="$RUNDIR/ruleset.nft"
+  local forge4=$1 host_addrs=$2 resolver_uid=$3
+  local up4 h4 lit4 file="$RUNDIR/ruleset.nft"
 
+  # v4 only, everywhere below: IPv6 is refused as a family, so a v6 address in
+  # any of these would be an element of a set no rule consults.
   up4=$(grep -v ':' "$UPSTREAM_FILE" | paste -sd, -) || true
-  up6=$(grep ':' "$UPSTREAM_FILE" | paste -sd, -) || true
   h4=$(printf '%s\n' "$host_addrs" | grep -v ':' | grep -v '^$' | paste -sd, -) || true
-  h6=$(printf '%s\n' "$host_addrs" | grep ':' | paste -sd, -) || true
   # Every address the operator supplied, of either class. Used to permit the
   # open-class ones and to exempt all of them from the non-global guard: the
   # guard is about answers, and these are not answers.
   lit4=$( { entries_of forge addr; entries_of open addr; } | grep -v ':' | paste -sd, -) || true
-  lit6=$( { entries_of forge addr; entries_of open addr; } | grep ':'    | paste -sd, -) || true
 
   {
     echo "table inet $TABLE"
@@ -418,28 +427,20 @@ apply_ruleset() {
     # the same range under more than one key, and overlapping intervals are an
     # error rather than a merge by default.
     emit_set forge_v4 ipv4_addr "flags interval;auto-merge" "$forge4"
-    emit_set forge_v6 ipv6_addr "flags interval;auto-merge" "$forge6"
     # Addresses of permitted names, by class. Written by the resolver as it
     # answers, with a timeout so an address a name no longer points at ages out
     # by itself.
     emit_set fname_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
-    emit_set fname_v6 ipv6_addr "flags timeout;timeout $SET_TTL" ""
     emit_set oname_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
-    emit_set oname_v6 ipv6_addr "flags timeout;timeout $SET_TTL" ""
     # Answers for the entries the operator exempted from the non-global check.
     # The resolver adds an exempt name's addresses here as well as to its class
     # set, which is what lets the guard below be one rule instead of a copy of
     # the class rules.
     emit_set internal_ok_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
-    emit_set internal_ok_v6 ipv6_addr "flags timeout;timeout $SET_TTL" ""
     emit_set literal_v4 ipv4_addr "flags interval;auto-merge" "$lit4"
-    emit_set literal_v6 ipv6_addr "flags interval;auto-merge" "$lit6"
     emit_set upstream_v4 ipv4_addr "" "$up4"
-    emit_set upstream_v6 ipv6_addr "" "$up6"
     emit_set host_v4 ipv4_addr "" "$h4"
-    emit_set host_v6 ipv6_addr "" "$h6"
     emit_set nonglobal_v4 ipv4_addr "flags interval;auto-merge" "$NONGLOBAL_V4"
-    emit_set nonglobal_v6 ipv6_addr "flags interval;auto-merge" "$NONGLOBAL_V6"
 
     cat <<EOF
 
@@ -479,12 +480,13 @@ apply_ruleset() {
   # supposed to be there, and an unsolicited inbound connection is not.
   chain inbound {
     type filter hook input priority filter; policy drop;
+    # First, so nothing below can let a v6 packet past - see the egress chain.
+    meta nfproto ipv6 counter drop
     ct state established,related counter accept
     iifname "lo" counter accept
     # The container's own host, which could already initiate inbound under the
     # firewall this replaced and still can.
     ip saddr @host_v4 counter accept
-    ip6 saddr @host_v6 counter accept
   }
 
   # Neither container routes for anything. Stated rather than left to the
@@ -495,6 +497,23 @@ apply_ruleset() {
 
   chain egress {
     type filter hook output priority filter; policy drop;
+
+    # IPv6 is refused outright. Not filtered alongside v4, not allow-listed -
+    # a sandbox has no IPv6 egress at all, and every rule below concerns v4
+    # only.
+    #
+    # First in the chain, above even the established and loopback passes,
+    # because a rule that sits under either of those is a rule a v6 packet can
+    # get past: loopback carries ::1 too, and a flow that was somehow permitted
+    # once would keep being permitted.
+    #
+    # One table is what makes this cheaper to hold than it used to be. The
+    # firewall this replaced had to decide whether the family was even present
+    # before it could block it, and the first version of that read "the tool
+    # will not run" as "the family is not there" - so it ran with IPv6 live and
+    # unfiltered, and said nothing. There is nothing to infer here: the refusal
+    # loads in the same transaction as everything else, or none of it loads.
+    meta nfproto ipv6 counter goto refuse
 
     # Replies and related traffic of connections already permitted.
     ct state established,related accept
@@ -509,15 +528,12 @@ apply_ruleset() {
     # Anything may reach OUR resolver, which is the point of having one.
     ip daddr 127.0.0.1 udp dport 53 goto permit
     ip daddr 127.0.0.1 tcp dport 53 goto permit
-    ip6 daddr ::1 udp dport 53 goto permit
-    ip6 daddr ::1 tcp dport 53 goto permit
 
     # The forwarder reaching the resolvers this namespace was given, matched by
     # the uid of the account created for it and used by nothing else. Any port,
     # not just 53: the runtime reaches its embedded resolver through a DNAT rule
     # that rewrites the port, so a port match would miss it.
     meta skuid $resolver_uid ip daddr @upstream_v4 goto permit
-    meta skuid $resolver_uid ip6 daddr @upstream_v6 goto permit
 
     # And the runtime's own embedded resolver forwarding onwards, which happens
     # from inside THIS namespace on some versions and not on others - two hosts
@@ -541,7 +557,6 @@ apply_ruleset() {
     meta skuid 0 tcp dport 53 goto permit
 
     ip daddr @upstream_v4 goto refuse
-    ip6 daddr @upstream_v6 goto refuse
     udp dport { 53, 853 } goto refuse
     tcp dport { 53, 853 } goto refuse
 
@@ -564,9 +579,7 @@ apply_ruleset() {
     # none of them is an answer. The only negated lookup is on a hash set,
     # because negating an interval set is not portable across kernels.
     ip daddr @fname_v4 ip daddr @nonglobal_v4 ip daddr != @internal_ok_v4 goto refuse
-    ip6 daddr @fname_v6 ip6 daddr @nonglobal_v6 ip6 daddr != @internal_ok_v6 goto refuse
     ip daddr @oname_v4 ip daddr @nonglobal_v4 ip daddr != @internal_ok_v4 goto refuse
-    ip6 daddr @oname_v6 ip6 daddr @nonglobal_v6 ip6 daddr != @internal_ok_v6 goto refuse
 
     # The rest of loopback is the namespace's own business and is untouched.
     # Not logged either: it never leaves the namespace, so it is not one of the
@@ -579,22 +592,17 @@ apply_ruleset() {
     # the address was arrived at.
 EOF
     emit_forge_clamp ip forge_v4
-    emit_forge_clamp ip6 forge_v6
     emit_forge_clamp ip fname_v4
-    emit_forge_clamp ip6 fname_v6
 
     cat <<EOF
 
     # The open class: names the launcher permitted and addresses it supplied,
     # on any port. DNS to them is refused above along with everyone else's.
     ip daddr @oname_v4 goto permit
-    ip6 daddr @oname_v6 goto permit
     ip daddr @literal_v4 goto permit
-    ip6 daddr @literal_v6 goto permit
 
     # The container's own host, as a single address.
     ip daddr @host_v4 goto permit
-    ip6 daddr @host_v6 goto permit
 
     # Anything else: logged, then refused. The chain policy is drop as a
     # backstop, but nothing should ever reach it.
@@ -665,6 +673,14 @@ max-cache-ttl=$RESOLVER_MAX_TTL
 # logged ("possible DNS-rebind attack detected"), which the lookup log records
 # as a refusal distinct from an unpermitted name.
 stop-dns-rebind
+
+# No AAAA answers, ever. The packet filter refuses IPv6 outright, so an address
+# this handed out could not be connected to anyway - and handing one out means
+# a client spends a connection attempt on it first, which presents as a slow
+# permitted destination rather than as a policy. The two layers point the same
+# way on purpose: the filter refuses the packet, and this never produces an
+# address that could become one.
+filter-AAAA
 EOF
 
   while read -r class kind exemption name; do
@@ -676,11 +692,11 @@ EOF
     # Which set the answers go into is the entry's class, stated in the entries
     # file rather than worked out from the addresses that come back.
     case $class in
-      forge) sets="4#inet#$TABLE#fname_v4,6#inet#$TABLE#fname_v6" ;;
-      *)     sets="4#inet#$TABLE#oname_v4,6#inet#$TABLE#oname_v6" ;;
+      forge) sets="4#inet#$TABLE#fname_v4" ;;
+      *)     sets="4#inet#$TABLE#oname_v4" ;;
     esac
     if [ "$exemption" = internal-ok ]; then
-      sets="$sets,4#inet#$TABLE#internal_ok_v4,6#inet#$TABLE#internal_ok_v6"
+      sets="$sets,4#inet#$TABLE#internal_ok_v4"
       printf 'rebind-domain-ok=/%s/\n' "$name" >> "$RESOLVER_CONF"
     fi
     printf 'nftset=/%s/%s\n' "$name" "$sets" >> "$RESOLVER_CONF"
@@ -879,7 +895,7 @@ verify() {
   # allow-list, and which set it uses is the name's class. Checking membership
   # of the class set proves both halves of that wiring; without it a name could
   # resolve and still be unreachable, or be reachable in the wrong class.
-  case $answer in *:*) set_name=fname_v6 ;; *) set_name=fname_v4 ;; esac
+  set_name=fname_v4
   nft get element inet "$TABLE" "$set_name" "{ $answer }" >/dev/null 2>&1 \
     || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
 
@@ -917,14 +933,55 @@ verify() {
 
   verify_refused "https://$PROBE_ADDR4/" "check 10" "$PROBE_ADDR4"
 
-  # Only meaningful where the namespace actually has v6 connectivity; where it
-  # does, an address family the policy did not cover would show up here.
-  if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
-    verify_refused "https://[$PROBE_ADDR6]/" "check 11" "$PROBE_ADDR6"
-  fi
+  verify_ipv6_refused "check 11"
 
   wait_for_log "$CONN_LOG" "$PROBE_ADDR4" \
     || die "check 12: the refused attempt to $PROBE_ADDR4 is not in $CONN_LOG (file present: $([ -f "$CONN_LOG" ] && echo yes || echo no))"
+}
+
+# IPv6 is refused as a family, and this is what says so rather than assuming it.
+#
+# Asserted on the ruleset, not on a connection attempt. A connection to a v6
+# address fails just as fast on a host with no v6 route at all, so a probe alone
+# passes whether the family is refused or merely absent - which is the shape of
+# check this branch already got wrong once, and the reason the firewall it
+# replaced ended up inferring a fact about the world from a fact about a tool.
+#
+# Two things, both unconditional:
+#
+#   the refusal is present, and FIRST - a rule below the established or
+#   loopback passes is one a v6 packet can get past, since loopback carries ::1
+#   and a flow permitted once stays permitted;
+#
+#   and nothing else in the chain names a v6 destination. That is what a
+#   regression would look like: not the refusal disappearing, but a permit rule
+#   appearing beside it.
+verify_ipv6_refused() {
+  local label=$1 chain first permits
+
+  chain=$(nft list chain inet "$TABLE" egress) \
+    || die "$label: the egress chain cannot be read, so its IPv6 posture cannot be confirmed"
+
+  # The chain's own declaration is not a rule, and neither are the braces or
+  # the comments nft echoes back. Taken whole and split in bash rather than
+  # piped through `head -1`, which would SIGPIPE the grep and fail the pipeline
+  # under pipefail - see the note on that at the top of this file.
+  local rules
+  rules=$(grep -vE '^\s*(table|chain|\}|#|type filter hook|$)' <<< "$chain") || true
+  first=${rules%%$'\n'*}
+  [[ "$first" == *"meta nfproto ipv6"* ]] \
+    || die "$label: the first rule of the egress chain is not the IPv6 refusal, so a v6 packet can reach the rules above it: $first"
+
+  permits=$(grep -n 'ip6 ' <<< "$chain" | grep -v 'nfproto ipv6' || true)
+  [ -z "$permits" ] \
+    || die "$label: the egress chain names IPv6 destinations, so the family is being allow-listed rather than refused: $permits"
+
+  # And the resolver hands out no AAAA, which is the second layer: an address
+  # never produced cannot become a packet to refuse.
+  local aaaa
+  aaaa=$(dig +short +time=3 +tries=2 @127.0.0.1 AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  [ -z "$aaaa" ] \
+    || die "$label: the resolver answered AAAA for $PROBE_AAAA_NAME ($aaaa), so a permitted name can still produce a v6 address"
 }
 
 # A permitted name that this policy's own configuration would refuse is a
@@ -1016,7 +1073,9 @@ why_no_answer() {
 # - a pipeline that fails when it succeeds, under pipefail. See the note above.
 resolve_one() {
   local answers line
-  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A "$1" AAAA 2>/dev/null) || return 0
+  # A only: the resolver is configured to answer no AAAA at all, so asking for
+  # one spends a query to be told nothing.
+  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 0
   while IFS= read -r line; do
     [[ "$line" =~ ^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)$ ]] || continue
     printf '%s\n' "$line"
@@ -1092,7 +1151,7 @@ cmd_apply() {
   local meta="$RUNDIR/forge-meta.json"
   fetch_forge_ranges "$meta"
 
-  local ranges forge4 forge6
+  local ranges forge4
   ranges=$(jq -r "$FORGE_META_FILTER" < "$meta" | grep -v '^null$' | grep -v '^$') \
     || die "the forge metadata did not parse as JSON, or the filter matched nothing"
   [ -n "$ranges" ] || die "the forge metadata produced no address ranges; refusing to start with an empty forge allow-list"
@@ -1103,13 +1162,13 @@ cmd_apply() {
   ranges=$( { printf '%s\n' "$ranges"; entries_of forge addr; } | cidr-collapse ) \
     || die "the forge metadata contained something that is not an address range"
   forge4=$(printf '%s\n' "$ranges" | grep -v ':' | paste -sd, -) || true
-  forge6=$(printf '%s\n' "$ranges" | grep ':'    | paste -sd, -) || true
-  [ -n "$forge4$forge6" ] || die "no usable forge ranges after collapsing"
+  [ -n "$forge4" ] \
+    || die "the forge published no IPv4 ranges, and this policy refuses IPv6 outright - there is nothing it could reach the forge over"
 
   local resolver_uid
   resolver_uid=$(id -u "$RESOLVER_USER")
 
-  apply_ruleset "$forge4" "$forge6" "$host_addrs" "$resolver_uid"
+  apply_ruleset "$forge4" "$host_addrs" "$resolver_uid"
   say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs), forge ssh=$FORGE_SSH"
 
   write_log_config
@@ -1199,10 +1258,10 @@ rollback_entries() {
 # single address.
 permit_address() {
   local class=$1 value=$2
-  nft add element inet "$TABLE" "literal_$(family_of "$value")" "{ $value }" \
+  nft add element inet "$TABLE" literal_v4 "{ $value }" \
     || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the allow-list"; }
   if [ "$class" = forge ]; then
-    nft add element inet "$TABLE" "forge_$(family_of "$value")" "{ $value }" \
+    nft add element inet "$TABLE" forge_v4 "{ $value }" \
       || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the forge class"; }
   fi
   say "$value permitted ($class class, direct)"
@@ -1220,8 +1279,8 @@ permit_name() {
   mark=$(wc -c < "$RESOLVER_LOG")
   start_resolver
 
-  addrs=$(dig +short +time=3 +tries=2 @127.0.0.1 "$name" A "$name" AAAA 2>/dev/null |
-            grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*') || true
+  addrs=$(dig +short +time=3 +tries=2 @127.0.0.1 "$name" A 2>/dev/null |
+            grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}') || true
   if [ -z "$addrs" ]; then
     rollback_entries
     # The same two conditions apply/check 7 separates: the policy refusing the
@@ -1236,17 +1295,13 @@ permit_name() {
 
   [ "$class" = forge ] && set_prefix=fname || set_prefix=oname
   for addr in $addrs; do
-    nft get element inet "$TABLE" "${set_prefix}_$(family_of "$addr")" "{ $addr }" >/dev/null 2>&1 && ok=yes
+    nft get element inet "$TABLE" "${set_prefix}_v4" "{ $addr }" >/dev/null 2>&1 && ok=yes
   done
   if [ -z "$ok" ]; then
     rollback_entries
     die "$name resolved to [$(printf '%s ' $addrs)] but none of those addresses reached the ${set_prefix} sets; nothing was changed"
   fi
   say "$name permitted ($class class, $exemption): $(printf '%s ' $addrs)"
-}
-
-family_of() {
-  case $1 in *:*) printf 'v6\n' ;; *) printf 'v4\n' ;; esac
 }
 
 cmd_status() {
