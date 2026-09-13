@@ -188,7 +188,7 @@ services:
       SANDBOX_HARNESS_SEED: ${SANDBOX_HARNESS_SEED:-}
       SANDBOX_HARNESS_STAGED_EMPTY: ${SANDBOX_HARNESS_STAGED_EMPTY:-}
       # Opt-in escape hatch from the default hard GitHub-push block - see
-      # init-firewall.sh and git-push-guard.sh. Off unless explicitly set.
+      # the egress policy and git-push-guard.sh. Off unless explicitly set.
       ALLOW_GITHUB_PUSH: ${ALLOW_GITHUB_PUSH:-0}
       # Base URL of a Loki push endpoint (e.g. http://192.0.2.10:3100) to
       # ship DNS-query and firewall allow/reject logs to. Its host is
@@ -282,7 +282,9 @@ services:
       # launch (it inspects the symlinks and appends the exact mounts
       # needed), not listed statically here, since this repo can't assume
       # what else might be installed on a given host.
-      - dejima-bashhistory:/commandhistory
+      # Same volume as before this path moved, so an operator's existing
+      # history carries over rather than being orphaned under the old name.
+      - dejima-bashhistory:/var/opt/shell-history
       - nvim-data:${HOME}/.local/share/nvim
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim

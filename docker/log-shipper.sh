@@ -1,10 +1,14 @@
 #!/bin/bash
-# Tails dns-proxy.sh's dnsmasq query log and ulogd2's NFLOG-derived JSON
-# output, shipping them to Loki as raw log streams. Lets DNS lookups and
-# firewall allow/reject decisions from inside the sandbox show up alongside
-# the rest of the Grafana/Loki setup, labeled by job so they're easy to
-# filter. No-op if LOKI_URL isn't set - logging is a bonus on top of the
-# firewall/DNS-proxy enforcement, not required for either to work.
+# Tails the two records egress-policy produces - one JSON object per name
+# lookup, one per connection attempt - and ships them to Loki as raw log
+# streams. Lets lookups and allow/reject decisions from inside the sandbox show
+# up alongside the rest of the Grafana/Loki setup, labeled by job so they're
+# easy to filter. No-op if LOKI_URL isn't set - logging is a bonus on top of
+# the enforcement, not required for it to work.
+#
+# Both files are already one JSON object per line, so nothing here parses them.
+# A refused lookup is the record that matters most and never becomes a
+# connection, which is why there are two streams rather than one.
 #
 # Batches rather than pushing one line at a time: a burst of activity (e.g.
 # npm install resolving/connecting to dozens of hosts in quick succession)
@@ -74,8 +78,8 @@ ship_stream() {
     done
 }
 
-# Only the logs that exist in this container: dnsmasq's queries and ulogd2's
-# output. Session transcripts are shipped host-side, by
+# Only the logs that exist in this container: the name lookups and the
+# connection attempts. Session transcripts are shipped host-side, by
 # bin/dejima-conversation-ship, because an oversight log of a session must
 # not run in a process that session can reach.
 
@@ -83,8 +87,8 @@ if [ "${LOG_SHIPPER_LIB_ONLY:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-ship_stream "dejima-dns" /var/log/dnsmasq.log &
-ship_stream "dejima-net" /var/log/ulogd.json &
+ship_stream "dejima-dns" /var/log/egress-policy/lookups.ndjson &
+ship_stream "dejima-net" /var/log/egress-policy/connections.ndjson &
 
 
 wait

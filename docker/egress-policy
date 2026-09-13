@@ -1,0 +1,1426 @@
+#!/usr/bin/env bash
+#
+# egress-policy - establish, verify and amend the egress policy for one session.
+#
+# Runs as root in the policy container, which owns the network namespace the
+# session container later joins. The entrypoint calls `egress-policy apply`
+# once, at start; the operator can call `egress-policy permit <entry>` from the
+# host afterwards.
+#
+# Shape of the thing:
+#
+#   nftables    one inet table, output hook, policy drop, everything the
+#               session may reach expressed as named sets. inet rather than two
+#               tables because a v4-only allow-list that ignores v6 is not an
+#               allow-list, and one table cannot get half-applied.
+#   dnsmasq     the only resolver anything in the namespace may use. It answers
+#               for permitted names and returns NXDOMAIN for everything else,
+#               and it is what puts a permitted name's addresses into the
+#               nftables sets as it resolves them, so a name whose addresses
+#               rotate keeps working without a policy reload.
+#   ulogd2      turns the NFLOG messages the rules emit into one JSON object
+#               per connection attempt.
+#   dns-lookup-log
+#               turns the resolver's own log into one JSON object per name
+#               lookup. A refused lookup never becomes a connection, and it is
+#               the query itself that carries data out, so it needs its own
+#               record rather than an absence in the connection log.
+#
+# Permitted destinations are declared by class, and the class decides the ports:
+# a destination's permitted ports are the same however it was arrived at. An
+# address that belongs to two classes gets the narrower of them, which the rule
+# order below enforces.
+#
+# Everything here fails closed: any step that does not do what it claims exits
+# non-zero without writing the readiness file, and the container stops.
+
+set -Eeuo pipefail
+
+# Nothing here may die quietly. Every failure this script expects goes through
+# die(), which says what happened - but `set -e` aborting on a command that was
+# never expected to fail prints nothing at all, and for a script that runs
+# during container startup that is the worst failure mode there is: the
+# container simply never appears, and every cause presents identically, as the
+# sandbox being broken. Three CI failures went to two instances of exactly that
+# (#59), neither leaving a line to go on.
+#
+# -E extends the trap into functions and subshells, where almost everything
+# here happens and where it would not fire at all otherwise.
+trap 'status=$?; echo "ERROR: egress-policy aborted at line $LINENO (exit $status): $BASH_COMMAND" >&2' ERR
+
+# --- contracts -------------------------------------------------------------
+# Paths and names other components depend on. See INTERFACES.md.
+readonly TABLE=egress_policy                     # nft table, inet family
+readonly RUNDIR=/run/egress-policy
+readonly LOGDIR=/var/log/egress-policy
+readonly CONN_LOG="$LOGDIR/connections.ndjson"   # connection attempts, one JSON object per line
+readonly LOOKUP_LOG="$LOGDIR/lookups.ndjson"     # name lookups, likewise
+readonly READY_FILE="$RUNDIR/ready"              # the launcher's readiness signal
+readonly RESOLVER_CONF="$RUNDIR/resolver.conf"
+readonly RESOLVER_PID="$RUNDIR/resolver.pid"
+readonly RESOLVER_LOG="$LOGDIR/resolver.log"     # the resolver's own text log
+readonly ENTRIES_FILE="$RUNDIR/entries"          # the permitted set, one entry per line
+readonly UPSTREAM_FILE="$RUNDIR/upstream-resolvers"
+readonly ULOGD_CONF="$RUNDIR/ulogd.conf"
+readonly ULOGD_PID="$RUNDIR/ulogd.pid"
+readonly LOOKUP_LOGGER=/usr/local/sbin/dns-lookup-log
+readonly LOOKUP_PID="$RUNDIR/lookup-log.pid"
+
+# NFLOG groups. Arbitrary but distinct, and deliberately not 0: the kernel uses
+# group 0 for conntrack-invalid messages.
+readonly NFLOG_ALLOW=21
+readonly NFLOG_REFUSE=22
+
+# The account the resolver drops to. Permission to speak to a resolver outside
+# this namespace is keyed to this uid, so the account has to exist for that and
+# nothing else - the image creates it, uses it for nothing else, and gives it no
+# shell and no home. `nobody` would be the obvious choice and is the wrong one:
+# it is the conventional landing place for every unprivileged program, so keying
+# a permission off it grants that permission to whatever else ends up there.
+readonly RESOLVER_USER=egress-resolver
+
+# The account both log producers drop to. Unlike RESOLVER_USER this is not
+# load-bearing for the policy - no rule matches on it - but between them they
+# parse packet headers and resolver log lines, both decided by what the session
+# sends and asks for, so a bug in either should not be a way back to root in
+# this container.
+readonly LOGGER_USER=ulogd
+
+# How long an address resolved from a permitted name stays in the allow-list.
+# Must comfortably exceed RESOLVER_MAX_TTL so that a name still being served
+# from the resolver's cache cannot have had its addresses expire from the set.
+readonly SET_TTL=1h
+readonly RESOLVER_MAX_TTL=300
+
+# Destinations that are not globally routable. Traffic to these is refused
+# unless the operator named the address itself - see the guard in the ruleset.
+# Deliberately wider than RFC 1918: carrier-grade NAT, link-local, benchmark,
+# documentation and multicast ranges are all places a public name has no
+# business pointing at.
+readonly NONGLOBAL_V4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, \
+169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, \
+198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4"
+
+# --- launcher-supplied settings --------------------------------------------
+FORGE_META_URL=${EGRESS_FORGE_META_URL:-https://api.github.com/meta}
+# jq program producing one CIDR per line from that document. The default reads
+# GitHub's /meta; point both variables elsewhere for another forge.
+FORGE_META_FILTER=${EGRESS_FORGE_META_FILTER:-'[.git[]?, .api[]?, .web[]?] | unique | .[]'}
+# A whole request header, or empty for an unauthenticated fetch. See
+# fetch_forge_ranges for why the default endpoint wants one.
+FORGE_META_AUTH=${EGRESS_FORGE_META_AUTH:-}
+# Entries of the forge class: reachable on HTTPS only, plus SSH with the opt-in,
+# whether they are named here, published in the document above, or both.
+FORGE_ENTRIES=${EGRESS_FORGE_NAMES:-}
+# Entries of the open class: reachable on any port but the DNS ports.
+OPEN_ENTRIES=${EGRESS_ALLOWED_NAMES:-}
+# Entries whose answers may point inside a private network. Must also appear in
+# one of the two lists above; naming one that does not is a typo, and a typo
+# here silently weakens nothing but silently permits nothing either.
+INTERNAL_OK=${EGRESS_INTERNAL_OK:-}
+# What to call that list when telling an operator to add something to it. The
+# variable above is this component's interface with its launcher, and an
+# operator has no way to set it - they set whatever the launcher reads. A
+# message naming the variable sends them looking for something that is not
+# theirs, so the launcher supplies its own name for it.
+INTERNAL_OK_HINT=${EGRESS_INTERNAL_OK_HINT:-EGRESS_INTERNAL_OK}
+FORGE_SSH=${EGRESS_FORGE_SSH:-0}
+HOST_ADDR=${EGRESS_HOST_ADDR:-}
+# Self-check probes. example.com is reserved by RFC 2606 for documentation and
+# resolves globally, which is what makes it a usable negative: if it does not
+# resolve here, the resolver is restricting names rather than simply broken.
+# 192.0.2.0/24 and 2001:db8::/32 are the equivalent reserved address ranges.
+PROBE_NAME=${EGRESS_PROBE_NAME:-example.com}
+# A PERMITTED name that really does have AAAA records, used to prove the
+# resolver hands none out. A name with no AAAA anywhere would satisfy that
+# check by being unremarkable rather than by the policy doing anything.
+PROBE_AAAA_NAME=${EGRESS_PROBE_AAAA_NAME:-registry.npmjs.org}
+PROBE_ADDR4=${EGRESS_PROBE_ADDR4:-192.0.2.1}
+FETCH_ATTEMPTS=${EGRESS_FETCH_ATTEMPTS:-5}
+FETCH_TIMEOUT=${EGRESS_FETCH_TIMEOUT:-20}
+
+say() { printf '[egress-policy] %s\n' "$*" >&2; }
+die() { printf '[egress-policy] FAILED: %s\n' "$*" >&2; exit 1; }
+
+# Nothing in this file pipes into `grep -q`, and that is deliberate rather than
+# stylistic. grep -q exits the moment it matches, which closes the pipe; the
+# writer then takes SIGPIPE and exits 141, and `set -o pipefail` makes the
+# pipeline's status that 141 - so the check fails BECAUSE it succeeded. It is
+# invisible while the output is small enough that the writer finishes first,
+# and it appears once a ruleset carries a forge's published ranges. Replacing
+# the producer with `printf` does not help: the SIGPIPE just moves.
+#
+# So matches are `[[ ... ]]` where the pattern is a fixed string, and a
+# herestring where grep is genuinely needed - bash writes the whole string out
+# before grep runs, so there is no pipe for grep to leave early.
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "must run as root (it changes the namespace's packet filter)"
+}
+
+need_tools() {
+  local missing=() t
+  for t in nft dnsmasq ulogd curl jq dig pgrep python3 gosu cidr-collapse; do
+    command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+  done
+  [ -x "$LOOKUP_LOGGER" ] || missing+=("$LOOKUP_LOGGER")
+  [ ${#missing[@]} -eq 0 ] || die "missing from the image: ${missing[*]}"
+  id -u "$RESOLVER_USER" >/dev/null 2>&1 \
+    || die "the image did not create the $RESOLVER_USER account, which the resolver rule is keyed to"
+}
+
+# --------------------------------------------------------------------------
+# The permitted set
+# --------------------------------------------------------------------------
+# Entries are recorded one per line as "<class> <kind> <exemption> <value>",
+# and everything downstream - resolver configuration, ruleset, the live
+# amendment - is generated from that file. The class is stated by whoever
+# supplied the entry rather than worked out from what it resolves to: an
+# address can be in more than one class, and guessing would pick the wrong one
+# exactly when it matters.
+
+classify_entry() {
+  local value=$1
+  # An address or a prefix is permitted directly; a name is permitted by
+  # resolution. Anything else stops the container, quoted, rather than becoming
+  # a line of resolver configuration that can never match - a destination that
+  # looks configured and is silently refused is the worst of the three.
+  if python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_network(sys.argv[1], strict=False).version == 4 else 2)' "$value" 2>/dev/null; then
+    printf 'addr\n'
+  elif python3 -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$value" 2>/dev/null; then
+    # A v6 address or prefix. Refused here rather than accepted and then never
+    # matched by anything: this policy refuses IPv6 as a family, so permitting
+    # a v6 destination cannot mean what whoever wrote it down meant.
+    die "permitted entry '$value' is an IPv6 address, and this policy refuses IPv6 outright"
+  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+    printf 'name\n'
+  else
+    die "permitted entry '$value' is neither a host name nor an address"
+  fi
+}
+
+record_entries() {
+  local class=$1 raw=$2 value kind exemption
+  for value in ${raw//,/ }; do
+    value=${value%.}
+    [ -n "$value" ] || continue
+    kind=$(classify_entry "$value")
+    exemption=strict
+    case " ${INTERNAL_OK//,/ } " in
+      *" $value "*) exemption=internal-ok ;;
+    esac
+    if [ "$exemption" = internal-ok ] && [ "$kind" = addr ]; then
+      # Harmless, but say so: the check it exempts is a check on answers, and
+      # an address the operator typed is not an answer.
+      say "note: $value is an address, so it is not subject to the answer check $INTERNAL_OK_HINT exempts"
+    fi
+    printf '%s %s %s %s\n' "$class" "$kind" "$exemption" "$value" >> "$ENTRIES_FILE"
+  done
+}
+
+build_entries() {
+  local forge_host=$1 listed missing=()
+  : > "$ENTRIES_FILE"
+  # The forge's own host is a forge-class entry, stated here rather than
+  # inferred later: without it nothing resolves, and with it in the wrong class
+  # the SSH opt-in would control nothing, because the name path would already
+  # have opened every port on the forge's addresses.
+  record_entries forge "$FORGE_ENTRIES $forge_host"
+  record_entries open "$OPEN_ENTRIES"
+
+  local value
+  for value in ${INTERNAL_OK//,/ }; do
+    [ -n "$value" ] || continue
+    listed=$(awk -v v="${value%.}" '$4 == v' "$ENTRIES_FILE")
+    [ -n "$listed" ] || missing+=("$value")
+  done
+  [ ${#missing[@]} -eq 0 ] \
+    || die "$INTERNAL_OK_HINT names entries that are not permitted at all: ${missing[*]}"
+
+  grep -q . "$ENTRIES_FILE" || die "no permitted entries at all, not even the forge"
+}
+
+entries_of() { # class kind [exemption]
+  awk -v c="$1" -v k="$2" -v e="${3:-}" \
+    '$1 == c && $2 == k && (e == "" || $3 == e) { print $4 }' "$ENTRIES_FILE"
+}
+
+# --------------------------------------------------------------------------
+# Discovery
+# --------------------------------------------------------------------------
+
+# The resolvers the container runtime gave us. Recorded on the first apply,
+# because the second thing apply does is point /etc/resolv.conf at our own
+# resolver, after which the original list is gone.
+discover_upstreams() {
+  if [ -s "$UPSTREAM_FILE" ]; then
+    return 0
+  fi
+  local found
+  # v4 only, for the same reason as everything else here - a v6 nameserver is
+  # one the forwarder would be refused on reaching, so recording it would turn
+  # "IPv6 is refused" into "DNS does not work".
+  found=$(awk '$1 == "nameserver" && $2 !~ /:/ && $2 != "127.0.0.1" { print $2 }' /etc/resolv.conf) || true
+  [ -n "$found" ] \
+    || die "no IPv4 upstream resolver in /etc/resolv.conf; the policy has nothing to forward permitted names to, and it refuses IPv6 outright"
+  printf '%s\n' "$found" > "$UPSTREAM_FILE"
+}
+
+# "The container's own host, at the address it is reachable on and no wider":
+# the gateway of the default route, as a single address. An operator whose
+# topology makes that wrong sets EGRESS_HOST_ADDR; EGRESS_HOST_ADDR=none says
+# there is deliberately no such destination. Guessing wider - the gateway's
+# whole subnet, say - would permit every other container on the bridge.
+discover_host_addr() {
+  if [ -n "$HOST_ADDR" ]; then
+    [ "$HOST_ADDR" = none ] && return 0
+    printf '%s\n' "${HOST_ADDR//,/ }" | tr ' ' '\n' | grep -v '^$' || true
+    return 0
+  fi
+  # v4 only. A v6 gateway would be an address no rule consults, since IPv6 is
+  # refused as a family.
+  local v4
+  v4=$(ip -4 route show default 2>/dev/null | awk '{ print $3; exit }') || true
+  [ -n "$v4" ] || die "no IPv4 default route, so the container's own host address cannot be determined; set EGRESS_HOST_ADDR (or EGRESS_HOST_ADDR=none)"
+  printf '%s\n' "$v4"
+  return 0
+}
+
+host_of_url() {
+  local url=${1#*://}
+  url=${url%%/*}
+  url=${url%%\?*}
+  printf '%s\n' "${url##*@}" | sed 's/:[0-9]*$//'
+}
+
+# --------------------------------------------------------------------------
+# Forge ranges
+# --------------------------------------------------------------------------
+
+# Fetched before the policy is applied, while the namespace is still open: the
+# document says which addresses the policy will permit, so it cannot be fetched
+# through the policy. The session container has not been started at this point -
+# the launcher waits for the readiness file - so the window is not one the agent
+# can be in.
+fetch_forge_ranges() {
+  local out=$1 attempt rc http err
+  # Authenticated when the launcher supplied a token. The endpoint this
+  # defaults to is rate-limited per source address, unauthenticated, across
+  # everything on the host - so a host that starts sandboxes in a loop exhausts
+  # it and every launch after that fails here, on a policy that is correct and
+  # a credential that was available. Passed as a whole header so the scheme is
+  # the launcher's to choose.
+  local -a auth=()
+  [ -n "$FORGE_META_AUTH" ] && auth=(-H "$FORGE_META_AUTH")
+  for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
+    rc=0
+    http=$(curl --silent --show-error --location \
+                --max-time "$FETCH_TIMEOUT" \
+                --write-out '%{http_code}' \
+                --output "$out.part" \
+                ${auth[@]+"${auth[@]}"} \
+                "$FORGE_META_URL" 2>"$out.err") || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$http" = 200 ]; then
+      # Whether the body carries ranges is part of whether the fetch worked,
+      # so it is decided here rather than after the loop. A rate limit is the
+      # reason: it answers with a message and no ranges, sometimes over a 200,
+      # and it is transient - a burst of container starts trips it and it
+      # clears on its own. Checked outside the loop, that case would fail the
+      # launch on the first attempt over something a second attempt would have
+      # got right, and curl's own --retry cannot see it because the transfer
+      # succeeded.
+      # Judged on the filter's OUTPUT rather than its exit status. Given an
+      # empty body jq reads no input, produces none, and exits 0 having decided
+      # nothing - so a status check reads an empty response as a good fetch and
+      # the launch fails later, somewhere that cannot retry.
+      # grep -v reads to the end, so nothing here exits early on a producer
+      # that is still writing - see the note on pipefail above.
+      local produced
+      produced=$(jq -r "$FORGE_META_FILTER" < "$out.part" 2>/dev/null | grep -v '^null$') || produced=""
+      if [ -n "$produced" ]; then
+        mv "$out.part" "$out"
+        say "forge ranges fetched from $FORGE_META_URL on attempt $attempt"
+        return 0
+      fi
+      # The document's own words, when it has any. An API saying "rate limit
+      # exceeded" points at the cause; "the response carried no ranges" points
+      # at the wrong thing entirely.
+      #
+      # Tested for emptiness rather than by exit status, for the same reason as
+      # above: on an empty body jq produces nothing and still exits 0, so a
+      # `|| echo <fallback>` never fires and the failure is reported with no
+      # reason at all - which is the diagnostic this whole path exists to give.
+      err=$(jq -re '.message' < "$out.part" 2>/dev/null || true)
+      [ -n "$err" ] || err="response carried no ranges"
+      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: $err"
+    else
+      err=$(tr '\n' ' ' < "$out.err")
+      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: curl exit $rc, http ${http:-none}${err:+, }$err"
+    fi
+    [ "$attempt" -lt "$FETCH_ATTEMPTS" ] && sleep $((attempt * 2))
+  done
+  die "could not fetch the forge address ranges after $FETCH_ATTEMPTS attempts; the reason for each is above. The sandbox cannot start without them - the policy would refuse every forge range, so git, gh and the API would all fail once inside."
+}
+
+# --------------------------------------------------------------------------
+# The ruleset
+# --------------------------------------------------------------------------
+
+# One set definition, with its elements if it has any: nft rejects an empty
+# `elements = { }`.
+emit_set() {
+  local name=$1 type=$2 opts=$3 elements=$4 o
+  local -a statements=()
+  printf '\n  set %s {\n    type %s\n' "$name" "$type"
+  IFS=';' read -r -a statements <<< "$opts"
+  for o in "${statements[@]}"; do
+    [ -n "$o" ] && printf '    %s\n' "$o"
+  done
+  [ -n "$elements" ] && printf '    elements = { %s }\n' "$elements"
+  printf '  }\n'
+  return 0
+}
+
+# The forge class is permitted on HTTPS, plus SSH when the launcher opted in,
+# and refused on everything else. Emitted once per set that belongs to the
+# class, because the refusal has to sit immediately after the permissions: it
+# is what makes the narrow class win when an address is also in a wider one.
+emit_forge_clamp() {
+  local family=$1 set=$2
+  printf '    %s daddr @%s tcp dport 443 goto permit\n' "$family" "$set"
+  if [ "$FORGE_SSH" = 1 ]; then
+    printf '    %s daddr @%s tcp dport 22 goto permit\n' "$family" "$set"
+  fi
+  printf '    %s daddr @%s goto refuse\n' "$family" "$set"
+}
+
+# Rules are generated into one file and loaded with `nft -f`, which is a single
+# transaction: the namespace is never left half-filtered. The table is replaced
+# rather than the ruleset flushed - the runtime has its own rules in this
+# namespace (the embedded DNS resolver is reached through a DNAT rule the
+# runtime installed here) and flushing would take them with it.
+#
+# The heredocs below are unquoted, because the rules interpolate group numbers
+# and the resolver's uid. Shell syntax therefore applies to the comments in them
+# as well: no backticks, and no bare $, in the text that goes into the ruleset.
+apply_ruleset() {
+  local forge4=$1 host_addrs=$2 resolver_uid=$3
+  local up4 h4 lit4 file="$RUNDIR/ruleset.nft"
+
+  # v4 only, everywhere below: IPv6 is refused as a family, so a v6 address in
+  # any of these would be an element of a set no rule consults.
+  up4=$(grep -v ':' "$UPSTREAM_FILE" | paste -sd, -) || true
+  h4=$(printf '%s\n' "$host_addrs" | grep -v ':' | grep -v '^$' | paste -sd, -) || true
+  # Every address the operator supplied, of either class. Used to permit the
+  # open-class ones and to exempt all of them from the non-global guard: the
+  # guard is about answers, and these are not answers.
+  lit4=$( { entries_of forge addr; entries_of open addr; } | grep -v ':' | paste -sd, -) || true
+
+  {
+    echo "table inet $TABLE"
+    echo "delete table inet $TABLE"
+    echo "table inet $TABLE {"
+
+    # Interval sets hold the forge's published ranges, and any address the
+    # operator declared to be the forge: both are the forge class, and the
+    # class decides the ports. auto-merge because a forge's document may list
+    # the same range under more than one key, and overlapping intervals are an
+    # error rather than a merge by default.
+    emit_set forge_v4 ipv4_addr "flags interval;auto-merge" "$forge4"
+    # Addresses of permitted names, by class. Written by the resolver as it
+    # answers, with a timeout so an address a name no longer points at ages out
+    # by itself.
+    emit_set fname_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
+    emit_set oname_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
+    # Answers for the entries the operator exempted from the non-global check.
+    # The resolver adds an exempt name's addresses here as well as to its class
+    # set, which is what lets the guard below be one rule instead of a copy of
+    # the class rules.
+    emit_set internal_ok_v4 ipv4_addr "flags timeout;timeout $SET_TTL" ""
+    emit_set literal_v4 ipv4_addr "flags interval;auto-merge" "$lit4"
+    emit_set upstream_v4 ipv4_addr "" "$up4"
+    emit_set host_v4 ipv4_addr "" "$h4"
+    emit_set nonglobal_v4 ipv4_addr "flags interval;auto-merge" "$NONGLOBAL_V4"
+
+    cat <<EOF
+
+  # Every accepted new connection and every refused packet is logged to NFLOG,
+  # where ulogd picks it up. Two groups rather than one prefix to parse: the
+  # verdict then arrives as a field the log reader gets for free, and the text
+  # prefix is there so a raw nft trace is still readable.
+  chain permit {
+    ct state new log prefix "egress allow " group $NFLOG_ALLOW
+    counter accept
+  }
+
+  # Refused, not dropped: a caller must get an error immediately. A TCP reset
+  # turns connect() into ECONNREFUSED at once; anything else gets an ICMP
+  # admin-prohibited, which surfaces as EHOSTUNREACH rather than a timeout.
+  # Silently dropping would make every blocked destination look like a hang,
+  # which is the failure mode this policy is meant to avoid.
+  # Counted as well as logged. The log needs a consumer and a reader; the
+  # counter is readable from the container at the moment something fails, which
+  # is what a startup self-check has to work with.
+  chain refuse {
+    counter log prefix "egress refuse " group $NFLOG_REFUSE
+    meta l4proto tcp reject with tcp reset
+    reject with icmpx type admin-prohibited
+  }
+
+  # Inbound, with the same closed default the outbound chain has. Nothing in
+  # either container is meant to be reachable from the bridge: the resolver and
+  # the credential forwarder both bind loopback, and a session process that
+  # binds 0.0.0.0 is binding it by accident. The launch puts each pair on a
+  # network of its own, so the only neighbours are the host and the session -
+  # but "there is nothing else on the bridge today" is a fact about the
+  # launcher, and this is the filter's own answer to the same question.
+  #
+  # Dropped rather than refused, which is the opposite of the outbound
+  # decision and deliberate: a refusal is a courtesy to a caller that is
+  # supposed to be there, and an unsolicited inbound connection is not.
+  chain inbound {
+    type filter hook input priority filter; policy drop;
+    # First, so nothing below can let a v6 packet past - see the egress chain.
+    meta nfproto ipv6 counter drop
+    ct state established,related counter accept
+    iifname "lo" counter accept
+    # The container's own host, which could already initiate inbound under the
+    # firewall this replaced and still can.
+    ip saddr @host_v4 counter accept
+  }
+
+  # Neither container routes for anything. Stated rather than left to the
+  # kernel's default, which is accept.
+  chain forwarding {
+    type filter hook forward priority filter; policy drop;
+  }
+
+  chain egress {
+    type filter hook output priority filter; policy drop;
+
+    # IPv6 is refused outright. Not filtered alongside v4, not allow-listed -
+    # a sandbox has no IPv6 egress at all, and every rule below concerns v4
+    # only.
+    #
+    # First in the chain, above even the established and loopback passes,
+    # because a rule that sits under either of those is a rule a v6 packet can
+    # get past: loopback carries ::1 too, and a flow that was somehow permitted
+    # once would keep being permitted.
+    #
+    # One table is what makes this cheaper to hold than it used to be. The
+    # firewall this replaced had to decide whether the family was even present
+    # before it could block it, and the first version of that read "the tool
+    # will not run" as "the family is not there" - so it ran with IPv6 live and
+    # unfiltered, and said nothing. There is nothing to infer here: the refusal
+    # loads in the same transaction as everything else, or none of it loads.
+    meta nfproto ipv6 counter goto refuse
+
+    # Replies and related traffic of connections already permitted.
+    ct state established,related accept
+    ct state invalid drop
+
+    # DNS discipline, before the loopback pass below, because the runtime's own
+    # resolver lives on a loopback address too. The session user must not be
+    # able to address a resolver of its own choosing: an arbitrary name sent to
+    # an arbitrary resolver carries data out in the query itself, whether or not
+    # the connection that would follow is ever permitted.
+    #
+    # Anything may reach OUR resolver, which is the point of having one.
+    ip daddr 127.0.0.1 udp dport 53 goto permit
+    ip daddr 127.0.0.1 tcp dport 53 goto permit
+
+    # The forwarder reaching the resolvers this namespace was given, matched by
+    # the uid of the account created for it and used by nothing else. Any port,
+    # not just 53: the runtime reaches its embedded resolver through a DNAT rule
+    # that rewrites the port, so a port match would miss it.
+    meta skuid $resolver_uid ip daddr @upstream_v4 goto permit
+
+    # And the runtime's own embedded resolver forwarding onwards, which happens
+    # from inside THIS namespace on some versions and not on others - two hosts
+    # with byte-identical resolver configuration behaved differently, so it
+    # cannot be assumed either way. Those queries leave as root, to the host's
+    # real nameservers, on ports this chain otherwise refuses. Without this rule
+    # the forward above succeeds, the runtime's resolver can go no further, and
+    # every lookup in the container times out having been permitted.
+    #
+    # What it costs, stated plainly rather than left to be discovered: a process
+    # already running as root in this network namespace can address a resolver
+    # directly. The session user cannot - it is uid 1000 with no sudo, no setuid
+    # binary and no capability to change uid - so the query-name channel stays
+    # closed for the thing this exists to contain. Root in the session container
+    # would be a way around it, and that is the posture the firewall this
+    # replaced also had: it permitted uid 0 to reach port 53 anywhere, and
+    # accepted all loopback besides. Narrower here, not wider - but narrower is
+    # not closed, and closing it needs a discriminator finer than uid, which
+    # nftables cannot express for a sibling container sharing this namespace.
+    meta skuid 0 udp dport 53 goto permit
+    meta skuid 0 tcp dport 53 goto permit
+
+    ip daddr @upstream_v4 goto refuse
+    udp dport { 53, 853 } goto refuse
+    tcp dport { 53, 853 } goto refuse
+
+    # An answer decides policy and an answer comes from outside, so an address
+    # that got into the allow-list by being answered - rather than by the
+    # operator naming it - may not point into a private network. The resolver
+    # refuses such answers before they are ever handed out; this says the same
+    # thing where it cannot be argued with, and covers the cases and families
+    # the resolver's own check may not.
+    #
+    # Above the loopback pass, not below it: loopback is in the non-global set
+    # because an answer pointing at 127.0.0.1 is one of the cases this has to
+    # catch, and a rule sitting under the loopback accept would never see it.
+    # This is the independent half of a two-layer check and has to hold on its
+    # own.
+    #
+    # Scoped to the two sets the resolver populates: an address the operator
+    # supplied outright, the forge's published ranges and the container's own
+    # host are all private-address destinations somebody chose on purpose, and
+    # none of them is an answer. The only negated lookup is on a hash set,
+    # because negating an interval set is not portable across kernels.
+    ip daddr @fname_v4 ip daddr @nonglobal_v4 ip daddr != @internal_ok_v4 goto refuse
+    ip daddr @oname_v4 ip daddr @nonglobal_v4 ip daddr != @internal_ok_v4 goto refuse
+
+    # The rest of loopback is the namespace's own business and is untouched.
+    # Not logged either: it never leaves the namespace, so it is not one of the
+    # connection attempts the log exists to account for.
+    oifname "lo" accept
+
+    # The forge class: its published ranges, the addresses declared to be it,
+    # and the addresses its names resolve to. HTTPS only - plus SSH with the
+    # opt-in - and refused on every other port, whichever of those three ways
+    # the address was arrived at.
+EOF
+    emit_forge_clamp ip forge_v4
+    emit_forge_clamp ip fname_v4
+
+    cat <<EOF
+
+    # The open class: names the launcher permitted and addresses it supplied,
+    # on any port. DNS to them is refused above along with everyone else's.
+    ip daddr @oname_v4 goto permit
+    ip daddr @literal_v4 goto permit
+
+    # The container's own host, as a single address.
+    ip daddr @host_v4 goto permit
+
+    # Anything else: logged, then refused. The chain policy is drop as a
+    # backstop, but nothing should ever reach it.
+    goto refuse
+  }
+}
+EOF
+  } > "$file"
+
+  nft -f "$file" || die "nftables refused the generated ruleset ($file)"
+
+  # The whole policy rests on this table existing with a closed default. If the
+  # kernel in this namespace could not express it - no inet family, no reject
+  # support - there is no degraded mode to fall back to.
+  nft list table inet "$TABLE" >/dev/null 2>&1 || die "table inet $TABLE is not present after loading"
+  local chain name
+  for name in egress inbound forwarding; do
+    chain=$(nft list chain inet "$TABLE" "$name") \
+      || die "the $name chain is not present after loading the ruleset"
+    [[ "$chain" == *"policy drop"* ]] \
+      || die "the $name chain came up without a default-drop policy: $chain"
+  done
+}
+
+# --------------------------------------------------------------------------
+# Resolver
+# --------------------------------------------------------------------------
+
+# Generated from the entries file in full, every time. The alternative - patching
+# the running configuration - was dropped when classes arrived: which set a name
+# feeds is part of its configuration, and dnsmasq re-reads only its servers file
+# on a signal, so a name added later would resolve and then be refused.
+write_resolver_config() {
+  local name class exemption sets upstream
+
+  cat > "$RESOLVER_CONF" <<EOF
+# Generated by egress-policy. Do not edit; apply and permit regenerate it.
+port=53
+listen-address=127.0.0.1,::1
+bind-interfaces
+user=$RESOLVER_USER
+pid-file=$RESOLVER_PID
+log-facility=$RESOLVER_LOG
+log-queries
+
+# Nothing but the permitted set may produce an answer.
+#
+# no-hosts keeps /etc/hosts out of the answer path, which matters because the
+# runtime writes entries into that file: anything that can get a line into it
+# would otherwise get an answer, and with it an allow-list entry.
+#
+# no-resolv keeps the runtime's resolver list from being read at start, so the
+# only upstreams are the ones named on the server= lines below. no-poll is the
+# other half of that: without it dnsmasq re-reads /etc/resolv.conf whenever it
+# changes, and apply rewrites that file to point at this resolver - which would
+# make the resolver its own upstream.
+no-hosts
+no-resolv
+no-poll
+domain-needed
+bogus-priv
+cache-size=2000
+max-cache-ttl=$RESOLVER_MAX_TTL
+
+# An answer decides policy, and an answer comes from outside: a permitted name
+# answered with a private, loopback or link-local address would turn one
+# influenced reply into egress to an internal host. Such answers are refused and
+# logged ("possible DNS-rebind attack detected"), which the lookup log records
+# as a refusal distinct from an unpermitted name.
+stop-dns-rebind
+
+# No AAAA answers, ever. The packet filter refuses IPv6 outright, so an address
+# this handed out could not be connected to anyway - and handing one out means
+# a client spends a connection attempt on it first, which presents as a slow
+# permitted destination rather than as a policy. The two layers point the same
+# way on purpose: the filter refuses the packet, and this never produces an
+# address that could become one.
+filter-AAAA
+EOF
+
+  while read -r class kind exemption name; do
+    [ "$kind" = name ] || continue
+    while read -r upstream; do
+      [ -n "$upstream" ] && printf 'server=/%s/%s\n' "$name" "$upstream" >> "$RESOLVER_CONF"
+    done < "$UPSTREAM_FILE"
+
+    # Which set the answers go into is the entry's class, stated in the entries
+    # file rather than worked out from the addresses that come back.
+    case $class in
+      forge) sets="4#inet#$TABLE#fname_v4" ;;
+      *)     sets="4#inet#$TABLE#oname_v4" ;;
+    esac
+    if [ "$exemption" = internal-ok ]; then
+      sets="$sets,4#inet#$TABLE#internal_ok_v4"
+      printf 'rebind-domain-ok=/%s/\n' "$name" >> "$RESOLVER_CONF"
+    fi
+    printf 'nftset=/%s/%s\n' "$name" "$sets" >> "$RESOLVER_CONF"
+  done < "$ENTRIES_FILE"
+
+  # Everything not matched by a server= line above is answered here, and a
+  # domain with no address after it is NXDOMAIN. This is the rule that makes an
+  # unpermitted name unresolvable rather than merely unreachable.
+  printf 'address=/#/\n' >> "$RESOLVER_CONF"
+
+  # dnsmasq's own words, not just a status. The reason that matters most here
+  # is a build without nftset support: the whole arrangement rests on the
+  # resolver writing answers into the packet filter's sets, and a dnsmasq
+  # compiled without it rejects the line rather than ignoring it. That is the
+  # right behaviour and an opaque failure to diagnose, since every other line
+  # in the file is ordinary.
+  local complaint
+  if ! complaint=$(dnsmasq --test -C "$RESOLVER_CONF" 2>&1); then
+    die "the generated resolver configuration is not valid ($RESOLVER_CONF): $complaint"
+  fi
+}
+
+start_resolver() {
+  stop_daemon "$RESOLVER_PID" dnsmasq
+  dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
+  wait_for_daemon dnsmasq
+
+  # Waiting for the process is not waiting for the resolver. dnsmasq
+  # daemonizes and the parent returns almost immediately, so `pgrep` succeeds
+  # while the child is still binding - and a query sent into that window gets
+  # a connection refused rather than an answer, which every check after this
+  # would read as the policy refusing a name it in fact permits.
+  #
+  # Answering is the condition, not reachability: the probe name must NOT
+  # resolve, so any response at all - including the NXDOMAIN it is supposed to
+  # get - proves the resolver is up and deciding. A name that should resolve
+  # would conflate "the resolver is ready" with "the forward worked".
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if dig +time=1 +tries=1 @127.0.0.1 "$PROBE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    [ "$i" -lt 20 ] || die "the resolver is running but did not answer on 127.0.0.1 within 10s"
+    sleep 0.5
+  done
+
+  # From here the policy container resolves through its own resolver too, so the
+  # self-checks below test what the session container will experience rather
+  # than a privileged shortcut.
+  printf 'nameserver 127.0.0.1\noptions timeout:2 attempts:2\n' > /etc/resolv.conf \
+    || die "could not point /etc/resolv.conf at the local resolver"
+}
+
+# --------------------------------------------------------------------------
+# Logs
+# --------------------------------------------------------------------------
+
+# ulogd turns the two NFLOG groups into one JSON object per line. Both stacks
+# feed the same output instance so the supervisor has a single file to follow,
+# and numeric_label carries the verdict: with boolean_label set, the JSON output
+# writes label 1 as "action":"allowed" and label 0 as "action":"blocked", which
+# is a field the reader gets rather than a text prefix it has to parse.
+write_log_config() {
+  local json_plugin plugin_dir
+  # Globbed rather than hard-coded: the plugin directory carries the multiarch
+  # triplet, which differs between the architectures this image is built for.
+  # A glob rather than `ls | head -1`: head leaves as soon as it has its line,
+  # which SIGPIPEs the producer, and under pipefail that is a failing pipeline.
+  for json_plugin in /usr/lib/*/ulogd/ulogd_output_JSON.so; do
+    [ -e "$json_plugin" ] && break
+    json_plugin=""
+  done
+  [ -n "$json_plugin" ] || die "the ulogd JSON output plugin is not installed"
+  plugin_dir=$(dirname "$json_plugin")
+
+  cat > "$ULOGD_CONF" <<EOF
+# Generated by egress-policy.
+[global]
+logfile="$LOGDIR/ulogd.log"
+loglevel=5
+plugin="$plugin_dir/ulogd_inppkt_NFLOG.so"
+plugin="$plugin_dir/ulogd_raw2packet_BASE.so"
+plugin="$plugin_dir/ulogd_filter_IFINDEX.so"
+plugin="$plugin_dir/ulogd_filter_IP2STR.so"
+plugin="$plugin_dir/ulogd_output_JSON.so"
+
+stack=allowed:NFLOG,base:BASE,ifindex:IFINDEX,addr:IP2STR,record:JSON
+stack=refused:NFLOG,base:BASE,ifindex:IFINDEX,addr:IP2STR,record:JSON
+
+[allowed]
+group=$NFLOG_ALLOW
+numeric_label=1
+
+[refused]
+group=$NFLOG_REFUSE
+numeric_label=0
+
+[record]
+file="$CONN_LOG"
+sync=1
+timestamp=1
+boolean_label=1
+EOF
+}
+
+# Dropped to its own account rather than left as root. It parses headers from
+# packets whose contents the session decides, which is the last thing in this
+# container that should be running with privilege. It opens the netlink socket
+# and its output files first, so the drop costs it nothing.
+start_connection_log() {
+  stop_daemon "$ULOGD_PID" ulogd
+  id -u "$LOGGER_USER" >/dev/null 2>&1 \
+    || die "the image did not create the $LOGGER_USER account, which the connection logger drops to"
+  ulogd -d -u "$LOGGER_USER" -c "$ULOGD_CONF" -p "$ULOGD_PID" \
+    || die "the connection logger did not start"
+  wait_for_daemon ulogd
+}
+
+# Started before the resolver so that no lookup goes unrecorded, and left alone
+# when the resolver is restarted: it follows the log by path, and the resolver
+# reopens the same file in append mode.
+start_lookup_log() {
+  if [ -s "$LOOKUP_PID" ] && kill -0 "$(cat "$LOOKUP_PID")" 2>/dev/null; then
+    return 0
+  fi
+  touch "$RESOLVER_LOG" "$LOOKUP_LOG" "$LOGDIR/lookup-log.err"
+  # Its own output and its own errors, so it can write them after the drop
+  # below. The resolver's log it only ever reads, and that stays root's.
+  chown "$LOGGER_USER" "$LOOKUP_LOG" "$LOGDIR/lookup-log.err" \
+    || die "could not give $LOGGER_USER its own log files"
+
+  # Dropped, for the same reason the connection logger is: it parses content
+  # the session decides - the names it queries, arriving as lines of the
+  # resolver's log - and that is the last thing in this container that should
+  # be running with privilege. It opens two files and then only reads and
+  # writes them, so the drop costs it nothing.
+  nohup gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
+    >/dev/null 2>>"$LOGDIR/lookup-log.err" &
+  echo $! > "$LOOKUP_PID"
+  sleep 0.3
+  kill -0 "$(cat "$LOOKUP_PID")" 2>/dev/null \
+    || die "the lookup logger did not start (see $LOGDIR/lookup-log.err)"
+}
+
+# --------------------------------------------------------------------------
+# Daemon helpers
+# --------------------------------------------------------------------------
+
+stop_daemon() {
+  local pidfile=$1 name=$2
+  if [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    kill "$(cat "$pidfile")" 2>/dev/null || true
+    sleep 0.3
+  fi
+  pkill -x "$name" 2>/dev/null || true
+  sleep 0.2
+  return 0
+}
+
+wait_for_daemon() {
+  local name=$1 i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x "$name" >/dev/null 2>&1 && return 0
+    sleep 0.3
+  done
+  die "$name is not running after start"
+}
+
+# --------------------------------------------------------------------------
+# Self-checks
+# --------------------------------------------------------------------------
+
+# Runs a check that asserts something CAN be reached, until it can or the
+# attempts run out.
+#
+# Only for the positive ones, and the asymmetry is the point. A check asserting
+# reachability is answered wrongly by a transient failure - a DNS answer that
+# did not come back, a CDN edge rotating mid-boot, a slow moment on the way to
+# the forge - and it is answered wrongly in the direction that stops the
+# container. That is how it presented: one container failing here while a dozen
+# others in the same CI run came up fine.
+#
+# The negative controls must NOT go through this. There a single success is the
+# real answer, and retrying would only be asking until it says what we want.
+retry_positive() {
+  local attempts=$1; shift
+  local i rc=0
+  for ((i = 1; i <= attempts; i++)); do
+    # `|| rc=$?` rather than `if "$@"`, because the status is the point: the
+    # caller reports it, and telling a timeout from a refusal is what
+    # diagnosed the failure this exists for. A bare `if` discards it and every
+    # failure then reads as exit 1, which is a code the command never returned.
+    rc=0
+    "$@" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$i" -lt "$attempts" ] || return "$rc"
+    say "attempt $i/$attempts of '$1' did not succeed (exit $rc); retrying"
+    sleep $((i * 2))
+  done
+}
+
+# Ordered so that a failure names its own cause: the positive checks come
+# first, because "a blocked destination was refused" means nothing until
+# something that should work has been shown to work.
+verify() {
+  local forge_host=$1 rc answer set_name
+
+  pgrep -x dnsmasq >/dev/null || die "check 1: the resolver is not running"
+  pgrep -x ulogd   >/dev/null || die "check 1: the connection logger is not running"
+  kill -0 "$(cat "$LOOKUP_PID" 2>/dev/null || echo 0)" 2>/dev/null \
+    || die "check 1: the lookup logger is not running"
+
+  # The rule that keeps every other process away from an outside resolver is a
+  # uid match, so the resolver actually running as that uid is load-bearing.
+  local running_as
+  running_as=$(ps -o user= -p "$(cat "$RESOLVER_PID")" 2>/dev/null | tr -d ' ') || true
+  [ "$running_as" = "$RESOLVER_USER" ] \
+    || die "check 2: the resolver is running as '${running_as:-unknown}', not $RESOLVER_USER, so the rule permitting it to reach an upstream resolver is keyed to the wrong account"
+
+  answer=$(retry_positive 3 resolve_one "$forge_host") || true
+  [ -n "$answer" ] \
+    || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$forge_host")"
+
+  # The resolver is also what puts a permitted name's addresses into the
+  # allow-list, and which set it uses is the name's class. Checking membership
+  # of the class set proves both halves of that wiring; without it a name could
+  # resolve and still be unreachable, or be reachable in the wrong class.
+  set_name=fname_v4
+  nft get element inet "$TABLE" "$set_name" "{ $answer }" >/dev/null 2>&1 \
+    || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
+
+  rc=0
+  retry_positive 3 curl --silent --show-error --output /dev/null \
+    --connect-timeout 5 --max-time 20 "$FORGE_META_URL" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
+
+  # The same address, on the port the opt-in gates. With the opt-in off it must
+  # be refused even though the address was reached by name, which is the whole
+  # point of the class: if this passes because the name path ignored ports, the
+  # opt-in would control nothing.
+  if [ "$FORGE_SSH" = 1 ]; then
+    say "forge ssh opt-in is on; not checking that port 22 is refused"
+  else
+    verify_port_refused "$answer" 22 "check 6"
+  fi
+
+  check_permitted_names "check 7"
+
+  answer=$(resolve_one "$PROBE_NAME") || true
+  [ -z "$answer" ] \
+    || die "check 8: the unpermitted name $PROBE_NAME resolved to $answer - names are not being restricted"
+
+  # A refused lookup leaves no connection behind, so the only evidence it ever
+  # happened is this record - and it has to say why, because a lookup refused
+  # for being unpermitted and one refused for answering with an internal
+  # address are different events.
+  wait_for_log "$LOOKUP_LOG" "\"name\": \"$PROBE_NAME\"" \
+    || die "check 9: the refused lookup of $PROBE_NAME is not in $LOOKUP_LOG"
+  local recorded
+  recorded=$(grep -F "\"name\": \"$PROBE_NAME\"" "$LOOKUP_LOG")
+  [[ "$recorded" == *'"reason": "not-permitted"'* ]] \
+    || die "check 9: the lookup of $PROBE_NAME was recorded, but not as refused for being unpermitted: $recorded"
+
+  verify_refused "https://$PROBE_ADDR4/" "check 10" "$PROBE_ADDR4"
+
+  verify_ipv6_refused "check 11"
+
+  wait_for_log "$CONN_LOG" "$PROBE_ADDR4" \
+    || die "check 12: the refused attempt to $PROBE_ADDR4 is not in $CONN_LOG (file present: $([ -f "$CONN_LOG" ] && echo yes || echo no))"
+}
+
+# IPv6 is refused as a family, and this is what says so rather than assuming it.
+#
+# Asserted on the ruleset, not on a connection attempt. A connection to a v6
+# address fails just as fast on a host with no v6 route at all, so a probe alone
+# passes whether the family is refused or merely absent - which is the shape of
+# check this branch already got wrong once, and the reason the firewall it
+# replaced ended up inferring a fact about the world from a fact about a tool.
+#
+# Two things, both unconditional:
+#
+#   the refusal is present, and FIRST - a rule below the established or
+#   loopback passes is one a v6 packet can get past, since loopback carries ::1
+#   and a flow permitted once stays permitted;
+#
+#   and nothing else in the chain names a v6 destination. That is what a
+#   regression would look like: not the refusal disappearing, but a permit rule
+#   appearing beside it.
+# One chain's IPv6 posture: the refusal is present and FIRST, and nothing else
+# in the chain names a v6 address. A rule below the established or loopback
+# passes is one a v6 packet gets past, because `oifname "lo"` carries ::1 and an
+# established flow stays established.
+#
+# The second half is what a regression looks like. It is not the refusal
+# disappearing - it is a permit rule appearing beside it.
+verify_chain_refuses_ipv6() {
+  local label=$1 name chain rules first permits
+  name=$2
+
+  chain=$(nft list chain inet "$TABLE" "$name") \
+    || die "$label: the $name chain cannot be read, so its IPv6 posture cannot be confirmed"
+
+  # The chain's own declaration is not a rule, and neither are the braces or
+  # the comments nft echoes back. Taken whole and split in bash rather than
+  # piped through `head -1`, which would SIGPIPE the grep and fail the pipeline
+  # under pipefail - see the note on that at the top of this file.
+  rules=$(grep -vE '^\s*(table|chain|\}|#|type filter hook|$)' <<< "$chain") || true
+  first=${rules%%$'\n'*}
+  [[ "$first" == *"meta nfproto ipv6"* ]] \
+    || die "$label: the first rule of the $name chain is not the IPv6 refusal, so a v6 packet can reach the rules above it: $first"
+
+  permits=$(grep -n 'ip6 ' <<< "$chain" | grep -v 'nfproto ipv6' || true)
+  [ -z "$permits" ] \
+    || die "$label: the $name chain names IPv6 addresses, so the family is being allow-listed rather than refused: $permits"
+}
+
+verify_ipv6_refused() {
+  local label=$1 name
+
+  # Both chains that carry traffic, not just the outbound one. The chain a v6
+  # permit rule last appeared in was `inbound` - a `ip6 saddr @host_v6 accept`
+  # that sat there while the egress chain was already clean - so checking only
+  # `egress` would have watched the wrong door.
+  for name in egress inbound; do
+    verify_chain_refuses_ipv6 "$label" "$name"
+  done
+
+  # And the resolver hands out no AAAA, which is the second layer: an address
+  # never produced cannot become a packet to refuse.
+  #
+  # Asked of the upstream first, because "our resolver returned no AAAA" is
+  # only evidence if there was an AAAA to return. A probe name that quietly
+  # loses its records - or an upstream that filters them itself - would
+  # otherwise turn this into a check that passes because the thing it depends
+  # on broke, which is the shape this repository has been caught by before.
+  #
+  # As the resolver's account, not as root. The rule permitting root to reach a
+  # resolver matches on port 53, and the runtime reaches its embedded resolver
+  # through a DNAT that has already rewritten the port by the time this hook
+  # sees the packet - so a root query falls through to the address-matched
+  # refuse below it. The forwarder's rule is portless for exactly that reason,
+  # and it is the one that lets this question be asked at all.
+  #
+  # dnsmasq is not in this path, so filter-AAAA does not apply to it: it stays
+  # an independent source of truth, which is the whole property the control
+  # needs.
+  local upstream truth ours
+  upstream=$(head -1 "$UPSTREAM_FILE" 2>/dev/null) || true
+  truth=""
+  if [ -n "$upstream" ]; then
+    truth=$(gosu "$RESOLVER_USER" dig +short +time=3 +tries=2 \
+              "@$upstream" AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  fi
+
+  ours=$(dig +short +time=3 +tries=2 @127.0.0.1 AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  [ -z "$ours" ] \
+    || die "$label: the resolver answered AAAA for $PROBE_AAAA_NAME ($ours), so a permitted name can still produce a v6 address"
+
+  # Not fatal when the upstream has none either. That is the world changing -
+  # the name dropped its records, or the upstream strips them - rather than
+  # this configuration being wrong, and refusing to start a session over it
+  # would cost more than it prevents. But it is said, because a check that
+  # proved nothing must not read as one that passed.
+  if [ -z "$truth" ]; then
+    say "note: $PROBE_AAAA_NAME has no AAAA upstream either, so the check that the resolver strips them proved nothing this launch. Set EGRESS_PROBE_AAAA_NAME to a permitted name that still has AAAA records."
+  fi
+}
+
+# A permitted name that this policy's own configuration would refuse is a
+# disagreement between two things the operator wrote - the permitted set and the
+# exemption list - and it is silent: the name resolves to nothing, the session
+# gets a refusal hours later, and nothing connects that back to the declaration.
+# So it stops the container here, named.
+#
+# A name that merely fails to resolve is the other condition entirely: the world,
+# not the configuration. It is reported and the session continues, because
+# refusing to start a session over a host that happens to be down would cost more
+# than it prevents.
+check_permitted_names() {
+  local label=$1 class kind exemption name mark refused=() silent=()
+  mark=$(wc -c < "$RESOLVER_LOG")
+  # Resolving every permitted name also leaves its current addresses in the
+  # allow-list before the session container is started, so the first thing the
+  # agent does is not waiting on a cold set.
+  while read -r class kind exemption name; do
+    [ "$kind" = name ] || continue
+    [ -n "$(resolve_one "$name")" ] || silent+=("$name")
+  done < "$ENTRIES_FILE"
+
+  # Only the lines this sweep produced: the log outlives a previous apply in the
+  # same container.
+  local since
+  since=$(tail -c "+$((mark + 1))" "$RESOLVER_LOG" 2>/dev/null) || true
+  while read -r class kind exemption name; do
+    [ "$kind" = name ] || continue
+    if [[ "$since" == *"possible DNS-rebind attack detected: $name"* ]]; then
+      refused+=("$name ($class/$exemption)")
+    fi
+  done < "$ENTRIES_FILE"
+
+  if [ ${#refused[@]} -ne 0 ]; then
+    die "$label: these permitted names are answered with an address inside a private network, and this policy refuses such answers: ${refused[*]}. That is this configuration disagreeing with itself - list them in $INTERNAL_OK_HINT if pointing inside is intended, or remove them."
+  fi
+  if [ ${#silent[@]} -ne 0 ]; then
+    say "note: permitted names that returned no address: ${silent[*]} - not a policy refusal (they are in the permitted set); the name may not exist or its upstream may be unreachable"
+  fi
+}
+
+# Why a permitted name came back empty, in the two ways it can.
+#
+# The resolver either never forwarded the query - a configuration fault, and it
+# says so in its own log - or forwarded it and got nothing back, which on a
+# fresh namespace almost always means the packet filter refused the forward.
+# Both present identically as an empty answer, and the difference is the whole
+# distance between "the config is wrong" and "the rule permitting the forwarder
+# to reach an upstream did not match its socket".
+#
+# Worth building into the failure rather than leaving to whoever reads it: this
+# runs unattended during container startup, the container is gone by the time
+# anyone looks, and the log it would have needed goes with it.
+why_no_answer() {
+  local name=$1 out="" tail_log="" refuse_counts=""
+  tail_log=$(grep -F "$name" "$RESOLVER_LOG" 2>/dev/null | tail -5) || true
+  out="$out"$'\n'"  the resolver's own log for $name:"
+  if [ -n "$tail_log" ]; then
+    out="$out"$'\n'"$(sed 's/^/    /' <<< "$tail_log")"
+  else
+    out="$out"$'\n'"    (nothing - the query never reached it)"
+  fi
+
+  # A forward that was refused leaves a count on the chain that refused it.
+  refuse_counts=$(nft -a list chain inet "$TABLE" refuse 2>/dev/null | grep -F 'counter' | tail -3) || true
+  out="$out"$'\n'"  what the policy permitted it to do:"
+  out="$out"$'\n'"$(grep -E '^(server=|address=|no-resolv)' "$RESOLVER_CONF" 2>/dev/null | grep -F "$name" | sed 's/^/    /' || true)"
+  out="$out"$'\n'"  upstream resolvers discovered at start: $(tr '\n' ' ' < "$UPSTREAM_FILE" 2>/dev/null)"
+  out="$out"$'\n'"  the forwarder runs as $RESOLVER_USER (uid $(id -u "$RESOLVER_USER" 2>/dev/null || echo '?')), and only that uid may reach them"
+  [ -n "$refuse_counts" ] && out="$out"$'\n'"  refuse chain: $refuse_counts"
+
+  # The uid the kernel will actually match on, which is the question and not
+  # the same as the uid the process runs as: `meta skuid` reads the socket's
+  # owner, and a socket opened before a daemon dropped privilege keeps the uid
+  # it was opened with. /proc/net/udp reports it per socket, in its uid column.
+  local socks
+  socks=$( { cat /proc/net/udp /proc/net/udp6 2>/dev/null || true; } \
+      | awk 'NR > 1 && $1 != "sl" { print "    uid " $8 "  local " $2 "  remote " $3 }' \
+      | sort -u) || true
+  [ -n "$socks" ] && out="$out"$'\n'"  UDP sockets in this namespace, by owning uid:"$'\n'"$socks"
+  printf '%s' "$out"
+}
+
+# First address of either family that the local resolver will admit to.
+#
+# Read in full and filtered in bash rather than piped through `head -1`, which
+# would leave as soon as it had its line and SIGPIPE whatever was still writing
+# - a pipeline that fails when it succeeds, under pipefail. See the note above.
+resolve_one() {
+  local answers line
+  # A only: the resolver is configured to answer no AAAA at all, so asking for
+  # one spends a query to be told nothing.
+  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [[ "$line" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || continue
+    printf '%s\n' "$line"
+    return 0
+  done <<< "$answers"
+  # Non-zero when there was no address, so a caller can retry a lookup that
+  # asserts a name CAN be resolved. Callers asserting the opposite swallow it.
+  return 1
+}
+
+wait_for_log() {
+  local file=$1 pattern=$2 i
+  for i in 1 2 3 4 5 6; do
+    grep -qF "$pattern" "$file" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# A refused destination must fail, and fail fast. Distinguishing "refused" from
+# "timed out" is the point: a drop and a reject both end with curl failing, and
+# only one of them is the behaviour asked for.
+verify_refused() {
+  local url=$1 label=$2 addr=$3 rc=0 started elapsed
+  started=$SECONDS
+  curl --silent --show-error --output /dev/null --connect-timeout 5 --max-time 8 "$url" || rc=$?
+  elapsed=$((SECONDS - started))
+  [ "$rc" -ne 0 ] || die "$label: $addr is reachable and should not be"
+  [ "$rc" -ne 28 ] || die "$label: the attempt to $addr timed out after ${elapsed}s instead of being refused; the policy is dropping where it should reject"
+  [ "$elapsed" -lt 5 ] || die "$label: the attempt to $addr took ${elapsed}s to fail; a caller would read that as a broken tool"
+}
+
+# One port on an otherwise permitted address. bash's own /dev/tcp rather than a
+# client for whatever happens to listen there: it connects and nothing more.
+verify_port_refused() {
+  local addr=$1 port=$2 label=$3 rc=0 started elapsed
+  started=$SECONDS
+  timeout 6 bash -c "exec 3<>/dev/tcp/$addr/$port" 2>/dev/null || rc=$?
+  elapsed=$((SECONDS - started))
+  [ "$rc" -ne 0 ] \
+    || die "$label: $addr accepted a connection on port $port, which this class does not permit"
+  [ "$elapsed" -lt 5 ] \
+    || die "$label: the attempt to $addr port $port took ${elapsed}s to fail instead of being refused outright"
+}
+
+# --------------------------------------------------------------------------
+# Subcommands
+# --------------------------------------------------------------------------
+
+cmd_apply() {
+  need_root
+  need_tools
+
+  mkdir -p "$RUNDIR" "$LOGDIR"
+  chmod 0755 "$LOGDIR"
+  # A stale readiness file from a previous run in the same namespace would tell
+  # the launcher to start the session before this run has proved anything.
+  rm -f "$READY_FILE"
+
+  discover_upstreams
+
+  local host_addrs forge_host
+  host_addrs=$(discover_host_addr)
+  forge_host=$(host_of_url "$FORGE_META_URL")
+
+  build_entries "$forge_host"
+  say "permitted: $(wc -l < "$ENTRIES_FILE") entries ($(entries_of forge name | wc -l) forge names, $(entries_of open name | wc -l) open names, $( { entries_of forge addr; entries_of open addr; } | wc -l) addresses)"
+
+  # A herestring, not a pipe: this one needs whole-line matching, which
+  # `[[ ]]` cannot express without anchoring by hand.
+  if grep -qxF -- "$PROBE_NAME" <<< "$(awk '{ print $4 }' "$ENTRIES_FILE")"; then
+    die "the negative probe name $PROBE_NAME is also in the permitted set; set EGRESS_PROBE_NAME to a name that is not"
+  fi
+
+  local meta="$RUNDIR/forge-meta.json"
+  fetch_forge_ranges "$meta"
+
+  local ranges forge4
+  ranges=$(jq -r "$FORGE_META_FILTER" < "$meta" | grep -v '^null$' | grep -v '^$') \
+    || die "the forge metadata did not parse as JSON, or the filter matched nothing"
+  [ -n "$ranges" ] || die "the forge metadata produced no address ranges; refusing to start with an empty forge allow-list"
+  # The operator's own forge addresses are forge-class destinations too, so they
+  # join the published ranges and get the same ports. cidr-collapse validates
+  # every entry as it goes and returns the smallest equivalent list, which keeps
+  # the interval sets small.
+  ranges=$( { printf '%s\n' "$ranges"; entries_of forge addr; } | cidr-collapse ) \
+    || die "the forge metadata contained something that is not an address range"
+  forge4=$(printf '%s\n' "$ranges" | grep -v ':' | paste -sd, -) || true
+  [ -n "$forge4" ] \
+    || die "the forge published no IPv4 ranges, and this policy refuses IPv6 outright - there is nothing it could reach the forge over"
+
+  local resolver_uid
+  resolver_uid=$(id -u "$RESOLVER_USER")
+
+  apply_ruleset "$forge4" "$host_addrs" "$resolver_uid"
+  say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs), forge ssh=$FORGE_SSH"
+
+  write_log_config
+  start_connection_log
+  start_lookup_log
+
+  write_resolver_config
+  start_resolver
+
+  verify "$forge_host"
+
+  # Written last, and only here. Everything in the contract holds by the time
+  # this file exists.
+  jq -n \
+    --arg applied "$(date -Is)" \
+    --arg forge "$FORGE_META_URL" \
+    --argjson ssh "$([ "$FORGE_SSH" = 1 ] && echo true || echo false)" \
+    --arg entries "$(awk '{ printf "%s:%s ", $1, $4 }' "$ENTRIES_FILE")" \
+    --arg conn "$CONN_LOG" \
+    --arg lookups "$LOOKUP_LOG" \
+    '{applied: $applied, forge_meta: $forge, forge_ssh: $ssh,
+      permitted: ($entries | split(" ") | map(select(. != ""))),
+      connection_log: $conn, lookup_log: $lookups}' \
+    > "$READY_FILE"
+  say "ready: $READY_FILE"
+}
+
+# B4: add one entry to a running session, from the host, with the session
+# playing no part and nothing restarting but the resolver itself - which takes
+# under a second and loses nothing but its cache.
+cmd_permit() {
+  need_root
+  local class=open exemption=strict value='' arg
+  for arg in "$@"; do
+    case $arg in
+      --forge)       class=forge ;;
+      --open)        class=open ;;
+      --internal-ok) exemption=internal-ok ;;
+      -*)            die "unknown option '$arg'" ;;
+      *)             [ -z "$value" ] || die "one entry at a time"; value=$arg ;;
+    esac
+  done
+  [ -n "$value" ] || die "usage: egress-policy permit <name|address> [--forge] [--internal-ok]"
+  nft list table inet "$TABLE" >/dev/null 2>&1 || die "no policy is in force; run apply first"
+  [ -s "$ENTRIES_FILE" ] || die "no entries file; run apply first"
+
+  local kind existing
+  kind=$(classify_entry "$value")
+
+  # An entry that is already present is either the same declaration - nothing to
+  # do - or a different one, and changing it here would not do what it says.
+  # The class decides which sets the resolver feeds, but the addresses already
+  # resolved under the old class stay in the old sets until they time out, so a
+  # move into the narrower class would leave the wider permission standing for
+  # up to the set lifetime. Refusing and saying why beats reporting a change
+  # that has not happened.
+  # awk stops itself rather than being cut off by `head -1`, which would
+  # SIGPIPE it and fail the pipeline under pipefail.
+  existing=$(awk -v v="$value" '$4 == v { print $1 "/" $3; exit }' "$ENTRIES_FILE")
+  if [ -n "$existing" ]; then
+    if [ "$existing" = "$class/$exemption" ]; then
+      say "$value is already permitted as $existing; nothing to do"
+      return 0
+    fi
+    die "$value is already permitted as $existing, and this would make it $class/$exemption. Changing the class of a live entry is not something this can do honestly: whatever was resolved under $existing stays in the allow-list for up to $SET_TTL, so a move to a narrower class would leave the wider permission standing. Restart the session with the entry declared in the class you want."
+  fi
+
+  cp "$ENTRIES_FILE" "$ENTRIES_FILE.prev"
+  printf '%s %s %s %s\n' "$class" "$kind" "$exemption" "$value" >> "$ENTRIES_FILE"
+
+  if [ "$kind" = addr ]; then
+    permit_address "$class" "$value"
+  else
+    permit_name "$class" "$value"
+  fi
+  rm -f "$ENTRIES_FILE.prev"
+}
+
+rollback_entries() {
+  mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"
+  write_resolver_config
+  start_resolver
+}
+
+# An address needs no resolution and no restart: it goes straight into the sets
+# its class uses. Both sets are interval sets, so a prefix works as well as a
+# single address.
+permit_address() {
+  local class=$1 value=$2
+  nft add element inet "$TABLE" literal_v4 "{ $value }" \
+    || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the allow-list"; }
+  if [ "$class" = forge ]; then
+    nft add element inet "$TABLE" forge_v4 "{ $value }" \
+      || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the forge class"; }
+  fi
+  say "$value permitted ($class class, direct)"
+}
+
+# A name needs the resolver to know about it - which set its answers feed is
+# part of that - so the configuration is regenerated and the resolver restarted.
+# Then it is proved: resolved through our own resolver, and its address looked
+# up in the set its class uses. A name that resolved but never reached the
+# allow-list would fail later as a mystery, so it is undone here instead.
+permit_name() {
+  local class=$1 name=$2 set_prefix addr addrs ok='' mark
+
+  write_resolver_config
+  mark=$(wc -c < "$RESOLVER_LOG")
+  start_resolver
+
+  addrs=$(dig +short +time=3 +tries=2 @127.0.0.1 "$name" A 2>/dev/null |
+            grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}') || true
+  if [ -z "$addrs" ]; then
+    rollback_entries
+    # The same two conditions apply/check 7 separates: the policy refusing the
+    # answer, or the name simply not being there.
+    local since
+    since=$(tail -c "+$((mark + 1))" "$RESOLVER_LOG" 2>/dev/null) || since=""
+    if [[ "$since" == *"possible DNS-rebind attack detected: $name"* ]]; then
+      die "$name is answered with an address inside a private network, which this policy refuses; pass --internal-ok if that is what it is. Nothing was changed."
+    fi
+    die "$name returned no address - the name may not exist, or its upstream may be unreachable. Nothing was changed."
+  fi
+
+  [ "$class" = forge ] && set_prefix=fname || set_prefix=oname
+  for addr in $addrs; do
+    nft get element inet "$TABLE" "${set_prefix}_v4" "{ $addr }" >/dev/null 2>&1 && ok=yes
+  done
+  if [ -z "$ok" ]; then
+    rollback_entries
+    die "$name resolved to [$(printf '%s ' $addrs)] but none of those addresses reached the ${set_prefix} sets; nothing was changed"
+  fi
+  say "$name permitted ($class class, $exemption): $(printf '%s ' $addrs)"
+}
+
+cmd_status() {
+  need_root
+  printf 'ready:      %s\n' "$([ -f "$READY_FILE" ] && echo yes || echo no)"
+  printf 'resolver:   %s (as %s)\n' \
+    "$(pgrep -x dnsmasq >/dev/null && echo running || echo stopped)" \
+    "$(ps -o user= -p "$(cat "$RESOLVER_PID" 2>/dev/null || echo 0)" 2>/dev/null | tr -d ' ' || echo -)"
+  printf 'conn log:   %s (%s lines)\n' "$CONN_LOG" "$(wc -l < "$CONN_LOG" 2>/dev/null || echo 0)"
+  printf 'lookup log: %s (%s lines)\n' "$LOOKUP_LOG" "$(wc -l < "$LOOKUP_LOG" 2>/dev/null || echo 0)"
+  printf 'entries:\n'
+  sed 's/^/  /' "$ENTRIES_FILE" 2>/dev/null || true
+  printf 'ruleset:\n'
+  nft list table inet "$TABLE" 2>/dev/null | sed 's/^/  /' || true
+}
+
+case "${1:-}" in
+  apply)  shift; cmd_apply "$@" ;;
+  permit) shift; cmd_permit "$@" ;;
+  # The name this had before entries could be addresses. Kept so a launcher
+  # wired up against it keeps working.
+  allow-name) shift; cmd_permit "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  *)
+    cat >&2 <<'USAGE'
+usage: egress-policy <command>
+
+  apply                    establish the policy and verify it; writes the
+                           readiness file only if every check passed
+  permit <entry> [opts]    permit one more name or address in a running
+                           session. --forge puts it in the forge class (HTTPS,
+                           plus SSH with the opt-in); --internal-ok lets a
+                           name's answers point inside a private network
+  status                   what is in force right now
+USAGE
+    exit 2
+    ;;
+esac

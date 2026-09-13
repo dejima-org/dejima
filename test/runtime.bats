@@ -12,7 +12,7 @@ bats_require_minimum_version 1.5.0
 # already built, for fast iteration - the default is to always rebuild, so a
 # stale image can't produce a false pass.
 #
-# Safety: every iptables/ipset/ip6tables mutation below happens inside the
+# Safety: every packet-filter mutation below happens inside the
 # test container's own network namespace (no --network host, no bind mounts
 # of host paths) - none of it touches the host's real firewall state, same
 # as any other container. Container/network names are derived from
@@ -106,9 +106,9 @@ start_credential_proxy() {  # <socket> <credentials> <upstream> <oauth-endpoint>
 }
 
 # Every container here must go on network_name(), never the default bridge:
-# dns-proxy.sh forwards to Docker's embedded resolver at 127.0.0.11, which
-# only exists on a user-defined network. On the default bridge dnsmasq has
-# nowhere to forward and startup dies in dns-proxy.sh.
+# the restricted resolver forwards to Docker's embedded resolver at
+# 127.0.0.11, which only exists on a user-defined network. On the default
+# bridge it has nowhere to forward and startup dies in egress-policy.
 #
 # Readiness is the FINAL `sleep infinity` (entrypoint.sh's SANDBOX_TEST_MODE
 # exec), matched exactly. A bare `pgrep -x sleep` also matches the startup
@@ -116,7 +116,7 @@ start_credential_proxy() {  # <socket> <credentials> <upstream> <oauth-endpoint>
 # a container with no firewall yet - turning egress assertions into vacuous
 # passes, since everything is still reachable.
 #
-# 120s rather than 60: the GitHub ranges fetch retries, and losing two
+# 120s rather than 60: the forge ranges fetch retries, and losing two
 # attempts costs ~26s (#59), which on a runner that just spent minutes
 # unpacking an image turns a recovery into a spurious failure. A longer
 # budget only delays reporting a stuck startup; nothing here passes on a
@@ -124,7 +124,7 @@ start_credential_proxy() {  # <socket> <credentials> <upstream> <oauth-endpoint>
 # `docker wait` returns on exit, but the json-file log driver writes
 # asynchronously, so reading right then can return a log that stops
 # mid-stream. That presented as a container "aborting" partway through
-# init-firewall.sh's domain loop at a different domain each run, and survived
+# the egress policy's name sweep at a different name each run, and survived
 # three fixes before the giveaway: no message from an ERR trap that cannot be
 # bypassed. Nothing had aborted; the read was short.
 #
@@ -174,7 +174,7 @@ wait_ready() {
 # code that is not under test.
 #
 # That is not a theoretical worry. It cost six CI rounds: a container kept
-# stopping partway through init-firewall.sh, and the fixes that were supposed
+# stopping partway through the egress policy, and the fixes that were supposed
 # to make it explain itself - an ERR trap, a resolver that reports on every
 # path - produced no output at all, because the script running in the container
 # was not the script in the commit. A stale image looks exactly like a bug in
@@ -230,14 +230,16 @@ build_harness_layer() {
 
 assert_image_matches_checkout() {
     local expected actual
-    expected=$(cd "$BATS_TEST_DIRNAME/../docker" && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh | awk '{print $1}')
+    expected=$(cd "$BATS_TEST_DIRNAME/../docker" && md5sum egress-policy firewall-up.sh entrypoint.sh | awk '{print $1}')
+    # egress-policy is installed into sbin, the other two into bin, so the
+    # paths are given in full rather than cd-ed to.
     actual=$(docker run --rm --entrypoint sh "$IMAGE" -c \
-        'cd /usr/local/bin && md5sum init-firewall.sh dns-proxy.sh entrypoint.sh' 2>&1 | awk '{print $1}')
+        'md5sum /usr/local/sbin/egress-policy /usr/local/bin/firewall-up.sh /usr/local/bin/entrypoint.sh' 2>&1 | awk '{print $1}')
     if [ "$expected" != "$actual" ]; then
         echo "The image tagged $IMAGE was not built from this checkout." >&2
         echo >&2
-        echo "checkout (docker/):        $(echo "$expected" | tr '\n' ' ')" >&2
-        echo "image (/usr/local/bin/):   $(echo "$actual" | tr '\n' ' ')" >&2
+        echo "checkout (docker/):  $(echo "$expected" | tr '\n' ' ')" >&2
+        echo "image:               $(echo "$actual" | tr '\n' ' ')" >&2
         echo >&2
         echo "Every test in this file would be asserting against different code than" >&2
         echo "the one in the working tree, so they are not run. Rebuild it:" >&2
@@ -397,14 +399,14 @@ setup_file() {
     #
     # GH_TOKEN is forwarded rather than dropped, and every container start in
     # this file does the same. It doesn't change the allowlist - it only
-    # authenticates init-firewall.sh's api.github.com/meta fetch, which
-    # returns the same ranges either way. What it changes is the quota: that
-    # endpoint allows 60 requests an hour per source IP unauthenticated, and
-    # this file starts sixteen containers, so two runs in an hour exhaust it
-    # and every container after that dies in init-firewall.sh with a rate
-    # limit error rather than anything to do with what was being tested.
-    # Locally it's usually unset and expands empty, which both init-firewall
-    # and entrypoint treat exactly as absent - so the no-token path stays the
+    # authenticates the api.github.com/meta fetch, which returns the same
+    # ranges either way. What it changes is the quota: that endpoint allows 60
+    # requests an hour per source IP unauthenticated, and this file starts
+    # sixteen containers, so two runs in an hour exhaust it and every container
+    # after that dies in the egress policy with a rate limit error rather than
+    # anything to do with what was being tested.
+    # Locally it's usually unset and expands empty, which the policy and the
+    # entrypoint treat exactly as absent - so the no-token path stays the
     # default here and only CI, where the volume is, passes a real one.
     # The harness's own domains, which bin/dejima resolves from the manifest
     # and passes in - the image no longer names any harness's endpoints, so a
@@ -571,7 +573,7 @@ dexec() {
     docker exec "$(container_name)" "$@"
 }
 
-# Into the container the egress control is in. iptables, ipset, dnsmasq and
+# Into the container the egress control is in. nft, dnsmasq and
 # ulogd2 all live there, so a check about any of them aimed at the session
 # container asks the wrong process - and fails rather than passes, which is
 # the better direction but still the wrong question.
@@ -709,33 +711,131 @@ session_pid() {  # [container], defaulting to the file-wide one
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
-@test "IPv6 is fully blocked" {
-    run dexec_filter ip6tables -L OUTPUT -n
-    [[ "$output" == *"policy DROP"* ]]
-}
 
-@test "the IPv6 block is a filtered family, not an absent one" {
-    # The DROP policy above is the good path. This asserts the container is
-    # actually ON that path rather than on the fallback, because the two are
-    # indistinguishable from the outside: a container with no IPv6 at all also
-    # reaches nothing over IPv6.
-    #
-    # If ip6tables ever stops working as root here, the test above fails and
-    # this one says why - and on a host that takes the fallback branch,
-    # init-firewall.sh now either turns the family off or refuses to start,
-    # rather than logging a conclusion it had not checked.
-    run dexec_filter sh -c 'ip6tables -L >/dev/null 2>&1 && echo usable'
-    [[ "$output" == *usable* ]] \
-        || { echo "ip6tables is not usable as root; the fallback branch is live"; return 1; }
-    # And the fallback's own condition is readable, so a failure here can be
-    # diagnosed without a second run: what does the kernel say is up?
-    run dexec sh -c 'cat /proc/net/if_inet6 2>/dev/null || echo "(no /proc/net/if_inet6)"'
+
+@test "IPv6 is refused outright, not allow-listed alongside IPv4" {
+    # The property, stated as the absence of a permit path rather than as a
+    # connection that fails. A connection to a v6 address fails identically on
+    # a host with no v6 route at all, so a probe alone passes whether the
+    # family is refused or merely absent - and inferring the second from the
+    # first is the bug the firewall this replaced spent two rounds on.
+    run dexec_filter nft list chain inet egress_policy egress
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"policy drop"* ]] \
+        || { echo "the egress chain does not default to drop: $output"; return 1; }
+
+    # The refusal is there, and it is the first rule - below the established or
+    # loopback passes it would be a rule a v6 packet can get past, since
+    # loopback carries ::1 and a flow permitted once stays permitted.
+    local first
+    first=$(grep -vE '^\s*(table|chain|\}|#|type filter hook|$)' <<< "$output" | head -1)
+    [[ "$first" == *"meta nfproto ipv6"* ]] \
+        || { echo "the first rule is not the v6 refusal: $first"; return 1; }
+
+    # And nothing else in the chain names a v6 destination. That is what the
+    # regression looked like: not the refusal missing, but permit rules beside
+    # it - this test used to REQUIRE those rules and so asserted the
+    # regression.
+    local permits
+    permits=$(grep 'ip6 ' <<< "$output" | grep -v 'nfproto ipv6' || true)
+    [ -z "$permits" ] \
+        || { echo "the chain allow-lists IPv6 destinations:"; echo "$permits"; return 1; }
+
+    # Inbound too, where the refusal is a drop rather than a reject.
+    run dexec_filter nft list chain inet egress_policy inbound
     [ "$status" -eq 0 ]
+    [[ "$output" == *"meta nfproto ipv6"* ]] \
+        || { echo "inbound does not refuse v6: $output"; return 1; }
 }
 
-@test "a non-allowlisted domain is refused by the DNS proxy, not just left to fail later" {
+
+
+
+@test "the resolver hands out no AAAA, so a permitted name cannot produce a v6 address" {
+    # The second layer, and the one that decides what a client even tries. With
+    # the filter refusing v6 and the resolver still answering AAAA, a permitted
+    # name would cost every client a connection attempt to an address that can
+    # never work - which presents as a slow destination rather than as a policy.
+    #
+    # The upstream is asked first, because "no AAAA came back" is only evidence
+    # if there was an AAAA to come back. A probe name that quietly loses its
+    # records would otherwise turn this into a check that passes because the
+    # thing it depends on broke.
+    #
+    # As the resolver's account, in the filter container. Not as root: the rule
+    # permitting root to reach a resolver matches on port 53, and the runtime's
+    # embedded resolver is reached through a DNAT that has already rewritten
+    # the port - which is the same reason the test below asserts root does not
+    # reach past it. The forwarder's own rule is portless, and that is what
+    # makes this question askable.
+    local upstream truth
+    upstream=$(dexec_filter head -1 /run/egress-policy/upstream-resolvers)
+    [ -n "$upstream" ] || { echo "no upstream resolver recorded"; return 1; }
+    truth=$(dexec_filter gosu egress-resolver \
+                dig +short +time=3 +tries=2 "@$upstream" AAAA registry.npmjs.org || true)
+    if [ -z "$truth" ]; then
+        skip "registry.npmjs.org has no AAAA upstream either; this check would prove nothing"
+    fi
+
+    # It does have them out there. So the resolver returning none is the policy
+    # doing something, not the name being unremarkable.
+    run dexec dig +short AAAA registry.npmjs.org
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] \
+        || { echo "the resolver answered AAAA for a permitted name: $output"; return 1; }
+
+    # And the A record still comes back, or the check above passes because
+    # nothing resolves at all.
+    run dexec dig +short A registry.npmjs.org
+    [ -n "$output" ] \
+        || { echo "the name does not resolve at all, so the AAAA check proves nothing"; return 1; }
+}
+
+@test "a v6 address the session somehow learns is still refused by the filter" {
+    # Belt and braces for the layer above: if something got a v6 address by a
+    # route the resolver does not control - a literal in a config file, an
+    # address embedded in a URL - the packet filter is what stops it.
+    #
+    # Unconditional, and it does not assert the speed of the failure: on a host
+    # with no v6 route this fails before reaching the filter, which is a
+    # different mechanism with the same outcome, and the ruleset test above is
+    # what distinguishes them.
+    run dexec sh -c 'curl -s -o /dev/null --connect-timeout 5 --max-time 8 "https://[2606:4700:4700::1111]/"; echo "rc=$?"'
+    [[ "$output" == *"rc="* ]]
+    [[ "$output" != *"rc=0"* ]] \
+        || { echo "a v6 address was reachable: $output"; return 1; }
+}
+
+
+@test "a name that is not permitted does not resolve, rather than being left to fail later" {
+    # The query itself carries data out, so a name nobody permitted must not
+    # reach an upstream at all - which is a different and earlier thing than
+    # the connection that would follow being refused.
     run dexec dig definitely-not-on-the-allowlist.example.org
-    [[ "$output" == *"status: REFUSED"* ]]
+    [[ "$output" == *"status: NXDOMAIN"* || "$output" == *"status: REFUSED"* ]] \
+        || { echo "an unpermitted name resolved: $output"; return 1; }
+}
+
+@test "a refused lookup is recorded, because it never becomes a connection" {
+    # The connection log cannot account for it - there is no connection - and
+    # this is the record that matters most: an attempt to resolve something
+    # unpermitted is the exfiltration attempt.
+    dexec dig +time=2 +tries=1 exfil-probe.example.org >/dev/null 2>&1 || true
+    local found=""
+    local i
+    for i in 1 2 3 4 5 6; do
+        if dexec_filter grep -q 'exfil-probe.example.org' /var/log/egress-policy/lookups.ndjson 2>/dev/null; then
+            found=yes; break
+        fi
+        sleep 0.5
+    done
+    [ -n "$found" ] \
+        || { echo "the refused lookup left no record"; dexec_filter tail -5 /var/log/egress-policy/lookups.ndjson; return 1; }
+    run dexec_filter sh -c "grep -F 'exfil-probe.example.org' /var/log/egress-policy/lookups.ndjson | tail -1"
+    [[ "$output" == *'"outcome": "refused"'* ]] \
+        || { echo "recorded, but not as a refusal: $output"; return 1; }
+    [[ "$output" == *'"reason": "not-permitted"'* ]] \
+        || { echo "recorded without saying why: $output"; return 1; }
 }
 
 @test "an allowlisted domain resolves via the DNS proxy" {
@@ -744,14 +844,15 @@ session_pid() {  # [container], defaulting to the file-wide one
 }
 
 @test "the session user cannot address a resolver directly, so the DNS allowlist is not bypassable" {
-    # init-firewall.sh opens UDP/TCP 53 to any destination for root-owned
-    # sockets, because that is what Docker's embedded resolver forwards
-    # external names from and without it nothing in here resolves at all.
-    # This is the assertion that the opening stops there. `node` is the
-    # session user and there is no sudo in the image, so if it could reach a
-    # resolver of its own choosing it could carry data out in the query name
-    # itself - the exact thing dns-proxy.sh exists to prevent, and something
-    # no allowlist of *names* can catch once the *resolver* is attacker-chosen.
+    # Reaching a resolver outside this namespace is restricted by uid: the
+    # forwarder, and root, because the container runtime's own resolver
+    # forwards onwards from in here and every lookup times out without it.
+    # `node` is neither - no sudo, no setuid binary, no way to change uid - so
+    # this is the assertion that the opening stops short of the session. If it
+    # could reach a resolver of its own choosing it could carry data out in the
+    # query name itself, which is the exact thing the name allowlist exists to
+    # prevent and something no allowlist of *names* can catch once the
+    # *resolver* is attacker-chosen.
     #
     # 1.1.1.1 rather than an unrouted address: it answers if it is reachable,
     # so a pass here means the packet was stopped and not that the probe was
@@ -761,6 +862,13 @@ session_pid() {  # [container], defaulting to the file-wide one
 
     run dexec_node dig +time=2 +tries=1 @1.1.1.1 definitely-not-allowed.example.org
     [ "$status" -ne 0 ]
+
+    # And the runtime's embedded resolver, which is on loopback and which the
+    # root exception does NOT reach past: the session user addressing it
+    # directly is the query-name channel, and it stays closed.
+    run dexec_node dig +time=2 +tries=1 @127.0.0.11 definitely-not-allowed.example.org
+    [ "$status" -ne 0 ] \
+        || { echo "the session user reached the runtime's resolver: $output"; return 1; }
 }
 
 @test "api.anthropic.com resolves in proxy-off mode (kill switch / API-key auth)" {
@@ -785,9 +893,9 @@ session_pid() {  # [container], defaulting to the file-wide one
     # are never retried - there, a retry could hide a hole that opens once.
     #
     # It failed once on CI with nothing to go on: no curl exit code, no HTTP
-    # status, no way to tell DNS from the ipset from the far end. Everything
-    # else in that run said the firewall was right - the port-22 push grant
-    # reached GitHub, so github-domains held real addresses - which left one
+    # status, no way to tell DNS from the address sets from the far end.
+    # Everything else in that run said the firewall was right - the port-22
+    # push grant reached GitHub, so the forge set held real addresses - which left one
     # five-second connect against a live third-party service as the only
     # explanation, and no evidence to confirm it with. Hence the diagnostics
     # as much as the retries.
@@ -802,7 +910,7 @@ session_pid() {  # [container], defaulting to the file-wide one
     echo "last curl exit: $rc, last output: '$code'" >&2
     echo "exit 6 is DNS, 7 or 28 is the route or the firewall; an HTTP code" >&2
     echo "with a non-zero exit means the connection worked. Check with" >&2
-    echo "'ipset list github-domains' inside the container." >&2
+    echo "'nft list set inet egress_policy forge_v4' in the filter container." >&2
     false
 }
 
@@ -893,10 +1001,10 @@ session_pid() {  # [container], defaulting to the file-wide one
     #
     # It has to be a boot test, because the failure it guards against was the
     # container not starting at all: with those three hostnames in
-    # DEJIMA_FORGE_HOSTS, init-firewall.sh resolves them into the
-    # port-unrestricted allowed-domains ipset, its own startup self-check
-    # finds github.com:22 reachable without ALLOW_GITHUB_PUSH=1, and
-    # entrypoint.sh (set -Eeuo pipefail) dies before the agent ever runs.
+    # DEJIMA_FORGE_HOSTS, firewall-up.sh puts them in the open class, which
+    # carries no port restriction, the policy's own startup self-check finds
+    # github.com:22 reachable without ALLOW_GITHUB_PUSH=1, and the filter
+    # container dies before the session ever starts.
     local test_container="$(test_container_name ghforge)"
     local test_filter="$(test_container_name ghforge-filter)"
     start_pair ghforge "$SESSION_IMAGE" \
@@ -912,8 +1020,8 @@ session_pid() {  # [container], defaulting to the file-wide one
     # Port 22 open, and open through the path that says so out loud.
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
     [ "$status" -eq 0 ]
-    # The FILTER container's log, because init-firewall.sh prints this and
-    # init-firewall.sh is what moved. The connect check above stays in the
+    # The FILTER container's log, because the policy prints this and the
+    # policy is what moved. The connect check above stays in the
     # session container for the opposite reason: reachability is a claim about
     # the session, and it is the half of this test that would still pass on a
     # grant that was never announced.
@@ -924,7 +1032,7 @@ session_pid() {  # [container], defaulting to the file-wide one
     # how this failed in CI - with the port-22 assertion directly above passing,
     # ie. with the branch that prints this line demonstrably taken. Waiting on
     # the line cannot mask its absence: one never printed still fails, later.
-    local want="ALLOW_GITHUB_PUSH=1: opening port 22" logs=""
+    local want="forge ssh=1" logs=""
     for _ in $(seq 1 40); do
         logs=$(docker logs "$test_filter" 2>&1)
         case "$logs" in *"$want"*) break ;; esac
@@ -932,28 +1040,30 @@ session_pid() {  # [container], defaulting to the file-wide one
     done
     [[ "$logs" == *"$want"* ]]
 
-    # And the other half of the widening this avoids: GitHub's names keep
-    # dnsmasq's rebind protection, which the extra-domains path would have
-    # exempted them from.
-    run docker exec "$test_filter" grep 'rebind-domain-ok=/github.com/' /etc/dnsmasq-sandbox.conf
+    # And the other half of the widening this avoids: GitHub's names keep the
+    # check that refuses an answer pointing inside a private network, which the
+    # open-class path would have exempted them from.
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/github.com/' /run/egress-policy/resolver.conf
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
+
 @test "a GitHub name declared as an extra domain stays port-restricted, so push stays unreachable" {
-    # .dejima/allowed-domains is read with the project and is meant to widen
-    # what a session can reach. It must not widen how. GitHub's addresses are
-    # confined to 443 by init-firewall.sh, and that is the entire read-only
-    # guarantee - with 22 shut there is no transport left for the forwarded
-    # ssh-agent's key to push with, whatever a hook does or does not catch.
+    # A project's declared domains widen what a session can reach. They must
+    # not widen how. GitHub's addresses are confined to 443, and that is the
+    # entire read-only guarantee - with 22 shut there is no transport left for
+    # the forwarded ssh-agent's key to push with, whatever a hook does or does
+    # not catch.
     #
-    # allowed-domains carries no port restriction, so before ipset_for_domain
-    # this path put GitHub's address there and opened 22. It surfaced as an
-    # intermittent startup failure rather than as a silent hole only because
-    # the port-22 self-check re-resolves the name: it catches the hole when
-    # GitHub's second answer matches the first, and misses it when the name
-    # has rotated in between. This test does not depend on that coin flip.
+    # The open class carries no port restriction, so before the class was
+    # attached to the destination rather than to the path it arrived by, this
+    # put GitHub's address there and opened 22. It surfaced as an intermittent
+    # startup failure rather than as a silent hole only because the port-22
+    # self-check re-resolves the name: it catches the hole when GitHub's second
+    # answer matches the first, and misses it when the name has rotated in
+    # between. This test does not depend on that coin flip.
     local test_container="$(test_container_name ghextra)"
     local test_filter="$(test_container_name ghextra-filter)"
     start_pair ghextra "$SESSION_IMAGE" \
@@ -964,20 +1074,22 @@ session_pid() {  # [container], defaulting to the file-wide one
 
     # Coming up at all is part of the assertion, and start_pair waited for it:
     # the port-22 self-check runs during the FILTER container's startup, and
-    # with the address in the wrong set it fails that boot rather than this one.
+    # with the address in the wrong class it fails that boot rather than this one.
 
-    # Resolved inside the container, through the same dnsmasq that answered
-    # during startup - so this asks about the address actually allowlisted,
-    # not one a fresh lookup from elsewhere happened to return.
+    # Resolved inside the container, through the same resolver that answered
+    # during startup - so this asks about the address actually permitted, not
+    # one a fresh lookup from elsewhere happened to return.
     local ip
     ip=$(docker exec "$test_container" dig +short A github.com | head -1)
     [ -n "$ip" ]
 
-    run docker exec "$test_filter" ipset test github-domains "$ip"
-    [ "$status" -eq 0 ]
+    # In the forge class's name set, which the clamp restricts to 443...
+    run docker exec "$test_filter" nft get element inet egress_policy fname_v4 "{ $ip }"
+    [ "$status" -eq 0 ] || { echo "github.com's address is not in the forge class: $output"; return 1; }
 
-    run docker exec "$test_filter" ipset test allowed-domains "$ip"
-    [ "$status" -ne 0 ]
+    # ...and not in the open class's, which has no port restriction at all.
+    run docker exec "$test_filter" nft get element inet egress_policy oname_v4 "{ $ip }"
+    [ "$status" -ne 0 ] || { echo "github.com's address reached the port-unrestricted class"; return 1; }
 
     # And the property those two sets exist to produce.
     run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/github.com/22"
@@ -999,14 +1111,14 @@ session_pid() {  # [container], defaulting to the file-wide one
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e DEJIMA_FORGE_HOSTS=forge.internal.example
 
-    run docker exec "$test_filter" grep -c '^stop-dns-rebind$' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep -c '^stop-dns-rebind$' /run/egress-policy/resolver.conf
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 
-    run docker exec "$test_filter" grep 'rebind-domain-ok=/forge.internal.example/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/forge.internal.example/' /run/egress-policy/resolver.conf
     [ "$status" -eq 0 ]
 
-    run docker exec "$test_filter" grep 'rebind-domain-ok=/registry.npmjs.org/' /etc/dnsmasq-sandbox.conf
+    run docker exec "$test_filter" grep 'rebind-domain-ok=/registry.npmjs.org/' /run/egress-policy/resolver.conf
     [ "$status" -ne 0 ]
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
@@ -1196,21 +1308,21 @@ session_pid() {  # [container], defaulting to the file-wide one
     # is refused, which is what makes an escape to container root stop short of
     # the filter that bounds it.
     #
-    # As root, deliberately. `node cannot run iptables directly` below asserts
-    # the unprivileged case and would pass on a container that simply had the
-    # capability and a user without it.
-    run docker exec -u root "$(container_name)" iptables -F
+    # As root, deliberately. `node cannot change the packet filter` below
+    # asserts the unprivileged case and would pass on a container that simply
+    # had the capability and a user without it.
+    run docker exec -u root "$(container_name)" nft flush ruleset
     [ "$status" -ne 0 ] \
         || { echo "root in the session container flushed the filter"; return 1; }
-    run docker exec -u root "$(container_name)" ipset list
+    run docker exec -u root "$(container_name)" nft list table inet egress_policy
     [ "$status" -ne 0 ] \
-        || { echo "root in the session container can read the ipsets: $output"; return 1; }
+        || { echo "root in the session container can read the ruleset: $output"; return 1; }
 
     # And the filter is still there afterwards - the negative above would read
     # the same if there were no rules to flush in the first place.
-    run dexec_filter iptables -S OUTPUT
+    run dexec_filter nft list chain inet egress_policy egress
     [ "$status" -eq 0 ]
-    [[ "$output" == *"-P OUTPUT DROP"* ]] \
+    [[ "$output" == *"policy drop"* ]] \
         || { echo "the filter is not in the state this test assumed: $output"; return 1; }
 }
 
@@ -1324,14 +1436,32 @@ session_pid() {  # [container], defaulting to the file-wide one
         || { echo "unprivileged binds start at $output, so :443 is out of reach"; return 1; }
 }
 
-@test "node cannot run iptables directly" {
-    run dexec_node iptables -L
+@test "node cannot change the packet filter" {
+    run dexec_node nft list ruleset
     [ "$status" -ne 0 ]
 }
 
-@test "node cannot re-run init-firewall.sh to widen the allowlist" {
-    run dexec_node /usr/local/bin/init-firewall.sh
+
+@test "node cannot re-run the egress policy to widen the allowlist" {
+    run dexec_node /usr/local/sbin/egress-policy apply
     [ "$status" -ne 0 ]
+    # And not merely because it is missing: it refuses for the reason that
+    # keeps holding after someone puts it back on PATH.
+    run dexec_node sh -c '/usr/local/sbin/egress-policy apply 2>&1'
+    [[ "$output" == *"must run as root"* ]] \
+        || { echo "refused, but not by the check that says why: $output"; return 1; }
+}
+
+@test "the permitted set cannot be amended from the session container" {
+    # `egress-policy permit` is the documented way to add a destination to a
+    # running session, and it is the operator's to run from the host. From
+    # inside the session it must do nothing - it is the same binary in the same
+    # image, and only the container it runs in differs.
+    run dexec_node /usr/local/sbin/egress-policy permit evil.example.com
+    [ "$status" -ne 0 ]
+    run docker exec -u root "$(container_name)" /usr/local/sbin/egress-policy permit evil.example.com
+    [ "$status" -ne 0 ] \
+        || { echo "root in the session container amended the permitted set"; return 1; }
 }
 
 @test "node has no working sudo" {
@@ -1357,6 +1487,59 @@ session_pid() {  # [container], defaulting to the file-wide one
         || { echo "PID 1 can still gain privileges on exec"; return 1; }
     run dexec_node sh -c 'grep NoNewPrivs /proc/self/status'
     [[ "$output" == *"1"* ]] || { echo "the session user's shell can: $output"; return 1; }
+}
+
+@test "the running image holds no setuid binary and no file capability" {
+    # no_new_privs above forbids one from taking effect; this asserts there is
+    # none to take effect, which is the half a misconfigured runtime cannot
+    # undo. Read from the running container rather than the build, because what
+    # matters is the image a session is actually handed - including the derived
+    # per-project layer, which installs its own packages after the base image
+    # is finished and sweeps them at its own end.
+    run dexec sh -c 'find / -xdev -type f -perm /6000 2>/dev/null'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "setuid or setgid binaries in the image:"; echo "$output"; return 1; }
+    run dexec sh -c 'getcap -r / 2>/dev/null'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "file capabilities in the image:"; echo "$output"; return 1; }
+}
+
+@test "the session shell is bash, configured by the image, with history appended" {
+    # A session is killed far more often than it exits, and bash writes history
+    # on a clean exit only - so without the per-command append there is no
+    # record of what a session did. Asserted in an interactive shell, because
+    # that is the only kind the configuration applies to.
+    run dexec_node bash -ic 'printf "%s|%s|%s\n" "$SHELL" "$HISTFILE" "$PROMPT_COMMAND"'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"/bin/bash|/var/opt/shell-history/.bash_history|history -a"* ]] \
+        || { echo "shell, history file or append is not as configured: $output"; return 1; }
+    # The volume is mounted and writable by the session user, so the file the
+    # variable names can actually be written.
+    run dexec_node sh -c 'touch /var/opt/shell-history/.bash_history && echo writable'
+    [[ "$output" == *writable* ]] || { echo "the history volume is not writable: $output"; return 1; }
+}
+
+@test "the wrapper's directory comes before the npm prefix on the session's PATH" {
+    # The wrapper in /usr/local/bin shadows the harness's real binary to pin
+    # --dangerously-skip-permissions, --settings and the briefing. That binary
+    # is npm-installed, so the order of these two directories decides whether
+    # any of those flags reach the session - and getting it wrong costs the
+    # sandbox its whole operating mode without erroring.
+    #
+    # Checked on the real PATH of both a login and a non-login shell, because
+    # Debian's /etc/profile rebuilds PATH from scratch for the first and the
+    # image's ENV supplies the second.
+    local shell_kind path lb np
+    for shell_kind in '-lc' '-c'; do
+        path=$(dexec_node bash "$shell_kind" 'printf "%s" "$PATH"')
+        [ -n "$path" ] || { echo "no PATH from bash $shell_kind"; return 1; }
+        lb=$(awk -v p="$path" 'BEGIN{n=split(p,a,":"); for(i=1;i<=n;i++) if(a[i]=="/usr/local/bin") {print i; exit}}')
+        np=$(awk -v p="$path" 'BEGIN{n=split(p,a,":"); for(i=1;i<=n;i++) if(a[i]=="/opt/node-tools/bin") {print i; exit}}')
+        [ -n "$lb" ] || { echo "bash $shell_kind: /usr/local/bin is not on PATH at all: $path"; return 1; }
+        [ -n "$np" ] || { echo "bash $shell_kind: the npm prefix is not on PATH at all: $path"; return 1; }
+        [ "$lb" -lt "$np" ] \
+            || { echo "bash $shell_kind: the npm prefix precedes /usr/local/bin, so the wrapper is shadowed: $path"; return 1; }
+    done
 }
 
 @test "the capability bounding set is the declared floor and nothing more" {
@@ -1403,11 +1586,11 @@ session_pid() {  # [container], defaulting to the file-wide one
 }
 
 @test "root can still signal dnsmasq, which is what adding a domain mid-session needs" {
-    # Named for the thing rather than left to be caught by the ipset tests,
+    # Named for the thing rather than left to be caught by the set tests,
     # which is how it WAS caught: the first version of the capability floor
     # dropped KILL, and `dejima-allow --container` failed with "Operation not
-    # permitted" because dnsmasq runs as its own user (`user=dnsmasq`) and root
-    # cannot signal another user's process without CAP_KILL.
+    # permitted" because the resolver runs as its own dedicated account and
+    # root cannot signal another user's process without CAP_KILL.
     #
     # Adding a domain to a running session is a documented feature that every
     # session briefing tells the agent to ask for, so this asserts the
@@ -1416,7 +1599,7 @@ session_pid() {  # [container], defaulting to the file-wide one
     # In the FILTER container, which is where dnsmasq runs - so the floor this
     # is about is the one bin/dejima gives that container, not the one
     # docker-compose.yml gives the session.
-    run dexec_filter sh -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    run dexec_filter sh -c 'kill -HUP "$(cat /run/egress-policy/resolver.pid)"'
     [ "$status" -eq 0 ] \
         || { echo "root cannot signal dnsmasq - is KILL in the filter floor? $output"; return 1; }
 }
@@ -1497,8 +1680,8 @@ session_pid() {  # [container], defaulting to the file-wide one
     # nothing here asserts delivery, and an unreachable one keeps this test off
     # the network.
     #
-    # It runs in the FILTER container, which is where the two logs it tails are
-    # written - dnsmasq's and ulogd2's.
+    # It runs in the FILTER container, which is where the two records it tails
+    # are written - the name lookups and the connection attempts.
     local test_filter; test_filter="$(test_container_name shipper-filter)"
 
     start_pair shipper "$SESSION_IMAGE" \
@@ -1532,30 +1715,106 @@ session_pid() {  # [container], defaulting to the file-wide one
         || { echo "the shipper cannot read a source it is meant to: $output"; return 1; }
 }
 
-@test "ulogd2 runs as its own unprivileged user, not root" {
-    run dexec_filter ps -eo user,comm
-    [[ "$output" == *"ulogd    ulogd"* ]] || [[ "$output" == *$'\nulogd '* ]]
-    ! [[ "$output" == *$'\nroot     ulogd'* ]]
+
+
+
+@test "both log producers run as their own unprivileged user, not root" {
+    # Between them they parse packet headers and resolver log lines, both
+    # decided by what the session sends and asks for, so neither should be
+    # holding privilege. Each opens what it needs first, so the drop costs it
+    # nothing.
+    #
+    # Read from /proc rather than matched in ps output, because ps truncates
+    # in two places that both bite here: `user` to eight characters, which is
+    # how an assertion about egress-resolver came to be unsatisfiable, and
+    # `comm` to fifteen, which dns-lookup-log fits inside today by one
+    # character. The uid in /proc/<pid>/status is neither truncated nor
+    # ambiguous, and each process is found by the pid its own producer
+    # recorded rather than by matching text.
+    local want
+    want=$(dexec_filter id -u ulogd)
+    [ -n "$want" ] || { echo "the image has no ulogd account"; return 1; }
+
+    local pid uid
+    for pid in "$(dexec_filter pgrep -x ulogd)" \
+               "$(dexec_filter cat /run/egress-policy/lookup-log.pid)"; do
+        [ -n "$pid" ] || { echo "one of the log producers is not running"; return 1; }
+        uid=$(dexec_filter awk '/^Uid:/ { print $2 }' "/proc/$pid/status")
+        [ "$uid" = "$want" ] \
+            || { echo "pid $pid runs as uid $uid, not $want ($(dexec_filter cat "/proc/$pid/cmdline" | tr '\0' ' '))"; return 1; }
+    done
 }
 
-@test "the ipset stays in sync with fresh (non-cached) DNS answers, not just the boot-time snapshot" {
-    # Any built-in domain that resolves to a CDN address will do; this one is
+@test "the resolver runs as the account the upstream rule is keyed to" {
+    # The rule permitting anything in this namespace to reach a resolver
+    # outside it is a uid match, so the resolver actually running as that
+    # account is load-bearing - and it must be an account nothing else uses,
+    # because a permission keyed to a shared one is granted to everything that
+    # lands there.
+    # Compared by uid, not by name. `ps -eo user` pads the column to eight
+    # characters and truncates anything longer to "egress-+", which is not a
+    # string any assertion about this account can match - and the account is
+    # deliberately named for what it is rather than for what fits.
+    local want
+    want=$(dexec_filter id -u egress-resolver)
+    [ -n "$want" ] || { echo "the image has no egress-resolver account"; return 1; }
+
+    run dexec_filter sh -c 'ps -eo uid,comm | awk "\$2 == \"dnsmasq\" { print \$1 }"'
+    [ "$status" -eq 0 ]
+    [ -n "$output" ] || { echo "no dnsmasq process in the filter container"; return 1; }
+    [ "$output" = "$want" ] \
+        || { echo "the resolver runs as uid $output, and the rule is keyed to $want"; return 1; }
+
+    # And nothing is running as the account the rule must NOT be keyed to,
+    # because a permission keyed to a shared one is granted to everything that
+    # lands there.
+    run dexec_filter sh -c 'ps -eo uid,comm | awk "\$1 == \"65534\" { print \$2 }"'
+    [ -z "$output" ] \
+        || { echo "something runs as nobody, which the rule must not be keyed to: $output"; return 1; }
+}
+
+@test "every connection attempt is recorded with its verdict" {
+    # A refused destination and a permitted one both have to leave a record, or
+    # the log a supervisor reads proves nothing about what the session did.
+    dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
+    local found="" i
+    for i in 1 2 3 4 5 6; do
+        if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null; then
+            found=yes; break
+        fi
+        sleep 0.5
+    done
+    [ -n "$found" ] \
+        || { echo "a refused connection left no record"; dexec_filter tail -5 /var/log/egress-policy/connections.ndjson; return 1; }
+    run dexec_filter sh -c "grep -F '192.0.2.1' /var/log/egress-policy/connections.ndjson | tail -1"
+    [[ "$output" == *'"action"'* ]] \
+        || { echo "recorded without a verdict field: $output"; return 1; }
+}
+
+
+@test "the address sets stay in sync with fresh answers, not just the boot-time snapshot" {
+    # A permitted name's addresses rotate, and the set has to follow - the
+    # resolver writes each answer into the set as it serves it, so a CDN edge
+    # moving does not turn into "allowed at startup, blocked minutes later".
+    #
+    # Any built-in name that resolves to a CDN address will do; this one is
     # here because it is built in, so keep it on a name from fixed-domains.sh
     # rather than one a project happens to have approved.
+    local ip
     ip=$(dexec dig +short registry.npmjs.org | head -1)
     [ -n "$ip" ]
-    dexec_filter ipset del allowed-domains "$ip"
-    run dexec_filter ipset test allowed-domains "$ip"
+    dexec_filter nft delete element inet egress_policy oname_v4 "{ $ip }"
+    run dexec_filter nft get element inet egress_policy oname_v4 "{ $ip }"
     [ "$status" -ne 0 ]
 
-    # SIGHUP clears dnsmasq's answer cache, forcing a genuine upstream
+    # SIGHUP clears the resolver's answer cache, forcing a genuine upstream
     # re-forward on the next query instead of a cache hit - only a fresh
-    # forward triggers dnsmasq's --ipset= tracking (see dns-proxy.sh).
-    dexec_filter bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    # forward writes into the set again.
+    dexec_filter bash -c 'kill -HUP "$(cat /run/egress-policy/resolver.pid)"'
     sleep 0.5
     dexec dig +short registry.npmjs.org >/dev/null
     sleep 0.5
-    run dexec_filter ipset test allowed-domains "$ip"
+    run dexec_filter nft get element inet egress_policy oname_v4 "{ $ip }"
     [ "$status" -eq 0 ]
 }
 
@@ -1579,9 +1838,11 @@ EOF'
 
 @test "a global package imports as ESM too, from a directory of its own" {
     # The test above proves the browser works, in the module system that
-    # already resolved. NODE_PATH covers require() and nothing else: ESM walks
-    # up from the importing file, so the modern form failed everywhere while
-    # this suite stayed green. What an agent got was ERR_MODULE_NOT_FOUND,
+    # already resolved. Both resolvers walk up from the importing file looking
+    # for node_modules, and only the symlink at the filesystem root ends that
+    # walk somewhere useful; when the image relied on NODE_PATH instead, which
+    # feeds the CommonJS resolver alone, the modern form failed everywhere
+    # while this suite stayed green. What an agent got was ERR_MODULE_NOT_FOUND,
     # which reads as an image without a browser.
     #
     # Written somewhere with no node_modules of its own, because anywhere
@@ -1755,43 +2016,65 @@ EOF
     [ "$status_grep" -ne 0 ]
 }
 
-@test "mid-session allowed domains get ongoing ipset tracking, not a one-time snapshot" {
-    # Simulate the container-side half of bin/dejima-allow for a
-    # domain that wasn't allowed at startup (SIGHUP also clears dnsmasq's
-    # cache, so subsequent digs are really forwarded, not cached).
-    # SIGHUP-to-reload is asynchronous - give dnsmasq a moment to actually
-    # reload servers-file and flush its cache before digging (see the
-    # existing "ipset stays in sync" test above for the same convention).
-    dexec_filter bash -c 'echo "server=/example.org/127.0.0.11" >> /etc/dnsmasq-sandbox-servers.conf && kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
-    sleep 0.5
+
+@test "a domain added mid-session gets ongoing tracking, not a one-time snapshot" {
+    # The container-side half of bin/dejima-allow, run the way it really runs.
+    # `permit` records the entry, regenerates the resolver configuration and
+    # restarts it, then proves the address reached the set its class uses -
+    # so if this returns 0 the wiring held end to end.
+    run dexec_filter /usr/local/sbin/egress-policy permit example.org
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    local ip
     ip=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
-    sleep 0.5
     [ -n "$ip" ]
-    # The resolution itself must have populated the ipset (wildcard ipset=).
-    dexec_filter ipset test allowed-domains "$ip"
-    # Simulate a CDN edge rotating away and back: drop the IP, clear the
-    # dnsmasq cache, resolve again - the wildcard must re-add it with no
-    # dejima-allow involvement. This is exactly the case that used
-    # to break ("allowed but blocked again minutes later").
-    dexec_filter ipset del allowed-domains "$ip"
-    dexec_filter bash -c 'kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"'
+    dexec_filter nft get element inet egress_policy oname_v4 "{ $ip }"
+
+    # Simulate a CDN edge rotating away and back: drop the address, clear the
+    # resolver's cache, resolve again - it must be re-added with no further
+    # dejima-allow involvement. This is exactly the case that used to break
+    # ("allowed but blocked again minutes later").
+    dexec_filter nft delete element inet egress_policy oname_v4 "{ $ip }"
+    dexec_filter bash -c 'kill -HUP "$(cat /run/egress-policy/resolver.pid)"'
     sleep 0.5
+    local ip2
     ip2=$(dexec dig +short A example.org | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     sleep 0.5
     [ -n "$ip2" ]
-    dexec_filter ipset test allowed-domains "$ip2"
+    dexec_filter nft get element inet egress_policy oname_v4 "{ $ip2 }"
 }
 
-@test "github resolutions land only in github-domains, never the port-unrestricted allowed-domains" {
-    # The wildcard ipset=/#/allowed-domains must NOT swallow GitHub names:
-    # dnsmasq picks the longest matching ipset= domain, so the explicit
-    # github-domains lines win, keeping GitHub restricted to port 443
-    # (read-only; SSH push physically unreachable).
+@test "adding a domain twice says so rather than changing its class" {
+    # Whatever resolved under the old class stays in the allow-list until it
+    # ages out, so a move to a narrower class would leave the wider permission
+    # standing - which is worse than refusing, because the command would report
+    # a restriction it had not applied.
+    dexec_filter /usr/local/sbin/egress-policy permit example.org >/dev/null 2>&1 || true
+    run dexec_filter /usr/local/sbin/egress-policy permit example.org
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already permitted"* ]]
+
+    run dexec_filter /usr/local/sbin/egress-policy permit example.org --forge
+    [ "$status" -ne 0 ] \
+        || { echo "the class of a live entry was changed: $output"; return 1; }
+    [[ "$output" == *"Restart the session"* ]] \
+        || { echo "refused without naming what to do instead: $output"; return 1; }
+}
+
+
+@test "github resolutions land only in the forge class, never the port-unrestricted one" {
+    # The resolver writes an answer into the set its entry's CLASS names, and
+    # a name under a forge suffix is forge class however it was permitted. That
+    # is what keeps GitHub restricted to 443 - read-only, with SSH push
+    # physically unreachable - rather than the restriction depending on which
+    # code path happened to add the address.
+    local ip
     ip=$(dexec dig +short A github.com | grep -Em1 '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     [ -n "$ip" ]
-    run dexec_filter ipset test allowed-domains "$ip"
-    [ "$status" -ne 0 ]
-    dexec_filter ipset test github-domains "$ip"
+    run dexec_filter nft get element inet egress_policy oname_v4 "{ $ip }"
+    [ "$status" -ne 0 ] \
+        || { echo "a github address reached the port-unrestricted class"; return 1; }
+    dexec_filter nft get element inet egress_policy fname_v4 "{ $ip }"
 }
 
 @test "nvim falls back to the sandbox OSC 52 clipboard provider" {
@@ -1892,8 +2175,14 @@ EOF
     # `run !` for sudo, matching "node has no working sudo" above: it exits
     # 127 rather than a permission error, since sudo isn't installed at all.
     run ! docker exec -u node "$test_container" sudo -n true
-    run docker exec -u node "$test_container" iptables -L
+    run docker exec -u node "$test_container" nft list ruleset
     [ "$status" -ne 0 ]
+    # And the sweep the base image ends with ran again over what this layer
+    # installed: a derived image is where a dependency shipping a setuid
+    # binary would land, after the base image had already finished checking.
+    run docker exec "$test_container" sh -c 'find / -xdev -type f -perm /6000 2>/dev/null'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "setuid binaries in the derived image:"; echo "$output"; return 1; }
 
     docker rm -f "$test_container" >/dev/null 2>&1 || true
     docker rmi "$derived" >/dev/null 2>&1 || true
@@ -1947,7 +2236,7 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
 
 @test "a host service bound to loopback is unreachable from inside the container, one bound to the bridge gateway is reachable" {
     # The regression test for the escape path bin/dejima-ttyd's
-    # --interface 127.0.0.1 exists to close. init-firewall.sh deliberately
+    # --interface 127.0.0.1 exists to close. The egress policy deliberately
     # ACCEPTs OUTPUT to the Docker bridge gateway, and a tmux client attached
     # through ttyd is a host shell - the prefix key opens a window outside the
     # container - so a ttyd the sandbox could reach would be a full escape.
@@ -1955,7 +2244,7 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     local container host_ip loopback_port gateway_port
     container="$(container_name)"
 
-    # Derived exactly as init-firewall.sh derives HOST_IP, so this is the one
+    # Derived exactly as the egress policy derives the host address, so this is the one
     # host address the container's OUTPUT chain accepts at all.
     host_ip="$(docker exec "$container" sh -c "ip route | grep default | cut -d' ' -f3")"
     [ -n "$host_ip" ]
@@ -1988,6 +2277,63 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     # from timeout, and that is still containment.
     run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
     [ "$status" -ne 0 ]
+}
+
+
+
+@test "a session port bound to every interface is still unreachable from the bridge" {
+    # The other direction, and the one a filter with only an output hook lets
+    # through: a session process that binds 0.0.0.0 - by accident, or because a
+    # dev server defaults to it - would be reachable from anything sharing the
+    # bridge. The launch puts each pair on a network of its own, so today there
+    # is nothing else on it; that is a property of the launcher and this is the
+    # filter's own answer.
+    #
+    # Bound in the SESSION container and dialled from a third container on the
+    # same network, which is the shape of the exposure - the two share a
+    # namespace, so the listener answers at the address the pair holds on that
+    # network. Loopback has to keep working throughout, since the resolver and
+    # the credential forwarder both listen there, so it is probed on the way
+    # past.
+    local addr
+    addr=$(docker inspect -f \
+        '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(filter_name)")
+    [ -n "$addr" ] || { echo "could not find the pair's address on its network"; return 1; }
+
+    # Its pid is recorded rather than matched later. `pkill -f "http.server
+    # 8099"` matches the command line of the shell running pkill, so it kills
+    # itself, the exec comes back 143, and bats stops the test there - which it
+    # did, before either assertion below had run.
+    dexec_node bash -c \
+        'nohup python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 &
+         echo $! > /tmp/probe-8099.pid
+         sleep 1'
+
+    # Both probes run before anything is asserted, and the listener is stopped
+    # before that - a leaked one would sit in the shared container for every
+    # test after this, and a cleanup that can fail must not be what decides
+    # whether this test passes.
+    local from_lo from_bridge
+    docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099' \
+        >/dev/null 2>&1 && from_lo=0 || from_lo=$?
+    docker run --rm \
+        --network "$(network_name)" \
+        --entrypoint bash "$SESSION_IMAGE" \
+        -c "timeout 5 bash -c 'exec 3<>/dev/tcp/$addr/8099'" >/dev/null 2>&1 \
+        && from_bridge=0 || from_bridge=$?
+    dexec_node bash -c \
+        'kill "$(cat /tmp/probe-8099.pid)" 2>/dev/null; rm -f /tmp/probe-8099.pid; true' || true
+
+    # It really was listening, or the refusal below proves nothing.
+    [ "$from_lo" -eq 0 ] \
+        || { echo "the probe server is not up on loopback, so this test cannot tell"; return 1; }
+    [ "$from_bridge" -ne 0 ] \
+        || { echo "a session port bound to 0.0.0.0 was reachable from the bridge"; return 1; }
+
+    # And it is actually gone, so the next test does not inherit it.
+    run docker exec -u node "$(container_name)" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8099'
+    [ "$status" -ne 0 ] \
+        || { echo "the probe listener survived the test"; return 1; }
 }
 
 @test "tls transport: https://api.anthropic.com from inside the container reaches the host proxy" {
@@ -2054,7 +2400,12 @@ EOF
     [ "$env_ca" = "1" ]
     [ "$env_token" = "0" ]
     [ "$hosts_hits" = "1" ]
-    [[ "$dig_output" == *"status: REFUSED"* ]]
+    # NXDOMAIN or REFUSED: the resolver answers for permitted names and refuses
+    # everything else, and which of the two it says is a property of how the
+    # refusal is expressed rather than of whether the name is permitted. What
+    # matters here is that a lookup of this name yields no address.
+    [[ "$dig_output" == *"status: NXDOMAIN"* || "$dig_output" == *"status: REFUSED"* ]] \
+        || { echo "api.anthropic.com resolved despite not being permitted: $dig_output"; return 1; }
 }
 
 @test "the kill switch leaves api.anthropic.com unpinned, so the real API stays reachable" {
@@ -2086,9 +2437,9 @@ EOF
     # detaching and asking the daemon's log driver for them afterwards.
     #
     # The detached form spent six CI rounds insisting this container aborted
-    # partway through init-firewall.sh. It had not. Every line those logs ever
+    # partway through the egress policy. It had not. Every line those logs ever
     # contained came from an `echo` to stdout, and not one line written to
-    # stderr appeared in any of them - not init-firewall.sh's ERR trap, not
+    # stderr appeared in any of them - not the policy's ERR trap, not
     # resolve_domain's per-attempt reports, and not the FATAL message this test
     # asserts on, which entrypoint.sh writes to stderr as well. The container
     # was doing the right thing; the stderr half of what it said was not

@@ -2112,7 +2112,7 @@ EOF
 
 @test "TCB: a manifest hidden from git is a CRITICAL finding" {
     # A forge's fixed_hosts reaches DEJIMA_FORGE_HOSTS, which entrypoint.sh
-    # joins into extra_domains and init-firewall.sh allowlists - so a line
+    # joins into the permitted set the egress policy is given - so a line
     # added to a manifest widens the egress allowlist on the next launch.
     # Manifests are data and are never executed, which is why they were not
     # in the TCB list; what they are is a decision about what the next launch

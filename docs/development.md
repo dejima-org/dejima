@@ -12,13 +12,13 @@ run them.
 | --- | --- |
 | `docker/Dockerfile` | Base image: dev tools, nvim, Playwright, the sandbox user. Carries **no harness** - the selected one installs into a layer above it, from its manifest's `install` |
 | `docker/install-forge-bins.sh` | Installs each forge's CLIs into the image from its manifest's `install` list, and fails the build on a file that is shipped but not declared, or declared but not shipped |
-| `docker/fixed-domains.sh` | Shared domain list sourced by both `init-firewall.sh` and `dns-proxy.sh` |
-| `docker/dns-proxy.sh` | Starts the DNS-allowlisting `dnsmasq`, repoints `resolv.conf` at it |
-| `docker/init-firewall.sh` | IPv4/IPv6 egress allowlist firewall, run at filter-container start |
-| `docker/firewall-up.sh` | Brings a network namespace's egress control up: the DNS proxy, the packet filter, and the two log producers. What a namespace needs, rather than what a container does |
+| `docker/fixed-domains.sh` | Composes the permitted set by class, shared by `firewall-up.sh` in the container and `dejima-allow` on the host so the two cannot disagree about which class a name belongs to |
+| `docker/egress-policy` | The egress policy itself: packet filter, restricted resolver, connection log, and the self-checks that must pass before a session starts. Also `permit`, which adds a destination to a running session |
+| `docker/dns-lookup-log` | Turns the resolver's query log into one JSON record per name lookup, with its outcome |
+| `docker/cidr-collapse` | Collapses a CIDR list into the smallest equivalent one, validating every entry |
+| `docker/firewall-up.sh` | Turns a launch's configuration into the permitted set `egress-policy` is given, then starts it. What a namespace needs, rather than what a container does |
 | `docker/filter-entrypoint.sh` | PID 1 of the filter container: runs `firewall-up.sh`, signals readiness, then holds the namespace open for the sandbox to join |
 | `docker/caps-lib.sh` | `drop_caps` and the `CAP_SETPCAP` precondition, sourced by both entrypoints so the two cannot drift |
-| `docker/ulogd.conf` | `ulogd2` config: turns `init-firewall.sh`'s NFLOG-tagged packets into JSON |
 | `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`). Container-side, because those files only exist there |
 | `docker/entrypoint.sh` | PID 1 of the session container: runs as root to prepare the session's own state, points `resolv.conf` at the namespace's resolver, then execs the session's command as the sandbox user with an empty capability bounding set. The egress control is the filter container's to bring up, not this one's |
 | `docker/harness-wrapper.sh` | Shadows the selected harness's command on `PATH` to add its no-confirm flags and dejima's settings layer. Named by no harness; `entrypoint.sh` links it into place |
@@ -79,18 +79,21 @@ the security invariants the README states, not a substitute for reading it,
 but a way to actually catch a future change silently breaking one of them
 instead of finding out the hard way.
 
-`static.bats` greps the repo's own files - no sudo in the `Dockerfile`, every
-`ipset add` is duplicate-safe, no `docker.sock`/host-credential mounts, the
-`~/.claude` mount inventory is exactly what it should be, `dejima-allow`
-rejects a malicious domain argument. `runtime.bats` builds the image, boots
-a real container running the actual `entrypoint.sh` (a `SANDBOX_TEST_MODE`
-env var makes it stop just short of execing the session's command, so the suite can attach
-to a fully-initialized container instead of reimplementing its own copy of
-the setup sequence), and asserts against it: IPv6 blocked, DNS/IP allowlist
-enforcement in both directions, GitHub read-only, no working `sudo`/
-`iptables`/`init-firewall.sh` as `node`, capabilities actually stripped
-(not just absent from a `docker exec` that doesn't have them to begin
-with), `ulogd2` unprivileged, and the dynamic-ipset CDN-rotation fix.
+`static.bats` greps the repo's own files - no sudo in the `Dockerfile`, no
+`docker.sock` or host-credential mounts, the `~/.claude` mount inventory is
+exactly what it should be, `dejima-allow` rejects a malicious domain argument.
+
+`runtime.bats` builds the image, boots a real container running the actual
+`entrypoint.sh` (a `SANDBOX_TEST_MODE` env var makes it stop just short of
+execing the session's command, so the suite can attach to a fully-initialized
+container instead of reimplementing its own copy of the setup sequence), and
+asserts against it: IPv6 refused outright with no permit path in the chain and
+no AAAA from the resolver, name and address enforcement in both directions,
+inbound and
+forwarded traffic dropped, GitHub reachable on 443 and not on 22, no working
+`sudo` and no way to change the packet filter as `node`, capabilities actually
+stripped (not just absent from a `docker exec` that doesn't have them to begin
+with), both log producers unprivileged, and the address-set CDN-rotation fix.
 
 `project.bats`, `remote.bats` and `audit.bats` need no Docker either.
 `project.bats` covers the
@@ -125,7 +128,7 @@ what stops the first from passing in an environment where the container
 reaches nothing at all. That pair is the ttyd front door's whole containment
 argument, so run it before trusting a front door you just set up.
 
-Every mutation in `runtime.bats` (firewall rules, `ipset` entries) happens
+Every mutation in `runtime.bats` (firewall rules, address-set entries) happens
 inside the test container's own network namespace, same as any other
 container - none of it touches the host. Container/network names are
 derived from bats' own per-run temp directory, not anything guessable or

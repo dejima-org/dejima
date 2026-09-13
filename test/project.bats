@@ -32,7 +32,7 @@ if [ "\$1" = ps ]; then
 fi
 case "\$*" in
     # A session container shares a filter container's network namespace, and
-    # that is where the dnsmasq and the ipsets are. dejima-allow derives the
+    # that is where the resolver and the packet filter are. dejima-allow derives the
     # one from the other rather than being told, so a stub that answers this
     # with nothing is a session with no filter to add a domain to.
     *inspect*NetworkMode*) echo "container:dejima-test-filter"; exit 0 ;;
@@ -126,7 +126,7 @@ dockerfile_for() {
 
 @test "valid_domain refuses the hostname shapes a resolver would read differently" {
     # The matcher is a trust boundary: what it accepts becomes a dnsmasq
-    # `server=` line and an ipset entry. The published bypass in this space
+    # `server=` line and an entry in the packet filter's address sets. The published bypass in this space
     # came from an egress control accepting a string its resolver then read as
     # a different host, so the shapes below are the ones worth asserting on
     # rather than only "does it reject evil.com".
@@ -656,6 +656,7 @@ EOF
     grep -qx 'crates.io' "$(store_of "$PROJ")/allowed-domains"
 }
 
+
 @test "dejima-allow takes the filter container's id, which is what a session reads" {
     # A session asked for its own container id runs `cat /etc/hostname`, and
     # Docker names a container that joined another's network namespace after
@@ -673,7 +674,6 @@ case "$*" in
     # And one running container is in its namespace.
     "ps -q")                   echo sessionid ;;
     *'{{.Id}} {{.HostConfig.NetworkMode}}'*) echo "sessionid container:filterid" ;;
-    *dig*)                     echo 10.0.0.1 ;;
 esac
 exit 0
 EOF
@@ -685,8 +685,8 @@ EOF
     # Asserted on the calls rather than the messages: which container each
     # half runs in is the whole point, and a message could name either while
     # the exec went to the wrong one.
-    grep -q 'exec -u root c1 ipset add' "$STUB_DIR/calls" \
-        || { echo "the ipset add did not go to the filter container:"; cat "$STUB_DIR/calls"; return 1; }
+    grep -q 'exec -u root c1 /usr/local/sbin/egress-policy permit crates.io' "$STUB_DIR/calls" \
+        || { echo "the permitted-set change did not go to the filter container:"; cat "$STUB_DIR/calls"; return 1; }
     grep -q 'exec sessionid curl' "$STUB_DIR/calls" \
         || { echo "the probe did not run in the session container:"; cat "$STUB_DIR/calls"; return 1; }
     rm -rf "$STUB_DIR"
@@ -760,55 +760,117 @@ EOF
     [[ "$output" == *"still NOT reachable"* ]]
     grep -qx 'crates.io' "$CONFIG_DIR/allowed-domains"
 }
-
-# A fake `docker` whose in-container dig answers only when asked upstream
-# directly (@127.0.0.11), which is what an internally-routed name looks like
-# from here: dnsmasq drops the private answer, the upstream still has it.
+# A fake `docker` whose filter container refuses to permit the name, the way
+# egress-policy does when the answer points inside a private network and
+# nothing exempted the entry. $2 of the exec is the entry; --internal-ok on the
+# command line is what makes it succeed, which is exactly the distinction the
+# two tests below are about.
 stub_docker_rebind() {
     STUB_DIR="$(mktemp -d)"
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
+echo "$*" >> "${DOCKER_CALL_LOG:-/dev/null}"
 case "$*" in
     *inspect*NetworkMode*) echo "container:dejima-test-filter"; exit 0 ;;
-    *dig*@127.0.0.11*) echo 10.0.0.1 ;;
+    *egress-policy\ permit*--internal-ok*)
+        echo "[egress-policy] internal.example.com permitted (open class, internal-ok): 10.0.0.1"
+        exit 0 ;;
+    *egress-policy\ permit*)
+        echo "[egress-policy] FAILED: internal.example.com did not resolve after being permitted (an answer pointing inside a private network is refused unless --internal-ok was given); nothing was changed" >&2
+        exit 1 ;;
 esac
 exit 0
 EOF
     chmod +x "$STUB_DIR/docker"
 }
 
-@test "dejima-allow names the relaunch for an internally-routed domain" {
-    # "Failed to resolve" sent people looking at their DNS server, which is
-    # working - the container's rebind protection is what dropped the answer,
-    # and no live patch can lift it.
+
+@test "dejima-allow names the approval that would let an internal name through" {
+    # A name that resolves inside the operator's own network is refused unless
+    # the entry was exempted, and a session-only grant deliberately is not:
+    # exempting an unreviewed name is how one influenced answer becomes egress
+    # to an internal host. So the useful answer is the approval that carries
+    # the exemption, not "failed to resolve" - which sent people looking at
+    # their DNS server, which was working.
     stub_docker_rebind
     run env PATH="$STUB_DIR:$PATH" \
         "$REPO_ROOT/bin/dejima-allow" --container c1 internal.example.com
     [ "$status" -eq 1 ]
-    [[ "$output" == *"private address (10.0.0.1)"* ]]
+    [[ "$output" == *"resolves inside your own network"* ]]
     [[ "$output" == *"dejima-allow --global internal.example.com"* ]]
+    # And the container's own reason survives, because it names the mechanism.
+    [[ "$output" == *"internal-ok"* ]]
 }
 
-@test "dejima-allow points an internally-routed domain at the approval it just recorded" {
+
+
+@test "a name declared internal is added to a running session, without a relaunch" {
+    # This used to be impossible: the exemption could only be written at
+    # startup, so an internally-routed name meant restarting the session. The
+    # permitted set is now regenerated in place, so a name the operator has
+    # declared internal can be added to the session already running.
+    printf '[core]\ninternal_domains = internal.example.com\n' > "$CONFIG_DIR/config"
     stub_docker_rebind
-    run env PATH="$STUB_DIR:$PATH" \
+    run env PATH="$STUB_DIR:$PATH" DOCKER_CALL_LOG="$STUB_DIR/calls" \
         "$REPO_ROOT/bin/dejima-allow" --global --container c1 internal.example.com
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"approval recorded above already does this"* ]]
-    [[ "$output" == *"Relaunch the session"* ]]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx 'internal.example.com' "$CONFIG_DIR/allowed-domains"
+    grep -q 'egress-policy permit internal.example.com.*--internal-ok' "$STUB_DIR/calls" \
+        || { echo "the declaration did not carry the exemption:"; cat "$STUB_DIR/calls"; return 1; }
+    [[ "$output" != *"Relaunch"* ]] \
+        || { echo "still telling the operator to relaunch:"; echo "$output"; return 1; }
 }
 
-@test "dejima-allow still reports a domain that resolves nowhere as unresolvable" {
-    # The rebind branch above must not swallow the ordinary failure: a typo'd
-    # or dead name gets no answer from the upstream either.
+@test "an approval alone does not exempt a name from the answer check" {
+    # The rule a launch applies, applied here too. An approval says a
+    # destination may be reached; it does not say an answer for it may point
+    # inside the operator's network, and a project's declared domains are
+    # reviewed as public names. Exempting one on the strength of an approval is
+    # what the two halves used to disagree about - this side handed out the
+    # exemption, a launch withheld it, and the operator found out when the next
+    # launch refused to start on a name that had just worked.
+    stub_docker_rebind
+    run env PATH="$STUB_DIR:$PATH" DOCKER_CALL_LOG="$STUB_DIR/calls" \
+        "$REPO_ROOT/bin/dejima-allow" --global --container c1 internal.example.com
+    [ "$status" -ne 0 ] || { echo "an approval exempted a name by itself"; return 1; }
+    ! grep -q 'internal-ok' "$STUB_DIR/calls" \
+        || { echo "the exemption was sent without a declaration:"; cat "$STUB_DIR/calls"; return 1; }
+    # The approval is still recorded - it is a decision about reachability and
+    # this command does not get to discard it over a separate question.
+    grep -qx 'internal.example.com' "$CONFIG_DIR/allowed-domains"
+    # And the refusal names the key that fixes it, not the variable the
+    # container reads.
+    [[ "$output" == *"internal_domains = internal.example.com"* ]] \
+        || { echo "the refusal does not name the remedy:"; echo "$output"; return 1; }
+}
+
+@test "a session-only grant is never exempted from the answer check" {
+    # The other half of the test above, and the one that matters: without an
+    # approval there is no exemption, because exempting a name nobody reviewed
+    # is what turns one attacker-influenced answer into egress to an internal
+    # host.
+    stub_docker_rebind
+    run env PATH="$STUB_DIR:$PATH" DOCKER_CALL_LOG="$STUB_DIR/calls" \
+        "$REPO_ROOT/bin/dejima-allow" --container c1 crates.io
+    grep -q 'egress-policy permit crates.io' "$STUB_DIR/calls" \
+        || { echo "no permit call at all:"; cat "$STUB_DIR/calls"; return 1; }
+    ! grep -q 'internal-ok' "$STUB_DIR/calls" \
+        || { echo "a session-only grant was exempted:"; cat "$STUB_DIR/calls"; return 1; }
+}
+
+
+@test "dejima-allow reports a domain that resolves nowhere, and says nothing changed" {
+    # The refusal branch above must not swallow the ordinary failure: a typo'd
+    # or dead name gets no answer either, and the operator needs to know the
+    # permitted set was left alone rather than half-changed.
     STUB_DIR="$(mktemp -d)"
-    # Answers where the filter container is and nothing else, so every lookup
-    # comes back empty - which is the case this is about.
     cat > "$STUB_DIR/docker" <<'EOF'
 #!/bin/bash
 case "$*" in
-    *inspect*NetworkMode*) echo "container:dejima-test-filter" ;;
+    *inspect*NetworkMode*) echo "container:dejima-test-filter"; exit 0 ;;
+    *egress-policy\ permit*)
+        echo "[egress-policy] FAILED: nowhere.example.com did not resolve after being permitted; nothing was changed" >&2
+        exit 1 ;;
 esac
 exit 0
 EOF
@@ -816,7 +878,8 @@ EOF
     run env PATH="$STUB_DIR:$PATH" \
         "$REPO_ROOT/bin/dejima-allow" --container c1 nowhere.example.com
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Failed to resolve nowhere.example.com"* ]]
+    [[ "$output" == *"nowhere.example.com did not resolve"* ]]
+    [[ "$output" == *"left as it was"* ]]
 }
 
 @test "dejima-project approve persists every domain even when a docker call would have failed" {

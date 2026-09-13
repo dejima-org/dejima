@@ -481,7 +481,7 @@ _emit_tarball_layers() {
 # Installs run at BUILD time, where there's no egress firewall - which is
 # why this is a derived image rather than an install step in entrypoint.sh:
 # the latter would need apt/npm/PyPI/crates.io reachable as root before
-# init-firewall.sh locks egress down.
+# the egress policy locks egress down.
 generate_derived_dockerfile() {
     local base="$1" store="$2" entries
     entries="$(approved_entries "$store" dependencies)" \
@@ -574,6 +574,12 @@ generate_spec_dockerfile() {
     # above left behind - entrypoint.sh must still start as root and drop
     # via gosu, with no escalation path for the session user.
     printf 'USER root\n'
+    # The base image swept its own setuid bits and file capabilities, and then
+    # the apt/pip/tarball layers above installed more software on top. Sweep
+    # again here, so a project declaring a dependency that happens to ship a
+    # setuid binary fails its build rather than handing every session on that
+    # project an escalation path the base image was careful not to have.
+    printf 'RUN /usr/local/sbin/strip-privilege-bits\n'
     printf 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n'
     return 0
 }

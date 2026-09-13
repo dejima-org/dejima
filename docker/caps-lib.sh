@@ -32,10 +32,15 @@ drop_caps() {
 # precondition of the whole script, and the point is to refuse before doing
 # work rather than partway through it.
 require_setpcap() {
-    if capsh --decode="$(awk '/^CapEff:/ {print $2}' /proc/self/status)" \
-        | grep -q cap_setpcap; then
-        return 0
-    fi
+    # Decoded first and matched with `[[ ]]`, rather than piped into `grep -q`.
+    # Both callers set `pipefail`, and grep -q leaves as soon as it matches,
+    # which SIGPIPEs the writer and makes the pipeline's status 141 - so the
+    # check reports a missing capability BECAUSE it found one. capsh's output is
+    # one short line and would almost always win that race, which is the worst
+    # place for it: this is the guard that decides whether the container starts.
+    local decoded
+    decoded=$(capsh --decode="$(awk '/^CapEff:/ {print $2}' /proc/self/status)") || decoded=""
+    [[ "$decoded" == *cap_setpcap* ]] && return 0
     echo "${0##*/}: this container does not hold CAP_SETPCAP, so the capabilities" >&2
     echo "the startup sequence needs cannot be taken away again before the session" >&2
     echo "starts - it would run inside a tree holding all of them." >&2

@@ -12,7 +12,7 @@ August, turned up two things worth having found sooner than that:
   a `.google.com` suffix while the resolver read `attacker-host`. dejima's
   matcher refused that shape and every neighbouring one, for structural reasons
   now recorded beside it - it matches whole domains rather than suffixes, and
-  the decision and the dial are bound by the ipset being filled from the
+  the decision and the dial are bound by the address set being filled from the
   answer the resolver returned. One laxity turned up and was fixed.
 - **The closest comparable project ships the opposite default.** Trail of Bits'
   Claude Code devcontainer lists network under "not sandboxed" and has full
@@ -156,11 +156,11 @@ both distinctions vanish within a week of writing:
 
 A bypass from the literature is a hypothesis about *their* implementation until
 it is run against this one. dejima differs in ways that plausibly change the
-answer: enforcement is `iptables` and a DNS proxy rather than an in-process
-proxy, the matcher is an anchored shell regex rather than a string-suffix test,
-the allowlist matches whole domains rather than suffixes, and the ipset is
-populated from the answer the resolver returned rather than from a second parse
-of a string.
+answer: enforcement is a packet filter and a restricting resolver rather than an
+in-process proxy, the matcher is an anchored shell regex rather than a
+string-suffix test, the allowlist matches whole domains rather than suffixes,
+and the address sets are populated from the answer the resolver returned rather
+than from a second parse of a string.
 
 Each entry states a prediction that can fail.
 
@@ -170,8 +170,8 @@ Each entry states a prediction that can fail.
   has since been fixed.*
 - **A published SOCKS-style parser differential, run end to end** rather than
   against the validator alone. Prediction: no path, because nothing in dejima
-  speaks SOCKS and the decision and the dial are bound by the ipset. Not yet
+  speaks SOCKS and the decision and the dial are bound by the address set. Not yet
   run.
 - **Redirect chains to a host outside the allowlist.** Prediction: fail at the
-  ipset, because dejima does not mediate HTTP and the connection is judged by
-  address. Not yet run.
+  packet filter, because dejima does not mediate HTTP and the connection is
+  judged by address. Not yet run.

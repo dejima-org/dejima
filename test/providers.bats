@@ -1115,7 +1115,7 @@ assert_remedy_forges_exist() {
     # ("the github forge's hosts never reach the extra-domains allowlist").
     # Those three hosts are public SaaS names already covered by core's
     # GitHub ranges: sending them down the extra-domains path would put them
-    # in the port-unrestricted allowed-domains ipset AND exempt them from
+    # in the port-unrestricted open class AND exempt them from
     # dnsmasq's stop-dns-rebind, and the firewall's startup self-check
     # ("github.com:22 was reachable without ALLOW_GITHUB_PUSH=1") would then
     # refuse to bring the container up at all.
