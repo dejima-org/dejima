@@ -869,6 +869,31 @@ wait_for_daemon() {
 # Self-checks
 # --------------------------------------------------------------------------
 
+# Runs a check that asserts something CAN be reached, until it can or the
+# attempts run out.
+#
+# Only for the positive ones, and the asymmetry is the point. A check asserting
+# reachability is answered wrongly by a transient failure - a DNS answer that
+# did not come back, a CDN edge rotating mid-boot, a slow moment on the way to
+# the forge - and it is answered wrongly in the direction that stops the
+# container. That is how it presented: one container failing here while a dozen
+# others in the same CI run came up fine.
+#
+# The negative controls must NOT go through this. There a single success is the
+# real answer, and retrying would only be asking until it says what we want.
+retry_positive() {
+  local attempts=$1; shift
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if "$@"; then
+      return 0
+    fi
+    [ "$i" -lt "$attempts" ] || return 1
+    say "attempt $i/$attempts of '$1' did not succeed; retrying"
+    sleep $((i * 2))
+  done
+}
+
 # Ordered so that a failure names its own cause: the positive checks come
 # first, because "a blocked destination was refused" means nothing until
 # something that should work has been shown to work.
@@ -887,7 +912,7 @@ verify() {
   [ "$running_as" = "$RESOLVER_USER" ] \
     || die "check 2: the resolver is running as '${running_as:-unknown}', not $RESOLVER_USER, so the rule permitting it to reach an upstream resolver is keyed to the wrong account"
 
-  answer=$(resolve_one "$forge_host") || true
+  answer=$(retry_positive 3 resolve_one "$forge_host") || true
   [ -n "$answer" ] \
     || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$forge_host")"
 
@@ -900,7 +925,8 @@ verify() {
     || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
 
   rc=0
-  curl --silent --show-error --output /dev/null --max-time 20 "$FORGE_META_URL" || rc=$?
+  retry_positive 3 curl --silent --show-error --output /dev/null \
+    --connect-timeout 5 --max-time 20 "$FORGE_META_URL" >/dev/null || rc=$?
   [ "$rc" -eq 0 ] \
     || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
 
@@ -1133,7 +1159,9 @@ resolve_one() {
     printf '%s\n' "$line"
     return 0
   done <<< "$answers"
-  return 0
+  # Non-zero when there was no address, so a caller can retry a lookup that
+  # asserts a name CAN be resolved. Callers asserting the opposite swallow it.
+  return 1
 }
 
 wait_for_log() {

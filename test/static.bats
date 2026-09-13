@@ -4237,6 +4237,40 @@ registered_commands() {
         || { echo "the wait has no bound, so a dead resolver hangs the start"; return 1; }
 }
 
+@test "the positive self-checks retry and the negative controls do not" {
+    # A check asserting something CAN be reached is answered wrongly by a
+    # transient failure - a lookup that did not come back, a CDN edge rotating
+    # mid-boot - and wrongly in the direction that stops the container. One
+    # container failed that way while a dozen others in the same CI run came up
+    # fine, which is the whole reason this asymmetry exists.
+    #
+    # The negative controls must never be retried. There a single success is
+    # the real answer, and retrying is asking until it says what we want.
+    local p="$SANDBOX_DIR/egress-policy" v
+    v=$(sed -n '/^verify()/,/^}/p' "$p")
+
+    # Reachability and the forge's own lookup: retried.
+    grep -q 'retry_positive [0-9]* resolve_one' <<< "$v" \
+        || { echo "the permitted-name lookup is not retried"; return 1; }
+    grep -q 'retry_positive [0-9]* curl' <<< "$v" \
+        || { echo "the reachability check is not retried"; return 1; }
+
+    # The negatives: not.
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            *retry_positive*) echo "a negative control is retried: $line"; return 1 ;;
+        esac
+    done < <(grep -E 'verify_refused|verify_port_refused|verify_ipv6_refused|PROBE_NAME\)' <<< "$v")
+
+    # And the lookup has to report emptiness, or retrying it is a no-op: it
+    # returns 0 whether or not it found an address otherwise.
+    local r
+    r=$(sed -n '/^resolve_one()/,/^}/p' "$p")
+    [ "$(grep -c 'return 1' <<< "$r")" -ge 1 ] \
+        || { echo "resolve_one cannot signal 'no address', so retrying it does nothing"; return 1; }
+}
+
 
 
 @test "IPv6 is refused as a family, with no permit path anywhere in the ruleset" {
