@@ -956,25 +956,44 @@ verify() {
 #   and nothing else in the chain names a v6 destination. That is what a
 #   regression would look like: not the refusal disappearing, but a permit rule
 #   appearing beside it.
-verify_ipv6_refused() {
-  local label=$1 chain first permits
+# One chain's IPv6 posture: the refusal is present and FIRST, and nothing else
+# in the chain names a v6 address. A rule below the established or loopback
+# passes is one a v6 packet gets past, because `oifname "lo"` carries ::1 and an
+# established flow stays established.
+#
+# The second half is what a regression looks like. It is not the refusal
+# disappearing - it is a permit rule appearing beside it.
+verify_chain_refuses_ipv6() {
+  local label=$1 name chain rules first permits
+  name=$2
 
-  chain=$(nft list chain inet "$TABLE" egress) \
-    || die "$label: the egress chain cannot be read, so its IPv6 posture cannot be confirmed"
+  chain=$(nft list chain inet "$TABLE" "$name") \
+    || die "$label: the $name chain cannot be read, so its IPv6 posture cannot be confirmed"
 
   # The chain's own declaration is not a rule, and neither are the braces or
   # the comments nft echoes back. Taken whole and split in bash rather than
   # piped through `head -1`, which would SIGPIPE the grep and fail the pipeline
   # under pipefail - see the note on that at the top of this file.
-  local rules
   rules=$(grep -vE '^\s*(table|chain|\}|#|type filter hook|$)' <<< "$chain") || true
   first=${rules%%$'\n'*}
   [[ "$first" == *"meta nfproto ipv6"* ]] \
-    || die "$label: the first rule of the egress chain is not the IPv6 refusal, so a v6 packet can reach the rules above it: $first"
+    || die "$label: the first rule of the $name chain is not the IPv6 refusal, so a v6 packet can reach the rules above it: $first"
 
   permits=$(grep -n 'ip6 ' <<< "$chain" | grep -v 'nfproto ipv6' || true)
   [ -z "$permits" ] \
-    || die "$label: the egress chain names IPv6 destinations, so the family is being allow-listed rather than refused: $permits"
+    || die "$label: the $name chain names IPv6 addresses, so the family is being allow-listed rather than refused: $permits"
+}
+
+verify_ipv6_refused() {
+  local label=$1 name
+
+  # Both chains that carry traffic, not just the outbound one. The chain a v6
+  # permit rule last appeared in was `inbound` - a `ip6 saddr @host_v6 accept`
+  # that sat there while the egress chain was already clean - so checking only
+  # `egress` would have watched the wrong door.
+  for name in egress inbound; do
+    verify_chain_refuses_ipv6 "$label" "$name"
+  done
 
   # And the resolver hands out no AAAA, which is the second layer: an address
   # never produced cannot become a packet to refuse.
