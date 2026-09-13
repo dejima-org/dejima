@@ -1004,13 +1004,23 @@ verify_ipv6_refused() {
   # otherwise turn this into a check that passes because the thing it depends
   # on broke, which is the shape this repository has been caught by before.
   #
-  # root may reach a resolver directly (see the DNS rules), so the upstream can
-  # be asked what the truth is.
+  # As the resolver's account, not as root. The rule permitting root to reach a
+  # resolver matches on port 53, and the runtime reaches its embedded resolver
+  # through a DNAT that has already rewritten the port by the time this hook
+  # sees the packet - so a root query falls through to the address-matched
+  # refuse below it. The forwarder's rule is portless for exactly that reason,
+  # and it is the one that lets this question be asked at all.
+  #
+  # dnsmasq is not in this path, so filter-AAAA does not apply to it: it stays
+  # an independent source of truth, which is the whole property the control
+  # needs.
   local upstream truth ours
   upstream=$(head -1 "$UPSTREAM_FILE" 2>/dev/null) || true
   truth=""
-  [ -n "$upstream" ] \
-    && truth=$(dig +short +time=3 +tries=2 "@$upstream" AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  if [ -n "$upstream" ]; then
+    truth=$(gosu "$RESOLVER_USER" dig +short +time=3 +tries=2 \
+              "@$upstream" AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
+  fi
 
   ours=$(dig +short +time=3 +tries=2 @127.0.0.1 AAAA "$PROBE_AAAA_NAME" 2>/dev/null) || true
   [ -z "$ours" ] \

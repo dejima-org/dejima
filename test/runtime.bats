@@ -760,13 +760,19 @@ session_pid() {  # [container], defaulting to the file-wide one
     # The upstream is asked first, because "no AAAA came back" is only evidence
     # if there was an AAAA to come back. A probe name that quietly loses its
     # records would otherwise turn this into a check that passes because the
-    # thing it depends on broke. Asked from the FILTER container, where root
-    # may reach a resolver directly; the session container may not, which is
-    # the point of the rule that says so.
+    # thing it depends on broke.
+    #
+    # As the resolver's account, in the filter container. Not as root: the rule
+    # permitting root to reach a resolver matches on port 53, and the runtime's
+    # embedded resolver is reached through a DNAT that has already rewritten
+    # the port - which is the same reason the test below asserts root does not
+    # reach past it. The forwarder's own rule is portless, and that is what
+    # makes this question askable.
     local upstream truth
     upstream=$(dexec_filter head -1 /run/egress-policy/upstream-resolvers)
     [ -n "$upstream" ] || { echo "no upstream resolver recorded"; return 1; }
-    truth=$(dexec_filter dig +short +time=3 +tries=2 "@$upstream" AAAA registry.npmjs.org || true)
+    truth=$(dexec_filter gosu egress-resolver \
+                dig +short +time=3 +tries=2 "@$upstream" AAAA registry.npmjs.org || true)
     if [ -z "$truth" ]; then
         skip "registry.npmjs.org has no AAAA upstream either; this check would prove nothing"
     fi
