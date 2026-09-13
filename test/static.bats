@@ -6930,6 +6930,35 @@ SCANNED_PATHS=(README.md SECURITY.md ATTRIBUTION.md docs docker bin forges workf
     }
 }
 
+@test "nothing in the tree claims the container derives from a reference dev container" {
+    # The README's provenance note was removed because it had stopped being
+    # true: the image and the egress policy were rewritten clean-room, and what
+    # remains in common is package names and one-way-to-spell-it idioms. That
+    # removal is a claim about the whole repository, and nothing checked it -
+    # which is how a citation in hooks/ outlived the audit, since the audit was
+    # scoped to docker/.
+    #
+    # Scoped to the citation and the claim, not to the vendor's name: dejima
+    # talks about Anthropic legitimately all over the place - a backend, an API,
+    # an upstream bug, a comparison with someone else's devcontainer in
+    # docs/research-review.md. What must not reappear is this repository saying
+    # its own container came from that one.
+    local hits
+    hits=$(grep -rIn --exclude-dir=.git --exclude-dir=.worktrees \
+        -e 'anthropics/claude-code/tree/[^ ]*devcontainer' \
+        -e 'reference this is based on' \
+        -e 'reference dev container this' \
+        "$REPO_ROOT" 2>/dev/null | grep -v '^[^:]*/test/static\.bats:' || true)
+    [ -z "$hits" ] || {
+        echo "the tree still cites the reference dev container as what this is based on:" >&2
+        echo "$hits" >&2
+        echo "" >&2
+        echo "If a citation is legitimate - comparing against it, linking an upstream" >&2
+        echo "bug - say what it is rather than what this derives from." >&2
+        false
+    }
+}
+
 # The exemption above is only defensible while it is the address the docs
 # actually recommend. If the recommendation changes and this does not, the
 # exemption starts covering an address nothing points at - a hole rather than
