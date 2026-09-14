@@ -154,8 +154,13 @@ dejima_mark_internal() {
 # gone, from a command whose whole output says it granted one domain. It went
 # wrong exactly that way when the answer lived in two places.
 dejima_class_for() {
-    local domain="$1" suffix
+    # Case-folded, because DNS names are case-insensitive and the resolver
+    # treats them so. Comparing verbatim put GITHUB.COM in the open class while
+    # github.com was forge, which is the narrower class silently lost on a
+    # spelling an operator is free to use.
+    local domain="${1,,}" suffix
     for suffix in ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}; do
+        suffix="${suffix,,}"
         if [ "$domain" = "$suffix" ] || [[ "$domain" == *".$suffix" ]]; then
             printf 'forge'
             return 0

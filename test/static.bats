@@ -2055,6 +2055,14 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # The suffix must not match a name that merely ends in the same letters.
     run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" notgithub.com
     [ "$output" = open ] || { echo "notgithub.com was treated as the forge"; return 1; }
+
+    # DNS names are case-insensitive and the resolver treats them so, which is
+    # what makes an uppercase spelling a way to land a forge name in the class
+    # that carries no port restriction.
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" API.GITHUB.COM
+    [ "$output" = forge ] || { echo "an uppercase forge name came back as $output"; return 1; }
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" NOTGITHUB.COM
+    [ "$output" = open ] || { echo "NOTGITHUB.COM was treated as the forge"; return 1; }
 }
 
 @test "the boot path states the class too, so an approved forge name is not widened" {
