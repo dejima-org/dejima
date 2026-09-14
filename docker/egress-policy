@@ -192,7 +192,12 @@ classify_entry() {
     # matched by anything: this policy refuses IPv6 as a family, so permitting
     # a v6 destination cannot mean what whoever wrote it down meant.
     die "permitted entry '$value' is an IPv6 address, and this policy refuses IPv6 outright"
-  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+  # The dotted part is optional: a single-label name is a host name. A LAN host,
+  # a container-runtime service name and an /etc/hosts entry all look like this,
+  # and the launcher's own validator accepts them - so requiring a dot here
+  # refuses a configuration that passed every check on the way in, and refuses it
+  # by stopping the container rather than by saying so at the point of entry.
+  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]; then
     printf 'name\n'
   else
     die "permitted entry '$value' is neither a host name nor an address"

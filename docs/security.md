@@ -1695,8 +1695,14 @@ config-file path that opens the same port, but not
 silently: `hosts_allowlisted_by_core` is what asks for it, explicitly, in a
 manifest, and only when the selected workflow actually pushes. What it opens
 is the same GitHub ranges the read-only path already allows on port 443, now
-also on port 22, logged like every other allowed connection and verified by
-the firewall's own startup self-check.
+also on port 22, logged like every other allowed connection.
+
+The startup self-check covers the default. With the opt-in off it asserts port
+22 is refused and stops the container if it is not; with the opt-in on it
+checks nothing, and says so in the log. So a break in the opt-in plumbing
+surfaces as a failed `git push` rather than as a container that refuses to
+start. `test/runtime.bats` asserts the open direction against a real container
+pair, which is where that property is covered.
 
 `[github] token_file` must point at a **read-only** fine-grained PAT
 regardless of this setting. `gh auth setup-git` (run at container start if

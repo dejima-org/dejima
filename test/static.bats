@@ -2081,15 +2081,111 @@ _reference_has_key() {  # <doc> <section> <leaf>
         source "$1"
         ALLOWED_DOMAINS="$2"
         eval "$3"
-        printf "%s\n" ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}
+        printf "open: %s\n" ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}
+        printf "forge: %s\n" ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}
     ' -- "$SANDBOX_DIR/fixed-domains.sh" "api.github.com crates.io objects.githubusercontent.com" "$loop"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *crates.io* ]] \
+    [[ "$output" == *"open: crates.io"* ]] \
         || { echo "an open-class domain did not reach the open class: $output"; return 1; }
-    [[ "$output" != *api.github.com* ]] \
+    [[ "$output" != *"open: api.github.com"* ]] \
         || { echo "a forge-class domain was added to the open class: $output"; return 1; }
-    [[ "$output" != *objects.githubusercontent.com* ]] \
+    [[ "$output" != *"open: objects.githubusercontent.com"* ]] \
         || { echo "a forge-class domain was added to the open class: $output"; return 1; }
+
+    # Recorded in the forge class rather than dropped. Skipping would leave it
+    # reachable by suffix but absent from every list, and the internal_domains
+    # check below matches by exact string - see the test that drives it.
+    [[ "$output" == *"forge: api.github.com"* ]] \
+        || { echo "a forge-class domain was not recorded at all: $output"; return 1; }
+}
+
+@test "an approved forge subdomain can also be declared internal, without stopping the boot" {
+    # [core] internal_domains is checked against the permitted lists by exact
+    # string. A name the approved-domains loop leaves out of every list - because
+    # a forge suffix already covers it - reads to that check as a name nothing
+    # permits, and the launch stops on a configuration that is correct. Split
+    # horizon DNS for a forge subdomain is the case that reaches it.
+    #
+    # Both fragments come out of the file, so this fails if either the loop or
+    # the check is changed to disagree with the other.
+    local f="$SANDBOX_DIR/firewall-up.sh" loop check
+    loop=$(sed -n '/^for _domain in \${ALLOWED_DOMAINS/,/^done$/p' "$f")
+    check=$(sed -n '/^_unknown=""/,/^done$/p' "$f")
+    [ -n "$loop" ] && [ -n "$check" ] \
+        || { echo "could not extract the loop and the internal check from $f"; return 1; }
+
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        ALLOWED_DOMAINS="$2"
+        DEJIMA_INTERNAL_DOMAINS="$3"
+        eval "$4"
+        eval "$5"
+        [ -z "$_unknown" ] || { echo "unknown:$_unknown"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" "api.github.com" "api.github.com" "$loop" "$check"
+    [ "$status" -eq 0 ] \
+        || { echo "declaring an approved forge subdomain internal stops the boot: $output"; return 1; }
+
+    # And the key still refuses a name nothing approved, which is what it is for.
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        ALLOWED_DOMAINS="$2"
+        DEJIMA_INTERNAL_DOMAINS="$3"
+        eval "$4"
+        eval "$5"
+        [ -z "$_unknown" ] || { echo "unknown:$_unknown"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" "crates.io" "never-approved.example.com" "$loop" "$check"
+    [ "$status" -ne 0 ] \
+        || { echo "internal_domains accepted a name nothing permits: $output"; return 1; }
+}
+
+# Drive the policy's own classifier, with `die` stubbed so a refusal is a
+# non-zero exit rather than an aborted shell.
+_classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
+    bash -c '
+        die() { echo "refused: $*" >&2; exit 1; }
+        eval "$1"
+        classify_entry "$2"
+    ' -- "$(sed -n "/^classify_entry()/,/^}/p" "$SANDBOX_DIR/egress-policy")" "$1"
+}
+
+@test "the policy accepts every destination shape the launcher lets through" {
+    # These two validators sit on either side of the container boundary, and the
+    # launcher's runs first. Anything it accepts and this one refuses is a
+    # configuration that passes every check an operator can see and then stops
+    # the container - the worst place to disagree, because the operator has
+    # already been told the value is good.
+    #
+    # Single-label names are the case that matters: a LAN host, a compose
+    # service name, an /etc/hosts entry.
+    local v
+    for v in loki gitbox ollama loki.example.com deep.sub.example.com; do
+        run _classify "$v"
+        [ "$status" -eq 0 ] && [ "$output" = name ] \
+            || { echo "the policy refuses '$v', which the launcher accepts: $output"; return 1; }
+        run bash -c 'source "$1"; valid_domain "$2"' -- "$REPO_ROOT/bin/dejima-config-lib.sh" "$v"
+        [ "$status" -eq 0 ] \
+            || { echo "this test's premise is wrong: the launcher rejects '$v'"; return 1; }
+    done
+
+    # Addresses and prefixes are permitted directly, without a lookup.
+    for v in 192.0.2.10 192.0.2.0/24; do
+        run _classify "$v"
+        [ "$status" -eq 0 ] && [ "$output" = addr ] \
+            || { echo "'$v' did not classify as an address: $output"; return 1; }
+    done
+
+    # And the refusals the classifier exists for still refuse. An IPv6 entry in
+    # particular: this policy refuses the family, so permitting one cannot mean
+    # what whoever wrote it down meant.
+    for v in 2001:db8::1 'http://example.com' 'a_b' '-nope' 'nope-' 'example.com/path'; do
+        run _classify "$v"
+        [ "$status" -ne 0 ] \
+            || { echo "'$v' was accepted as a permitted entry ($output)"; return 1; }
+    done
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {

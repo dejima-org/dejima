@@ -53,15 +53,22 @@ dejima_permit_open "${DEJIMA_BACKEND_HOST:-}" internal
 # approved domain that really is internal makes the container say so at start,
 # naming the entry - see egress-policy's check on the permitted names.
 #
-# A name the forge class already covers is skipped rather than added: it is
-# reachable under its suffix entry, and adding it here would give the resolver
-# a more specific line feeding the open-class set, so its answers would stop
-# reaching the forge set. The port restriction would then rest entirely on the
-# forge's published ranges covering that address, which is one layer where the
-# design has two. A project declaring github.com is the ordinary way to hit it.
+# Added in its own class rather than all in one. A forge-class name in the open
+# class would get the resolver a line more specific than the forge suffix entry,
+# feeding the open-class set, and the port restriction would rest on the forge's
+# published ranges alone - one layer where the design has two. A project
+# declaring github.com is the ordinary way to reach that.
+#
+# Recorded rather than skipped, even though the suffix entry already makes it
+# reachable: [core] internal_domains is checked against these lists by exact
+# string, so a name reachable only by suffix reads as one nothing permits, and
+# the launch stops on a configuration that is in fact correct.
 for _domain in ${ALLOWED_DOMAINS:-}; do
-    [ "$(dejima_class_for "$_domain")" = forge ] && continue
-    dejima_permit_open "$_domain"
+    if [ "$(dejima_class_for "$_domain")" = forge ]; then
+        dejima_permit_forge "$_domain"
+    else
+        dejima_permit_open "$_domain"
+    fi
 done
 
 # Declared internal destinations, for the case the check above names: an
