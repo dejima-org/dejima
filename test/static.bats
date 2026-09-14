@@ -2081,15 +2081,65 @@ _reference_has_key() {  # <doc> <section> <leaf>
         source "$1"
         ALLOWED_DOMAINS="$2"
         eval "$3"
-        printf "%s\n" ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}
+        printf "open: %s\n" ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}
+        printf "forge: %s\n" ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}
     ' -- "$SANDBOX_DIR/fixed-domains.sh" "api.github.com crates.io objects.githubusercontent.com" "$loop"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *crates.io* ]] \
+    [[ "$output" == *"open: crates.io"* ]] \
         || { echo "an open-class domain did not reach the open class: $output"; return 1; }
-    [[ "$output" != *api.github.com* ]] \
+    [[ "$output" != *"open: api.github.com"* ]] \
         || { echo "a forge-class domain was added to the open class: $output"; return 1; }
-    [[ "$output" != *objects.githubusercontent.com* ]] \
+    [[ "$output" != *"open: objects.githubusercontent.com"* ]] \
         || { echo "a forge-class domain was added to the open class: $output"; return 1; }
+
+    # Recorded in the forge class rather than dropped. Skipping would leave it
+    # reachable by suffix but absent from every list, and the internal_domains
+    # check below matches by exact string - see the test that drives it.
+    [[ "$output" == *"forge: api.github.com"* ]] \
+        || { echo "a forge-class domain was not recorded at all: $output"; return 1; }
+}
+
+@test "an approved forge subdomain can also be declared internal, without stopping the boot" {
+    # [core] internal_domains is checked against the permitted lists by exact
+    # string. A name the approved-domains loop leaves out of every list - because
+    # a forge suffix already covers it - reads to that check as a name nothing
+    # permits, and the launch stops on a configuration that is correct. Split
+    # horizon DNS for a forge subdomain is the case that reaches it.
+    #
+    # Both fragments come out of the file, so this fails if either the loop or
+    # the check is changed to disagree with the other.
+    local f="$SANDBOX_DIR/firewall-up.sh" loop check
+    loop=$(sed -n '/^for _domain in \${ALLOWED_DOMAINS/,/^done$/p' "$f")
+    check=$(sed -n '/^_unknown=""/,/^done$/p' "$f")
+    [ -n "$loop" ] && [ -n "$check" ] \
+        || { echo "could not extract the loop and the internal check from $f"; return 1; }
+
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        ALLOWED_DOMAINS="$2"
+        DEJIMA_INTERNAL_DOMAINS="$3"
+        eval "$4"
+        eval "$5"
+        [ -z "$_unknown" ] || { echo "unknown:$_unknown"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" "api.github.com" "api.github.com" "$loop" "$check"
+    [ "$status" -eq 0 ] \
+        || { echo "declaring an approved forge subdomain internal stops the boot: $output"; return 1; }
+
+    # And the key still refuses a name nothing approved, which is what it is for.
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        ALLOWED_DOMAINS="$2"
+        DEJIMA_INTERNAL_DOMAINS="$3"
+        eval "$4"
+        eval "$5"
+        [ -z "$_unknown" ] || { echo "unknown:$_unknown"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" "crates.io" "never-approved.example.com" "$loop" "$check"
+    [ "$status" -ne 0 ] \
+        || { echo "internal_domains accepted a name nothing permits: $output"; return 1; }
 }
 
 @test "an unparseable settings.json stops the launch instead of being ignored" {

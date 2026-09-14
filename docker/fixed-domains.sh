@@ -109,6 +109,18 @@ dejima_permit_open() {
     return 0
 }
 
+# The same, in the class whose ports are restricted. For a name a forge suffix
+# already covers: the suffix makes it reachable, but only an entry of its own
+# makes it something the rest of the system can name - dejima_mark_internal and
+# the policy's own internal_domains check both look for the exact string, and a
+# name reachable by suffix alone is invisible to them.
+dejima_permit_forge() {
+    local entry="$1"
+    [ -n "$entry" ] || return 0
+    DEJIMA_FORGE_CLASS+=("$entry")
+    return 0
+}
+
 # Exempts an entry from the answer check WITHOUT permitting it. The two are
 # separate decisions and only one of them is a grant: whether a destination may
 # be reached is an approval, and whether an answer for it may point inside the
