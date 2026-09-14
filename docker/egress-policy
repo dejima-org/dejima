@@ -192,13 +192,21 @@ classify_entry() {
     # matched by anything: this policy refuses IPv6 as a family, so permitting
     # a v6 destination cannot mean what whoever wrote it down meant.
     die "permitted entry '$value' is an IPv6 address, and this policy refuses IPv6 outright"
-  # The dotted part is optional: a single-label name is a host name. A LAN host,
-  # a container-runtime service name and an /etc/hosts entry all look like this,
-  # and the launcher's own validator accepts them - so requiring a dot here
-  # refuses a configuration that passed every check on the way in, and refuses it
-  # by stopping the container rather than by saying so at the point of entry.
-  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]; then
+  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
     printf 'name\n'
+  # A name with no dot, refused with its own message because it is the one shape
+  # an operator writes on purpose - a LAN host, a container-runtime service
+  # name - and the generic message sends them looking for a typo.
+  #
+  # Two things make it unusable here, and both would have to change before this
+  # could be permitted rather than refused. The resolver runs with
+  # domain-needed, so it never forwards a dotless query and the name resolves
+  # to nothing however it is permitted. And an entry becomes a
+  # `server=/<entry>/` line, which dnsmasq matches against the name AND
+  # everything under it - so a bare label is a grant over its whole suffix, and
+  # `org` would permit every .org name on every port.
+  elif [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+    die "permitted entry '$value' has no dot. The resolver here runs with domain-needed and never forwards a dotless query, so the name could not resolve; and a bare label would be permitted as a suffix, covering every name under it. Give the fully qualified name instead."
   else
     die "permitted entry '$value' is neither a host name nor an address"
   fi

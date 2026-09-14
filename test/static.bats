@@ -2152,23 +2152,38 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     ' -- "$(sed -n "/^classify_entry()/,/^}/p" "$SANDBOX_DIR/egress-policy")" "$1"
 }
 
-@test "the policy accepts every destination shape the launcher lets through" {
-    # These two validators sit on either side of the container boundary, and the
-    # launcher's runs first. Anything it accepts and this one refuses is a
-    # configuration that passes every check an operator can see and then stops
-    # the container - the worst place to disagree, because the operator has
-    # already been told the value is good.
+@test "a permitted destination must be fully qualified, and says why it must" {
+    # A bare label cannot work here and must not be accepted as though it could.
     #
-    # Single-label names are the case that matters: a LAN host, a compose
-    # service name, an /etc/hosts entry.
+    # It would never resolve: the resolver config sets domain-needed, which stops
+    # dnsmasq forwarding a dotless query at all. And an entry becomes a
+    # `server=/<entry>/` line, which dnsmasq matches against the name and
+    # everything under it - so permitting `org` would resolve every .org name
+    # into the open class, which carries no port restriction.
+    #
+    # Refused with its own message rather than the generic one, because a LAN
+    # host name is written on purpose and "neither a host name nor an address"
+    # reads as a typo.
     local v
-    for v in loki gitbox ollama loki.example.com deep.sub.example.com; do
+    for v in loki gitbox ollama org; do
+        run _classify "$v"
+        [ "$status" -ne 0 ] \
+            || { echo "'$v' was accepted as a permitted entry, and it cannot resolve"; return 1; }
+        [[ "$output" == *"has no dot"* ]] \
+            || { echo "'$v' was refused without saying why: $output"; return 1; }
+    done
+
+    # The property the launcher and the policy have to agree on is what the
+    # resolver can actually serve. Stated here so the two are read together:
+    # `valid_domain` accepting a bare label is about host-side resolution, which
+    # is a different question from what this policy can permit.
+    grep -q 'domain-needed' "$SANDBOX_DIR/egress-policy" \
+        || { echo "domain-needed is gone, so this refusal's stated reason no longer holds"; return 1; }
+
+    for v in loki.example.com deep.sub.example.com; do
         run _classify "$v"
         [ "$status" -eq 0 ] && [ "$output" = name ] \
-            || { echo "the policy refuses '$v', which the launcher accepts: $output"; return 1; }
-        run bash -c 'source "$1"; valid_domain "$2"' -- "$REPO_ROOT/bin/dejima-config-lib.sh" "$v"
-        [ "$status" -eq 0 ] \
-            || { echo "this test's premise is wrong: the launcher rejects '$v'"; return 1; }
+            || { echo "the policy refuses '$v', which is fully qualified: $output"; return 1; }
     done
 
     # Addresses and prefixes are permitted directly, without a lookup.
