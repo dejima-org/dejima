@@ -29,7 +29,20 @@
 # The verification is why this is a build step rather than a package list:
 # adding a dependency that ships a setuid binary fails the build instead of
 # quietly widening the image.
+#
+# `--check` runs the verification alone, changing nothing. It exists so a test
+# against a running container asserts the property by running this code rather
+# than by restating it - in particular the root list below, which is the part
+# most easily got wrong.
 set -eu
+
+check_only=false
+if [ "${1:-}" = "--check" ]; then
+    check_only=true
+elif [ "$#" -gt 0 ]; then
+    echo "usage: ${0##*/} [--check]" >&2
+    exit 2
+fi
 
 # Real filesystems only. /proc, /sys and /dev are mounted during a build and
 # have nothing to strip; -xdev keeps find out of them, and getcap has no
@@ -39,21 +52,23 @@ for d in /bin /boot /etc /home /lib /lib32 /lib64 /libx32 /opt /root /sbin /srv 
     [ -d "$d" ] && roots="$roots $d"
 done
 
-# shellcheck disable=SC2086
-find $roots -xdev -type f -perm /6000 -exec chmod -s {} +
+if ! $check_only; then
+    # shellcheck disable=SC2086
+    find $roots -xdev -type f -perm /6000 -exec chmod -s {} +
 
-# getcap prints "<path> <capabilities>"; strip the capabilities from each file
-# it names. A failure here is left to fail the script: a capability that cannot
-# be removed is exactly the thing this exists to catch.
-# shellcheck disable=SC2086
-getcap -r $roots 2>/dev/null | cut -d' ' -f1 | while read -r f; do
-    setcap -r "$f"
-done
+    # getcap prints "<path> <capabilities>"; strip the capabilities from each
+    # file it names. A failure here is left to fail the script: a capability
+    # that cannot be removed is exactly the thing this exists to catch.
+    # shellcheck disable=SC2086
+    getcap -r $roots 2>/dev/null | cut -d' ' -f1 | while read -r f; do
+        setcap -r "$f"
+    done
+fi
 
 # shellcheck disable=SC2086
 remaining="$(find $roots -xdev -type f -perm /6000; getcap -r $roots 2>/dev/null)"
 if [ -n "$remaining" ]; then
-    printf 'privileged bits remain after the sweep:\n%s\n' "$remaining" >&2
+    printf 'privileged bits remain:\n%s\n' "$remaining" >&2
     exit 1
 fi
 
