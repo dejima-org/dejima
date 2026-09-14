@@ -2142,6 +2142,52 @@ _reference_has_key() {  # <doc> <section> <leaf>
         || { echo "internal_domains accepted a name nothing permits: $output"; return 1; }
 }
 
+# Drive the policy's own classifier, with `die` stubbed so a refusal is a
+# non-zero exit rather than an aborted shell.
+_classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
+    bash -c '
+        die() { echo "refused: $*" >&2; exit 1; }
+        eval "$1"
+        classify_entry "$2"
+    ' -- "$(sed -n "/^classify_entry()/,/^}/p" "$SANDBOX_DIR/egress-policy")" "$1"
+}
+
+@test "the policy accepts every destination shape the launcher lets through" {
+    # These two validators sit on either side of the container boundary, and the
+    # launcher's runs first. Anything it accepts and this one refuses is a
+    # configuration that passes every check an operator can see and then stops
+    # the container - the worst place to disagree, because the operator has
+    # already been told the value is good.
+    #
+    # Single-label names are the case that matters: a LAN host, a compose
+    # service name, an /etc/hosts entry.
+    local v
+    for v in loki gitbox ollama loki.example.com deep.sub.example.com; do
+        run _classify "$v"
+        [ "$status" -eq 0 ] && [ "$output" = name ] \
+            || { echo "the policy refuses '$v', which the launcher accepts: $output"; return 1; }
+        run bash -c 'source "$1"; valid_domain "$2"' -- "$REPO_ROOT/bin/dejima-config-lib.sh" "$v"
+        [ "$status" -eq 0 ] \
+            || { echo "this test's premise is wrong: the launcher rejects '$v'"; return 1; }
+    done
+
+    # Addresses and prefixes are permitted directly, without a lookup.
+    for v in 192.0.2.10 192.0.2.0/24; do
+        run _classify "$v"
+        [ "$status" -eq 0 ] && [ "$output" = addr ] \
+            || { echo "'$v' did not classify as an address: $output"; return 1; }
+    done
+
+    # And the refusals the classifier exists for still refuse. An IPv6 entry in
+    # particular: this policy refuses the family, so permitting one cannot mean
+    # what whoever wrote it down meant.
+    for v in 2001:db8::1 'http://example.com' 'a_b' '-nope' 'nope-' 'example.com/path'; do
+        run _classify "$v"
+        [ "$status" -ne 0 ] \
+            || { echo "'$v' was accepted as a permitted entry ($output)"; return 1; }
+    done
+}
+
 @test "an unparseable settings.json stops the launch instead of being ignored" {
     # Claude Code ignores a settings.json it cannot parse, wholesale and with
     # a startup warning only - so the session would run without the
