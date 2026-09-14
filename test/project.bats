@@ -153,6 +153,44 @@ github.com'; do
     done
 }
 
+@test "a domain a project may ask to reach needs two labels, though a host name does not" {
+    # A permitted name covers everything under it: the resolver is configured
+    # per name and matches the name and its subdomains, with no exact-name form
+    # to use instead. So a bare label grants its whole suffix, and `org` asks
+    # for every .org name. This floor is what keeps one entry from being that
+    # large - and it is also why the two validators differ, since valid_domain
+    # gates host-side consumers where a single label is ordinary.
+    local one
+    for one in loki gitbox org com localhost a; do
+        run bash -c 'source "$1"; valid_domain "$2"' _ "$LIB" "$one"
+        [ "$status" -eq 0 ] \
+            || { echo "premise wrong: valid_domain already refuses '$one'"; return 1; }
+        run bash -c 'source "$1"; valid_permitted_domain "$2"' _ "$LIB" "$one"
+        [ "$status" -ne 0 ] \
+            || { echo "'$one' was accepted as a domain a project may reach"; return 1; }
+    done
+
+    local ok
+    for ok in crates.io static.crates.io llm-backend.example.com a.b; do
+        run bash -c 'source "$1"; valid_permitted_domain "$2"' _ "$LIB" "$ok"
+        [ "$status" -eq 0 ] || { echo "refused a fully qualified name: $ok"; return 1; }
+    done
+
+    # And it still refuses everything valid_domain does, rather than only
+    # counting dots.
+    local bad
+    for bad in 'a..b.com' '-bad.com' 'a_b.com' '' 'github.com.'; do
+        run bash -c 'source "$1"; valid_permitted_domain "$2"' _ "$LIB" "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted: $(printf %q "$bad")"; return 1; }
+    done
+
+    # The declaration path uses it, which is what makes the refusal happen
+    # while the operator is looking at the file.
+    run bash -c 'source "$1"; _approved_validator allowed-domains' _ "$LIB"
+    [ "$output" = valid_permitted_domain ] \
+        || { echo "allowed-domains is validated by $output"; return 1; }
+}
+
 @test "valid_domain accepts real domains and rejects shell-active input" {
     run bash -c 'source "$1"; valid_domain "crates.io"' _ "$LIB"
     [ "$status" -eq 0 ]
