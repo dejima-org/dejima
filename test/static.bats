@@ -2057,6 +2057,41 @@ _reference_has_key() {  # <doc> <section> <leaf>
     [ "$output" = open ] || { echo "notgithub.com was treated as the forge"; return 1; }
 }
 
+@test "the boot path states the class too, so an approved forge name is not widened" {
+    # The same question as the test above, asked of the other path that turns a
+    # name into a permitted entry: the approved-domains loop at container start.
+    # Both have to ask, and only one of them did.
+    #
+    # A forge name here would get the resolver a more specific line feeding the
+    # open-class set, so its answers would stop reaching the forge set and the
+    # port restriction would rest on the published ranges alone - one layer
+    # where the design has two.
+    local f="$SANDBOX_DIR/firewall-up.sh"
+    grep -q 'dejima_class_for "$_domain"' "$f" \
+        || { echo "the approved-domains loop does not ask which class a domain is"; return 1; }
+
+    # Driven, not grepped - and driving the loop that is in the file rather than
+    # a copy of it written here, which would keep passing after a revert.
+    local loop
+    loop=$(sed -n '/^for _domain in \${ALLOWED_DOMAINS/,/^done$/p' "$f")
+    [ -n "$loop" ] || { echo "could not find the approved-domains loop in $f"; return 1; }
+
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        ALLOWED_DOMAINS="$2"
+        eval "$3"
+        printf "%s\n" ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" "api.github.com crates.io objects.githubusercontent.com" "$loop"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *crates.io* ]] \
+        || { echo "an open-class domain did not reach the open class: $output"; return 1; }
+    [[ "$output" != *api.github.com* ]] \
+        || { echo "a forge-class domain was added to the open class: $output"; return 1; }
+    [[ "$output" != *objects.githubusercontent.com* ]] \
+        || { echo "a forge-class domain was added to the open class: $output"; return 1; }
+}
+
 @test "an unparseable settings.json stops the launch instead of being ignored" {
     # Claude Code ignores a settings.json it cannot parse, wholesale and with
     # a startup warning only - so the session would run without the

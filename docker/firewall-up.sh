@@ -52,7 +52,15 @@ dejima_permit_open "${DEJIMA_BACKEND_HOST:-}" internal
 # check is that a public name answered with an internal address is refused. An
 # approved domain that really is internal makes the container say so at start,
 # naming the entry - see egress-policy's check on the permitted names.
+#
+# A name the forge class already covers is skipped rather than added: it is
+# reachable under its suffix entry, and adding it here would give the resolver
+# a more specific line feeding the open-class set, so its answers would stop
+# reaching the forge set. The port restriction would then rest entirely on the
+# forge's published ranges covering that address, which is one layer where the
+# design has two. A project declaring github.com is the ordinary way to hit it.
 for _domain in ${ALLOWED_DOMAINS:-}; do
+    [ "$(dejima_class_for "$_domain")" = forge ] && continue
     dejima_permit_open "$_domain"
 done
 
