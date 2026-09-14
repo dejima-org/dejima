@@ -133,11 +133,17 @@ dejima_permit_forge() {
 # which one rather than leaving it to be discovered as a destination that is
 # quietly unreachable.
 dejima_mark_internal() {
-    local entry="$1" known
+    # Case-folded on both sides, for the reason dejima_class_for gives. Here the
+    # cost of comparing verbatim is not a lost restriction but a refused launch:
+    # this returns non-zero for an entry nothing permits, and the caller stops
+    # the container naming it - so [core] internal_domains and the key that
+    # permitted the same host, differing only in case, is a configuration that
+    # is correct and will not start.
+    local entry="${1,,}" known
     [ -n "$entry" ] || return 0
     for known in ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"} \
                  ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"}; do
-        if [ "$known" = "$entry" ]; then
+        if [ "${known,,}" = "$entry" ]; then
             DEJIMA_INTERNAL_CLASS+=("$entry")
             return 0
         fi

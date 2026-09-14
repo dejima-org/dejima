@@ -2063,6 +2063,51 @@ _reference_has_key() {  # <doc> <section> <leaf>
     [ "$output" = forge ] || { echo "an uppercase forge name came back as $output"; return 1; }
     run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" NOTGITHUB.COM
     [ "$output" = open ] || { echo "NOTGITHUB.COM was treated as the forge"; return 1; }
+
+    # Both sides of the comparison, because the suffix list is lowercase today
+    # and folding only the argument would pass this while leaving the function
+    # dependent on that staying true.
+    run bash -c 'source "$1"; DEJIMA_FORGE_CLASS=("GITHUB.COM"); dejima_class_for "$2"' \
+        -- "$SANDBOX_DIR/fixed-domains.sh" api.github.com
+    [ "$output" = forge ] \
+        || { echo "an uppercase suffix did not match a lowercase name: $output"; return 1; }
+}
+
+@test "internal_domains and the key that permitted the host may differ in case" {
+    # dejima_mark_internal returns non-zero for an entry nothing permits, and
+    # the caller stops the container naming it. So comparing verbatim turns a
+    # bare case difference between two operator keys into a launch that refuses
+    # to start, on a configuration that is correct - and the message says the
+    # name is permitted by nothing when it is permitted.
+    #
+    # No forge involved: this is two ordinary keys naming the same host.
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "BOOT ABORTS"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" loki.example.com LOKI.EXAMPLE.COM
+    [ "$status" -eq 0 ] \
+        || { echo "an uppercase internal_domains entry stops the boot: $output"; return 1; }
+
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "BOOT ABORTS"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" LOKI.EXAMPLE.COM loki.example.com
+    [ "$status" -eq 0 ] \
+        || { echo "an uppercase approved entry stops the boot: $output"; return 1; }
+
+    # And it still refuses a name nothing permits, which is the point of it.
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "refused"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" loki.example.com never-approved.example.com
+    [ "$status" -ne 0 ] \
+        || { echo "an unpermitted name was exempted: $output"; return 1; }
 }
 
 @test "the boot path states the class too, so an approved forge name is not widened" {
@@ -2185,7 +2230,11 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # resolver can actually serve. Stated here so the two are read together:
     # `valid_domain` accepting a bare label is about host-side resolution, which
     # is a different question from what this policy can permit.
-    grep -q 'domain-needed' "$SANDBOX_DIR/egress-policy" \
+    # The directive itself, on a line of its own, and not the word appearing in
+    # the comment and the refusal message above - both of which name it, so a
+    # grep over the file is satisfied by the very text whose accuracy it is
+    # supposed to be checking.
+    grep -qx 'domain-needed' "$SANDBOX_DIR/egress-policy" \
         || { echo "domain-needed is gone, so this refusal's stated reason no longer holds"; return 1; }
 
     for v in loki.example.com deep.sub.example.com; do
