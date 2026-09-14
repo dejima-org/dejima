@@ -13,6 +13,23 @@
 
 case $- in *i*) ;; *) return 0 ;; esac
 
+# The sandbox user's shell only, even though /etc/bash.bashrc sources this for
+# every interactive bash in the container - root's included, which is what an
+# operator attaching to debug a session gets.
+#
+# Root must not take its history file from the volume below. That directory
+# belongs to the sandbox user, and `history -a` follows a symlink, so a session
+# that replaces .bash_history with one pointed elsewhere gets whatever root
+# types appended to a file of its choosing, as uid 0. In the other direction it
+# reads back anything the operator typed, including a command carrying a token.
+#
+# Bailing out of the whole file rather than guarding the HISTFILE assignment:
+# nothing here is written for root, and a guard on one setting would have to be
+# remembered by whoever adds the next one.
+if [ "$(id -u)" -eq 0 ]; then
+  return 0
+fi
+
 # Debian's /etc/profile rewrites PATH from scratch for login shells: it drops
 # the global Node tool directory the image put in the environment, and it leaves
 # out the sbin directories, where the network tools a session is expected to use

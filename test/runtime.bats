@@ -1519,6 +1519,24 @@ session_pid() {  # [container], defaulting to the file-wide one
     [[ "$output" == *writable* ]] || { echo "the history volume is not writable: $output"; return 1; }
 }
 
+@test "root's shell does not share the session user's history file" {
+    # The snippet above is sourced from /etc/bash.bashrc, so it reaches root's
+    # interactive shell too - the one an operator gets attaching to debug. The
+    # volume belongs to the sandbox user, and `history -a` follows a symlink, so
+    # sharing it would let the session choose a file for root to append to and
+    # read back whatever the operator typed.
+    run dexec bash -ic 'printf "%s" "$HISTFILE"'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"/var/opt/shell-history"* ]] \
+        || { echo "root's HISTFILE is on the session user's volume: $output"; return 1; }
+
+    # The directory is the session user's, which is what makes the above
+    # necessary rather than merely tidy.
+    run dexec stat -c '%U' /var/opt/shell-history
+    [[ "$output" != root ]] \
+        || { echo "the history volume is root-owned now; this test's premise has changed"; return 1; }
+}
+
 @test "the wrapper's directory comes before the npm prefix on the session's PATH" {
     # The wrapper in /usr/local/bin shadows the harness's real binary to pin
     # --dangerously-skip-permissions, --settings and the briefing. That binary

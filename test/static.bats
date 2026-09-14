@@ -616,6 +616,35 @@ EOF
         || { echo "the history volume is not mounted where HISTFILE points"; return 1; }
 }
 
+@test "root's interactive shell takes no history file from the session user's volume" {
+    # /etc/bash.bashrc sources this snippet for every interactive bash, so an
+    # operator attaching as root gets it too - and the volume it would point
+    # HISTFILE at belongs to the sandbox user. `history -a` follows a symlink,
+    # so the session could aim root's history at any file and have root append
+    # to it; and whatever the operator typed, tokens included, would be readable
+    # by the agent.
+    #
+    # Run rather than grepped, with `id` stubbed, because what matters is the
+    # value HISTFILE ends up holding and not which line decided it.
+    local rc="$SANDBOX_DIR/session-bashrc.sh" stub="$BATS_TEST_TMPDIR/stub"
+    mkdir -p "$stub"
+
+    printf '#!/bin/sh\necho 0\n' > "$stub/id"
+    chmod +x "$stub/id"
+    run env PATH="$stub:$PATH" bash -ic "HISTFILE=UNSET; . '$rc'; printf '%s' \"\$HISTFILE\""
+    [ "$status" -eq 0 ] || { echo "sourcing the rc as root failed: $output"; return 1; }
+    [[ "$output" == *UNSET* ]] \
+        || { echo "root's HISTFILE was reassigned to: $output"; return 1; }
+
+    # The same file still configures the account it is written for. Asserted
+    # because the guard above is one `id` away from disabling the whole snippet.
+    printf '#!/bin/sh\necho 1000\n' > "$stub/id"
+    run env PATH="$stub:$PATH" bash -ic "HISTFILE=UNSET; . '$rc'; printf '%s' \"\$HISTFILE\""
+    [ "$status" -eq 0 ] || { echo "sourcing the rc as the sandbox user failed: $output"; return 1; }
+    [[ "$output" != *UNSET* ]] \
+        || { echo "the sandbox user's HISTFILE was left unset, so the guard is too broad"; return 1; }
+}
+
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
     # The sweep only covers what exists when it runs, so the base image's copy
     # has to be the last thing that changes the filesystem, and the derived
