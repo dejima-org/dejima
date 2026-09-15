@@ -434,6 +434,42 @@ EOF
 }
 
 
+@test "a name in both classes is recorded once, in the narrower one" {
+    # release-assets.githubusercontent.com is an open-class entry of the
+    # component's own and also sits under a forge suffix, so it reaches both
+    # lists; a harness or backend domain under one would do the same. Two lines
+    # meant two resolver lines naming different sets for one name, of which the
+    # resolver honours one - so nothing could say which class was in force, and
+    # the check that reads an answer back out of its class's set would look in
+    # the set that lost.
+    local out
+    out=$(bash -c '
+        TABLE=t; ENTRIES_FILE="$2/ents"
+        FORGE_ENTRIES="github.com githubusercontent.com release-assets.githubusercontent.com"
+        OPEN_ENTRIES="registry.npmjs.org release-assets.githubusercontent.com crates.io"
+        INTERNAL_OK=""; INTERNAL_OK_HINT=hint
+        die() { echo "DIE: $*" >&2; exit 1; }
+        say() { :; }
+        eval "$(sed -n "/^classify_entry()/,/^}/p" "$1")"
+        eval "$(sed -n "/^record_entries()/,/^}/p" "$1")"
+        eval "$(sed -n "/^build_entries()/,/^}/p" "$1")"
+        build_entries forge.example.com
+        cat "$ENTRIES_FILE"
+    ' _ "$SANDBOX_DIR/egress-policy" "$BATS_TEST_TMPDIR") \
+        || { echo "build_entries failed: $out"; return 1; }
+
+    local n
+    n=$(awk '$4 == "release-assets.githubusercontent.com"' <<< "$out" | wc -l)
+    [ "$n" -eq 1 ] || { echo "recorded $n times, not once:"; echo "$out"; return 1; }
+    awk '$4 == "release-assets.githubusercontent.com" {print $1}' <<< "$out" | grep -qx forge \
+        || { echo "the overlapping name did not keep the narrower class:"; echo "$out"; return 1; }
+
+    # And nothing else was lost to the deduplication.
+    for n in github.com registry.npmjs.org crates.io forge.example.com; do
+        grep -q " $n\$" <<< "$out" || { echo "$n is missing:"; echo "$out"; return 1; }
+    done
+}
+
 @test "a permitted name whose address never reached its class's set stops the launch" {
     # The property nothing else asserts. Reading the code cannot: the class the
     # entry was recorded with, the resolver line built from it, and the set the

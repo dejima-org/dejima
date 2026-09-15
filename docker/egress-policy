@@ -252,6 +252,23 @@ build_entries() {
   record_entries forge "$FORGE_ENTRIES $forge_host"
   record_entries open "$OPEN_ENTRIES"
 
+  # One line per name, forge class winning, because forge is recorded first and
+  # this keeps the first occurrence.
+  #
+  # A name can reach both lists - release-assets.githubusercontent.com is an
+  # open-class entry of this component's own and also sits under a forge suffix,
+  # and any harness or backend domain under one would do the same. Two lines
+  # meant two resolver lines naming different sets for one name, of which the
+  # resolver honours one: the entries file and `status` could not say which
+  # class was in force, and the check that reads an answer back out of its
+  # class's set would look in the set that lost.
+  #
+  # Narrower wins, so a name that is forge class by any route keeps the port
+  # restriction rather than inheriting the open class from a second mention.
+  local deduped
+  deduped=$(awk '!seen[$4]++' "$ENTRIES_FILE")
+  printf '%s\n' "$deduped" > "$ENTRIES_FILE"
+
   local value
   for value in ${INTERNAL_OK//,/ }; do
     [ -n "$value" ] || continue
