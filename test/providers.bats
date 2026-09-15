@@ -222,6 +222,34 @@ assert_remedy_forges_exist() {
     [ -x "$REPO_ROOT/forges/gitea/bin/gitea-issue" ]
 }
 
+@test "a sandbox missing its forge token is not told to create one in the container" {
+    # The token reaches a sandbox as GITEA_TOKEN, read host-side from whatever
+    # the forge's token_file names. The file these tools fall back to is
+    # deliberately absent in the container, so a message naming it as the remedy
+    # sends an agent to write a credential into a disposable filesystem - or, if
+    # it cannot, to report that it is unable to work when nothing is wrong with
+    # the arrangement. That happened.
+    # One subcommand per tool that actually reaches the token check.
+    local spec t sub
+    for spec in gitea-pr:create gitea-issue:create gitea-actions:runs; do
+        t=${spec%%:*}; sub=${spec#*:}
+        run env -u GITEA_TOKEN DEJIMA=1 GITEA_SSH_HOST=x GITEA_API=http://x/api/v1 \
+            HOME="$BATS_TEST_TMPDIR/nohome" bash "$REPO_ROOT/forges/gitea/bin/$t" "$sub"
+        [ "$status" -ne 0 ] || { echo "$t proceeded with no token"; return 1; }
+        [[ "$output" == *"arrives as GITEA_TOKEN"* ]] \
+            || { echo "$t does not say where the token comes from: $output"; return 1; }
+        [[ "$output" != *"save it to"* ]] \
+            || { echo "$t still tells a sandbox to save a token file: $output"; return 1; }
+    done
+
+    # And the host-side message is unchanged, where writing the file IS the
+    # remedy and nothing exports the variable.
+    run env -u GITEA_TOKEN -u DEJIMA GITEA_SSH_HOST=x GITEA_API=http://x/api/v1 \
+        HOME="$BATS_TEST_TMPDIR/nohome" bash "$REPO_ROOT/forges/gitea/bin/gitea-pr" create
+    [[ "$output" == *"save it to"* ]] \
+        || { echo "the host-side remedy is gone: $output"; return 1; }
+}
+
 @test "a workflow requiring a capability its forge lacks is refused" {
     FAKE_ROOT="$(mktemp -d)"
     mkdir -p "$FAKE_ROOT/forges/bare" "$FAKE_ROOT/workflows/needy" "$FAKE_ROOT/harnesses/h"
