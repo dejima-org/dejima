@@ -233,7 +233,7 @@ resolve_project_store() {
 
 _approved_validator() {
     case "$1" in
-        allowed-domains) printf 'valid_domain' ;;
+        allowed-domains) printf 'valid_permitted_domain' ;;
         dependencies)    printf 'valid_dep_spec' ;;
         corpus)          printf 'valid_corpus_rule' ;;
         tools)           printf 'valid_tool_name' ;;
@@ -260,6 +260,27 @@ DEJIMA_CORPUS_RULES="commit-per-step"
 valid_tool_name() {
     valid_provider_name "$1" || return 1
     provider_dir tool "$1" >/dev/null 2>&1
+}
+
+# A domain a project may ask to reach, which is narrower than a valid host
+# name: it has to name at least two labels.
+#
+# A permitted name covers everything under it - the resolver is configured per
+# name and matches the name and its subdomains, with no exact-name form to use
+# instead - so a bare label grants its whole suffix, and `org` would ask for
+# every .org name. The floor is what keeps one entry from being that large.
+#
+# `valid_domain` stays as it is, because it also gates host-side consumers
+# where a single label is an ordinary thing to write. This is the rule for
+# entries that reach the firewall, refused at declaration time so the operator
+# is told while they are looking at the file rather than by a sandbox that
+# will not start.
+valid_permitted_domain() {
+    valid_domain "$1" || return 1
+    case "$1" in
+        *.*) return 0 ;;
+    esac
+    return 1
 }
 
 valid_corpus_rule() {

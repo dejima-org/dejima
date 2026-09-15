@@ -450,3 +450,38 @@ EOF
     grep -q -- ' run --rm ' "$LAUNCH_DIR/docker-log" \
         || { echo "the session never started"; return 1; }
 }
+
+@test "a single-label host in a firewall-facing key stops the launch, naming the key" {
+    # The policy refuses a dotless permitted entry at container start. Meeting
+    # that as a sandbox that will not boot, on a value every check on the way in
+    # accepted, is the failure this check exists to move: it happens here, on
+    # the host, before anything starts, and says which key it came from.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://loki:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -ne 0 ] || { echo "the launch proceeded with a dotless host"; return 1; }
+    [[ "$output" == *"loki_url"* ]] \
+        || { echo "the error does not name the key it came from: $output"; return 1; }
+    [[ "$output" == *"single label"* ]] \
+        || { echo "the error does not say what is wrong: $output"; return 1; }
+
+    # And nothing was started, rather than started and then torn down.
+    [ ! -s "$LAUNCH_DIR/docker-log" ] || {
+        echo "docker was invoked before the check refused:"; cat "$LAUNCH_DIR/docker-log"; return 1; }
+}
+
+@test "a fully qualified host in the same key launches" {
+    # The control for the test above: same key, same shape, one dot more.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://loki.example.com:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "a fully qualified loki_url was refused: $output"; return 1; }
+}

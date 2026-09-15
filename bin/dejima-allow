@@ -361,8 +361,12 @@ if [ "$session_wanted" -eq 1 ]; then
         # `|| [ -n "$_d" ]`, because config_get prints its value with no
         # trailing newline - so a single-entry list is one line read never
         # returns, and the loop body would not run at all.
+        # Case-folded, like the class decision below and dejima_mark_internal:
+        # a live add that misses the exemption the operator configured leaves
+        # the name without it until the next launch, which then refuses to
+        # start on the same mismatch.
         while IFS= read -r _d || [ -n "$_d" ]; do
-            [ "$_d" = "$domain" ] && internal=1
+            [ "${_d,,}" = "${domain,,}" ] && internal=1
         done < <(config_get core internal_domains | tr ':' '\n')
     fi
 

@@ -2055,6 +2055,59 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # The suffix must not match a name that merely ends in the same letters.
     run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" notgithub.com
     [ "$output" = open ] || { echo "notgithub.com was treated as the forge"; return 1; }
+
+    # DNS names are case-insensitive and the resolver treats them so, which is
+    # what makes an uppercase spelling a way to land a forge name in the class
+    # that carries no port restriction.
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" API.GITHUB.COM
+    [ "$output" = forge ] || { echo "an uppercase forge name came back as $output"; return 1; }
+    run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" NOTGITHUB.COM
+    [ "$output" = open ] || { echo "NOTGITHUB.COM was treated as the forge"; return 1; }
+
+    # Both sides of the comparison, because the suffix list is lowercase today
+    # and folding only the argument would pass this while leaving the function
+    # dependent on that staying true.
+    run bash -c 'source "$1"; DEJIMA_FORGE_CLASS=("GITHUB.COM"); dejima_class_for "$2"' \
+        -- "$SANDBOX_DIR/fixed-domains.sh" api.github.com
+    [ "$output" = forge ] \
+        || { echo "an uppercase suffix did not match a lowercase name: $output"; return 1; }
+}
+
+@test "internal_domains and the key that permitted the host may differ in case" {
+    # dejima_mark_internal returns non-zero for an entry nothing permits, and
+    # the caller stops the container naming it. So comparing verbatim turns a
+    # bare case difference between two operator keys into a launch that refuses
+    # to start, on a configuration that is correct - and the message says the
+    # name is permitted by nothing when it is permitted.
+    #
+    # No forge involved: this is two ordinary keys naming the same host.
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "BOOT ABORTS"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" loki.example.com LOKI.EXAMPLE.COM
+    [ "$status" -eq 0 ] \
+        || { echo "an uppercase internal_domains entry stops the boot: $output"; return 1; }
+
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "BOOT ABORTS"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" LOKI.EXAMPLE.COM loki.example.com
+    [ "$status" -eq 0 ] \
+        || { echo "an uppercase approved entry stops the boot: $output"; return 1; }
+
+    # And it still refuses a name nothing permits, which is the point of it.
+    run bash -c '
+        source "$1"
+        dejima_permit_open "$2"
+        dejima_mark_internal "$3" || { echo "refused"; exit 1; }
+        echo ok
+    ' -- "$SANDBOX_DIR/fixed-domains.sh" loki.example.com never-approved.example.com
+    [ "$status" -ne 0 ] \
+        || { echo "an unpermitted name was exempted: $output"; return 1; }
 }
 
 @test "the boot path states the class too, so an approved forge name is not widened" {
@@ -2152,23 +2205,42 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     ' -- "$(sed -n "/^classify_entry()/,/^}/p" "$SANDBOX_DIR/egress-policy")" "$1"
 }
 
-@test "the policy accepts every destination shape the launcher lets through" {
-    # These two validators sit on either side of the container boundary, and the
-    # launcher's runs first. Anything it accepts and this one refuses is a
-    # configuration that passes every check an operator can see and then stops
-    # the container - the worst place to disagree, because the operator has
-    # already been told the value is good.
+@test "a permitted destination must be fully qualified, and says why it must" {
+    # A bare label cannot work here and must not be accepted as though it could.
     #
-    # Single-label names are the case that matters: a LAN host, a compose
-    # service name, an /etc/hosts entry.
+    # It would never resolve: the resolver config sets domain-needed, which stops
+    # dnsmasq forwarding a dotless query at all. And an entry becomes a
+    # `server=/<entry>/` line, which dnsmasq matches against the name and
+    # everything under it - so permitting `org` would resolve every .org name
+    # into the open class, which carries no port restriction.
+    #
+    # Refused with its own message rather than the generic one, because a LAN
+    # host name is written on purpose and "neither a host name nor an address"
+    # reads as a typo.
     local v
-    for v in loki gitbox ollama loki.example.com deep.sub.example.com; do
+    for v in loki gitbox ollama org; do
+        run _classify "$v"
+        [ "$status" -ne 0 ] \
+            || { echo "'$v' was accepted as a permitted entry, and it cannot resolve"; return 1; }
+        [[ "$output" == *"has no dot"* ]] \
+            || { echo "'$v' was refused without saying why: $output"; return 1; }
+    done
+
+    # The property the launcher and the policy have to agree on is what the
+    # resolver can actually serve. Stated here so the two are read together:
+    # `valid_domain` accepting a bare label is about host-side resolution, which
+    # is a different question from what this policy can permit.
+    # The directive itself, on a line of its own, and not the word appearing in
+    # the comment and the refusal message above - both of which name it, so a
+    # grep over the file is satisfied by the very text whose accuracy it is
+    # supposed to be checking.
+    grep -qx 'domain-needed' "$SANDBOX_DIR/egress-policy" \
+        || { echo "domain-needed is gone, so this refusal's stated reason no longer holds"; return 1; }
+
+    for v in loki.example.com deep.sub.example.com; do
         run _classify "$v"
         [ "$status" -eq 0 ] && [ "$output" = name ] \
-            || { echo "the policy refuses '$v', which the launcher accepts: $output"; return 1; }
-        run bash -c 'source "$1"; valid_domain "$2"' -- "$REPO_ROOT/bin/dejima-config-lib.sh" "$v"
-        [ "$status" -eq 0 ] \
-            || { echo "this test's premise is wrong: the launcher rejects '$v'"; return 1; }
+            || { echo "the policy refuses '$v', which is fully qualified: $output"; return 1; }
     done
 
     # Addresses and prefixes are permitted directly, without a lookup.
