@@ -233,7 +233,7 @@ resolve_project_store() {
 
 _approved_validator() {
     case "$1" in
-        allowed-domains) printf 'valid_permitted_domain' ;;
+        allowed-domains) printf 'valid_domain' ;;
         dependencies)    printf 'valid_dep_spec' ;;
         corpus)          printf 'valid_corpus_rule' ;;
         tools)           printf 'valid_tool_name' ;;
@@ -312,6 +312,19 @@ approve_entry() {
     local store="$1" kind="$2" entry="$3" validator
     validator="$(_approved_validator "$kind")" || return 1
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
+    # Granting is where the narrower rule belongs, not reading. An approval
+    # already in the store was valid when it was made, and a rule that tightens
+    # afterwards must not turn it into the corruption message below - that
+    # message means tampering, and it would be saying so about the operator's
+    # own file on every launch.
+    if [ "$kind" = allowed-domains ] && ! valid_permitted_domain "$entry"; then
+        echo "Not a domain this can permit: $entry" >&2
+        echo "A permitted destination has to name at least two labels. The" >&2
+        echo "sandbox's resolver does not forward a dotless query, and a bare" >&2
+        echo "label would be permitted as a suffix, covering every name under" >&2
+        echo "it. Use the fully qualified name." >&2
+        return 1
+    fi
     touch "$store/$kind"
     grep -qxF "$entry" "$store/$kind" || printf '%s\n' "$entry" >> "$store/$kind"
 }
