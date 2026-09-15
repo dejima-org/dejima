@@ -243,10 +243,19 @@ for them.
 A project can declare what it needs in two committed files:
 
 ```
-.dejima/allowed-domains    # one domain per line
+.dejima/allowed-domains    # one domain per line, fully qualified
 .dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line, or a
                            # tarball:<name>@<sha256>:<url> release archive
 ```
+
+A domain has to name at least two labels. A permitted name covers everything
+under it, because the sandbox's resolver is configured per name and matches the
+name and its subdomains, with no exact-name form to use instead - so a bare
+label would grant its whole suffix, and `org` would ask for every `.org` name.
+The same floor applies to every key whose value becomes a permitted
+destination: `[core] internal_domains`, a forge's `ssh_host` and `api`, a
+backend's `base_url`, and `[logging] loki_url`. A single-label value is refused
+when the entry is declared and again at launch, naming the key it came from.
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a session could write these files; they are read only to
