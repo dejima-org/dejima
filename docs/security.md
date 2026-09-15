@@ -1575,7 +1575,7 @@ Useful filters on top of those:
 
 ```logql
 # DNS lookups that got refused (not on the allowlist)
-{job="dejima-dns"} |= "REFUSED"
+{job="dejima-dns"} | json | outcome="refused"
 
 # Rejected connections only (parses ulogd2's JSON, filters on its action field)
 {job="dejima-net"} | json | action="blocked"
@@ -1698,8 +1698,9 @@ is the same GitHub ranges the read-only path already allows on port 443, now
 also on port 22, logged like every other allowed connection.
 
 The startup self-check covers the default. With the opt-in off it asserts port
-22 is refused and stops the container if it is not; with the opt-in on it
-checks nothing, and says so in the log. So a break in the opt-in plumbing
+22 is refused and stops the container if it is not; with the opt-in on it skips
+that one check, and says so in the log. Everything else it asserts still
+runs. So a break in the opt-in plumbing
 surfaces as a failed `git push` rather than as a container that refuses to
 start. `test/runtime.bats` asserts the open direction against a real container
 pair, which is where that property is covered.

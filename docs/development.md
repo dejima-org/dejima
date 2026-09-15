@@ -19,7 +19,7 @@ run them.
 | `docker/firewall-up.sh` | Turns a launch's configuration into the permitted set `egress-policy` is given, then starts it. What a namespace needs, rather than what a container does |
 | `docker/filter-entrypoint.sh` | PID 1 of the filter container: runs `firewall-up.sh`, signals readiness, then holds the namespace open for the sandbox to join |
 | `docker/caps-lib.sh` | `drop_caps` and the `CAP_SETPCAP` precondition, sourced by both entrypoints so the two cannot drift |
-| `docker/log-shipper.sh` | Tails the dnsmasq/ulogd2 logs and ships them to the configured Loki endpoint (`[logging] loki_url`). Container-side, because those files only exist there |
+| `docker/log-shipper.sh` | Tails the two records `egress-policy` produces - name lookups from `dns-lookup-log`, connection verdicts from ulogd2 - and ships them to the configured Loki endpoint (`[logging] loki_url`). Container-side, because those files only exist there |
 | `docker/entrypoint.sh` | PID 1 of the session container: runs as root to prepare the session's own state, points `resolv.conf` at the namespace's resolver, then execs the session's command as the sandbox user with an empty capability bounding set. The egress control is the filter container's to bring up, not this one's |
 | `docker/harness-wrapper.sh` | Shadows the selected harness's command on `PATH` to add its no-confirm flags and dejima's settings layer. Named by no harness; `entrypoint.sh` links it into place |
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
