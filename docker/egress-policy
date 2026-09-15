@@ -179,6 +179,17 @@ need_tools() {
 # address can be in more than one class, and guessing would pick the wrong one
 # exactly when it matters.
 
+# Which address set a class's answers go into. One definition, because the
+# resolver config is what fills a set and the verification is what reads it back
+# - and a check that looked in a different set from the one being filled would
+# pass while the class meant nothing.
+set_for_class() {
+  case $1 in
+    forge) printf 'fname_v4' ;;
+    *)     printf 'oname_v4' ;;
+  esac
+}
+
 classify_entry() {
   local value=$1
   # An address or a prefix is permitted directly; a name is permitted by
@@ -704,10 +715,7 @@ EOF
 
     # Which set the answers go into is the entry's class, stated in the entries
     # file rather than worked out from the addresses that come back.
-    case $class in
-      forge) sets="4#inet#$TABLE#fname_v4" ;;
-      *)     sets="4#inet#$TABLE#oname_v4" ;;
-    esac
+    sets="4#inet#$TABLE#$(set_for_class "$class")"
     if [ "$exemption" = internal-ok ]; then
       sets="$sets,4#inet#$TABLE#internal_ok_v4"
       printf 'rebind-domain-ok=/%s/\n' "$name" >> "$RESOLVER_CONF"
@@ -935,9 +943,15 @@ verify() {
 
   # The resolver is also what puts a permitted name's addresses into the
   # allow-list, and which set it uses is the name's class. Checking membership
-  # of the class set proves both halves of that wiring; without it a name could
-  # resolve and still be unreachable, or be reachable in the wrong class.
-  set_name=fname_v4
+  # proves both halves of that wiring; without it a name could resolve and still
+  # be unreachable, or be reachable in the wrong class.
+  #
+  # Here as well as in check 7, which asserts the same property of every
+  # permitted name: this one runs before the connectivity checks, so the
+  # resolver being wired to the wrong set is named as itself rather than
+  # reported later as a destination that would not connect. Same helper, so the
+  # two cannot look in different sets.
+  set_name=$(set_for_class forge)
   nft get element inet "$TABLE" "$set_name" "{ $answer }" >/dev/null 2>&1 \
     || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
 
@@ -1090,14 +1104,30 @@ verify_ipv6_refused() {
 # refusing to start a session over a host that happens to be down would cost more
 # than it prevents.
 check_permitted_names() {
-  local label=$1 class kind exemption name mark refused=() silent=()
+  local label=$1 class kind exemption name mark refused=() silent=() stranded=()
+  local addr want
   mark=$(wc -c < "$RESOLVER_LOG")
   # Resolving every permitted name also leaves its current addresses in the
   # allow-list before the session container is started, so the first thing the
   # agent does is not waiting on a cold set.
+  #
+  # And every name that answers is checked into the set its class names, which
+  # is the only place the whole chain is asserted end to end: the class the
+  # entry was recorded with, the resolver line built from it, whether an answer
+  # actually reaches a set, and whether it reaches the one the ports are keyed
+  # to. Reading the code proves none of that - each half can be right about a
+  # different set - and every defect this check would have caught got through a
+  # green suite.
   while read -r class kind exemption name; do
     [ "$kind" = name ] || continue
-    [ -n "$(resolve_one "$name")" ] || silent+=("$name")
+    addr=$(resolve_one "$name")
+    if [ -z "$addr" ]; then
+      silent+=("$name")
+      continue
+    fi
+    want=$(set_for_class "$class")
+    nft get element inet "$TABLE" "$want" "{ $addr }" >/dev/null 2>&1 \
+      || stranded+=("$name -> $addr (class $class, expected in $want)")
   done < "$ENTRIES_FILE"
 
   # Only the lines this sweep produced: the log outlives a previous apply in the
@@ -1111,6 +1141,13 @@ check_permitted_names() {
     fi
   done < "$ENTRIES_FILE"
 
+  # Fatal, unlike a name that did not answer. That one is the world being
+  # unavailable; this one is the policy's own wiring disagreeing with itself,
+  # and the session it would produce reaches a destination it was configured to
+  # permit only by accident, or not at all.
+  if [ ${#stranded[@]} -ne 0 ]; then
+    die "$label: these permitted names resolved and their addresses did not reach the set their class names: ${stranded[*]}. A session would resolve them and then be refused, or reach them in the wrong class - which decides the ports. Either the entry's class and the resolver line built from it disagree, or the resolver is not populating that set."
+  fi
   if [ ${#refused[@]} -ne 0 ]; then
     die "$label: these permitted names are answered with an address inside a private network, and this policy refuses such answers: ${refused[*]}. That is this configuration disagreeing with itself - list them in $INTERNAL_OK_HINT if pointing inside is intended, or remove them."
   fi

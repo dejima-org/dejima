@@ -388,11 +388,22 @@ EOF
 # check_permitted_names is extracted and run against a stubbed dig and a
 # hand-written resolver log, which is exactly what it reads.
 run_check_names() {
-    local entries="$1" resolver_log="$2" dig_behaviour="$3"
+    local entries="$1" resolver_log="$2" dig_behaviour="$3" nft_behaviour="${4:-}"
     STUB_DIR="$BATS_TEST_TMPDIR/stub"
     mkdir -p "$STUB_DIR"
     cp "$dig_behaviour" "$STUB_DIR/dig"
     chmod +x "$STUB_DIR/dig"
+    # The sweep reads the address sets back. Stubbed rather than left to the
+    # machine's own nft, which in a sandbox answers for a table that is not
+    # there - so every name would look stranded and every test here would fail
+    # for a reason none of them is about. Default: every address is where its
+    # class says it should be.
+    if [ -n "$nft_behaviour" ]; then
+        cp "$nft_behaviour" "$STUB_DIR/nft"
+    else
+        printf '#!/bin/sh\nexit 0\n' > "$STUB_DIR/nft"
+    fi
+    chmod +x "$STUB_DIR/nft"
     PATH="$STUB_DIR:$PATH"
     say() { printf '%s\n' "$*" >&2; }
     die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
@@ -402,6 +413,7 @@ run_check_names() {
     # message offers an operator cannot drift from the one the launch supplies.
     INTERNAL_OK_HINT="$(sed -n "s/^EGRESS_INTERNAL_OK_HINT='\(.*\)'$/\1/p" "$SANDBOX_DIR/firewall-up.sh")"
     [ -n "$INTERNAL_OK_HINT" ] || { echo "firewall-up.sh supplies no name for the exemption list"; return 1; }
+    eval "$(sed -n '/^set_for_class()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     eval "$(sed -n '/^resolve_one()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     eval "$(sed -n '/^check_permitted_names()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     check_permitted_names "check N"
@@ -421,6 +433,73 @@ EOF
     [[ "$output" != *"returned no address"* ]]
 }
 
+
+@test "a permitted name whose address never reached its class's set stops the launch" {
+    # The property nothing else asserts. Reading the code cannot: the class the
+    # entry was recorded with, the resolver line built from it, and the set the
+    # ports are keyed to are three separate statements, and each can be right
+    # about a different set. Every defect of that shape in this area reached a
+    # green suite.
+    #
+    # Fatal, unlike a name that did not answer: that is the world being down,
+    # this is the policy disagreeing with itself, and the session it produces
+    # reaches a permitted destination only by accident or not at all.
+    printf 'forge name strict forge.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    printf '#!/bin/bash\necho 192.0.2.7\n' > "$BATS_TEST_TMPDIR/dig"
+    # In no set at all: the answer resolved and was never added.
+    printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/nft"
+
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" \
+        "$BATS_TEST_TMPDIR/dig" "$BATS_TEST_TMPDIR/nft"
+    [ "$status" -ne 0 ] || { echo "a stranded name did not stop the launch: $output"; return 1; }
+    [[ "$output" == *forge.example.com* && "$output" == *192.0.2.7* ]] \
+        || { echo "the failure names neither the entry nor its address: $output"; return 1; }
+    [[ "$output" == *fname_v4* ]] \
+        || { echo "the failure does not say which set was expected: $output"; return 1; }
+}
+
+@test "a forge name that landed in the open class's set is caught, not just a missing one" {
+    # The class bug, which is the one that actually happened - twice. The
+    # address is in a set, so a check that only asked "is it permitted at all"
+    # would pass; the ports come from WHICH set, so it has to be the right one.
+    printf 'forge name strict forge.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    printf '#!/bin/bash\necho 192.0.2.7\n' > "$BATS_TEST_TMPDIR/dig"
+    cat > "$BATS_TEST_TMPDIR/nft" <<'EOF'
+#!/bin/sh
+# Present in the open class's set, absent from the forge's.
+case "$*" in
+    *oname_v4*) exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" \
+        "$BATS_TEST_TMPDIR/dig" "$BATS_TEST_TMPDIR/nft"
+    [ "$status" -ne 0 ] \
+        || { echo "a forge name in the wrong class's set was accepted: $output"; return 1; }
+    [[ "$output" == *"class forge"* ]] \
+        || { echo "the failure does not name the class: $output"; return 1; }
+}
+
+@test "the set a class feeds has one definition, used to fill it and to read it back" {
+    # The recurring failure in this area is a rule applied in one of the places
+    # that needs it. If the resolver config and the verification each named a
+    # set, they could name different ones and the check would pass while the
+    # class meant nothing.
+    local p="$SANDBOX_DIR/egress-policy"
+    [ "$(grep -c 'fname_v4' <<< "$(sed -n '/^set_for_class()/,/^}/p' "$p")")" -eq 1 ] \
+        || { echo "set_for_class does not name the forge set exactly once"; return 1; }
+    grep -q 'sets="4#inet#\$TABLE#\$(set_for_class' "$p" \
+        || { echo "the resolver config does not get its set from set_for_class"; return 1; }
+    grep -q 'want=\$(set_for_class "\$class")' "$p" \
+        || { echo "the sweep does not get its set from set_for_class"; return 1; }
+
+    # And the function answers correctly for both classes, driven rather than read.
+    run bash -c 'eval "$(sed -n "/^set_for_class()/,/^}/p" "$1")"; set_for_class forge; echo; set_for_class open' _ "$p"
+    [ "${lines[0]}" = fname_v4 ] || { echo "forge class maps to ${lines[0]}"; return 1; }
+    [ "${lines[1]}" = oname_v4 ] || { echo "open class maps to ${lines[1]}"; return 1; }
+}
 
 @test "a permitted name that resolves nowhere is reported, and the session continues" {
     # The world is allowed to be down. A name whose host is unreachable, or
