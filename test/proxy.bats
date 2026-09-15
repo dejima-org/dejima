@@ -816,3 +816,41 @@ print(raw.decode().strip())
     [[ "$output" == *"path=/v1/"* ]] && [[ "$output" == *"red"* ]] \
         || { echo "$output"; return 1; }
 }
+
+@test "a refresh the provider rejects names the login that fixes it, in the session" {
+    # What an overnight session meets in the morning: the access token has
+    # expired, the refresh token with it, and the provider answers the refresh
+    # with invalid_grant. That is not transient and no amount of retrying or
+    # waiting improves it - the operator has to log in on the host.
+    #
+    # The session is where the failure is met and the host terminal is behind a
+    # window the agent cannot read, so "see host terminal" costs a trip to find
+    # one sentence. This message is written in the proxy rather than taken from
+    # the provider's response, which is what makes it safe to send.
+    write_creds -60
+    start_proxy
+    curl -s "http://127.0.0.1:$PORT/oauth-reject" >/dev/null
+
+    run pcurl -o /dev/null -w '%{http_code}' -X POST --data '{}' http://x/v1/messages
+    [ "$output" = 502 ] || { echo "status was $output"; return 1; }
+
+    run pcurl -X POST --data '{}' http://x/v1/messages
+    [[ "$output" == *"log in again"* ]] \
+        || { echo "the session was not told how to fix it: $output"; return 1; }
+    [[ "$output" == *"on the host"* ]] \
+        || { echo "the session was not told where to fix it: $output"; return 1; }
+
+    # The provider's own bytes stay on the host, which is the rule this is
+    # working within rather than around.
+    [[ "$output" != *"invalid_grant"* ]] \
+        || { echo "an upstream response body reached the session: $output"; return 1; }
+    grep -q 'invalid_grant' "$TD/stderr" \
+        || { echo "the host log lost the detail:"; cat "$TD/stderr"; return 1; }
+
+    # And the host log carries the remedy as well as the detail. The exit audit
+    # prints the last line of this file when a session ends, so an operator who
+    # was away while it failed reads it there - which is where this was found
+    # wanting: it showed the provider's error code and nothing to do about it.
+    grep -q 'log in again' "$TD/stderr" \
+        || { echo "the host log names no remedy:"; cat "$TD/stderr"; return 1; }
+}
