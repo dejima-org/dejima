@@ -389,6 +389,7 @@ EOF
 # hand-written resolver log, which is exactly what it reads.
 run_check_names() {
     local entries="$1" resolver_log="$2" dig_behaviour="$3" nft_behaviour="${4:-}"
+    local script="$BATS_TEST_TMPDIR/run-check.sh" table hint
     STUB_DIR="$BATS_TEST_TMPDIR/stub"
     mkdir -p "$STUB_DIR"
     cp "$dig_behaviour" "$STUB_DIR/dig"
@@ -404,19 +405,39 @@ run_check_names() {
         printf '#!/bin/sh\nexit 0\n' > "$STUB_DIR/nft"
     fi
     chmod +x "$STUB_DIR/nft"
-    PATH="$STUB_DIR:$PATH"
-    say() { printf '%s\n' "$*" >&2; }
-    die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
-    ENTRIES_FILE="$entries"
-    RESOLVER_LOG="$resolver_log"
-    # Taken from firewall-up.sh rather than written here, so the name the
-    # message offers an operator cannot drift from the one the launch supplies.
-    INTERNAL_OK_HINT="$(sed -n "s/^EGRESS_INTERNAL_OK_HINT='\(.*\)'$/\1/p" "$SANDBOX_DIR/firewall-up.sh")"
-    [ -n "$INTERNAL_OK_HINT" ] || { echo "firewall-up.sh supplies no name for the exemption list"; return 1; }
-    eval "$(sed -n '/^set_for_class()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
-    eval "$(sed -n '/^resolve_one()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
-    eval "$(sed -n '/^check_permitted_names()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
-    check_permitted_names "check N"
+
+    # Read out of the sources rather than written here, so the table the stub is
+    # asked about and the name the message offers an operator cannot drift from
+    # what the policy and the launch really use.
+    table="$(sed -n 's/^readonly TABLE=\([^ ]*\).*$/\1/p' "$SANDBOX_DIR/egress-policy")"
+    [ -n "$table" ] || { echo "egress-policy no longer declares a table name"; return 1; }
+    hint="$(sed -n "s/^EGRESS_INTERNAL_OK_HINT='\(.*\)'$/\1/p" "$SANDBOX_DIR/firewall-up.sh")"
+    [ -n "$hint" ] || { echo "firewall-up.sh supplies no name for the exemption list"; return 1; }
+
+    # A real child shell, with the options egress-policy sets, rather than the
+    # function evaluated here.
+    #
+    # bats runs a test with errexit off, and `set -e` inside a subshell of that
+    # shell does not restore it - measured, not assumed. So evaluating the
+    # function in this process runs it somewhere more forgiving than production,
+    # and a command substitution that fails is an ordinary outcome here while it
+    # aborts the policy there. That is not hypothetical: it shipped, the suite
+    # stayed green, and every container refused to start.
+    {
+        printf 'set -Eeuo pipefail\n'
+        printf 'say() { printf "%%s\\n" "$*" >&2; }\n'
+        printf 'die() { printf "FAILED: %%s\\n" "$*" >&2; exit 1; }\n'
+        printf 'ENTRIES_FILE=%q\n' "$entries"
+        printf 'RESOLVER_LOG=%q\n' "$resolver_log"
+        printf 'TABLE=%q\n' "$table"
+        printf 'INTERNAL_OK_HINT=%q\n' "$hint"
+        sed -n '/^set_for_class()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^resolve_one()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^check_permitted_names()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        printf 'check_permitted_names "check N"\n'
+    } > "$script"
+
+    PATH="$STUB_DIR:$PATH" bash "$script"
 }
 
 
@@ -468,6 +489,25 @@ EOF
     for n in github.com registry.npmjs.org crates.io forge.example.com; do
         grep -q " $n\$" <<< "$out" || { echo "$n is missing:"; echo "$out"; return 1; }
     done
+}
+
+@test "a lookup that answers with no address does not abort the policy" {
+    # The other empty-answer path, and the one that is not exercised by a dig
+    # that fails: here the lookup succeeds and carries no A record, so
+    # resolve_one returns non-zero, which under the policy's own `set -e` will
+    # abort an assignment that does not handle it. That shipped - the suite was
+    # green and every container refused to start, because this harness ran the
+    # function in a more forgiving shell than production does.
+    printf 'open name strict noaddr.example.com\n' > "$BATS_TEST_TMPDIR/entries"
+    : > "$BATS_TEST_TMPDIR/resolver.log"
+    printf '#!/bin/bash\nexit 0\n' > "$BATS_TEST_TMPDIR/dig"
+
+    run run_check_names "$BATS_TEST_TMPDIR/entries" "$BATS_TEST_TMPDIR/resolver.log" \
+        "$BATS_TEST_TMPDIR/dig"
+    [ "$status" -eq 0 ] \
+        || { echo "a name that answered with no address stopped the policy: $output"; return 1; }
+    [[ "$output" == *"returned no address"* ]] \
+        || { echo "it was not reported either: $output"; return 1; }
 }
 
 @test "a permitted name whose address never reached its class's set stops the launch" {

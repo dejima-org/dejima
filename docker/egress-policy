@@ -1137,7 +1137,12 @@ check_permitted_names() {
   # green suite.
   while read -r class kind exemption name; do
     [ "$kind" = name ] || continue
-    addr=$(resolve_one "$name")
+    # `|| addr=""` and not a bare assignment: resolve_one returns non-zero for
+    # a name with no address, which is an ordinary outcome here, and under
+    # `set -e` the assignment alone would abort the policy - taking the
+    # container down over a permitted name whose host happens to be unreachable,
+    # which is exactly what the note below exists to avoid.
+    addr=$(resolve_one "$name") || addr=""
     if [ -z "$addr" ]; then
       silent+=("$name")
       continue
