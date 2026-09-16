@@ -1504,6 +1504,15 @@ session_pid() {  # [container], defaulting to the file-wide one
     # container.
     run dexec /usr/local/sbin/strip-privilege-bits --check
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    # And once more outside those roots. --check walks the directories the
+    # sweeper walks, which deliberately exclude /tmp, /run, /mnt and /media -
+    # the sweeper has no reason to visit them, but an image that shipped
+    # something there would go unnoticed by a check scoped to its own sweep.
+    # Cheap because those directories are near-empty in an image.
+    run dexec sh -c 'find /tmp /run /mnt /media -xdev -type f -perm /6000 2>/dev/null; getcap -r /tmp /run /mnt /media 2>/dev/null'
+    [ -z "$output" ] \
+        || { echo "privileged bits outside the swept roots:"; echo "$output"; return 1; }
 }
 
 @test "the session shell is bash, configured by the image, with history appended" {

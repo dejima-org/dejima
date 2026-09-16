@@ -808,19 +808,60 @@ EOF
         || { echo "the sandbox user's HISTFILE was left unset, so the guard is too broad"; return 1; }
 }
 
+# True when a Dockerfile RUN line INVOKES the sweeper, rather than merely
+# mentioning its path. `chmod +x /usr/local/sbin/strip-privilege-bits` contains
+# the path and runs nothing, and so does a commented-out line - both of which
+# satisfied a substring grep, so the sweep could be disabled with its test green.
+_runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
+    local line="${1#*:}" seg
+    case "$line" in RUN\ *) line="${line#RUN }" ;; *) return 1 ;; esac
+    while IFS= read -r seg; do
+        seg="${seg#"${seg%%[![:space:]]*}"}"
+        case "$seg" in
+            /usr/local/sbin/strip-privilege-bits|/usr/local/sbin/strip-privilege-bits\ *) return 0 ;;
+        esac
+    done < <(printf '%s\n' "$line" | tr ';' '\n' | sed 's/&&/\n/g')
+    return 1
+}
+
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
     # The sweep only covers what exists when it runs, so the base image's copy
     # has to be the last thing that changes the filesystem, and the derived
     # per-project layer - which installs apt/pip/tarball dependencies after the
     # base image is finished - has to run it again at its own end.
+    #
+    # With the sweep disabled the image ships Debian's setuid set - su, mount,
+    # passwd, chsh, ssh-keysign, unix_chkpwd - with no_new_privs as the only
+    # remaining lock, which strip-privilege-bits.sh's own header declines to
+    # rely on. So this asserts the invocation, not the spelling.
     local dockerfile="$SANDBOX_DIR/Dockerfile" last
     [ -f "$SANDBOX_DIR/strip-privilege-bits.sh" ] \
         || { echo "docker/strip-privilege-bits.sh is gone"; return 1; }
     last=$(grep -nE '^(RUN|COPY|ADD) ' "$dockerfile" | tail -1)
-    [[ "$last" == *strip-privilege-bits* ]] \
-        || { echo "the last filesystem-changing instruction is not the sweep: $last"; return 1; }
-    grep -q 'strip-privilege-bits' "$REPO_ROOT/bin/dejima-project-lib.sh" \
-        || { echo "a derived project layer installs packages and never sweeps them"; return 1; }
+    _runs_sweeper "$last" \
+        || { echo "the last instruction does not run the sweep: $last"; return 1; }
+
+    # The derived layer, generated and read rather than grepped: the order is
+    # the whole property and the generator is what decides it.
+    local df store="$BATS_TEST_TMPDIR/store"
+    mkdir -p "$store"
+    printf 'apt:cowsay\n' > "$store/dependencies"
+    df=$(bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+            _ "$REPO_ROOT/bin/dejima-project-lib.sh" localhost/base:test "$store") \
+        || { echo "could not generate a derived Dockerfile"; return 1; }
+
+    local n sweep_at=0 install_at=0 line
+    n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        case "$line" in RUN\ *) ;; *) continue ;; esac
+        if _runs_sweeper "$line"; then sweep_at=$n; else install_at=$n; fi
+    done <<< "$df"
+
+    [ "$sweep_at" -gt 0 ] \
+        || { echo "a derived project layer installs packages and never sweeps them:"; echo "$df"; return 1; }
+    [ "$sweep_at" -gt "$install_at" ] \
+        || { echo "the derived layer sweeps before its last install:"; echo "$df"; return 1; }
 }
 
 @test "docker-compose.yml runs an init so orphaned processes get reaped" {
