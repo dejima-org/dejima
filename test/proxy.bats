@@ -851,6 +851,13 @@ print(raw.decode().strip())
     # prints the last line of this file when a session ends, so an operator who
     # was away while it failed reads it there - which is where this was found
     # wanting: it showed the provider's error code and nothing to do about it.
-    grep -q 'log in again' "$TD/stderr" \
-        || { echo "the host log names no remedy:"; cat "$TD/stderr"; return 1; }
+    # The LAST line specifically. bin/dejima's exit audit prints that one when a
+    # session ends, so it is what an operator who was away while it failed reads
+    # without going looking - and it was the provider's error code with no
+    # remedy in it, which is what sent one looking in the first place.
+    run tail -n 1 "$TD/stderr"
+    [[ "$output" == *"log in again"* ]] \
+        || { echo "the last host line is not the actionable one: $output"; return 1; }
+    [[ "$output" != *"HTTP 400"* ]] \
+        || { echo "the last host line still leads with the provider's answer: $output"; return 1; }
 }
