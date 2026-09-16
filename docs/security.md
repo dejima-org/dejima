@@ -782,7 +782,19 @@ reach the model - which reads as a dejima fault rather than a missing
 prerequisite. Sign in on the host first; see the README's
 [Sign in on the host first](../README.md#sign-in-on-the-host-first).
 Refreshing an expired credential is the same: on the host, not from inside a
-session, where the credential deliberately never goes.
+session, where the credential deliberately never goes. A session that outlives
+its credential - one left open overnight is the ordinary way - meets a 502 from
+the proxy naming that as the remedy, and the same line is the last thing the
+proxy logs, so the exit audit repeats it on the host terminal.
+
+**What the proxy may tell a session about a credential failure.** Anything it
+learned from the provider stays on the host: a response body, a status line, an
+exception. What crosses into the container is text this repository wrote, and
+only when it names something the operator has to do - "log in again on the
+host" is useful to an agent that would otherwise report itself broken, and
+discloses nothing the session did not already know. The distinction is the
+credential proxy's `CredentialNeedsOperator`, which carries the two separately
+so neither can be sent by accident.
 
 ### The refreshing OAuth path, in detail
 
@@ -1285,6 +1297,16 @@ to infer: the refusal loads in the same transaction as everything else, or none
 of it loads. A tool that will not run and a family that is not there are
 different conditions, and reporting the second on evidence of the first is how
 a boundary comes to be described rather than held.
+
+The startup self-check also resolves every permitted name and reads each answer
+back out of the address set its class names, refusing to start if one is
+missing. A name that resolves and whose address is not where the ports are
+keyed to would be a session that reaches a configured destination only by
+accident, or not at all - and the class an entry carries, the resolver line
+built from it, and the set the rules use are three separate statements that can
+each be right about a different one. A name that returns no address is reported
+rather than fatal: that is the world being unavailable, not the policy
+disagreeing with itself.
 
 The startup self-check asserts the shape of the ruleset, not a connection that
 fails: a v6 connection fails identically on a host with no v6 route, so a probe

@@ -570,6 +570,14 @@ EOF
         || { echo "the resolver config does not get its set from set_for_class"; return 1; }
     grep -q 'want=\$(set_for_class "\$class")' "$p" \
         || { echo "the sweep does not get its set from set_for_class"; return 1; }
+    # Including the live add, which named its own set for a while after this
+    # comment claimed it did not. A `dejima-allow` looking in a different set
+    # from the one being filled reports a permitted name as unreachable, or the
+    # reverse.
+    [ "$(grep -c 'set_prefix' "$p")" -eq 0 ] \
+        || { echo "something still spells a set name for itself:"; grep -n 'set_prefix' "$p"; return 1; }
+    sed -n '/^permit_name()/,/^}/p' "$p" | grep -q 'set_for_class' \
+        || { echo "the live add does not get its set from set_for_class"; return 1; }
 
     # And the function answers correctly for both classes, driven rather than read.
     run bash -c 'eval "$(sed -n "/^set_for_class()/,/^}/p" "$1")"; set_for_class forge; echo; set_for_class open' _ "$p"

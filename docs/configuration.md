@@ -254,8 +254,16 @@ name and its subdomains, with no exact-name form to use instead - so a bare
 label would grant its whole suffix, and `org` would ask for every `.org` name.
 The same floor applies to every key whose value becomes a permitted
 destination: `[core] internal_domains`, a forge's `ssh_host` and `api`, a
-backend's `base_url`, and `[logging] loki_url`. A single-label value is refused
-when the entry is declared and again at launch, naming the key it came from.
+backend's `base_url`, and `[logging] loki_url`. A value that is not a host name of at least two labels is
+refused when the entry is declared and again at launch, naming the key it came
+from - which includes a value that reached the launcher through a URL and lost
+its host on the way, such as a `loki_url` carrying userinfo.
+
+An approval granted before this rule existed is still read rather than called
+corrupt, so an upgrade does not present as tampering; the launch stops instead,
+naming the entry. There is no `remove` verb, so clearing one means editing the
+store by hand - `~/.config/dejima/allowed-domains` for a global approval, or
+`~/.config/dejima/projects/<slug>/allowed-domains` for a project's.
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a session could write these files; they are read only to

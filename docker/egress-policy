@@ -1429,7 +1429,7 @@ permit_address() {
 # up in the set its class uses. A name that resolved but never reached the
 # allow-list would fail later as a mystery, so it is undone here instead.
 permit_name() {
-  local class=$1 name=$2 set_prefix addr addrs ok='' mark
+  local class=$1 name=$2 set_name addr addrs ok='' mark
 
   write_resolver_config
   mark=$(wc -c < "$RESOLVER_LOG")
@@ -1449,13 +1449,18 @@ permit_name() {
     die "$name returned no address - the name may not exist, or its upstream may be unreachable. Nothing was changed."
   fi
 
-  [ "$class" = forge ] && set_prefix=fname || set_prefix=oname
+  # Through the same helper as the config that fills the set and the check that
+  # reads it back at boot. This was the fourth place naming a set for a class,
+  # and the one the helper's own comment claimed did not exist - a live add
+  # looking in a different set from the one being filled would report a name as
+  # unreachable while it was permitted, or the reverse.
+  set_name=$(set_for_class "$class")
   for addr in $addrs; do
-    nft get element inet "$TABLE" "${set_prefix}_v4" "{ $addr }" >/dev/null 2>&1 && ok=yes
+    nft get element inet "$TABLE" "$set_name" "{ $addr }" >/dev/null 2>&1 && ok=yes
   done
   if [ -z "$ok" ]; then
     rollback_entries
-    die "$name resolved to [$(printf '%s ' $addrs)] but none of those addresses reached the ${set_prefix} sets; nothing was changed"
+    die "$name resolved to [$(printf '%s ' $addrs)] but none of those addresses reached $set_name; nothing was changed"
   fi
   say "$name permitted ($class class, $exemption): $(printf '%s ' $addrs)"
 }
