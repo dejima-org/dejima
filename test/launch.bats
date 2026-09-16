@@ -466,12 +466,31 @@ EOF
     [ "$status" -ne 0 ] || { echo "the launch proceeded with a dotless host"; return 1; }
     [[ "$output" == *"loki_url"* ]] \
         || { echo "the error does not name the key it came from: $output"; return 1; }
-    [[ "$output" == *"single label"* ]] \
-        || { echo "the error does not say what is wrong: $output"; return 1; }
+    [[ "$output" == *"at least two"* && "$output" == *labels* ]] \
+        || { echo "the error does not say what the rule is: $output"; return 1; }
 
     # And nothing was started, rather than started and then torn down.
     [ ! -s "$LAUNCH_DIR/docker-log" ] || {
         echo "docker was invoked before the check refused:"; cat "$LAUNCH_DIR/docker-log"; return 1; }
+}
+
+@test "a derived host that is not a host name is refused, not only a dotless one" {
+    # The check exists for a derivation that went wrong, and a URL slip does not
+    # always leave a bare label: userinfo and a trailing dot both survive into
+    # the derived name, and both have a dot in them. Counting dots would pass
+    # them here and the container would refuse them at boot instead.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://user@loki.example.com:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -ne 0 ] || { echo "a userinfo URL launched"; return 1; }
+    [[ "$output" == *"user@loki.example.com"* ]] \
+        || { echo "the error does not show the derived host: $output"; return 1; }
+    [ ! -s "$LAUNCH_DIR/docker-log" ] || {
+        echo "docker was invoked before the check refused"; return 1; }
 }
 
 @test "a fully qualified host in the same key launches" {

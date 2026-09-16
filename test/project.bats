@@ -184,11 +184,34 @@ github.com'; do
         [ "$status" -ne 0 ] || { echo "accepted: $(printf %q "$bad")"; return 1; }
     done
 
-    # The declaration path uses it, which is what makes the refusal happen
-    # while the operator is looking at the file.
-    run bash -c 'source "$1"; _approved_validator allowed-domains' _ "$LIB"
-    [ "$output" = valid_permitted_domain ] \
-        || { echo "allowed-domains is validated by $output"; return 1; }
+    # Granting is where it applies. Reading deliberately does not - see the
+    # test below.
+    run bash -c 'source "$1"; approve_entry "$2" allowed-domains loki' _ "$LIB" "$BATS_TEST_TMPDIR"
+    [ "$status" -ne 0 ] || { echo "a single-label domain was granted"; return 1; }
+    [[ "$output" == *"two labels"* ]] \
+        || { echo "the refusal does not say why: $output"; return 1; }
+    run bash -c 'source "$1"; approve_entry "$2" allowed-domains ok.example.com' _ "$LIB" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ] || { echo "a fully qualified domain was refused: $output"; return 1; }
+}
+
+@test "an approval granted before the two-label rule is still read, not called corruption" {
+    # approved_entries validates on every read, and bin/dejima assigns from it
+    # under set -e on every launch. Applying a rule that tightened afterwards
+    # there would turn an approval that was valid when it was made into the
+    # store's tampering message - on every launch, in every project, for an
+    # operator whose only mistake was upgrading. The last release accepted a
+    # single-label domain, so that store is the ordinary one.
+    printf 'crates.io\nloki\n' > "$BATS_TEST_TMPDIR/allowed-domains"
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ] \
+        || { echo "a pre-existing approval now fails the read: $output"; return 1; }
+    [[ "$output" == *loki* ]] \
+        || { echo "the entry was dropped rather than read: $output"; return 1; }
+
+    # The shape check that guards against real tampering still fires.
+    printf 'crates.io\na..b.com\n' > "$BATS_TEST_TMPDIR/allowed-domains"
+    run bash -c 'source "$1"; approved_entries "$2" allowed-domains' _ "$LIB" "$BATS_TEST_TMPDIR"
+    [ "$status" -ne 0 ] || { echo "a malformed entry was read as valid"; return 1; }
 }
 
 @test "valid_domain accepts real domains and rejects shell-active input" {

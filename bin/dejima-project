@@ -162,7 +162,7 @@ case "$action" in
         echo "dependencies:"
         report dependencies valid_dep_spec
         echo "allowed-domains:"
-        report allowed-domains valid_domain
+        report allowed-domains valid_permitted_domain
         echo "corpus:"
         report corpus valid_corpus_rule
         echo "tools:"
@@ -170,12 +170,12 @@ case "$action" in
         ;;
     approve)
         pending_deps=$(classify dependencies valid_dep_spec | sed -n 's/^pending //p')
-        pending_doms=$(classify allowed-domains valid_domain | sed -n 's/^pending //p')
+        pending_doms=$(classify allowed-domains valid_permitted_domain | sed -n 's/^pending //p')
         pending_corpus=$(classify corpus valid_corpus_rule | sed -n 's/^pending //p')
         pending_tools=$(classify tools valid_tool_name | sed -n 's/^pending //p')
-        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_domain; classify corpus valid_corpus_rule; classify tools valid_tool_name; } | sed -n 's/^rejected //p')
+        rejected=$( { classify dependencies valid_dep_spec; classify allowed-domains valid_permitted_domain; classify corpus valid_corpus_rule; classify tools valid_tool_name; } | sed -n 's/^rejected //p')
         trunc_deps=$(classify dependencies valid_dep_spec | sed -n 's/^truncated //p')
-        trunc_doms=$(classify allowed-domains valid_domain | sed -n 's/^truncated //p')
+        trunc_doms=$(classify allowed-domains valid_permitted_domain | sed -n 's/^truncated //p')
         if [ -n "$trunc_deps" ]; then
             echo "Warning: dependencies declares $trunc_deps entries; only the first $DEJIMA_MAX_DECLARED were considered." >&2
         fi

@@ -2322,17 +2322,26 @@ export DEJIMA_INTERNAL_DOMAINS
 # case this most wants to catch, because it is the one nobody would look for.
 _require_fqdn() {  # <config key, for the message> <host>
     [ -n "$2" ] || return 0
-    case "$2" in
-        *.*) return 0 ;;
-    esac
-    echo "ERROR: $1 gives the host '$2', which is a single label." >&2
+    # A host name with at least two labels. Counting dots alone would pass the
+    # residue of a derivation that went wrong in a way that happens to leave
+    # one: `https://user@host.example/` reduces to `user@host.example`, and
+    # `http://loki./` to `loki.`, neither of which is a host name. Those are the
+    # slips this exists to catch, so it asks the same question of the value that
+    # the policy will ask, rather than a cheaper one.
+    if valid_domain "$2"; then
+        case "$2" in
+            *.*) return 0 ;;
+        esac
+    fi
+    echo "ERROR: $1 gives the host '$2', which this cannot permit." >&2
     echo "" >&2
-    echo "A permitted destination has to be fully qualified. The sandbox's" >&2
-    echo "resolver does not forward a dotless query, so the name would not" >&2
-    echo "resolve; and a permitted name covers everything under it, so a bare" >&2
-    echo "label would grant its whole suffix." >&2
+    echo "A permitted destination has to be a host name of at least two" >&2
+    echo "labels. The sandbox's resolver does not forward a dotless query, so" >&2
+    echo "a bare label would not resolve; and a permitted name covers" >&2
+    echo "everything under it, so a bare label would grant its whole suffix." >&2
     echo "" >&2
-    echo "Use the fully qualified name for that host." >&2
+    echo "If the value came from a URL, check it parses to the host you meant:" >&2
+    echo "userinfo and a trailing dot both survive into the derived name." >&2
     exit 1
 }
 for _host in ${DEJIMA_FORGE_HOSTS:-}; do
