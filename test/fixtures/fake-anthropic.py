@@ -17,7 +17,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-STATE = {"oauth_hits": 0, "oauth_last": {}, "returned_401": False}
+STATE = {"oauth_hits": 0, "oauth_last": {}, "returned_401": False, "oauth_reject": False}
 LOCK = threading.Lock()
 
 
@@ -50,11 +50,26 @@ class Handler(BaseHTTPRequestHandler):
         }).encode())
 
     def _handle(self):
-        if self.path == "/v1/oauth/token":
+        if self.path == "/oauth-reject":
+            # Make the next refresh fail the way a finished refresh token does.
+            # Set rather than always-on, so the ordinary refresh tests keep the
+            # same endpoint.
+            with LOCK:
+                STATE["oauth_reject"] = True
+            self._send(200, b"ok", "text/plain")
+        elif self.path == "/v1/oauth/token":
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             with LOCK:
                 STATE["oauth_hits"] += 1
                 STATE["oauth_last"] = req
+                reject = STATE.get("oauth_reject")
+            if reject:
+                # Verbatim from a real overnight expiry.
+                self._send(400, json.dumps({
+                    "error": "invalid_grant",
+                    "error_description": "Refresh token expired",
+                }).encode())
+                return
             self._send(200, json.dumps({
                 "access_token": "refreshed-access-token",
                 "refresh_token": "rotated-refresh-token",
