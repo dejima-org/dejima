@@ -272,7 +272,13 @@ build_entries() {
   local value
   for value in ${INTERNAL_OK//,/ }; do
     [ -n "$value" ] || continue
-    listed=$(awk -v v="${value%.}" '$4 == v' "$ENTRIES_FILE")
+    # Case-folded on both sides, like dejima_class_for and dejima_mark_internal
+    # on the launcher's side of this. DNS names are case-insensitive and the
+    # resolver matches them so, and comparing verbatim here refused a launch
+    # whose configuration was correct - the launcher's own check had already
+    # passed on the same pair, so the refusal arrived from the wrong layer with
+    # a message saying the name was permitted by nothing.
+    listed=$(awk -v v="${value%.}" 'BEGIN { v = tolower(v) } tolower($4) == v' "$ENTRIES_FILE")
     [ -n "$listed" ] || missing+=("$value")
   done
   [ ${#missing[@]} -eq 0 ] \

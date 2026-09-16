@@ -2236,6 +2236,35 @@ _reference_has_key() {  # <doc> <section> <leaf>
         || { echo "an uppercase suffix did not match a lowercase name: $output"; return 1; }
 }
 
+@test "the policy matches internal_domains case-insensitively too, like the launcher" {
+    # Third site for the same rule. dejima_class_for and dejima_mark_internal
+    # fold case on the launcher's side; build_entries compared verbatim, so a
+    # pair the launcher had already accepted was refused one layer down, with a
+    # message saying the name was permitted by nothing. A correct configuration
+    # that will not start, from a spelling difference DNS does not recognise.
+    local script="$BATS_TEST_TMPDIR/be.sh"
+    {
+        printf 'TABLE=t; ENTRIES_FILE=%q\n' "$BATS_TEST_TMPDIR/ents"
+        printf 'FORGE_ENTRIES="github.com"; OPEN_ENTRIES="Git.Example.Com"\n'
+        printf 'INTERNAL_OK="git.example.com"; INTERNAL_OK_HINT=hint\n'
+        printf 'die() { echo "REFUSED: $*"; exit 1; }\nsay() { :; }\n'
+        sed -n '/^classify_entry()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^record_entries()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^build_entries()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        printf 'build_entries forge.example.com && echo booted\n'
+    } > "$script"
+
+    run bash "$script"
+    [ "$status" -eq 0 ] \
+        || { echo "a case difference refused the launch: $output"; return 1; }
+
+    # And a name nothing permits is still refused, whatever its case.
+    sed -i 's/INTERNAL_OK="git.example.com"/INTERNAL_OK="Never.Approved.Example.Com"/' "$script"
+    run bash "$script"
+    [ "$status" -ne 0 ] \
+        || { echo "an unpermitted name was exempted: $output"; return 1; }
+}
+
 @test "nothing reaches the open class that the forge class covers, whatever route it took" {
     # The comment in fixed-domains.sh says the forge class wins wherever the two
     # overlap. Only the approved-domains loop asked, so a name in the built-in
