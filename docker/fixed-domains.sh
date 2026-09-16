@@ -58,11 +58,13 @@ DEJIMA_OPEN_CLASS=(
 
 DEJIMA_INTERNAL_CLASS=()
 
-# release-assets.githubusercontent.com is under a forge-class suffix, and the
-# forge class wins wherever the two overlap - by design, not by accident. It is
-# fetched over HTTPS like everything else under that suffix, so the narrower
-# class costs it nothing and the alternative would be a name that quietly
-# widened the forge.
+# release-assets.githubusercontent.com is under a forge-class suffix, so it ends
+# up in the forge class: firewall-up.sh routes every open-class entry through
+# dejima_class_for, this list included, rather than only the ones a project
+# declared. It is fetched over HTTPS like everything else under that suffix, so
+# the narrower class costs it nothing, and the alternative is a name that
+# quietly widens the forge - which is what it did until the normalisation
+# covered this list too.
 
 # Split on spaces explicitly, not on whatever IFS the caller happens to have,
 # so every consumer gets the same list from the same value. A harness declaring

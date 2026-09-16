@@ -2236,6 +2236,41 @@ _reference_has_key() {  # <doc> <section> <leaf>
         || { echo "an uppercase suffix did not match a lowercase name: $output"; return 1; }
 }
 
+@test "nothing reaches the open class that the forge class covers, whatever route it took" {
+    # The comment in fixed-domains.sh says the forge class wins wherever the two
+    # overlap. Only the approved-domains loop asked, so a name in the built-in
+    # open list that sits under a built-in forge suffix kept the open class -
+    # and release-assets.githubusercontent.com is exactly that. It then gets a
+    # resolver line more specific than the suffix entry, feeding the set with no
+    # port restriction, and the 443 clamp rests on the forge's published ranges
+    # alone. The last release restricted it.
+    #
+    # Asserted over the shipped defaults with nothing else set, because that is
+    # the configuration every operator has before they declare anything.
+    local out
+    out=$(env -i bash -c '
+        set -uo pipefail
+        source "$1"
+        '"$(sed -n '/^_join()/,/^}/p' "$SANDBOX_DIR/firewall-up.sh")"'
+        '"$(sed -n '/^_forge_extra=""/,/^EGRESS_ALLOWED_NAMES=/p' "$SANDBOX_DIR/firewall-up.sh")"'
+        printf "forge:%s\n" "$EGRESS_FORGE_NAMES"
+        printf "open:%s\n" "$EGRESS_ALLOWED_NAMES"
+    ' _ "$SANDBOX_DIR/fixed-domains.sh") || { echo "composition failed: $out"; return 1; }
+
+    local open_names name
+    open_names=$(sed -n 's/^open://p' <<< "$out")
+    [ -n "$open_names" ] || { echo "no open-class names at all: $out"; return 1; }
+    for name in $open_names; do
+        run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" "$name"
+        [ "$output" = open ] \
+            || { echo "$name is $output class and reached the open class anyway"; return 1; }
+    done
+
+    # And the name that prompted this is in the forge class rather than dropped.
+    grep -q '^forge:.*release-assets\.githubusercontent\.com' <<< "$out" \
+        || { echo "the overlapping name did not reach the forge class: $out"; return 1; }
+}
+
 @test "internal_domains and the key that permitted the host may differ in case" {
     # dejima_mark_internal returns non-zero for an entry nothing permits, and
     # the caller stops the container naming it. So comparing verbatim turns a
