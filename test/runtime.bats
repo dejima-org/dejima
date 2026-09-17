@@ -1513,6 +1513,20 @@ session_pid() {  # [container], defaulting to the file-wide one
     run dexec sh -c 'find /tmp /run /mnt /media -xdev -type f -perm /6000 2>/dev/null; getcap -r /tmp /run /mnt /media 2>/dev/null'
     [ -z "$output" ] \
         || { echo "privileged bits outside the swept roots:"; echo "$output"; return 1; }
+
+    # File capabilities over the whole image filesystem, not a directory
+    # union: a capability at a top-level path nobody enumerated - /data/bin
+    # in some future layer - is asserted by nothing else, while setuid gets
+    # the same whole-filesystem walk in the derived-image test below. -xdev
+    # keeps this to the image: /proc, /sys and every bind mount are their own
+    # filesystems, and a capability in the operator's mounted checkout is not
+    # the image's to answer for. A missing getcap prints a marker instead of
+    # nothing, because an empty result has to mean "none found", not "nothing
+    # asked".
+    run dexec sh -c 'command -v getcap >/dev/null || { echo getcap-missing; exit 1; }
+        find / -xdev -type f -print0 2>/dev/null | xargs -0 -r getcap 2>/dev/null || true'
+    [ -z "$output" ] \
+        || { echo "a file capability survived somewhere in the image (or getcap is gone):"; echo "$output"; return 1; }
 }
 
 @test "the session shell is bash, configured by the image, with history appended" {
