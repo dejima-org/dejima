@@ -1495,34 +1495,67 @@ cleanup() {
         # bound before the EXIT trap can fire - it reads one and reports an
         # unbound name. That test is right to be strict, so this stays out of
         # its way rather than asking it to parse quoting.
-        _audit_counts="$(awk '{ if (match($0, /answered [0-9]+/))
-                   n[substr($0, RSTART + 9, RLENGTH - 9)]++ }
+        #
+        # Anchored to the whole line the proxy writes - its prefix, then
+        # `upstream answered N for` or `cannot load|refresh credentials:`,
+        # the spellings in bin/dejima-credential-proxy - not to a phrase
+        # appearing anywhere. The log also carries text chosen elsewhere: an
+        # upstream error-body prefix, an exception echoing the session's
+        # request path. Classified on a floating match, a token endpoint
+        # whose error body said `answered 503` fabricated a status count
+        # here, and a session whose only lines were connection failures was
+        # reported as unable to authenticate. Each section prints on its own
+        # evidence, and a session can have earned both.
+        _audit_counts="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /)) {
+                   match($0, / answered [0-9]+ for /)
+                   n[substr($0, RSTART + 10, RLENGTH - 15)]++ } }
              END { for (s in n) printf "  %d x HTTP %s\n", n[s], s }' \
             "$SANDBOX_CREDENTIAL_PROXY_LOG")"
+        _audit_api_last="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /))
+                   line = $0 }
+             END { print line }' "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')"
+        # The `cannot ...` line names what failed; the line the proxy writes
+        # right after it is the remedy, and is the one an operator can act on.
+        _audit_cred="$(awk '
+            { if (match($0, /^[0-9:]* dejima-credential-proxy: cannot (load|refresh) credentials: /)) {
+                  cred = $0; want = NR + 1; remedy = "" }
+              else if (NR == want) remedy = $0 }
+            END { if (cred != "") { print cred; if (remedy != "") print remedy } }' \
+            "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //; s/^/  /')"
         _audit_last="$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
                | sed 's/^[0-9:]* dejima-credential-proxy: //')"
         if [ -n "$_audit_counts" ]; then
             printf '\n%sThe model API answered with an error this session:%s\n' \
                 "${C_WARN:-}" "${C_RESET:-}" >&2
             printf '%s\n' "$_audit_counts" >&2
-            printf '  most recent: %s\n' "$_audit_last" >&2
+            printf '  most recent: %s\n' "$_audit_api_last" >&2
             # Said because the count above cannot distinguish them: a harness
             # that retried a 429 or a 5xx may well have got its answer in the
             # end, so this is not on its own a session that failed.
             printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
             printf '  not a verdict on the session.\n' >&2
-        else
-            # The proxy logged something the API never answered - it could not
+        fi
+        if [ -n "$_audit_cred" ]; then
+            # The proxy logged a failure the API never answered - it could not
             # load or refresh the credential, and no request was made. Saying
             # "the model API answered with an error" there sends an operator to
-            # check the provider's availability, and the retry caveat below it
-            # invites them to hope it succeeded anyway. Neither is true, and the
-            # line the proxy leaves last is an instruction rather than a status.
+            # check the provider's availability, and the retry caveat above it
+            # invites them to hope it succeeded anyway. Neither is true.
             printf '\n%sThe session could not authenticate to the model API:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '%s\n' "$_audit_cred" >&2
+        fi
+        if [ -z "$_audit_counts" ] && [ -z "$_audit_cred" ]; then
+            # Something else: a request that never reached the upstream, a
+            # body the proxy refused. Neither an API answer nor a credential
+            # failure, so this claims neither and shows the line instead.
+            printf '\n%sThe credential proxy reported a problem this session:%s\n' \
                 "${C_WARN:-}" "${C_RESET:-}" >&2
             printf '  %s\n' "$_audit_last" >&2
         fi
-        unset _audit_counts _audit_last
+        unset _audit_counts _audit_last _audit_cred _audit_api_last
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true

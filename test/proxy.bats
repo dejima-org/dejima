@@ -911,3 +911,44 @@ run_exit_audit() {  # <proxy log>
     [[ "$output" == *"may still have succeeded"* ]] \
         || { echo "the retry caveat is gone from the case it is about: $output"; return 1; }
 }
+
+@test "a request that never reached the upstream is reported as neither case" {
+    # `upstream request failed` carries no status - nothing answered - and no
+    # credential failed either. Classified by "no status lines anywhere", it
+    # read as an authentication failure, sending an operator to log in again
+    # over a connection problem.
+    start_proxy --upstream "http://127.0.0.1:1"
+    pcurl -o /dev/null -X POST --data '{}' http://x/v1/messages || true
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" != *"could not authenticate"* ]] \
+        || { echo "a connection failure read as an authentication failure: $output"; return 1; }
+    [[ "$output" != *"model API answered with an error"* ]] \
+        || { echo "reported as the API answering: $output"; return 1; }
+    [[ "$output" == *"credential proxy reported a problem"* ]] \
+        || { echo "the failure went unreported: $output"; return 1; }
+    [[ "$output" == *"upstream request failed"* ]] \
+        || { echo "the line itself is missing: $output"; return 1; }
+}
+
+@test "upstream text saying 'answered 503' cannot fabricate a status count" {
+    # The refresh failure's detail line carries up to 200 bytes of the token
+    # endpoint's response body - text the upstream chose. Counted wherever
+    # `answered N` appeared, that body minted "1 x HTTP 503" for a session
+    # that made no request, and brought the retry caveat with it. The count
+    # is anchored to the proxy's own `upstream answered N for` lines.
+    write_creds -60
+    start_proxy
+    curl -s "http://127.0.0.1:$PORT/oauth-reject?say=the+upstream+answered+503+today" >/dev/null
+    pcurl -o /dev/null -X POST --data '{}' http://x/v1/messages || true
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" != *"model API answered with an error"* ]] \
+        || { echo "an upstream string was counted as an API answer: $output"; return 1; }
+    [[ "$output" != *"HTTP 503"* ]] \
+        || { echo "a status count was minted from body text: $output"; return 1; }
+    [[ "$output" == *"could not authenticate"* ]] \
+        || { echo "the real failure went unreported: $output"; return 1; }
+    [[ "$output" == *"answered 503 today"* ]] \
+        || { echo "the detail line is not shown: $output"; return 1; }
+}
