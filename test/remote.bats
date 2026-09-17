@@ -2548,7 +2548,7 @@ PY
 }
 
 @test "nothing shipped by the front doors binds a routable address" {
-    # Load-bearing, not stylistic. docker/init-firewall.sh:187 accepts
+    # Load-bearing, not stylistic. The egress policy permits traffic to
     # container OUTPUT to the default-route address, which is the Docker
     # bridge gateway - the host - and attaching tmux gives a host shell. A
     # listener on any address the container can route to is the sandbox's own

@@ -402,7 +402,7 @@ jobs:
       # hour to 5000, and nothing about a run looks different when it stops
       # doing that. A misspelled secret name, a revoked token and an expiry a
       # year from now all present identically: green for a while, then
-      # containers failing to boot in init-firewall.sh - which reads as a
+      # containers failing to boot in docker/egress-policy - which reads as a
       # regression in the firewall rather than as a lapsed credential. So ask
       # the API what the ceiling actually is, rather than checking that a
       # variable is non-empty and assuming the rest.
@@ -468,11 +468,25 @@ jobs:
       - name: Build the sandbox image
         run: docker build -t localhost/dejima:latest -f docker/Dockerfile .
 
-      - run: bats test/runtime.bats
+      # -T prints each test's duration. This job is the slow one and the only
+      # one nobody can run locally, so without it the cost of a test is
+      # guesswork - and the guess is wrong, because the expensive tests here are
+      # the ones that build an image rather than the ones that assert the most.
+      # Serial execution (see below) makes the numbers straightforwardly
+      # additive.
+      #
+      # Not --jobs, unlike the confined half. One container is shared across
+      # this file and a handful of tests mutate it - signalling dnsmasq,
+      # reloading the address sets - so running tests concurrently would have
+      # them racing over state the others read. Parallelising this suite means
+      # first separating the tests that only read the shared container from the
+      # ones that change it, which is a larger change than a flag.
+      - run: bats -T test/runtime.bats
         env:
           SKIP_BUILD: 1
           # Every container this suite starts fetches GitHub's IP ranges from
-          # api.github.com/meta in init-firewall.sh, and unauthenticated that
+          # api.github.com/meta (fetch_forge_ranges in docker/egress-policy),
+          # and unauthenticated that
           # endpoint allows 60 requests an hour per source IP - shared with
           # everything else on this runner host. Thirteen starts per run means
           # two runs an hour exhausts it, after which containers fail to boot

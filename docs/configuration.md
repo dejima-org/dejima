@@ -70,6 +70,7 @@ which `[forge.<name>]`.
 | `command` | *(the selected harness's own)* | container's main process (e.g. `nvim`), also settable per launch with `--cmd`. Overriding it changes what dejima launches, not which harness is wrapped |
 | `tools` | unset | optional tools to put in the image, colon-separated; also `.dejima/tools` in a project (approved first) and `--include` per launch. None by default. See [docs/tools.md](tools.md) |
 | `firewall` | `on` | egress firewall; `off` disables it (debugging only), also settable per launch with `--no-firewall` |
+| `internal_domains` | unset | approved domains that really do resolve inside your own network, colon-separated. The policy refuses an answer for a permitted name that points at a private address, because an answer decides what the allowlist contains and comes from outside; this exempts the ones you know are internal. It exempts only - a name here is not reachable unless it is also approved, and naming one that is not stops the launch saying so. The configured forge, the Loki host and a self-served backend's `base_url` host are permitted and exempt already, so this is for destinations dejima does not configure itself. `dejima-allow` reads this same key when adding a domain to a running session |
 | `share_dir` | `~/.local/share/dejima/shared` | host-visible read/write scratch dir. One directory per project underneath it, and only that project's is mounted at `~/shared`. `dejima-share` is the host side of it |
 | `known_hosts` | `~/.ssh/known_hosts` | known-hosts file used for git-over-ssh |
 | `update_check` | `on` | at startup, say when this checkout is behind the branch it tracks. One `ls-remote` to your own remote, at most hourly, never fetching; `off` makes dejima contact nothing of its own accord. The answer is cached in `~/.local/share/dejima/update-check`, which is safe to delete |
@@ -242,10 +243,27 @@ for them.
 A project can declare what it needs in two committed files:
 
 ```
-.dejima/allowed-domains    # one domain per line
+.dejima/allowed-domains    # one domain per line, fully qualified
 .dejima/dependencies       # <apt|npm|pip|cargo>:<name> per line, or a
                            # tarball:<name>@<sha256>:<url> release archive
 ```
+
+A domain has to name at least two labels. A permitted name covers everything
+under it, because the sandbox's resolver is configured per name and matches the
+name and its subdomains, with no exact-name form to use instead - so a bare
+label would grant its whole suffix, and `org` would ask for every `.org` name.
+The same floor applies to every key whose value becomes a permitted
+destination: `[core] internal_domains`, a forge's `ssh_host` and `api`, a
+backend's `base_url`, and `[logging] loki_url`. A value that is not a host name of at least two labels is
+refused when the entry is declared and again at launch, naming the key it came
+from - which includes a value that reached the launcher through a URL and lost
+its host on the way, such as a `loki_url` carrying userinfo.
+
+An approval granted before this rule existed is still read rather than called
+corrupt, so an upgrade does not present as tampering; the launch stops instead,
+naming the entry. There is no `remove` verb, so clearing one means editing the
+store by hand - `~/.config/dejima/allowed-domains` for a global approval, or
+`~/.config/dejima/projects/<slug>/allowed-domains` for a project's.
 
 **Declaring grants nothing.** The project directory is bind-mounted
 read-write, so a session could write these files; they are read only to

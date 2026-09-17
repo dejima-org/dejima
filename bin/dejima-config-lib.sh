@@ -45,6 +45,7 @@ core.command	?identifier
 core.identity	?identifier
 core.tools	?list:identifier
 core.firewall	bool	on
+core.internal_domains	?list:hostname
 ui.banner	bool	on
 core.update_check	bool	on
 core.share_dir	path	~/.local/share/dejima/shared
@@ -286,12 +287,11 @@ valid_tarball_spec() {
 # anything that could split a header must not survive validation.
 # ---------------------------------------------------------------------------
 
-# A declared domain has to survive being written into a dnsmasq
-# server=/domain/ line. Here rather than in dejima-project-lib.sh as well, so
-# there is one definition and no pair of them to drift apart.
-# A hostname, label by label. The matcher is a trust boundary: what it accepts
-# becomes a dnsmasq `server=` line and an ipset entry, so it should accept only
-# what it means to rather than only what it can see a use for.
+# A hostname, label by label. Here rather than in dejima-project-lib.sh as well,
+# so there is one definition and no pair of them to drift apart. The matcher is
+# a trust boundary: what it accepts becomes a dnsmasq `server=` line and an
+# entry in the packet filter's address sets, so it should accept only what it
+# means to rather than only what it can see a use for.
 #
 # The previous form allowed an EMPTY label - `a..b.com` matched - because its
 # repeated group could consume a dot having matched no characters before it.
@@ -300,9 +300,13 @@ valid_tarball_spec() {
 # came from a matcher accepting a string the resolver read differently.
 #
 # Per label: 1-63 characters, starting and ending alphanumeric, hyphens in
-# between. That also newly refuses a label with a leading or trailing hyphen,
-# which is not a hostname either. A single label with no dot stays legal - an
-# internal name resolved by the host's own resolver is a real case.
+# between. That also refuses a label with a leading or trailing hyphen, which is
+# not a hostname either.
+#
+# A single label stays legal here, because this also gates host-side consumers
+# where an internal name resolved by the host's own resolver is a real case. A
+# domain that becomes a permitted destination is narrower and has its own rule:
+# valid_permitted_domain in dejima-project-lib.sh, which requires two labels.
 valid_domain() {
     local label='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
     [[ "$1" =~ ^$label(\.$label)*$ ]]

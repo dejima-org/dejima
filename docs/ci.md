@@ -365,9 +365,11 @@ concurrent jobs share a broadcast domain and can reach each other's service
 containers. Check that before raising it.
 
 The DNS and firewall shape is the same one dejima uses inside its own
-container (`docker/dns-proxy.sh` and `docker/init-firewall.sh`), applied one
-layer out: allowlist the *names* and let the answers populate the set of
-allowed *addresses*.
+container (`docker/egress-policy`), applied one layer out: allowlist the
+*names* and let the answers populate the set of allowed *addresses*. The
+toolchain differs - the hardener is written against `iptables` and `ipset`,
+dejima's own policy against `nftables` - but the arrangement is the same, and
+so is what it is worth.
 
 `dnsmasq` binds the bridge gateway. With `no-resolv` and one `server=` line
 per allowed name, every other name gets `REFUSED`, not resolved-then-blocked,

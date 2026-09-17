@@ -60,10 +60,10 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=dejima-project-lib.sh
 source "$SCRIPT_DIR/dejima-project-lib.sh"
-# For ipset_for_domain: the live add below writes into a running container's
-# ipsets, and which set a name belongs in is the container's rule, not this
-# script's. Sourced rather than restated so the two cannot drift - the same
-# reason init-firewall.sh and dns-proxy.sh share this file.
+# For dejima_class_for: the live add below changes a running container's
+# permitted set, and which class a name belongs to is the container's rule, not
+# this script's. Sourced rather than restated so the two cannot drift - the
+# same reason firewall-up.sh reads this file.
 # shellcheck source=../docker/fixed-domains.sh
 source "$SCRIPT_DIR/../docker/fixed-domains.sh"
 # The palette, heading and prompt dejima-attach uses. Picking one session out
@@ -268,9 +268,9 @@ if [ "$session_wanted" -eq 1 ]; then
         [ -n "$container" ] || container="${containers%%$'\t'*}"
     fi
 
-    # The dnsmasq and the ipsets are not in the session's container. They are
-    # in the filter container that owns its network namespace, which is what
-    # keeps a session from reaching either. So everything that CHANGES the
+    # The resolver and the packet filter are not in the session's container.
+    # They are in the filter container that owns its network namespace, which
+    # is what keeps a session from reaching either. So everything that CHANGES the
     # allowlist below runs there, and only the reachability check at the end
     # runs in the session's own container - because that is the container whose
     # reachability this command claims to have changed.
@@ -321,61 +321,78 @@ if [ "$session_wanted" -eq 1 ]; then
             ;;
     esac
 
-    # The DNS proxy (dns-proxy.sh) NXDOMAINs anything not in its allowlist, so
-    # this has to happen *before* resolving the domain below - otherwise the dig
-    # right after this would itself get blocked. Append a server= line to
-    # dnsmasq's servers-file (idempotent - skip if already present from an
-    # earlier call) and SIGHUP it to reload just that file, no restart needed.
-    # $domain is passed as a positional arg to the inner script (`$1`, inside a
-    # single-quoted heredoc) rather than interpolated into the script text - it's
-    # validated above, but this keeps it that way even if the validation regex
-    # above is ever loosened later.
-    docker exec -u root "$filter" bash -c '
-        domain="$1"
-        entry="server=/${domain}/127.0.0.11"
-        grep -qxF "$entry" /etc/dnsmasq-sandbox-servers.conf 2>/dev/null || echo "$entry" >> /etc/dnsmasq-sandbox-servers.conf
-        kill -HUP "$(cat /var/run/dnsmasq-sandbox.pid)"
-    ' -- "$domain"
-
-    # Named for where the lookup happens, which is where the DNS allowlist is.
-    echo "Resolving $domain in $filter, this session's egress control..."
-    ips=$(docker exec "$filter" dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || true)
-    if [ -z "$ips" ]; then
-        # An internally-routed name can't be added to a *running* session at
-        # all: dnsmasq's stop-dns-rebind drops a private answer for any domain
-        # not exempted when the container started, and dns-proxy.sh writes
-        # those rebind-domain-ok= lines only at startup - the servers-file this
-        # script SIGHUPs carries server= lines and nothing else. Asking the
-        # upstream resolver directly separates that dead end from a name that
-        # simply doesn't resolve, so the message can name the fix that works.
-        upstream=$(docker exec "$filter" dig +short A "$domain" @127.0.0.11 2>/dev/null |
-            grep -E '^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' || true)
-        if [ -n "$upstream" ]; then
-            echo "$domain resolves to a private address (${upstream//$'\n'/ }), which the" >&2
-            echo "container's DNS rebind protection drops for any domain not allowlisted" >&2
-            echo "when it started." >&2
-            echo "" >&2
-            if [ -n "$project" ] || [ "$global" -eq 1 ]; then
-                echo "  (the approval recorded above already does this)" >&2
-            else
-                echo "  dejima-allow --global $domain" >&2
-            fi
-            echo "" >&2
-            echo "Relaunch the session to pick it up - a running one cannot be patched." >&2
-            exit 1
-        fi
-        echo "Failed to resolve $domain inside the container." >&2
-        exit 1
+    # One command in the filter container does the whole change: it records the
+    # entry, regenerates and restarts the restricted resolver so the name
+    # resolves, waits for the answer, and confirms the address reached the set
+    # its class uses. If any of that fails it puts the permitted set back the
+    # way it was and exits non-zero, so there is no half-added name that
+    # resolves and is then refused.
+    #
+    # The class is this script's to state and the container's to enforce - a
+    # forge name added to the open class would be reachable on every port,
+    # which is the read-only guarantee gone from a command whose whole output
+    # says it granted one domain.
+    #
+    # --internal-ok for a name in [core] internal_domains, and for no other.
+    #
+    # The policy refuses an answer for a permitted name that points inside a
+    # private network, because an answer decides what the allowlist contains
+    # and comes from outside. An approval does not lift that: a project's
+    # declared domains are reviewed with the project and expected to be public,
+    # and exempting a public name is the pivot the check exists to stop. What
+    # lifts it is the operator saying a specific name really is internal.
+    #
+    # Read from the same key a launch reads, so the two cannot disagree. They
+    # did: this passed the exemption for any approval while firewall-up.sh
+    # withheld it, so a live add succeeded and the next launch refused to start
+    # on the same name - with the failed launch as the operator's first hint
+    # that the two commands had different ideas.
+    #
+    # $domain reaches the container as an argument rather than inside the
+    # command string: it is validated above, and this keeps it that way if that
+    # validation is ever loosened.
+    #
+    # Guarded on the file existing: config_get says so on stderr when it does
+    # not, which is right for a launch and noise for this, where a host with no
+    # configuration at all is an ordinary case and the answer is simply "not
+    # listed". A config that exists and is malformed still reports itself.
+    internal=0
+    if [ -f "$(config_path)" ]; then
+        # `|| [ -n "$_d" ]`, because config_get prints its value with no
+        # trailing newline - so a single-entry list is one line read never
+        # returns, and the loop body would not run at all.
+        # Case-folded, like the class decision below and dejima_mark_internal:
+        # a live add that misses the exemption the operator configured leaves
+        # the name without it until the next launch, which then refuses to
+        # start on the same mismatch.
+        while IFS= read -r _d || [ -n "$_d" ]; do
+            [ "${_d,,}" = "${domain,,}" ] && internal=1
+        done < <(config_get core internal_domains | tr ':' '\n')
     fi
 
-    # allowed-domains carries no port restriction, so a GitHub address added
-    # there is reachable on 22 as well - which is the read-only guarantee gone,
-    # from a command whose whole output says it granted one domain.
-    target_set=$(ipset_for_domain "$domain")
-    for ip in $ips; do
-        echo "Allowing $ip ($domain -> $target_set)"
-        docker exec -u root "$filter" ipset add "$target_set" "$ip" -exist
-    done
+    permit_args=(permit "$domain")
+    [ "$(dejima_class_for "$domain")" = forge ] && permit_args+=(--forge)
+    [ "$internal" -eq 1 ] && permit_args+=(--internal-ok)
+
+    echo "Permitting $domain in $filter, this session's egress control..."
+    if ! docker exec -u root "$filter" /usr/local/sbin/egress-policy "${permit_args[@]}"; then
+        echo "" >&2
+        echo "The permitted set was left as it was - the reason is above." >&2
+        if [ "$internal" -eq 0 ]; then
+            echo "" >&2
+            echo "If $domain resolves inside your own network, say so in the config and" >&2
+            echo "relaunch - an answer pointing inside is refused for every name that is" >&2
+            echo "not listed there, whether or not it is approved:" >&2
+            echo "" >&2
+            echo "  [core]" >&2
+            echo "  internal_domains = $domain" >&2
+            echo "" >&2
+            echo "It still needs an approval to be reachable at all:" >&2
+            echo "" >&2
+            echo "  dejima-allow --global $domain" >&2
+        fi
+        exit 1
+    fi
 
     echo "$domain allowed for the running session ($container)."
 

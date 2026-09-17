@@ -13,7 +13,7 @@
 #
 # So two things carry this feature's entire security, and both live here:
 #
-#   1. The listen address. docker/init-firewall.sh:187 accepts container
+#   1. The listen address. docker/egress-policy permits container
 #      OUTPUT to the default-route address - the Docker bridge gateway, which
 #      is the host. A vhost bound to every interface, or to that gateway
 #      address, is reachable FROM a sandbox, which would let a compromised

@@ -36,6 +36,18 @@ stub_launch() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# `docker run -e NAME` carries the value in the environment rather than on the
+# command line, so the log above cannot show whether a flag had anything behind
+# it. Record what this process inherited, which is the same thing the flag
+# would forward. GH_TOKEN is deliberately not among them: it is a real
+# credential on a developer's machine and there is no reason to write one to
+# disk to test an unrelated variable.
+case "$*" in
+    "run -d --init"*)
+        env | grep -E '^(DEJIMA_|ALLOWED_DOMAINS=|ENABLE_FIREWALL=|ALLOW_GITHUB_PUSH=|LOKI_URL=|SANDBOX_)' \
+            > "${SANDBOX_TEST_FILTER_ENV:-/dev/null}" || true
+        ;;
+esac
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
@@ -52,6 +64,7 @@ launch() {
         "$LAUNCH_DIR/sandbox-key" >> "$conf"
     HOME="$LAUNCH_DIR/home" PATH="$LAUNCH_DIR:$PATH" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
+        SANDBOX_TEST_FILTER_ENV="$LAUNCH_DIR/filter-env" \
         SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
         "${DEJIMA_BIN:-$REPO_ROOT/bin/dejima}" "$@"
 }
@@ -79,7 +92,7 @@ log_pos() { grep -n -- "$1" "$LAUNCH_DIR/docker-log" | tail -1 | cut -d: -f1; }
         || { echo "the filter container does not run the filter entrypoint: $run"; return 1; }
 
     # One network per launch, and the filter container on that one - not on
-    # whatever bridge Docker would have picked. dns-proxy.sh forwards to the
+    # whatever bridge Docker would have picked. The restricted resolver forwards to the
     # embedded resolver at 127.0.0.11, which only exists on a user-defined
     # network, so this is load-bearing rather than tidiness.
     local id; id="$(sed -E 's/.*dejima-run-([0-9a-f]{16}).*/\1/' <<< "$net")"
@@ -152,7 +165,7 @@ case "$*" in
     # what a firewall that refused to start leaves behind.
     *dejima-firewall-ready*) exit 1 ;;
     *inspect*State.Running*) echo false; exit 0 ;;
-    *logs*) echo "init-firewall.sh: DNS lookup for registry.npmjs.org failed"; exit 0 ;;
+    *logs*) echo "[egress-policy] FAILED: registry.npmjs.org did not resolve"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -225,31 +238,60 @@ EOF
     done
 }
 
+
 @test "every variable the firewall path reads is passed to the filter container" {
     # The drift guard this arrangement needs most. The sandbox gets its
     # environment from docker-compose.yml; the filter container is started with
     # `docker run` and gets nothing that is not named on that command line.
     #
     # So a firewall script that starts reading a new variable does not fail - it
-    # reads an empty one, and allowlists less than it was told to, which
-    # presents as a domain the operator approved being unreachable rather than
-    # as anything about this. Derived from the scripts rather than listed here,
-    # so the test cannot drift from them either.
+    # reads an empty one, and permits less than it was told to, which presents
+    # as a domain the operator approved being unreachable rather than as
+    # anything about this. Derived from the scripts rather than listed here, so
+    # the test cannot drift from them either.
     stub_launch
     launch "$PROJ"
     local run; run="$(log_line 'run -d --init')"
     [ -n "$run" ]
 
+    # A name these files ORIGINATE is their own working value, not something
+    # the launcher supplies, so only names they read without originating have
+    # to be passed in. Derived rather than listed, because a hand-kept
+    # exclusion list is the same drift this test exists to catch, one level up.
+    #
+    # `X="${X:-}"` does not count as originating X: it reads the launcher's
+    # value and supplies a default for its absence, which is the shape every
+    # variable here is consumed with. Counting it would have quietly dropped
+    # LOKI_URL out of the required set.
+    local scripts=("$SANDBOX_DIR/firewall-up.sh" "$SANDBOX_DIR/egress-policy"
+                   "$SANDBOX_DIR/fixed-domains.sh" "$SANDBOX_DIR/log-shipper.sh")
+    # The awk program is held in a variable rather than written inline: it
+    # contains a double quote, and bash mis-nests one inside a single-quoted
+    # program inside "$( )" - the whole file then fails to parse, as a syntax
+    # error pointing at an unrelated line much further down.
+    local prog assigned
+    prog=$(cat <<'AWK'
+match($0, /^[[:space:]]*(export |readonly |local )?[A-Z][A-Z0-9_]*\+?=/) {
+    decl = substr($0, RSTART, RLENGTH)
+    rest = substr($0, RSTART + RLENGTH)
+    gsub(/^[[:space:]]*(export|readonly|local)[[:space:]]+/, "", decl)
+    sub(/\+?=$/, "", decl)
+    if (rest ~ ("[$]{?" decl)) next
+    print decl
+}
+
+AWK
+)
+    assigned="$(cat "${scripts[@]}" | awk "$prog" | sort -u)"
     local v missing=""
     while read -r v; do
         [ -n "$v" ] || continue
+        grep -qxF "$v" <<< "$assigned" && continue
         [[ "$run" == *"-e $v"* ]] || missing="$missing $v"
-    done < <(cat "$SANDBOX_DIR/firewall-up.sh" "$SANDBOX_DIR/dns-proxy.sh" \
-                 "$SANDBOX_DIR/init-firewall.sh" "$SANDBOX_DIR/fixed-domains.sh" \
-                 "$SANDBOX_DIR/log-shipper.sh" \
+    done < <(cat "${scripts[@]}" \
              | grep -oE '\$\{?(ALLOW[A-Z_]*|DEJIMA_[A-Z_]*|ENABLE_[A-Z_]*|GH_TOKEN|LOKI_URL|SANDBOX_[A-Z_]*)' \
              | tr -d '${' | sort -u \
-             | grep -vE '^(EXTRA_ALLOWED_DOMAINS|SANDBOX_TEST.*)$')
+             | grep -vE '^(SANDBOX_TEST.*)$')
 
     [ -z "$missing" ] \
         || { echo "the firewall path reads these, and the filter container is not given them:$missing"; return 1; }
@@ -257,7 +299,7 @@ EOF
     # And the other half of the same failure, which the flag alone cannot show.
     # `docker run -e NAME` takes the value from the launcher's environment, so
     # a name that is assigned but never exported passes an empty one - the
-    # filter container then allowlists less than it was told to, and what an
+    # filter container then permits less than it was told to, and what an
     # operator sees is a domain they approved being unreachable, with nothing
     # pointing here.
     #
@@ -283,6 +325,34 @@ EOF
 
     [ -z "$unexported" ] \
         || { echo "passed as -e NAME but never exported, so the value is empty:$unexported"; return 1; }
+}
+@test "a declared internal domain reaches the filter container as a value, not just a name" {
+    # The test above proves the flag is on the command line. `docker run -e
+    # NAME` takes the value from the launcher's environment, so a flag with
+    # nothing behind it passes an empty string - and this key decides whether a
+    # security check applies to a name, so an empty one silently applies it to
+    # every name the operator declared internal.
+    #
+    # Colon-separated in the file, space-separated in the environment, which is
+    # what firewall-up.sh splits on.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[core]\ninternal_domains = mirror.example:logs.example\n' >> "$conf"
+    launch "$PROJ"
+
+    local run; run="$(log_line 'run -d --init')"
+    [ -n "$run" ]
+    [[ "$run" == *"-e DEJIMA_INTERNAL_DOMAINS"* ]] \
+        || { echo "the flag is not on the filter container's command line"; return 1; }
+
+    # The value itself, read out of the environment the launcher handed over.
+    # The stub records it, because `-e NAME` puts the value nowhere the command
+    # line can show it - which is the whole reason this can go wrong quietly.
+    local seen; seen="$(cat "$LAUNCH_DIR/filter-env" 2>/dev/null || true)"
+    [[ "$seen" == *"DEJIMA_INTERNAL_DOMAINS=mirror.example logs.example"* ]] \
+        || { echo "the filter container was given: '$seen'"; return 1; }
 }
 
 # A `docker` that reports one filter container and one network, with whatever
@@ -379,4 +449,58 @@ EOF
         || { echo "a failing reconcile refused the launch: $output"; return 1; }
     grep -q -- ' run --rm ' "$LAUNCH_DIR/docker-log" \
         || { echo "the session never started"; return 1; }
+}
+
+@test "a single-label host in a firewall-facing key stops the launch, naming the key" {
+    # The policy refuses a dotless permitted entry at container start. Meeting
+    # that as a sandbox that will not boot, on a value every check on the way in
+    # accepted, is the failure this check exists to move: it happens here, on
+    # the host, before anything starts, and says which key it came from.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://loki:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -ne 0 ] || { echo "the launch proceeded with a dotless host"; return 1; }
+    [[ "$output" == *"loki_url"* ]] \
+        || { echo "the error does not name the key it came from: $output"; return 1; }
+    [[ "$output" == *"at least two"* && "$output" == *labels* ]] \
+        || { echo "the error does not say what the rule is: $output"; return 1; }
+
+    # And nothing was started, rather than started and then torn down.
+    [ ! -s "$LAUNCH_DIR/docker-log" ] || {
+        echo "docker was invoked before the check refused:"; cat "$LAUNCH_DIR/docker-log"; return 1; }
+}
+
+@test "a derived host that is not a host name is refused, not only a dotless one" {
+    # The check exists for a derivation that went wrong, and a URL slip does not
+    # always leave a bare label: userinfo and a trailing dot both survive into
+    # the derived name, and both have a dot in them. Counting dots would pass
+    # them here and the container would refuse them at boot instead.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://user@loki.example.com:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -ne 0 ] || { echo "a userinfo URL launched"; return 1; }
+    [[ "$output" == *"user@loki.example.com"* ]] \
+        || { echo "the error does not show the derived host: $output"; return 1; }
+    [ ! -s "$LAUNCH_DIR/docker-log" ] || {
+        echo "docker was invoked before the check refused"; return 1; }
+}
+
+@test "a fully qualified host in the same key launches" {
+    # The control for the test above: same key, same shape, one dot more.
+    stub_launch
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    mkdir -p "$(dirname "$conf")"
+    printf '[logging]\nloki_url = http://loki.example.com:3100\n' >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "a fully qualified loki_url was refused: $output"; return 1; }
 }

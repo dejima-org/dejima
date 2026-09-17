@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# SessionStart hook: when running inside the dejima Docker container
-# (see https://github.com/anthropics/claude-code/tree/main/.devcontainer for
-# the reference this is based on, and this repo's own README for the actual
-# setup), hand Claude Code the session briefing.
+# SessionStart hook: when running inside the dejima Docker container, hand
+# Claude Code the session briefing. The container is dejima's own - the README
+# describes what it is and docs/security.md what it bounds.
 #
 # Everything that composes that briefing lives in dejima-briefing-render.sh,
 # baked into the image and shared with every harness. What is left here is the

@@ -1,9 +1,3 @@
-# Loosely inspired by the general shape of Anthropic's public reference dev
-# container (https://github.com/anthropics/claude-code/tree/main/.devcontainer),
-# substantially extended and reworked for this project's own sandboxing model
-# (parametrized SANDBOX_USER, DNS proxy + ulogd2 logging, gosu-based privilege
-# drop, nvim/Playwright/tree-sitter toolchain, gitea-pr helper, etc).
-#
 # What belongs in here is what the sandbox itself needs, plus the editor and
 # browser tooling that has no route through the dependency mechanism. Language
 # toolchains and per-project utilities do have one - `dejima-dep`, including
@@ -12,13 +6,41 @@
 # below is added for every project, forever, with no review anywhere.
 FROM node:22
 
-ARG TZ
+# Timestamps inside the container match the ones outside it. Validated rather
+# than trusted: an unknown zone leaves the container silently on UTC, and a log
+# line an hour out of step with the operator's own is harder to distrust than a
+# build that refused. /etc/localtime covers everything that reads the system
+# zone; TZ in the environment covers what consults it directly, Node among them.
+ARG TZ=Etc/UTC
+RUN [ -f "/usr/share/zoneinfo/$TZ" ] || { echo "unknown timezone: $TZ" >&2; exit 1; }; \
+  ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime && \
+  echo "$TZ" > /etc/timezone
 ENV TZ="$TZ"
 
-# Install basic development tools, iptables/ipset (for the egress firewall),
-# openssh-client (for git-over-ssh and agent forwarding), and the toolchain a
-# typical nvim plugin set (telescope/treesitter/mason) expects, since
-# SANDBOX_NVIM_CONFIG can point a session's editor at one.
+# What a session is expected to have without installing anything: git and a
+# forge client, tools to read and search a tree, an editor, the network tools
+# the egress policy is written against, and enough of a toolchain to build a
+# small thing. Sorted, so adding one is a one-line diff rather than a judgement
+# about where it goes.
+#
+# nftables rather than iptables and ipset. One tool covers both packet
+# filtering and the named address sets the policy needs; one inet table covers
+# v4 and v6, so an allowlist cannot cover one family and silently ignore the
+# other; sets take CIDR intervals directly; and a whole ruleset loads as a
+# single transaction, so the namespace is never left half-filtered. See
+# docker/egress-policy.
+#
+# dnsmasq-base rather than dnsmasq: the binary without the init script, service
+# user and default configuration, none of which apply - there is no init system
+# here to run them, and egress-policy generates the configuration per launch.
+#
+# No CIDR aggregation package. Collapsing a list of ranges is a few lines of the
+# Python standard library, which is here anyway, and the packaged option
+# predates IPv6 - see docker/cidr-collapse.
+#
+# bash-completion rather than a shell framework: the session shell is the base
+# image's bash, configured by this image in /etc/bash.bashrc.d rather than by an
+# installer fetched at build time. See the shell section below.
 #
 # Deliberately NOT installing bubblewrap/socat: they exist to let a harness's
 # own internal per-command sandboxing run, and that inner sandbox is redundant
@@ -34,48 +56,62 @@ ENV TZ="$TZ"
 # iproute2; a security control resting on another package's dependency graph is
 # one an unrelated package change removes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  less \
-  git \
-  openssh-client \
-  procps \
-  fzf \
-  zsh \
-  unzip \
-  gnupg2 \
-  gh \
-  iptables \
-  ipset \
-  iproute2 \
-  libcap2-bin \
-  dnsutils \
-  aggregate \
-  jq \
-  openssl \
-  dnsmasq \
-  ulogd2 \
-  ulogd2-json \
-  nano \
-  ripgrep \
-  fd-find \
+  bash-completion \
+  bind9-dnsutils \
   build-essential \
+  dnsmasq-base \
+  fd-find \
+  fzf \
+  gh \
+  git \
+  gnupg2 \
+  iproute2 \
+  jq \
+  less \
+  libcap2-bin \
+  nano \
+  nftables \
+  openssh-client \
+  openssl \
+  procps \
   python3 \
   python3-pip \
+  ripgrep \
+  ulogd2 \
+  ulogd2-json \
+  unzip \
   xz-utils \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && ln -s "$(command -v fdfind)" /usr/local/bin/fd
 
-# Set `DEVCONTAINER` environment variable to help with orientation
-ENV DEVCONTAINER=true
+# Deliberately NOT set: DEVCONTAINER, or any other variable announcing this as
+# a generic development container. It is not one - it is a sandbox with an
+# egress firewall and no path back to root - and tools change behaviour when
+# they see such a flag, on an assumption about their environment that does not
+# hold here. What a harness actually needs to know is below, and says the thing
+# that is true.
 
 # Lets the harness, and the SessionStart hook it runs, know it is inside this
 # container rather than directly on the host.
 ENV DEJIMA=1
 
-# Dedicated unprivileged user for ulogd2 (see entrypoint.sh) - unlike
-# dnsmasq, the ulogd2 Debian package doesn't create one of its own. ulogd2
-# opens its log/output files and the NFLOG netlink socket before dropping to
-# this user, so it doesn't need to own anything itself.
+# Dedicated unprivileged user for ulogd2 (see firewall-up.sh) - the ulogd2
+# Debian package doesn't create one of its own. ulogd2 opens its log/output
+# files and the NFLOG netlink socket before dropping to this user, so it
+# doesn't need to own anything itself.
 RUN useradd -r -s /usr/sbin/nologin ulogd
+
+# The account the DNS forwarder drops to, and nothing else ever runs as.
+# Permission to speak to a resolver outside this network namespace is a uid
+# match in the packet filter (docker/egress-policy), so this account IS that
+# permission: anything else running as it would inherit the one route out that
+# the name allowlist exists to close.
+#
+# `nobody` would be the obvious choice and is the wrong one. It is where every
+# unprivileged program lands when it drops privilege without having an account
+# of its own, so a permission keyed to it is a permission granted to all of
+# them. Created here rather than by a package, so nothing else can be given it.
+RUN useradd -r -M -s /usr/sbin/nologin egress-resolver
 
 # Every fetch from here down retries. What matters is not the odds of one
 # download failing but of ANY of them failing, and without retries a single
@@ -154,20 +190,29 @@ RUN userdel -r node 2>/dev/null; \
 ENV SANDBOX_USER=$SANDBOX_USER
 ENV SANDBOX_HOME=$SANDBOX_HOME
 
-# Ensure the sandbox user has access to /usr/local/share. The recursion is
-# scoped to npm-global: Neovim unpacks into /usr/local/share/nvim above this
-# line, and recursing from the parent would hand the sandbox user Neovim's
-# runtime files. /usr/local/share itself is still
-# chowned, so anything that expected to create entries in it still can.
-RUN mkdir -p /usr/local/share/npm-global && \
-  chown $SANDBOX_USER:$SANDBOX_USER /usr/local/share && \
-  chown -R $SANDBOX_USER:$SANDBOX_USER /usr/local/share/npm-global
+# Where globally installed Node CLIs go: this image's own later stages, and an
+# operator's declared npm dependencies at launch. Both have to work as the
+# sandbox user, which has no sudo and never will, so the prefix has to be a
+# directory that user owns.
+#
+# A directory of its own rather than a subdirectory of a shared one, because
+# "owned by the sandbox user" and "put here by npm" then describe the same set
+# of files. Under /usr/local/share they do not: Neovim unpacks into
+# /usr/local/share/nvim, and one careless -R would hand the session write access
+# to the editor's own runtime.
+RUN mkdir -p /opt/node-tools/bin /opt/node-tools/lib/node_modules && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /opt/node-tools
 
-# Persist bash history. The env vars that actually wire history up to this
-# file are set below via zsh-in-docker's -a flag.
-RUN mkdir /commandhistory && \
-  touch /commandhistory/.bash_history && \
-  chown -R $SANDBOX_USER /commandhistory
+# Shell history, on a named volume (docker-compose.yml) so a session started
+# tomorrow sees what was typed today. Created here so the directory exists with
+# the right owner and mode even on a run with nothing mounted over it - Docker
+# seeds a fresh named volume from what is already at the mount path, ownership
+# included, so this is also what keeps the volume writable by that user rather
+# than root. The shell that reads it is configured below.
+RUN mkdir -p /var/opt/shell-history && \
+  touch /var/opt/shell-history/.bash_history && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /var/opt/shell-history && \
+  chmod 0700 /var/opt/shell-history
 
 # Create the ssh directory and set permissions. The project directory itself
 # is bind-mounted at runtime at its real host path (see docker-compose.yml),
@@ -193,47 +238,35 @@ RUN mkdir -p $SANDBOX_HOME/.ssh && \
 RUN mkdir -p $SANDBOX_HOME/.local/share/nvim $SANDBOX_HOME/.local/state/nvim $SANDBOX_HOME/.cache/nvim && \
   chown -R $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.local $SANDBOX_HOME/.cache
 
-# Set up non-root user
+# Everything from here to the `USER root` below runs as the sandbox user, so
+# that global npm installs land in the prefix that user owns.
 USER $SANDBOX_USER
 
-# Install global packages
-ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH=$PATH:/usr/local/share/npm-global/bin
-# A global npm install only puts a package's CLI on PATH, not its module on
-# Node's require() resolution path - NODE_PATH is what makes `require
-# ("playwright")` work from any script anywhere, not just the project's own
-# node_modules (which it likely doesn't have without its own npm install).
-ENV NODE_PATH=/usr/local/share/npm-global/lib/node_modules
+ENV NPM_CONFIG_PREFIX=/opt/node-tools
+# Appended, not prepended. /usr/local/bin holds the harness wrapper, which
+# shadows the harness's real binary to pin the no-confirm, settings and
+# briefing flags - and the real binary is npm-installed, so putting this
+# directory first would let it win and drop every one of those flags silently.
+ENV PATH=$PATH:/opt/node-tools/bin
 
-# Set the default shell to zsh rather than sh
-ENV SHELL=/bin/zsh
+# The session shell is the base image's own bash. It is what the sandbox user's
+# account is already set to, and configuring it costs this image one file
+# instead of a package and an installer downloaded at build time.
+#
+# That download is the reason, not the package. A build-time fetch of a script
+# that is then executed is a supply-chain surface, and this image is a security
+# boundary: whatever it installs runs in every sandbox on the host, forever,
+# with no review anywhere. What a prompt framework would have set up is written
+# out in session-bashrc.sh instead, where it can be read.
+ENV SHELL=/bin/bash
 
-# Set the default editor and visual
+# Anything that spawns an editor - `git commit` with no message, an interactive
+# rebase - reads these. Unset, git falls back to whatever /usr/bin/editor points
+# at, and an unattended session that lands in a modal editor it cannot name the
+# exit key for will sit there until something kills it. nano prints its own.
 ENV EDITOR=nano
 ENV VISUAL=nano
-
-# Default powerline10k theme, git/fzf oh-my-zsh plugins, fzf's own key
-# bindings, and wiring HISTFILE to the persisted /commandhistory volume -
-# see https://github.com/deluan/zsh-in-docker for the installer's own flags.
-#
-# Downloaded to a file and then run, rather than upstream's documented
-# `sh -c "$(wget -O- ...)"`. In that form a failed download substitutes to an
-# empty string, `sh -c ""` exits 0, and the build goes green having installed
-# no zsh config at all - the failure only surfaces much later, as a shell that
-# is mysteriously unconfigured. Two steps make the download's exit status the
-# build's exit status.
-ARG ZSH_IN_DOCKER_VERSION=1.2.0
-RUN wget --tries=3 --timeout=30 --waitretry=5 --retry-connrefused \
-    -O /tmp/zsh-in-docker.sh \
-    "https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh" && \
-  sh /tmp/zsh-in-docker.sh \
-  -p fzf \
-  -p git \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-  -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
-  -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -x && \
-  rm /tmp/zsh-in-docker.sh
+ENV PAGER=less
 
 # No harness here. The image is shared by every project on the host, and
 # baking one harness into it means every sandbox carries it whether or not it
@@ -271,14 +304,15 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && \
 # The launched application itself (SANDBOX_CMD) and any editor config for it
 # are supplied at runtime, not baked into the image - see
 # docker-compose.yml/entrypoint.sh.
+COPY docker/session-bashrc.sh /etc/bash.bashrc.d/10-session.bash
 COPY docker/fixed-domains.sh /usr/local/bin/
 COPY docker/caps-lib.sh /usr/local/bin/
-COPY docker/dns-proxy.sh /usr/local/bin/
-COPY docker/init-firewall.sh /usr/local/bin/
+COPY docker/egress-policy /usr/local/sbin/egress-policy
+COPY docker/dns-lookup-log /usr/local/sbin/dns-lookup-log
+COPY docker/cidr-collapse /usr/local/bin/cidr-collapse
 COPY docker/firewall-up.sh /usr/local/bin/
 COPY docker/filter-entrypoint.sh /usr/local/bin/
 COPY docker/log-shipper.sh /usr/local/bin/
-COPY docker/ulogd.conf /etc/ulogd-sandbox.conf
 # Into $VIMRUNTIME/plugin, not /etc/xdg/nvim - see the file's own comment.
 COPY docker/sandbox-clipboard.lua /usr/local/share/nvim/runtime/plugin/sandbox-clipboard.lua
 COPY docker/entrypoint.sh /usr/local/bin/
@@ -321,19 +355,41 @@ COPY docker/install-forge-bins.sh /tmp/install-forge-bins.sh
 RUN bash /tmp/install-forge-bins.sh /tmp/forges /usr/local/lib/dejima/forge /usr/local/bin \
     && rm -rf /tmp/forges /tmp/install-forge-bins.sh
 
-# The other half of NODE_PATH, which only ever applied to require(): ESM
-# resolution ignores it entirely and walks up from the importing file looking
-# for node_modules, so `import { chromium } from "playwright"` fails from
-# every directory a script is likely to be written in while require() of the
-# same package succeeds. At the root, that walk always ends here.
+# What makes a globally installed package resolvable from a script in any
+# directory. Both of Node's resolvers find a bare specifier by walking
+# node_modules directories upwards from the importing file, and every path
+# bottoms out at /, so one here is visible everywhere - including from a
+# directory with no dependency tree of its own.
 #
-# It is worth a line because of how the failure reads. An agent writing the
-# modern form gets ERR_MODULE_NOT_FOUND, concludes the image has no browser,
-# and describes what a page should look like instead of going and seeing.
-RUN ln -s /usr/local/share/npm-global/lib/node_modules /node_modules
+# It is worth a line because of how the failure reads without it. An agent
+# writing `import { chromium } from "playwright"` gets ERR_MODULE_NOT_FOUND,
+# concludes the image has no browser, and describes what a page should look
+# like instead of going and seeing.
+RUN ln -s /opt/node-tools/lib/node_modules /node_modules
 
-RUN chmod +x /usr/local/bin/dns-proxy.sh /usr/local/bin/init-firewall.sh /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
-  echo 'export PATH="$PATH:/usr/local/share/npm-global/bin"' > /etc/profile.d/npm-global-path.sh
+# Source the snippet directory from the system rc file, so every interactive
+# bash gets it, and from the sandbox user's own ~/.bashrc, so it is applied
+# after the Debian skeleton rc file rather than being undone by it. The guard on
+# the append keeps a rebuild on a changed base from adding the loop twice.
+RUN grep -q 'bash.bashrc.d' /etc/bash.bashrc || \
+    printf '\nfor __rc in /etc/bash.bashrc.d/*.bash; do\n  [ -r "$__rc" ] && . "$__rc"\ndone\nunset __rc\n' >> /etc/bash.bashrc; \
+  printf '%s\n' \
+    '# The sandbox shell configuration this image installs. Sourced here as well' \
+    '# as from /etc/bash.bashrc so it is applied last, after the Debian defaults.' \
+    '[ -r /etc/bash.bashrc.d/10-session.bash ] && . /etc/bash.bashrc.d/10-session.bash' \
+    > "$SANDBOX_HOME/.bashrc" && \
+  chown "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME/.bashrc"
+
+RUN chmod +x /usr/local/sbin/egress-policy /usr/local/sbin/dns-lookup-log /usr/local/bin/cidr-collapse /usr/local/bin/firewall-up.sh /usr/local/bin/filter-entrypoint.sh /usr/local/bin/log-shipper.sh /usr/local/bin/entrypoint.sh /usr/local/bin/dejima-harness-wrapper /usr/local/lib/dejima/git-guard.sh /usr/local/lib/dejima/forge-guard.sh /usr/local/lib/dejima/dejima-briefing-render.sh /usr/local/lib/dejima/hooks/*.sh && \
+  echo 'export PATH="$PATH:/opt/node-tools/bin"' > /etc/profile.d/node-tools-path.sh
+
+# Last instruction that changes the filesystem, and it has to stay last: it
+# removes every setuid bit, setgid bit and file capability in the image and
+# fails the build if one survives, which only holds for what already exists
+# when it runs. A derived per-project layer runs it again at its own end, for
+# the packages it installs after this point - see bin/dejima-project-lib.sh.
+COPY docker/strip-privilege-bits.sh /usr/local/sbin/strip-privilege-bits
+RUN chmod +x /usr/local/sbin/strip-privilege-bits && /usr/local/sbin/strip-privilege-bits
 
 # Entrypoint runs as root (no USER node here) so it can set up the firewall
 # directly, with no sudo/setuid escalation path available to node at any

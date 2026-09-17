@@ -982,12 +982,12 @@ DEJIMA_WORKFLOW_PUSH="$(manifest_get workflow "$DEJIMA_WORKFLOW_NAME" push)"
 # A forge declaring hosts_allowlisted_by_core says its hosts are ones core
 # already allowlists in its own right - the GitHub ranges every session can
 # read from over 443. Those must NOT reach DEJIMA_FORGE_HOSTS, which
-# entrypoint.sh folds into EXTRA_ALLOWED_DOMAINS: that path resolves a name
-# into the port-UNRESTRICTED allowed-domains ipset and exempts it from
-# dnsmasq's stop-dns-rebind, both of which are deliberate for an internal,
-# self-hosted forge host and both of which are a widening for a public one.
-# It would also make init-firewall.sh's startup self-check ("port 22 was
-# reachable without the push grant") fail, killing the container outright.
+# firewall-up.sh puts in the open class: that path permits a name on every
+# port and exempts it from the check that refuses an answer pointing inside a
+# private network, both of which are deliberate for an internal, self-hosted
+# forge host and both of which are a widening for a public one. It would also
+# make the policy's startup self-check ("port 22 was reachable without the
+# push grant") fail, killing the container outright.
 #
 # They still reach DEJIMA_PUSH_HOSTS: git-push-guard.sh's allowlist is a
 # separate question from which names the firewall resolves, and a push to a
@@ -1021,7 +1021,7 @@ fi
 # --allow-github-push's actual effect: git-push-guard.sh only ever checks
 # DEJIMA_PUSH_HOSTS, so granting it a github.com push means adding these
 # hosts to that list, not just exporting ALLOW_GITHUB_PUSH - that variable
-# reaches only init-firewall.sh's port-22 grant and its startup self-check,
+# reaches only the egress policy's port-22 grant and its startup self-check,
 # never the guard. Keyed to the
 # flag alone, not to ALLOW_CORE_PUSH_GRANT: a forge whose own hosts these
 # are has already contributed them above, and adding them twice would leave
@@ -1369,6 +1369,7 @@ DEJIMA_STATE_DIR=""
 # different statement: what the trap must never inherit.
 SANDBOX_BRIEFING_FILE=""
 SANDBOX_CREDENTIAL_PROXY_DIR=""
+SANDBOX_CREDENTIAL_PROXY_LOG=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
 # The same rule, for two names cleanup() hands to `docker rm` rather than to
 # `rm`. An inherited value there removes a container or a network belonging to
@@ -1487,28 +1488,76 @@ cleanup() {
         # retries turns one condition into several identical lines - three
         # 429s four seconds apart was the first real instance - and a list of
         # them says no more than the count does.
-        printf '\n%sThe model API answered with an error this session:%s\n' \
-            "${C_WARN:-}" "${C_RESET:-}" >&2
+        #
         # match() on the whole line rather than a loop over fields. A loop
         # needs an index, and an awk index dereferenced inside single quotes
         # is indistinguishable to the test that every name cleanup() uses is
         # bound before the EXIT trap can fire - it reads one and reports an
         # unbound name. That test is right to be strict, so this stays out of
         # its way rather than asking it to parse quoting.
-        awk '{ if (match($0, /answered [0-9]+/))
-                   n[substr($0, RSTART + 9, RLENGTH - 9)]++ }
+        #
+        # Anchored to the whole line the proxy writes - its prefix, then
+        # `upstream answered N for` or `cannot load|refresh credentials:`,
+        # the spellings in bin/dejima-credential-proxy - not to a phrase
+        # appearing anywhere. The log also carries text chosen elsewhere: an
+        # upstream error-body prefix, an exception echoing the session's
+        # request path. Classified on a floating match, a token endpoint
+        # whose error body said `answered 503` fabricated a status count
+        # here, and a session whose only lines were connection failures was
+        # reported as unable to authenticate. Each section prints on its own
+        # evidence, and a session can have earned both.
+        _audit_counts="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /)) {
+                   match($0, / answered [0-9]+ for /)
+                   n[substr($0, RSTART + 10, RLENGTH - 15)]++ } }
              END { for (s in n) printf "  %d x HTTP %s\n", n[s], s }' \
-            "$SANDBOX_CREDENTIAL_PROXY_LOG" >&2
-        printf '  most recent: %s\n' \
-            "$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
-               | sed 's/^[0-9:]* dejima-credential-proxy: //')" >&2
-        # Said because the count above cannot distinguish them: a harness that
-        # retried a 429 or a 5xx may well have got its answer in the end, so
-        # this is not on its own a session that failed.
-        printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
-        printf '  not a verdict on the session.\n' >&2
+            "$SANDBOX_CREDENTIAL_PROXY_LOG")"
+        _audit_api_last="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /))
+                   line = $0 }
+             END { print line }' "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')"
+        # The `cannot ...` line names what failed; the line the proxy writes
+        # right after it is the remedy, and is the one an operator can act on.
+        _audit_cred="$(awk '
+            { if (match($0, /^[0-9:]* dejima-credential-proxy: cannot (load|refresh) credentials: /)) {
+                  cred = $0; want = NR + 1; remedy = "" }
+              else if (NR == want) remedy = $0 }
+            END { if (cred != "") { print cred; if (remedy != "") print remedy } }' \
+            "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //; s/^/  /')"
+        _audit_last="$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')"
+        if [ -n "$_audit_counts" ]; then
+            printf '\n%sThe model API answered with an error this session:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '%s\n' "$_audit_counts" >&2
+            printf '  most recent: %s\n' "$_audit_api_last" >&2
+            # Said because the count above cannot distinguish them: a harness
+            # that retried a 429 or a 5xx may well have got its answer in the
+            # end, so this is not on its own a session that failed.
+            printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
+            printf '  not a verdict on the session.\n' >&2
+        fi
+        if [ -n "$_audit_cred" ]; then
+            # The proxy logged a failure the API never answered - it could not
+            # load or refresh the credential, and no request was made. Saying
+            # "the model API answered with an error" there sends an operator to
+            # check the provider's availability, and the retry caveat above it
+            # invites them to hope it succeeded anyway. Neither is true.
+            printf '\n%sThe session could not authenticate to the model API:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '%s\n' "$_audit_cred" >&2
+        fi
+        if [ -z "$_audit_counts" ] && [ -z "$_audit_cred" ]; then
+            # Something else: a request that never reached the upstream, a
+            # body the proxy refused. Neither an API answer nor a credential
+            # failure, so this claims neither and shows the line instead.
+            printf '\n%sThe credential proxy reported a problem this session:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '  %s\n' "$_audit_last" >&2
+        fi
+        unset _audit_counts _audit_last _audit_cred _audit_api_last
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # dejima-notify-watch keys its debounce stamps by run id. Removed here,
@@ -2012,6 +2061,9 @@ _suggest_backends() {  # <harness-section-name>
 # declare still stops the launch.
 DEJIMA_BACKEND_NAME=""
 SANDBOX_BACKEND_PROXIED_DOMAIN=""
+# The host of a backend the operator serves themselves, when the selected one
+# has a base_url. Empty for every backend dejima proxies.
+DEJIMA_BACKEND_HOST=""
 DEJIMA_BACKEND_CREDENTIAL_KIND=""
 DEJIMA_BACKEND_CREDENTIAL_FILE=""
 DEJIMA_BACKEND_CREDENTIAL_FIELD=""
@@ -2184,6 +2236,29 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     if config_type "backend.$DEJIMA_BACKEND_NAME.credential_field" >/dev/null 2>&1; then
         DEJIMA_BACKEND_CREDENTIAL_FIELD="$(config_get "backend.$DEJIMA_BACKEND_NAME" credential_field)"
     fi
+    # A backend the operator serves rather than one dejima stands in front of:
+    # where it is comes from their own config, and the sandbox has to be able
+    # to reach it or the session has no model at all.
+    #
+    # Handed to the firewall path the way the forge's hosts and Loki's are.
+    # Without this the endpoint is reachable only if the operator ALSO approves
+    # its name as a domain - which works, and then looks like any other
+    # approved public name, so a self-hosted endpoint on their own network gets
+    # the answer check meant for names nobody reviewed. dejima configured this
+    # address; there is nothing for an answer to decide about it.
+    #
+    # Only for a backend dejima does NOT stand in front of, which today is the
+    # same set as "has a base_url" and is guarded rather than assumed. A
+    # backend with both would be proxied AND have its host permitted and
+    # exempted: that re-opens the DNS bypass leaving a proxied name
+    # unresolvable exists to close, and hands a public SaaS name the exemption
+    # fixed-domains.sh withholds from it on purpose. No manifest declares both,
+    # and this is what keeps that from being a coincidence.
+    if [ -z "$SANDBOX_BACKEND_PROXIED_DOMAIN" ] \
+        && config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1; then
+        DEJIMA_BACKEND_HOST="$(config_get "backend.$DEJIMA_BACKEND_NAME" base_url \
+            | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')"
+    fi
 
 fi
 # Everything staged for the container, checked before anything is put back
@@ -2241,7 +2316,7 @@ SANDBOX_HARNESS_BRIEFING_PATH="$(manifest_get harness "$DEJIMA_HARNESS_NAME" bri
 export SANDBOX_HARNESS_COMMAND SANDBOX_HARNESS_REAL SANDBOX_HARNESS_ARGS \
     SANDBOX_HARNESS_SETTINGS SANDBOX_HARNESS_DOMAINS \
     SANDBOX_BACKEND_PROXIED_DOMAIN SANDBOX_HARNESS_BRIEFING_ARGS \
-    SANDBOX_HARNESS_BRIEFING_PATH
+    SANDBOX_HARNESS_BRIEFING_PATH DEJIMA_BACKEND_HOST
 
 # [core] command defaults to the selected harness's own command rather than
 # to a literal in core's schema.
@@ -2253,6 +2328,86 @@ export SANDBOX_CMD
 # firewall by default.
 ENABLE_FIREWALL="$(config_get_bool core firewall)"; export ENABLE_FIREWALL
 LOKI_URL="$(config_get logging loki_url)"; export LOKI_URL
+
+# Approved names that genuinely resolve inside the operator's own network.
+#
+# The egress policy refuses an answer for a permitted name that points at a
+# private address, because an answer decides what the allowlist contains and an
+# answer comes from outside - so one influenced reply for a public name would
+# otherwise be egress to an internal host. The configured forge and Loki are
+# exempt without being listed here: dejima resolves their addresses itself, so
+# there is nothing for an answer to decide. An approved domain is not, because
+# a project's declared domains are reviewed with the project and expected to be
+# public names.
+#
+# This is for the case where that expectation is wrong on purpose - an internal
+# mirror, a service on the operator's LAN. It exempts and does not grant: a
+# name here is reachable only if it is also approved, and firewall-up.sh stops
+# the launch when one is not, rather than leaving an exemption attached to
+# nothing. Colon-separated in the config file like every other list;
+# space-separated from here on, which is what the firewall scripts read.
+DEJIMA_INTERNAL_DOMAINS="$(config_get core internal_domains | tr ':' ' ')"
+export DEJIMA_INTERNAL_DOMAINS
+
+# Every host that becomes a permitted destination has to name at least two
+# labels, checked here because here is where the operator can act on it.
+#
+# The policy refuses a dotless entry anyway, and correctly: an entry becomes a
+# `server=/<entry>/` line, which dnsmasq matches against the name and
+# everything under it, so a bare label grants its whole suffix - `org` would
+# permit every .org name. There is no exact-name form to use instead. Refusing
+# one here is a floor on how much a single entry can grant, not a judgement
+# about the name.
+#
+# But the policy refuses it at container start, which an operator meets as a
+# sandbox that will not boot, on a value every check on the way in accepted.
+# `valid_domain` cannot simply require a dot: it also gates host-side consumers
+# where a bare label is fine. So the requirement lives with the keys that reach
+# the firewall, and names the one it found.
+#
+# The derived hosts are checked, not the values they came from. A URL yields
+# its host through a sed, and a slip there - a `base_url` carrying userinfo
+# reduces to the user name - produces a bare label nobody typed. That is the
+# case this most wants to catch, because it is the one nobody would look for.
+_require_fqdn() {  # <config key, for the message> <host>
+    [ -n "$2" ] || return 0
+    # A host name with at least two labels. Counting dots alone would pass the
+    # residue of a derivation that went wrong in a way that happens to leave
+    # one: `https://user@host.example/` reduces to `user@host.example`, and
+    # `http://loki./` to `loki.`, neither of which is a host name. Those are the
+    # slips this exists to catch, so it asks the same question of the value that
+    # the policy will ask, rather than a cheaper one.
+    if valid_domain "$2"; then
+        case "$2" in
+            *.*) return 0 ;;
+        esac
+    fi
+    echo "ERROR: $1 gives the host '$2', which this cannot permit." >&2
+    echo "" >&2
+    echo "A permitted destination has to be a host name of at least two" >&2
+    echo "labels. The sandbox's resolver does not forward a dotless query, so" >&2
+    echo "a bare label would not resolve; and a permitted name covers" >&2
+    echo "everything under it, so a bare label would grant its whole suffix." >&2
+    echo "" >&2
+    echo "If the value came from a URL, check it parses to the host you meant:" >&2
+    echo "userinfo and a trailing dot both survive into the derived name." >&2
+    exit 1
+}
+for _host in ${DEJIMA_FORGE_HOSTS:-}; do
+    _require_fqdn "the configured forge's host" "$_host"
+done
+for _host in ${ALLOWED_DOMAINS:-}; do
+    _require_fqdn "an approved domain" "$_host"
+done
+for _host in ${DEJIMA_INTERNAL_DOMAINS:-}; do
+    _require_fqdn "[core] internal_domains" "$_host"
+done
+_require_fqdn "[backend.$DEJIMA_BACKEND_NAME] base_url" "${DEJIMA_BACKEND_HOST:-}"
+if [ -n "${LOKI_URL:-}" ]; then
+    _require_fqdn "[logging] loki_url" \
+        "$(echo "$LOKI_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*##')"
+fi
+unset _host
 
 # ~/.claude/hooks may contain symlinks whose real targets live outside
 # ~/.claude (this repo's own hooks/, and potentially others - e.g. dotfiles'
@@ -2649,10 +2804,15 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
     SANDBOX_CREDENTIAL_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_CREDENTIAL_PROXY_SOCKET="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.sock"
+    # Outside SANDBOX_CREDENTIAL_PROXY_DIR, which is bind-mounted into the
+    # session below so the socket is reachable. The log holds what the proxy
+    # learned from the provider - statuses, error-body prefixes - and
+    # docs/security.md says that stays on the host, so it must not share the
+    # one proxy path the session can read.
+    SANDBOX_CREDENTIAL_PROXY_LOG="$(mktemp "${TMPDIR:-/tmp}/dejima-credential-proxy-log.XXXXXX")"
     # Every value comes from backends/<name>/backend.conf. Nothing about a
     # backend is written here, which is what makes adding one a directory
     # rather than an edit to this file.
-    SANDBOX_CREDENTIAL_PROXY_LOG="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.log"
     _proxy_args=(
         --socket "$SANDBOX_CREDENTIAL_PROXY_SOCKET"
         --log "$SANDBOX_CREDENTIAL_PROXY_LOG"
@@ -3383,7 +3543,8 @@ reconcile_orphans || true
 
 # One network per launch, for two reasons, and the first is not optional:
 # Docker's embedded resolver at 127.0.0.11 exists only on a user-defined
-# network, and dns-proxy.sh forwards to it. The second is that concurrent
+# network, and the restricted resolver forwards to it. The second is that
+# concurrent
 # sessions are then separated at the link layer as well, rather than only by
 # each namespace's own egress default-deny.
 docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK" >/dev/null
@@ -3404,6 +3565,8 @@ filter_env=(
     -e ALLOW_GITHUB_PUSH     # whether port 22 to GitHub opens
     -e GH_TOKEN              # authenticates the GitHub ranges fetch
     -e LOKI_URL              # its host is allowlisted, and the shipper needs it
+    -e DEJIMA_INTERNAL_DOMAINS  # approved names that really do resolve inside
+    -e DEJIMA_BACKEND_HOST   # a self-served model's host, from its base_url
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET
@@ -3413,12 +3576,13 @@ filter_env=(
 # owns needs. Every one of these used to be in docker-compose.yml, and none of
 # them belongs to a container running a session:
 #
-#   NET_ADMIN, NET_RAW   the packet filter and the ipsets
-#   KILL                 dnsmasq drops to its own user, and dejima-allow
-#                        signals it to add a domain mid-session
+#   NET_ADMIN, NET_RAW   the packet filter and its named address sets, which
+#                        the resolver also writes into as it answers
+#   KILL                 the resolver drops to its own user, and dejima-allow
+#                        restarts it to add a domain mid-session
 #   CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID
-#                        dns-proxy.sh's log file, and the two daemons that
-#                        drop privilege after opening what they need
+#                        the log files, and the daemons that drop privilege
+#                        after opening what they need
 #   SETPCAP              spent taking the rest away from log-shipper.sh
 #
 # The sysctl lets the credential proxy's TLS terminator bind :443 as the

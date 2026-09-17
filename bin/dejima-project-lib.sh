@@ -262,6 +262,27 @@ valid_tool_name() {
     provider_dir tool "$1" >/dev/null 2>&1
 }
 
+# A domain a project may ask to reach, which is narrower than a valid host
+# name: it has to name at least two labels.
+#
+# A permitted name covers everything under it - the resolver is configured per
+# name and matches the name and its subdomains, with no exact-name form to use
+# instead - so a bare label grants its whole suffix, and `org` would ask for
+# every .org name. The floor is what keeps one entry from being that large.
+#
+# `valid_domain` stays as it is, because it also gates host-side consumers
+# where a single label is an ordinary thing to write. This is the rule for
+# entries that reach the firewall, refused at declaration time so the operator
+# is told while they are looking at the file rather than by a sandbox that
+# will not start.
+valid_permitted_domain() {
+    valid_domain "$1" || return 1
+    case "$1" in
+        *.*) return 0 ;;
+    esac
+    return 1
+}
+
 valid_corpus_rule() {
     case " $DEJIMA_CORPUS_RULES " in
         *" $1 "*) return 0 ;;
@@ -291,6 +312,19 @@ approve_entry() {
     local store="$1" kind="$2" entry="$3" validator
     validator="$(_approved_validator "$kind")" || return 1
     "$validator" "$entry" || { echo "Invalid $kind entry: $entry" >&2; return 1; }
+    # Granting is where the narrower rule belongs, not reading. An approval
+    # already in the store was valid when it was made, and a rule that tightens
+    # afterwards must not turn it into the corruption message below - that
+    # message means tampering, and it would be saying so about the operator's
+    # own file on every launch.
+    if [ "$kind" = allowed-domains ] && ! valid_permitted_domain "$entry"; then
+        echo "Not a domain this can permit: $entry" >&2
+        echo "A permitted destination has to name at least two labels. The" >&2
+        echo "sandbox's resolver does not forward a dotless query, and a bare" >&2
+        echo "label would be permitted as a suffix, covering every name under" >&2
+        echo "it. Use the fully qualified name." >&2
+        return 1
+    fi
     touch "$store/$kind"
     grep -qxF "$entry" "$store/$kind" || printf '%s\n' "$entry" >> "$store/$kind"
 }
@@ -481,7 +515,7 @@ _emit_tarball_layers() {
 # Installs run at BUILD time, where there's no egress firewall - which is
 # why this is a derived image rather than an install step in entrypoint.sh:
 # the latter would need apt/npm/PyPI/crates.io reachable as root before
-# init-firewall.sh locks egress down.
+# the egress policy locks egress down.
 generate_derived_dockerfile() {
     local base="$1" store="$2" entries
     entries="$(approved_entries "$store" dependencies)" \
@@ -574,6 +608,12 @@ generate_spec_dockerfile() {
     # above left behind - entrypoint.sh must still start as root and drop
     # via gosu, with no escalation path for the session user.
     printf 'USER root\n'
+    # The base image swept its own setuid bits and file capabilities, and then
+    # the apt/pip/tarball layers above installed more software on top. Sweep
+    # again here, so a project declaring a dependency that happens to ship a
+    # setuid binary fails its build rather than handing every session on that
+    # project an escalation path the base image was careful not to have.
+    printf 'RUN /usr/local/sbin/strip-privilege-bits\n'
     printf 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n'
     return 0
 }

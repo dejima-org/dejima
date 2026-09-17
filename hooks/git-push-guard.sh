@@ -7,7 +7,7 @@
 # not a hard security boundary - a sandbox session has full shell access
 # and could in principle edit .git/config or re-export these variables to
 # route around it; that is true today and is not a regression, and the
-# firewall (see init-firewall.sh) is the actual boundary. No-op outside the
+# firewall (see docker/egress-policy) is the actual boundary. No-op outside the
 # sandbox (DEJIMA unset), since this restriction doesn't apply to normal
 # host usage.
 #
