@@ -2287,7 +2287,7 @@ _reference_has_key() {  # <doc> <section> <leaf>
     {
         printf 'TABLE=t; ENTRIES_FILE=%q\n' "$BATS_TEST_TMPDIR/ents"
         printf 'FORGE_ENTRIES="github.com"; OPEN_ENTRIES="Git.Example.Com"\n'
-        printf 'INTERNAL_OK="git.example.com"; INTERNAL_OK_HINT=hint\n'
+        printf 'INTERNAL_OK="GIT.example.com."; INTERNAL_OK_HINT=hint\n'
         printf 'die() { echo "REFUSED: $*"; exit 1; }\nsay() { :; }\n'
         sed -n '/^classify_entry()/,/^}/p' "$SANDBOX_DIR/egress-policy"
         sed -n '/^record_entries()/,/^}/p' "$SANDBOX_DIR/egress-policy"
@@ -2298,9 +2298,14 @@ _reference_has_key() {  # <doc> <section> <leaf>
     run bash "$script"
     [ "$status" -eq 0 ] \
         || { echo "a case difference refused the launch: $output"; return 1; }
+    # The exemption is recorded, not just tolerated: an entry the check above
+    # accepts but record_entries writes as strict is refused one layer later
+    # still, by the rebind check on the name's internal answer.
+    grep -q ' internal-ok Git\.Example\.Com$' "$BATS_TEST_TMPDIR/ents" \
+        || { echo "the exemption was not recorded for a case-mismatched pair:"; cat "$BATS_TEST_TMPDIR/ents"; return 1; }
 
     # And a name nothing permits is still refused, whatever its case.
-    sed -i 's/INTERNAL_OK="git.example.com"/INTERNAL_OK="Never.Approved.Example.Com"/' "$script"
+    sed -i 's/INTERNAL_OK="GIT.example.com."/INTERNAL_OK="Never.Approved.Example.Com"/' "$script"
     run bash "$script"
     [ "$status" -ne 0 ] \
         || { echo "an unpermitted name was exempted: $output"; return 1; }

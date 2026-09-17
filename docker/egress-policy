@@ -224,15 +224,23 @@ classify_entry() {
 }
 
 record_entries() {
-  local class=$1 raw=$2 value kind exemption
+  local class=$1 raw=$2 value kind exemption ok_name
   for value in ${raw//,/ }; do
     value=${value%.}
     [ -n "$value" ] || continue
     kind=$(classify_entry "$value")
     exemption=strict
-    case " ${INTERNAL_OK//,/ } " in
-      *" $value "*) exemption=internal-ok ;;
-    esac
+    # Case-folded and dot-stripped on both sides, like build_entries below and
+    # dejima_class_for/dejima_mark_internal on the launcher's side. Compared
+    # verbatim, a pair the launcher had accepted was recorded strict here, and
+    # the boot then refused the name's internal answer while telling the
+    # operator to configure the exemption they had already configured.
+    for ok_name in ${INTERNAL_OK//,/ }; do
+      ok_name=${ok_name%.}
+      if [ "${ok_name,,}" = "${value,,}" ]; then
+        exemption=internal-ok
+      fi
+    done
     if [ "$exemption" = internal-ok ] && [ "$kind" = addr ]; then
       # Harmless, but say so: the check it exempts is a check on answers, and
       # an address the operator typed is not an answer.
