@@ -1804,20 +1804,32 @@ session_pid() {  # [container], defaulting to the file-wide one
 
 @test "every connection attempt is recorded with its verdict" {
     # A refused destination and a permitted one both have to leave a record, or
-    # the log a supervisor reads proves nothing about what the session did.
+    # the log a supervisor reads proves nothing about what the session did. And
+    # each record's verdict has to be the right one, not merely present: the
+    # verdict rides on which NFLOG group the rule named, so the two groups
+    # swapped would log every refusal as "allowed" - and a check that only
+    # asked for the field would stay green while it did.
+    local gw
+    gw="$(dexec sh -c "ip route | grep default | cut -d' ' -f3")"
+    [ -n "$gw" ] || { echo "no default route in the session container"; return 1; }
     dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
+    # The bridge gateway is in @host_v4, so this attempt is permitted at the
+    # filter whether or not the host answers on the port - the allow record is
+    # written when the first packet is accepted, not when a service replies.
+    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$gw:9/" 2>/dev/null || true
     local found="" i
     for i in 1 2 3 4 5 6; do
-        if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null; then
+        if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null \
+            && dexec_filter grep -F "$gw" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
             found=yes; break
         fi
         sleep 0.5
     done
     [ -n "$found" ] \
-        || { echo "a refused connection left no record"; dexec_filter tail -5 /var/log/egress-policy/connections.ndjson; return 1; }
+        || { echo "a connection left no record with its verdict"; dexec_filter tail -5 /var/log/egress-policy/connections.ndjson; return 1; }
     run dexec_filter sh -c "grep -F '192.0.2.1' /var/log/egress-policy/connections.ndjson | tail -1"
-    [[ "$output" == *'"action"'* ]] \
-        || { echo "recorded without a verdict field: $output"; return 1; }
+    [[ "$output" == *'"blocked"'* ]] \
+        || { echo "a refused connection was not recorded as blocked: $output"; return 1; }
 }
 
 
