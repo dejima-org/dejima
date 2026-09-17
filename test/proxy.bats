@@ -861,3 +861,94 @@ print(raw.decode().strip())
     [[ "$output" != *"HTTP 400"* ]] \
         || { echo "the last host line still leads with the provider's answer: $output"; return 1; }
 }
+
+# The exit audit in bin/dejima reads this log. Extracted and driven here rather
+# than restated, and fed logs this proxy actually wrote, because the two live in
+# different files and the classification only works if they agree about what a
+# line looks like.
+run_exit_audit() {  # <proxy log>
+    C_WARN='' C_RESET='' SANDBOX_CREDENTIAL_PROXY_LOG="$1" bash -c '
+        C_WARN=""; C_RESET=""
+        SANDBOX_CREDENTIAL_PROXY_LOG="$1"
+        '"$(sed -n '/_audit_counts="\$(awk/,/unset _audit_counts _audit_last/p' \
+              "$REPO_ROOT/bin/dejima")"'
+    ' _ "$1" 2>&1
+}
+
+@test "the exit audit does not report a credential failure as the API answering" {
+    # An overnight expiry logs no upstream status, because no request was made -
+    # the credential could not be loaded. Announcing "the model API answered
+    # with an error" there sends an operator to check the provider, and the
+    # retry caveat invites them to hope it succeeded anyway. Neither is true,
+    # and the line the proxy leaves last is an instruction rather than a status.
+    write_creds -60
+    start_proxy
+    curl -s "http://127.0.0.1:$PORT/oauth-reject" >/dev/null
+    pcurl -o /dev/null -X POST --data '{}' http://x/v1/messages || true
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" != *"model API answered with an error"* ]] \
+        || { echo "reported as the API answering: $output"; return 1; }
+    [[ "$output" != *"may still have succeeded"* ]] \
+        || { echo "invited a retry that cannot succeed: $output"; return 1; }
+    [[ "$output" == *"could not authenticate"* ]] \
+        || { echo "did not say what happened: $output"; return 1; }
+    [[ "$output" == *"log in again"* ]] \
+        || { echo "did not carry the remedy: $output"; return 1; }
+}
+
+@test "an upstream that answered with errors is still reported as one" {
+    # The control: the audit's original purpose has to survive the split.
+    start_proxy
+    pcurl -o /dev/null "http://localhost/status-429"
+    pcurl -o /dev/null "http://localhost/status-429"
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" == *"model API answered with an error"* ]] \
+        || { echo "an upstream error stopped being reported as one: $output"; return 1; }
+    [[ "$output" == *"2 x HTTP 429"* ]] \
+        || { echo "the grouping by status is gone: $output"; return 1; }
+    [[ "$output" == *"may still have succeeded"* ]] \
+        || { echo "the retry caveat is gone from the case it is about: $output"; return 1; }
+}
+
+@test "a request that never reached the upstream is reported as neither case" {
+    # `upstream request failed` carries no status - nothing answered - and no
+    # credential failed either. Classified by "no status lines anywhere", it
+    # read as an authentication failure, sending an operator to log in again
+    # over a connection problem.
+    start_proxy --upstream "http://127.0.0.1:1"
+    pcurl -o /dev/null -X POST --data '{}' http://x/v1/messages || true
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" != *"could not authenticate"* ]] \
+        || { echo "a connection failure read as an authentication failure: $output"; return 1; }
+    [[ "$output" != *"model API answered with an error"* ]] \
+        || { echo "reported as the API answering: $output"; return 1; }
+    [[ "$output" == *"credential proxy reported a problem"* ]] \
+        || { echo "the failure went unreported: $output"; return 1; }
+    [[ "$output" == *"upstream request failed"* ]] \
+        || { echo "the line itself is missing: $output"; return 1; }
+}
+
+@test "upstream text saying 'answered 503' cannot fabricate a status count" {
+    # The refresh failure's detail line carries up to 200 bytes of the token
+    # endpoint's response body - text the upstream chose. Counted wherever
+    # `answered N` appeared, that body minted "1 x HTTP 503" for a session
+    # that made no request, and brought the retry caveat with it. The count
+    # is anchored to the proxy's own `upstream answered N for` lines.
+    write_creds -60
+    start_proxy
+    curl -s "http://127.0.0.1:$PORT/oauth-reject?say=the+upstream+answered+503+today" >/dev/null
+    pcurl -o /dev/null -X POST --data '{}' http://x/v1/messages || true
+
+    run run_exit_audit "$TD/stderr"
+    [[ "$output" != *"model API answered with an error"* ]] \
+        || { echo "an upstream string was counted as an API answer: $output"; return 1; }
+    [[ "$output" != *"HTTP 503"* ]] \
+        || { echo "a status count was minted from body text: $output"; return 1; }
+    [[ "$output" == *"could not authenticate"* ]] \
+        || { echo "the real failure went unreported: $output"; return 1; }
+    [[ "$output" == *"answered 503 today"* ]] \
+        || { echo "the detail line is not shown: $output"; return 1; }
+}

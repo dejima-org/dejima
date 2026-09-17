@@ -16,8 +16,10 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
-STATE = {"oauth_hits": 0, "oauth_last": {}, "returned_401": False, "oauth_reject": False}
+STATE = {"oauth_hits": 0, "oauth_last": {}, "returned_401": False, "oauth_reject": False,
+         "oauth_reject_say": None}
 LOCK = threading.Lock()
 
 
@@ -50,12 +52,15 @@ class Handler(BaseHTTPRequestHandler):
         }).encode())
 
     def _handle(self):
-        if self.path == "/oauth-reject":
+        if self.path.startswith("/oauth-reject"):
             # Make the next refresh fail the way a finished refresh token does.
             # Set rather than always-on, so the ordinary refresh tests keep the
-            # same endpoint.
+            # same endpoint. ?say= replaces the error_description, for tests
+            # about upstream-chosen text landing in the proxy's log.
             with LOCK:
                 STATE["oauth_reject"] = True
+                STATE["oauth_reject_say"] = \
+                    parse_qs(urlsplit(self.path).query).get("say", [None])[0]
             self._send(200, b"ok", "text/plain")
         elif self.path == "/v1/oauth/token":
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -63,11 +68,12 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["oauth_hits"] += 1
                 STATE["oauth_last"] = req
                 reject = STATE.get("oauth_reject")
+                say = STATE.get("oauth_reject_say")
             if reject:
                 # Verbatim from a real overnight expiry.
                 self._send(400, json.dumps({
                     "error": "invalid_grant",
-                    "error_description": "Refresh token expired",
+                    "error_description": say or "Refresh token expired",
                 }).encode())
                 return
             self._send(200, json.dumps({

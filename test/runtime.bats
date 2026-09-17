@@ -1504,6 +1504,29 @@ session_pid() {  # [container], defaulting to the file-wide one
     # container.
     run dexec /usr/local/sbin/strip-privilege-bits --check
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    # And once more outside those roots. --check walks the directories the
+    # sweeper walks, which deliberately exclude /tmp, /run, /mnt and /media -
+    # the sweeper has no reason to visit them, but an image that shipped
+    # something there would go unnoticed by a check scoped to its own sweep.
+    # Cheap because those directories are near-empty in an image.
+    run dexec sh -c 'find /tmp /run /mnt /media -xdev -type f -perm /6000 2>/dev/null; getcap -r /tmp /run /mnt /media 2>/dev/null'
+    [ -z "$output" ] \
+        || { echo "privileged bits outside the swept roots:"; echo "$output"; return 1; }
+
+    # File capabilities over the whole image filesystem, not a directory
+    # union: a capability at a top-level path nobody enumerated - /data/bin
+    # in some future layer - is asserted by nothing else, while setuid gets
+    # the same whole-filesystem walk in the derived-image test below. -xdev
+    # keeps this to the image: /proc, /sys and every bind mount are their own
+    # filesystems, and a capability in the operator's mounted checkout is not
+    # the image's to answer for. A missing getcap prints a marker instead of
+    # nothing, because an empty result has to mean "none found", not "nothing
+    # asked".
+    run dexec sh -c 'command -v getcap >/dev/null || { echo getcap-missing; exit 1; }
+        find / -xdev -type f -print0 2>/dev/null | xargs -0 -r getcap 2>/dev/null || true'
+    [ -z "$output" ] \
+        || { echo "a file capability survived somewhere in the image (or getcap is gone):"; echo "$output"; return 1; }
 }
 
 @test "the session shell is bash, configured by the image, with history appended" {
@@ -1795,20 +1818,32 @@ session_pid() {  # [container], defaulting to the file-wide one
 
 @test "every connection attempt is recorded with its verdict" {
     # A refused destination and a permitted one both have to leave a record, or
-    # the log a supervisor reads proves nothing about what the session did.
+    # the log a supervisor reads proves nothing about what the session did. And
+    # each record's verdict has to be the right one, not merely present: the
+    # verdict rides on which NFLOG group the rule named, so the two groups
+    # swapped would log every refusal as "allowed" - and a check that only
+    # asked for the field would stay green while it did.
+    local gw
+    gw="$(dexec sh -c "ip route | grep default | cut -d' ' -f3")"
+    [ -n "$gw" ] || { echo "no default route in the session container"; return 1; }
     dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
+    # The bridge gateway is in @host_v4, so this attempt is permitted at the
+    # filter whether or not the host answers on the port - the allow record is
+    # written when the first packet is accepted, not when a service replies.
+    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$gw:9/" 2>/dev/null || true
     local found="" i
     for i in 1 2 3 4 5 6; do
-        if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null; then
+        if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null \
+            && dexec_filter grep -F "$gw" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
             found=yes; break
         fi
         sleep 0.5
     done
     [ -n "$found" ] \
-        || { echo "a refused connection left no record"; dexec_filter tail -5 /var/log/egress-policy/connections.ndjson; return 1; }
+        || { echo "a connection left no record with its verdict"; dexec_filter tail -5 /var/log/egress-policy/connections.ndjson; return 1; }
     run dexec_filter sh -c "grep -F '192.0.2.1' /var/log/egress-policy/connections.ndjson | tail -1"
-    [[ "$output" == *'"action"'* ]] \
-        || { echo "recorded without a verdict field: $output"; return 1; }
+    [[ "$output" == *'"blocked"'* ]] \
+        || { echo "a refused connection was not recorded as blocked: $output"; return 1; }
 }
 
 

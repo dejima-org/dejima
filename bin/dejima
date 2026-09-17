@@ -1369,6 +1369,7 @@ DEJIMA_STATE_DIR=""
 # different statement: what the trap must never inherit.
 SANDBOX_BRIEFING_FILE=""
 SANDBOX_CREDENTIAL_PROXY_DIR=""
+SANDBOX_CREDENTIAL_PROXY_LOG=""
 SANDBOX_FAKE_CREDENTIALS_FILE=""
 # The same rule, for two names cleanup() hands to `docker rm` rather than to
 # `rm`. An inherited value there removes a container or a network belonging to
@@ -1487,28 +1488,76 @@ cleanup() {
         # retries turns one condition into several identical lines - three
         # 429s four seconds apart was the first real instance - and a list of
         # them says no more than the count does.
-        printf '\n%sThe model API answered with an error this session:%s\n' \
-            "${C_WARN:-}" "${C_RESET:-}" >&2
+        #
         # match() on the whole line rather than a loop over fields. A loop
         # needs an index, and an awk index dereferenced inside single quotes
         # is indistinguishable to the test that every name cleanup() uses is
         # bound before the EXIT trap can fire - it reads one and reports an
         # unbound name. That test is right to be strict, so this stays out of
         # its way rather than asking it to parse quoting.
-        awk '{ if (match($0, /answered [0-9]+/))
-                   n[substr($0, RSTART + 9, RLENGTH - 9)]++ }
+        #
+        # Anchored to the whole line the proxy writes - its prefix, then
+        # `upstream answered N for` or `cannot load|refresh credentials:`,
+        # the spellings in bin/dejima-credential-proxy - not to a phrase
+        # appearing anywhere. The log also carries text chosen elsewhere: an
+        # upstream error-body prefix, an exception echoing the session's
+        # request path. Classified on a floating match, a token endpoint
+        # whose error body said `answered 503` fabricated a status count
+        # here, and a session whose only lines were connection failures was
+        # reported as unable to authenticate. Each section prints on its own
+        # evidence, and a session can have earned both.
+        _audit_counts="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /)) {
+                   match($0, / answered [0-9]+ for /)
+                   n[substr($0, RSTART + 10, RLENGTH - 15)]++ } }
              END { for (s in n) printf "  %d x HTTP %s\n", n[s], s }' \
-            "$SANDBOX_CREDENTIAL_PROXY_LOG" >&2
-        printf '  most recent: %s\n' \
-            "$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
-               | sed 's/^[0-9:]* dejima-credential-proxy: //')" >&2
-        # Said because the count above cannot distinguish them: a harness that
-        # retried a 429 or a 5xx may well have got its answer in the end, so
-        # this is not on its own a session that failed.
-        printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
-        printf '  not a verdict on the session.\n' >&2
+            "$SANDBOX_CREDENTIAL_PROXY_LOG")"
+        _audit_api_last="$(awk '{ if (match($0, /^[0-9:]* dejima-credential-proxy: upstream answered [0-9]+ for /))
+                   line = $0 }
+             END { print line }' "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')"
+        # The `cannot ...` line names what failed; the line the proxy writes
+        # right after it is the remedy, and is the one an operator can act on.
+        _audit_cred="$(awk '
+            { if (match($0, /^[0-9:]* dejima-credential-proxy: cannot (load|refresh) credentials: /)) {
+                  cred = $0; want = NR + 1; remedy = "" }
+              else if (NR == want) remedy = $0 }
+            END { if (cred != "") { print cred; if (remedy != "") print remedy } }' \
+            "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //; s/^/  /')"
+        _audit_last="$(tail -n 1 "$SANDBOX_CREDENTIAL_PROXY_LOG" \
+               | sed 's/^[0-9:]* dejima-credential-proxy: //')"
+        if [ -n "$_audit_counts" ]; then
+            printf '\n%sThe model API answered with an error this session:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '%s\n' "$_audit_counts" >&2
+            printf '  most recent: %s\n' "$_audit_api_last" >&2
+            # Said because the count above cannot distinguish them: a harness
+            # that retried a 429 or a 5xx may well have got its answer in the
+            # end, so this is not on its own a session that failed.
+            printf '  A retried status may still have succeeded; this is what the API said,\n' >&2
+            printf '  not a verdict on the session.\n' >&2
+        fi
+        if [ -n "$_audit_cred" ]; then
+            # The proxy logged a failure the API never answered - it could not
+            # load or refresh the credential, and no request was made. Saying
+            # "the model API answered with an error" there sends an operator to
+            # check the provider's availability, and the retry caveat above it
+            # invites them to hope it succeeded anyway. Neither is true.
+            printf '\n%sThe session could not authenticate to the model API:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '%s\n' "$_audit_cred" >&2
+        fi
+        if [ -z "$_audit_counts" ] && [ -z "$_audit_cred" ]; then
+            # Something else: a request that never reached the upstream, a
+            # body the proxy refused. Neither an API answer nor a credential
+            # failure, so this claims neither and shows the line instead.
+            printf '\n%sThe credential proxy reported a problem this session:%s\n' \
+                "${C_WARN:-}" "${C_RESET:-}" >&2
+            printf '  %s\n' "$_audit_last" >&2
+        fi
+        unset _audit_counts _audit_last _audit_cred _audit_api_last
     fi
-    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" || true
+    rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" || true
     rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # dejima-notify-watch keys its debounce stamps by run id. Removed here,
@@ -2755,10 +2804,15 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
     && _credential_usable "$DEJIMA_BACKEND_CREDENTIAL_KIND" "$DEJIMA_BACKEND_CREDENTIAL_FILE" "$DEJIMA_BACKEND_CREDENTIAL_FIELD"; then
     SANDBOX_CREDENTIAL_PROXY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-credential-proxy.XXXXXX")"
     SANDBOX_CREDENTIAL_PROXY_SOCKET="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.sock"
+    # Outside SANDBOX_CREDENTIAL_PROXY_DIR, which is bind-mounted into the
+    # session below so the socket is reachable. The log holds what the proxy
+    # learned from the provider - statuses, error-body prefixes - and
+    # docs/security.md says that stays on the host, so it must not share the
+    # one proxy path the session can read.
+    SANDBOX_CREDENTIAL_PROXY_LOG="$(mktemp "${TMPDIR:-/tmp}/dejima-credential-proxy-log.XXXXXX")"
     # Every value comes from backends/<name>/backend.conf. Nothing about a
     # backend is written here, which is what makes adding one a directory
     # rather than an edit to this file.
-    SANDBOX_CREDENTIAL_PROXY_LOG="$SANDBOX_CREDENTIAL_PROXY_DIR/proxy.log"
     _proxy_args=(
         --socket "$SANDBOX_CREDENTIAL_PROXY_SOCKET"
         --log "$SANDBOX_CREDENTIAL_PROXY_LOG"

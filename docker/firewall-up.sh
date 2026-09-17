@@ -101,8 +101,28 @@ fi
 
 _join() { local IFS=' '; echo "${*:-}"; }
 
-EGRESS_FORGE_NAMES="$(_join ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"})"
-EGRESS_ALLOWED_NAMES="$(_join ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"})"
+# The forge class wins wherever the two overlap, applied here rather than
+# asserted in a comment. Every route into the open class is normalised, not just
+# the approved-domains loop: the built-in list carries
+# release-assets.githubusercontent.com, which is under a forge suffix, and a
+# harness or backend domain under one would arrive the same way. Left alone, such
+# a name gets a resolver line more specific than the suffix entry, feeding the
+# open-class set - and the port restriction then rests on the forge's published
+# ranges alone, which is one layer where the design has two.
+_forge_extra=""
+_open_kept=""
+for _domain in ${DEJIMA_OPEN_CLASS[@]+"${DEJIMA_OPEN_CLASS[@]}"}; do
+    if [ "$(dejima_class_for "$_domain")" = forge ]; then
+        _forge_extra="$_forge_extra $_domain"
+    else
+        _open_kept="$_open_kept $_domain"
+    fi
+done
+
+# shellcheck disable=SC2086
+EGRESS_FORGE_NAMES="$(_join ${DEJIMA_FORGE_CLASS[@]+"${DEJIMA_FORGE_CLASS[@]}"} $_forge_extra)"
+# shellcheck disable=SC2086
+EGRESS_ALLOWED_NAMES="$(_join $_open_kept)"
 EGRESS_INTERNAL_OK="$(_join ${DEJIMA_INTERNAL_CLASS[@]+"${DEJIMA_INTERNAL_CLASS[@]}"})"
 # What the policy should call that list when it tells an operator to add
 # something to it. It knows the variable it reads; only dejima knows the

@@ -570,6 +570,14 @@ EOF
         || { echo "the resolver config does not get its set from set_for_class"; return 1; }
     grep -q 'want=\$(set_for_class "\$class")' "$p" \
         || { echo "the sweep does not get its set from set_for_class"; return 1; }
+    # Including the live add, which named its own set for a while after this
+    # comment claimed it did not. A `dejima-allow` looking in a different set
+    # from the one being filled reports a permitted name as unreachable, or the
+    # reverse.
+    [ "$(grep -c 'set_prefix' "$p")" -eq 0 ] \
+        || { echo "something still spells a set name for itself:"; grep -n 'set_prefix' "$p"; return 1; }
+    sed -n '/^permit_name()/,/^}/p' "$p" | grep -q 'set_for_class' \
+        || { echo "the live add does not get its set from set_for_class"; return 1; }
 
     # And the function answers correctly for both classes, driven rather than read.
     run bash -c 'eval "$(sed -n "/^set_for_class()/,/^}/p" "$1")"; set_for_class forge; echo; set_for_class open' _ "$p"
@@ -800,19 +808,60 @@ EOF
         || { echo "the sandbox user's HISTFILE was left unset, so the guard is too broad"; return 1; }
 }
 
+# True when a Dockerfile RUN line INVOKES the sweeper, rather than merely
+# mentioning its path. `chmod +x /usr/local/sbin/strip-privilege-bits` contains
+# the path and runs nothing, and so does a commented-out line - both of which
+# satisfied a substring grep, so the sweep could be disabled with its test green.
+_runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
+    local line="${1#*:}" seg
+    case "$line" in RUN\ *) line="${line#RUN }" ;; *) return 1 ;; esac
+    while IFS= read -r seg; do
+        seg="${seg#"${seg%%[![:space:]]*}"}"
+        case "$seg" in
+            /usr/local/sbin/strip-privilege-bits|/usr/local/sbin/strip-privilege-bits\ *) return 0 ;;
+        esac
+    done < <(printf '%s\n' "$line" | tr ';' '\n' | sed 's/&&/\n/g')
+    return 1
+}
+
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
     # The sweep only covers what exists when it runs, so the base image's copy
     # has to be the last thing that changes the filesystem, and the derived
     # per-project layer - which installs apt/pip/tarball dependencies after the
     # base image is finished - has to run it again at its own end.
+    #
+    # With the sweep disabled the image ships Debian's setuid set - su, mount,
+    # passwd, chsh, ssh-keysign, unix_chkpwd - with no_new_privs as the only
+    # remaining lock, which strip-privilege-bits.sh's own header declines to
+    # rely on. So this asserts the invocation, not the spelling.
     local dockerfile="$SANDBOX_DIR/Dockerfile" last
     [ -f "$SANDBOX_DIR/strip-privilege-bits.sh" ] \
         || { echo "docker/strip-privilege-bits.sh is gone"; return 1; }
     last=$(grep -nE '^(RUN|COPY|ADD) ' "$dockerfile" | tail -1)
-    [[ "$last" == *strip-privilege-bits* ]] \
-        || { echo "the last filesystem-changing instruction is not the sweep: $last"; return 1; }
-    grep -q 'strip-privilege-bits' "$REPO_ROOT/bin/dejima-project-lib.sh" \
-        || { echo "a derived project layer installs packages and never sweeps them"; return 1; }
+    _runs_sweeper "$last" \
+        || { echo "the last instruction does not run the sweep: $last"; return 1; }
+
+    # The derived layer, generated and read rather than grepped: the order is
+    # the whole property and the generator is what decides it.
+    local df store="$BATS_TEST_TMPDIR/store"
+    mkdir -p "$store"
+    printf 'apt:cowsay\n' > "$store/dependencies"
+    df=$(bash -c 'source "$1"; generate_derived_dockerfile "$2" "$3"' \
+            _ "$REPO_ROOT/bin/dejima-project-lib.sh" localhost/base:test "$store") \
+        || { echo "could not generate a derived Dockerfile"; return 1; }
+
+    local n sweep_at=0 install_at=0 line
+    n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        case "$line" in RUN\ *) ;; *) continue ;; esac
+        if _runs_sweeper "$line"; then sweep_at=$n; else install_at=$n; fi
+    done <<< "$df"
+
+    [ "$sweep_at" -gt 0 ] \
+        || { echo "a derived project layer installs packages and never sweeps them:"; echo "$df"; return 1; }
+    [ "$sweep_at" -gt "$install_at" ] \
+        || { echo "the derived layer sweeps before its last install:"; echo "$df"; return 1; }
 }
 
 @test "docker-compose.yml runs an init so orphaned processes get reaped" {
@@ -2226,6 +2275,75 @@ _reference_has_key() {  # <doc> <section> <leaf>
         -- "$SANDBOX_DIR/fixed-domains.sh" api.github.com
     [ "$output" = forge ] \
         || { echo "an uppercase suffix did not match a lowercase name: $output"; return 1; }
+}
+
+@test "the policy matches internal_domains case-insensitively too, like the launcher" {
+    # Third site for the same rule. dejima_class_for and dejima_mark_internal
+    # fold case on the launcher's side; build_entries compared verbatim, so a
+    # pair the launcher had already accepted was refused one layer down, with a
+    # message saying the name was permitted by nothing. A correct configuration
+    # that will not start, from a spelling difference DNS does not recognise.
+    local script="$BATS_TEST_TMPDIR/be.sh"
+    {
+        printf 'TABLE=t; ENTRIES_FILE=%q\n' "$BATS_TEST_TMPDIR/ents"
+        printf 'FORGE_ENTRIES="github.com"; OPEN_ENTRIES="Git.Example.Com"\n'
+        printf 'INTERNAL_OK="GIT.example.com."; INTERNAL_OK_HINT=hint\n'
+        printf 'die() { echo "REFUSED: $*"; exit 1; }\nsay() { :; }\n'
+        sed -n '/^classify_entry()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^record_entries()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        sed -n '/^build_entries()/,/^}/p' "$SANDBOX_DIR/egress-policy"
+        printf 'build_entries forge.example.com && echo booted\n'
+    } > "$script"
+
+    run bash "$script"
+    [ "$status" -eq 0 ] \
+        || { echo "a case difference refused the launch: $output"; return 1; }
+    # The exemption is recorded, not just tolerated: an entry the check above
+    # accepts but record_entries writes as strict is refused one layer later
+    # still, by the rebind check on the name's internal answer.
+    grep -q ' internal-ok Git\.Example\.Com$' "$BATS_TEST_TMPDIR/ents" \
+        || { echo "the exemption was not recorded for a case-mismatched pair:"; cat "$BATS_TEST_TMPDIR/ents"; return 1; }
+
+    # And a name nothing permits is still refused, whatever its case.
+    sed -i 's/INTERNAL_OK="GIT.example.com."/INTERNAL_OK="Never.Approved.Example.Com"/' "$script"
+    run bash "$script"
+    [ "$status" -ne 0 ] \
+        || { echo "an unpermitted name was exempted: $output"; return 1; }
+}
+
+@test "nothing reaches the open class that the forge class covers, whatever route it took" {
+    # The comment in fixed-domains.sh says the forge class wins wherever the two
+    # overlap. Only the approved-domains loop asked, so a name in the built-in
+    # open list that sits under a built-in forge suffix kept the open class -
+    # and release-assets.githubusercontent.com is exactly that. It then gets a
+    # resolver line more specific than the suffix entry, feeding the set with no
+    # port restriction, and the 443 clamp rests on the forge's published ranges
+    # alone. The last release restricted it.
+    #
+    # Asserted over the shipped defaults with nothing else set, because that is
+    # the configuration every operator has before they declare anything.
+    local out
+    out=$(env -i bash -c '
+        set -uo pipefail
+        source "$1"
+        '"$(sed -n '/^_join()/,/^}/p' "$SANDBOX_DIR/firewall-up.sh")"'
+        '"$(sed -n '/^_forge_extra=""/,/^EGRESS_ALLOWED_NAMES=/p' "$SANDBOX_DIR/firewall-up.sh")"'
+        printf "forge:%s\n" "$EGRESS_FORGE_NAMES"
+        printf "open:%s\n" "$EGRESS_ALLOWED_NAMES"
+    ' _ "$SANDBOX_DIR/fixed-domains.sh") || { echo "composition failed: $out"; return 1; }
+
+    local open_names name
+    open_names=$(sed -n 's/^open://p' <<< "$out")
+    [ -n "$open_names" ] || { echo "no open-class names at all: $out"; return 1; }
+    for name in $open_names; do
+        run bash -c 'source "$1"; dejima_class_for "$2"' -- "$SANDBOX_DIR/fixed-domains.sh" "$name"
+        [ "$output" = open ] \
+            || { echo "$name is $output class and reached the open class anyway"; return 1; }
+    done
+
+    # And the name that prompted this is in the forge class rather than dropped.
+    grep -q '^forge:.*release-assets\.githubusercontent\.com' <<< "$out" \
+        || { echo "the overlapping name did not reach the forge class: $out"; return 1; }
 }
 
 @test "internal_domains and the key that permitted the host may differ in case" {
@@ -5088,6 +5206,19 @@ registered_commands() {
     grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIAL_PROXY_DIR:\$SANDBOX_CREDENTIAL_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
     run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
     [ "$status" -ne 0 ]
+}
+
+@test "the proxy's log lives outside the directory the session mounts" {
+    # The socket directory crosses into the session read-only so the socket is
+    # reachable, and the session user's uid is the host user's, so anything in
+    # that directory is readable from inside. The log keeps provider statuses
+    # and error-body prefixes for the exit audit, which docs/security.md says
+    # stay host-side. The only way it lands inside the mount is by being
+    # derived from the mounted path, so the live assignment must not be.
+    run grep -E 'SANDBOX_CREDENTIAL_PROXY_LOG="[^"]' "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "no live assignment of the proxy log"; return 1; }
+    [[ "$output" != *CREDENTIAL_PROXY_DIR* ]] \
+        || { echo "the log is inside the mounted socket directory: $output"; return 1; }
 }
 
 @test "bin/dejima mounts the real credential only when the proxy is off" {
