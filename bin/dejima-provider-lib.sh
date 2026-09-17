@@ -1696,8 +1696,10 @@ What this means:
   and leave the screenshot in ~/shared.
 - Outbound network is restricted to an allowlist (Anthropic's API, the npm
   registry, {{network_allowlist}}, plus anything
-  approved via dejima-allow). Requests to anything else will simply
-  fail to connect. That restriction is not only a limit on your reach: it
+  approved via dejima-allow). Anything else is refused at once rather than
+  left to time out, so a connection that HANGS is not this allowlist - it is
+  something past the sandbox, and from in here the timing is the only thing
+  that tells the two apart. That restriction is not only a limit on your reach: it
   is also what bounds where a prompt injection or a compromised dependency
   in this session could send the user's code or fetch its next instruction
   from. You cannot audit yourself for that from the inside, so the
