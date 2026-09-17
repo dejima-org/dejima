@@ -53,7 +53,9 @@ suites_for() {
         # stores, and the share layout, so a change to it is not one area's.
         bin/dejima-slug-lib.sh)              echo 'share conversation audit static' ;;
         bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo proxy ;;
-        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep|bin/dejima-allow) echo project ;;
+        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) echo project ;;
+        # static.bats asserts on dejima-allow's class wiring as well.
+        bin/dejima-allow)                    echo 'project static' ;;
         bin/dejima-attach|bin/dejima-ttyd|bin/dejima-notify-watch) echo remote ;;
         web/*|systemd/*)                     echo remote ;;
         bin/dejima-provider-lib.sh|bin/dejima-harness-lib.sh) echo providers ;;
@@ -72,6 +74,10 @@ suites_for() {
         .dejima/*)                           echo 'static config project providers' ;;
 
         test/*.bats) local n="${1##*/}"; echo "${n%.bats}" ;;
+        # Fixtures are executed by the suites that consume them, not merely
+        # read: fake-anthropic.py is the upstream in proxy.bats (and in
+        # runtime.bats, which no confined selection can carry).
+        test/fixtures/*)                     echo 'proxy static' ;;
         test/*)                              echo static ;;
 
         *) echo ALL ;;
