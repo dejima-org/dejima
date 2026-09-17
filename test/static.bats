@@ -5203,6 +5203,19 @@ registered_commands() {
     [ "$status" -ne 0 ]
 }
 
+@test "the proxy's log lives outside the directory the session mounts" {
+    # The socket directory crosses into the session read-only so the socket is
+    # reachable, and the session user's uid is the host user's, so anything in
+    # that directory is readable from inside. The log keeps provider statuses
+    # and error-body prefixes for the exit audit, which docs/security.md says
+    # stay host-side. The only way it lands inside the mount is by being
+    # derived from the mounted path, so the live assignment must not be.
+    run grep -E 'SANDBOX_CREDENTIAL_PROXY_LOG="[^"]' "$REPO_ROOT/bin/dejima"
+    [ "$status" -eq 0 ] || { echo "no live assignment of the proxy log"; return 1; }
+    [[ "$output" != *CREDENTIAL_PROXY_DIR* ]] \
+        || { echo "the log is inside the mounted socket directory: $output"; return 1; }
+}
+
 @test "bin/dejima mounts the real credential only when the proxy is off" {
     # With ~/.claude no longer mounted as a whole, the documented
     # SANDBOX_CREDENTIAL_PROXY=0 downgrade no longer gets the credential for

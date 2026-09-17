@@ -794,7 +794,10 @@ only when it names something the operator has to do - "log in again on the
 host" is useful to an agent that would otherwise report itself broken, and
 discloses nothing the session did not already know. The distinction is the
 credential proxy's `CredentialNeedsOperator`, which carries the two separately
-so neither can be sent by accident.
+so neither can be sent by accident. The proxy's own log is bound by the same
+rule - it keeps provider statuses and error-body prefixes for the exit audit -
+so it lives outside the socket directory, which is the one proxy path the
+session mounts.
 
 ### The refreshing OAuth path, in detail
 
