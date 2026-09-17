@@ -2497,10 +2497,26 @@ PY
     # restricts outbound traffic to an allowlist, so a CDN reference would not
     # resolve even from a browser outside it if the operator is on the same
     # restricted network.
+    #
+    # A `data:` URI is exempt and only that: it carries its bytes in the
+    # attribute, so it fetches nothing and neither reason above applies to it.
+    # The favicon is one. Matched per attribute rather than per line, so a data
+    # URI on a line cannot carry a real reference past this beside it.
     local page="$REPO_ROOT/web/index.html"
     [ -f "$page" ]
-    run grep -nEi '<(script|link|img|iframe)[^>]+(src|href)=' "$page"
+    run bash -c "grep -oEi '<(script|link|img|iframe)[^>]+(src|href)=\"[^\"]*\"' '$page' \
+                 | grep -vEi '(src|href)=\"data:'"
     [ "$status" -ne 0 ] || { echo "the page references an external asset: $output" >&2; false; }
+
+    # And the exemption is not a hole: anything that is not a data URI still
+    # fails, checked against a copy rather than trusted.
+    local probe="$BATS_TEST_TMPDIR/probe.html"
+    sed 's|<link rel="icon"|<link rel="stylesheet" href="https://cdn.example.com/x.css"><link rel="icon"|' \
+        "$page" > "$probe"
+    run bash -c "grep -oEi '<(script|link|img|iframe)[^>]+(src|href)=\"[^\"]*\"' '$probe' \
+                 | grep -vEi '(src|href)=\"data:'"
+    [ "$status" -eq 0 ] \
+        || { echo "the check no longer catches a real external reference" >&2; false; }
 }
 
 @test "the terminal page's own unit tests pass" {
