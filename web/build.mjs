@@ -43,6 +43,7 @@ const CLIENT_SOURCES = [
 const MANIFEST_SOURCES = [
   'package-lock.json',
   'src/config.js',
+  'src/favicon.png',
   'src/gestures.js',
   'src/keyboard.js',
   'src/keys.js',
@@ -59,6 +60,7 @@ const MANIFEST_SOURCES = [
 ];
 
 const read = (relative) => readFileSync(join(here, relative), 'utf8');
+const readBytes = (relative) => readFileSync(join(here, relative));
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
 // A literal </script> inside an inlined script would end the element early.
@@ -82,8 +84,9 @@ html = fill(html, 'PAGE_CSS', read('src/page.css'));
 html = fill(html, 'XTERM_JS', escapeForScript(read('node_modules/@xterm/xterm/lib/xterm.js')));
 html = fill(html, 'ADDON_FIT_JS', escapeForScript(read('node_modules/@xterm/addon-fit/lib/addon-fit.js')));
 html = fill(html, 'CLIENT_JS', escapeForScript(client));
+html = fill(html, 'FAVICON_B64', readBytes('src/favicon.png').toString('base64'));
 
-const manifest = MANIFEST_SOURCES.map((file) => `${sha256(read(file))}  ${file}\n`).join('');
+const manifest = MANIFEST_SOURCES.map((file) => `${sha256(readBytes(file))}  ${file}\n`).join('');
 html = html.replace(
   '<!--BUILD_STAMP-->',
   () =>
