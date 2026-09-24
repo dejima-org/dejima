@@ -4109,6 +4109,31 @@ _scan_staged_has_token() {
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
 }
 
+@test "scrubbing two secrets from one array removes both" {
+    # Deleting by document order made each later index stale: the second secret
+    # survived and an innocent value went instead. The staged file is mounted
+    # into the container, so the operator answers "keep it out" and it goes in.
+    #
+    # Driven against the program's own functions rather than a reimplementation
+    # of the ordering, which is the thing under test.
+    local scan="$REPO_ROOT/bin/dejima-credential-scan"
+    run python3 - "$scan" <<'PYEOF'
+import json, sys
+mod = {}
+exec(compile(open(sys.argv[1]).read(), "scan", "exec"), mod)
+doc = {"mcpServers": {"x": {"args": ["sk-SECRET-ONE-aaaaaaaaaaaaaaaaaaaa",
+                                     "sk-SECRET-TWO-bbbbbbbbbbbbbbbbbbbb",
+                                     "--harmless-flag"]}}}
+mod["delete_json_paths"](doc, ["mcpServers.x.args[0]", "mcpServers.x.args[1]"])
+print(json.dumps(doc["mcpServers"]["x"]["args"]))
+PYEOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *SECRET* ]] \
+        || { echo "a secret survived the scrub: $output"; return 1; }
+    [[ "$output" == *harmless-flag* ]] \
+        || { echo "the scrub removed a value that was not a secret: $output"; return 1; }
+}
+
 @test "a standing scrub written by hand is honoured, and holds no value" {
     # Not offered at the prompt, but available to someone who has read what it
     # does - and it is the only way a scrubbed field survives an unattended
