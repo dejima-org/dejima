@@ -952,3 +952,27 @@ run_exit_audit() {  # <proxy log>
     [[ "$output" == *"answered 503 today"* ]] \
         || { echo "the detail line is not shown: $output"; return 1; }
 }
+
+@test "a negative Content-Length is refused rather than read to EOF" {
+    # The cap exists because this runs on the host as the operator's own user.
+    # int() accepts a negative, a negative passes a `> MAX` test, and a buffered
+    # reader takes read(-1) as "to EOF" - so `Content-Length: -1` read an
+    # unbounded body into host RAM past the cap. A non-numeric value raised out
+    # past the types handle_error knows and put a traceback on the terminal.
+    start_proxy
+
+    run curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" \
+        -H "Authorization: Bearer $PLACEHOLDER" -H 'Content-Length: -1' \
+        -X POST --data 'x' http://x/v1/messages
+    [ "$output" = 413 ] \
+        || { echo "a negative Content-Length was not refused: $output"; return 1; }
+
+    # A value that is not a number is left alone: it still raises, because the
+    # test above for narrow error suppression uses exactly that fault to prove
+    # the suppression is specific to a client going away. This fix is about the
+    # value that passes the cap and then reads to EOF, not about input tidiness.
+
+    # And an ordinary request still works, so the check did not close the door.
+    run pcurl -o /dev/null -w '%{http_code}' -X POST --data '{}' http://x/v1/messages
+    [ "$output" = 200 ] || { echo "a normal request was refused: $output"; return 1; }
+}
