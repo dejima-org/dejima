@@ -90,11 +90,17 @@ fi
 # Linked here rather than COPYed into place at build time because both depend
 # on values that are only known per launch: which hosts this forge may be
 # pushed to, and which subcommand this workflow blocks.
-if [ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" ]; then
-    # /usr/local/bin precedes /usr/bin, so this shadows git without moving it
-    # and the guard execs /usr/bin/git directly.
-    ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
-fi
+# Unconditionally, because DEJIMA_PUSH_HOSTS fails CLOSED: empty means no host
+# may be pushed to, which is how a no-forge or non-pushing workflow becomes
+# enforced rather than described. Installing the shadow only when one of these
+# is non-empty inverted that - it was absent in exactly the case it exists for.
+# The shipped default workflow is local-only, which sets push off and no blocked
+# branches, so that case was the ordinary one; a harness declaring no guards had
+# nothing left checking a push at all.
+#
+# /usr/local/bin precedes /usr/bin, so this shadows git without moving it and
+# the guard execs /usr/bin/git directly.
+ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
 
 # Every CLI the shadow has something to do about: the one whose merge a
 # workflow blocks, and every one that writes a body the session authored. More
