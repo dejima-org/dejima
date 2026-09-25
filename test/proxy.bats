@@ -972,7 +972,39 @@ run_exit_audit() {  # <proxy log>
     # the suppression is specific to a client going away. This fix is about the
     # value that passes the cap and then reads to EOF, not about input tidiness.
 
+    # The log says what arrived, which is what tells a hostile negative length
+    # apart from a genuinely oversized upload.
+    grep -q 'Content-Length of -1' "$TD/stderr" \
+        || { echo "the refusal log does not name the offending length:"; cat "$TD/stderr"; return 1; }
+
     # And an ordinary request still works, so the check did not close the door.
     run pcurl -o /dev/null -w '%{http_code}' -X POST --data '{}' http://x/v1/messages
     [ "$output" = 200 ] || { echo "a normal request was refused: $output"; return 1; }
+}
+
+@test "a negative chunk size is refused too, not only Content-Length" {
+    # The two paths share one helper today. A refactor that inlines the chunked
+    # branch - int(readline().split(b";")[0], 16) - puts the unbounded read back
+    # with nothing failing, so the chunked shape is asserted in its own right.
+    start_proxy
+    python3 - "$SOCK" <<'PYEOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: proxy\r\n"
+          b"Authorization: Bearer placeholder\r\n"
+          b"Transfer-Encoding: chunked\r\n\r\n-1\r\n")
+s.settimeout(5)
+try:
+    got = s.recv(200)
+except Exception:
+    got = b"<no answer>"
+print(got.split(b"\r\n")[0].decode("latin-1"))
+s.close()
+PYEOF
+    run cat "$TD/stderr"
+    [[ "$output" == *"chunk size of -1"* ]] \
+        || { echo "a negative chunk size was not refused as one: $output"; return 1; }
+    [[ "$output" != *"Traceback"* ]] \
+        || { echo "it raised instead of being refused: $output"; return 1; }
 }
