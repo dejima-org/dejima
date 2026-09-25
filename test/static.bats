@@ -824,6 +824,61 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     return 1
 }
 
+@test "the git shadow is installed whatever the workflow says, because empty refuses" {
+    # DEJIMA_PUSH_HOSTS fails closed - empty means no host may be pushed to,
+    # which is how a non-pushing workflow becomes enforced rather than
+    # described. Installing the shadow only when it or the blocked-branch list
+    # was non-empty inverted that: absent in exactly the case it exists for.
+    #
+    # The shipped default workflow is local-only, which sets push off and no
+    # blocked branches, so that was the ordinary case - and a harness declaring
+    # no guards had nothing checking a push at all.
+    local ep="$SANDBOX_DIR/entrypoint.sh" line
+    line=$(grep -n 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$ep") \
+        || { echo "the git shadow is not installed at all"; return 1; }
+
+    # Not gated, in any spelling. An `if` is one way to reintroduce this; so are
+    # `[ -n ... ] && ln`, `test -n ... && ln`, and an `if` whose body is not
+    # indented. Three checks rather than one pattern: the command sits at the
+    # top level of the file, carries no test of its own, and the block it lives
+    # in opens no conditional on either list.
+    local n before
+    n=${line%%:*}
+    [[ "${line#*:}" == "ln -sf"* ]] \
+        || { echo "the link is indented, so it sits inside something: $line"; return 1; }
+    grep -qE '(\[|test |&&|\|\|)' <<< "${line#*:}" \
+        && { echo "the link carries a condition of its own: $line"; return 1; }
+    before=$(sed -n "1,${n}p" "$ep" | tac | sed -n '/^fi$/q;p' | tac)
+    grep -qE '^[[:space:]]*(if|elif)[[:space:]].*(DEJIMA_PUSH_HOSTS|DEJIMA_BLOCKED_BRANCHES)' <<< "$before" \
+        && { echo "the shadow is gated on a list that may legitimately be empty:"; echo "$before"; return 1; }
+    true
+}
+
+@test "the git shadow refuses a push when no host is permitted" {
+    # The other half of the reason the shadow is unconditional: empty means
+    # refuse, so shipping it always is fail-closed rather than merely more code.
+    #
+    # Run against the real guard and a real repository, not a copy of its loop
+    # written here. A simulation passes while an early fail-open added above the
+    # loop ships, and fails when the loop is rewritten innocuously - it tests
+    # this file rather than that one.
+    local repo
+    repo="$(_guard_repo)"
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" == *"Blocked by dejima"* ]] \
+        || { echo "an empty host list permitted a push: $output"; return 1; }
+
+    # And with a host permitted, the same invocation is not refused for that
+    # reason - so the refusal above is the empty list and not a broken guard.
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" != *"may only push to"* ]] \
+        || { echo "a permitted host was refused as unpermitted: $output"; return 1; }
+}
+
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
     # The sweep only covers what exists when it runs, so the base image's copy
     # has to be the last thing that changes the filesystem, and the derived
@@ -4412,16 +4467,19 @@ comment forge-cli issue comment"
     [ "$checked" -ge 6 ] || { echo "only checked $checked commands"; return 1; }
 }
 
-@test "the entrypoint links each guard only when it has something to enforce" {
+@test "the forge shadow is linked only when it has something to enforce; the git shadow always" {
     local e="$SANDBOX_DIR/entrypoint.sh"
     grep -q 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$e" \
         || { echo "git is never shadowed"; return 1; }
     grep -q 'ln -sf /usr/local/lib/dejima/forge-guard.sh' "$e" \
         || { echo "the forge CLI is never shadowed"; return 1; }
-    # Both are conditional: a launch with no push hosts and no merge block
-    # should leave PATH as the image left it.
-    grep -q 'if \[ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" \]' "$e" \
-        || { echo "the git shadow is unconditional"; return 1; }
+    # The git shadow is NOT conditional, and that reverses what this test used
+    # to require. Leaving PATH as the image left it is the right instinct for a
+    # shadow with nothing to enforce, and DEJIMA_PUSH_HOSTS is not that: it
+    # fails closed, so empty means every push is refused. Gating on it made the
+    # guard absent in precisely the case it exists for - and the shipped default
+    # workflow is local-only, which sets push off, so that was the ordinary
+    # launch. See the test named for it.
     # The shadow is linked for whatever the forge and workflow between them
     # ask for - a blocked merge, a body to disclose on, or both - and for
     # nothing when they ask for neither.
