@@ -4109,7 +4109,7 @@ _scan_staged_has_token() {
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
 }
 
-@test "scrubbing two secrets from one array removes both" {
+@test "a scrub finds the value again whatever the key is spelled like" {
     # Deleting by document order made each later index stale: the second secret
     # survived and an innocent value went instead. The staged file is mounted
     # into the container, so the operator answers "keep it out" and it goes in.
@@ -4124,14 +4124,29 @@ exec(compile(open(sys.argv[1]).read(), "scan", "exec"), mod)
 doc = {"mcpServers": {"x": {"args": ["sk-SECRET-ONE-aaaaaaaaaaaaaaaaaaaa",
                                      "sk-SECRET-TWO-bbbbbbbbbbbbbbbbbbbb",
                                      "--harmless-flag"]}}}
-mod["delete_json_paths"](doc, ["mcpServers.x.args[0]", "mcpServers.x.args[1]"])
-print(json.dumps(doc["mcpServers"]["x"]["args"]))
+def scrub(doc, want):
+    pairs = list(mod["walk_json"](json.loads(json.dumps(doc))))
+    drop = [parts for p, v, parts in pairs if p in want]
+    out = json.loads(json.dumps(doc))
+    mod["delete_json_components"](out, drop)
+    return out
+
+print(json.dumps(scrub(doc, {"mcpServers.x.args[0]",
+                             "mcpServers.x.args[1]"})["mcpServers"]["x"]["args"]))
+# A key that spells an index, and a key carrying a dot: both used to be
+# re-parsed as traversals, deleting a bystander or raising out of the scrub.
+print(json.dumps(scrub({"x[0]": "sk-SECRET-key", "x": ["innocent"]}, {"x[0]"})))
+print(json.dumps(scrub({"a.b": "sk-SECRET-dotted"}, {"a.b"})))
 PYEOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *SECRET* ]] \
         || { echo "a secret survived the scrub: $output"; return 1; }
     [[ "$output" == *harmless-flag* ]] \
         || { echo "the scrub removed a value that was not a secret: $output"; return 1; }
+    # No line raised: a KeyError here aborts the scrub and bin/dejima then
+    # copies the file in unscrubbed.
+    [ "${#lines[@]}" -eq 3 ] \
+        || { echo "the scrub did not complete for every shape: $output"; return 1; }
 }
 
 @test "a standing scrub written by hand is honoured, and holds no value" {
