@@ -837,27 +837,46 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     line=$(grep -n 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$ep") \
         || { echo "the git shadow is not installed at all"; return 1; }
 
-    # Not inside a conditional on either list. Checked by reading the block the
-    # link sits in rather than by grepping for an `if` anywhere in the file.
+    # Not gated, in any spelling. An `if` is one way to reintroduce this; so are
+    # `[ -n ... ] && ln`, `test -n ... && ln`, and an `if` whose body is not
+    # indented. Three checks rather than one pattern: the command sits at the
+    # top level of the file, carries no test of its own, and the block it lives
+    # in opens no conditional on either list.
     local n before
     n=${line%%:*}
+    [[ "${line#*:}" == "ln -sf"* ]] \
+        || { echo "the link is indented, so it sits inside something: $line"; return 1; }
+    grep -qE '(\[|test |&&|\|\|)' <<< "${line#*:}" \
+        && { echo "the link carries a condition of its own: $line"; return 1; }
     before=$(sed -n "1,${n}p" "$ep" | tac | sed -n '/^fi$/q;p' | tac)
-    grep -qE '^\s*if .*(DEJIMA_PUSH_HOSTS|DEJIMA_BLOCKED_BRANCHES)' <<< "$before" \
-        && { echo "the shadow is still gated on a list that may legitimately be empty:"; echo "$before"; return 1; }
+    grep -qE '^[[:space:]]*(if|elif)[[:space:]].*(DEJIMA_PUSH_HOSTS|DEJIMA_BLOCKED_BRANCHES)' <<< "$before" \
+        && { echo "the shadow is gated on a list that may legitimately be empty:"; echo "$before"; return 1; }
+    true
+}
 
-    # And the shadow really does refuse when the list is empty, so installing it
-    # unconditionally is the fail-closed behaviour and not merely more code.
-    local guard="$SANDBOX_DIR/git-guard.sh"
-    grep -q 'for allowed_host in ${DEJIMA_PUSH_HOSTS:-}' "$guard" \
-        || { echo "the shadow no longer iterates the permitted hosts"; return 1; }
-    run bash -c '
-        DEJIMA_PUSH_HOSTS="" host=example.com
-        host_allowed=0
-        for allowed_host in ${DEJIMA_PUSH_HOSTS:-}; do
-            [ "$host" = "$allowed_host" ] && { host_allowed=1; break; }
-        done
-        echo "$host_allowed"'
-    [ "$output" = 0 ] || { echo "an empty host list permitted a push"; return 1; }
+@test "the git shadow refuses a push when no host is permitted" {
+    # The other half of the reason the shadow is unconditional: empty means
+    # refuse, so shipping it always is fail-closed rather than merely more code.
+    #
+    # Run against the real guard and a real repository, not a copy of its loop
+    # written here. A simulation passes while an early fail-open added above the
+    # loop ships, and fails when the loop is rewritten innocuously - it tests
+    # this file rather than that one.
+    local repo
+    repo="$(_guard_repo)"
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" == *"Blocked by dejima"* ]] \
+        || { echo "an empty host list permitted a push: $output"; return 1; }
+
+    # And with a host permitted, the same invocation is not refused for that
+    # reason - so the refusal above is the empty list and not a broken guard.
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" != *"may only push to"* ]] \
+        || { echo "a permitted host was refused as unpermitted: $output"; return 1; }
 }
 
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
