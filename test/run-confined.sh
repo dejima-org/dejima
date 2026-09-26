@@ -37,38 +37,50 @@ PRIVILEGED=" runtime ci-runner "
 # is a path nobody has decided about, and guessing "none" there is how a change
 # ships having been checked by nothing.
 suites_for() {
+    # Every suite that READS the path, not the one that owns it. static.bats
+    # asserts invariants over the whole tree and config.bats sources most of
+    # the libraries, so both appear far more often than a by-area reading
+    # suggests - and leaving them out is what made the --changed lane report an
+    # edit as green from a selection that never loaded the file.
+    #
+    # The map is checked against the suites mechanically; see the test named
+    # for it in static.bats. Over-selecting costs a suite run, under-selecting
+    # costs a missed regression, so a rule here errs wide.
     case "$1" in
         # Read by nearly every other suite, so a change to one is the whole set.
         bin/dejima|bin/dejima-config-lib.sh) echo ALL ;;
 
-        bin/dejima-audit)                    echo audit ;;
-        bin/dejima-update-check)             echo config ;;
-        bin/dejima-epitaph)                  echo config ;;
+        bin/dejima-audit)                    echo 'audit config proxy remote static' ;;
+        bin/dejima-update-check)             echo 'config project remote static' ;;
+        bin/dejima-epitaph)                  echo 'config static' ;;
         bin/dejima-tty-suspend)              echo static ;;
-        bin/dejima-color-lib.sh)             echo 'remote project' ;;
-        bin/dejima-tui-lib.sh)               echo 'remote project' ;;
-        bin/dejima-conversation-ship)        echo conversation ;;
-        bin/dejima-share)                    echo share ;;
+        bin/dejima-color-lib.sh)             echo 'remote project config static' ;;
+        bin/dejima-tui-lib.sh)               echo 'remote project static' ;;
+        bin/dejima-conversation-ship)        echo 'conversation static' ;;
+        bin/dejima-share)                    echo 'share static' ;;
         # The slug scheme keys the transcript mounts, the epitaph and audit
         # stores, and the share layout, so a change to it is not one area's.
         bin/dejima-slug-lib.sh)              echo 'share conversation audit static' ;;
-        bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo proxy ;;
-        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) echo project ;;
-        # static.bats asserts on dejima-allow's class wiring as well.
-        bin/dejima-allow)                    echo 'project static' ;;
-        bin/dejima-attach|bin/dejima-ttyd|bin/dejima-notify-watch) echo remote ;;
-        web/*|systemd/*)                     echo remote ;;
-        bin/dejima-provider-lib.sh|bin/dejima-harness-lib.sh) echo providers ;;
-        bin/harness/*)                       echo providers ;;
-        forges/*|workflows/*|harnesses/*|tools/*) echo providers ;;
-        install.sh)                          echo config ;;
+        bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo 'proxy static' ;;
+        bin/dejima-credential-scan*)         echo 'config static' ;;
+        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) \
+            echo 'project config launch providers remote static' ;;
+        bin/dejima-allow)                    echo 'project static config' ;;
+        bin/dejima-attach)                   echo 'remote config project static' ;;
+        bin/dejima-ttyd|bin/dejima-notify-watch) echo 'remote config static' ;;
+        web/*|systemd/*)                     echo 'remote static' ;;
+        bin/dejima-provider-lib.sh)          echo 'providers config remote share static' ;;
+        bin/dejima-harness-lib.sh)           echo 'providers config remote static' ;;
+        bin/harness/*)                       echo 'providers remote static' ;;
+        forges/*|workflows/*|harnesses/*|tools/*) echo 'providers static' ;;
+        install.sh)                          echo 'config audit providers remote static' ;;
 
         # static.bats asserts on files it does not own, so a shipped doc or a
         # docker/ file needs it as well as whatever else the change touched -
         # which for docker/ is most things, since the entrypoint and compose
         # file are read by nearly every suite that builds a launch.
         docker/*)                            echo ALL ;;
-        hooks/*)                             echo 'static config providers project' ;;
+        hooks/*)                             echo 'static config providers project remote' ;;
         docs/*|README.md|*.md)               echo static ;;
         .gitea/*|.shellcheckrc)              echo static ;;
         .dejima/*)                           echo 'static config project providers' ;;
