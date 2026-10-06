@@ -3558,6 +3558,12 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # docker-compose.yml declares for the sandbox. A static test reads the same
 # names back out of the firewall scripts, so a script that starts reading a new
 # one fails rather than silently allowlisting less than it was told to.
+# The only two names here this launcher does not derive: they come from the
+# operator's own environment and travel through untouched. Marked exported
+# anyway, so that `-e NAME` carries a value rather than an empty string on a
+# shell where they were set without being exported.
+export EGRESS_HOST_ADDR EGRESS_HOST_PORTS
+
 filter_env=(
     -e ENABLE_FIREWALL       # whether to install rules at all
     -e ALLOWED_DOMAINS       # the operator's approved names
