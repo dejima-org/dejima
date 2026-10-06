@@ -157,7 +157,7 @@ you selected, the second is push access when GitHub *is* your forge.
 | `[forge.gitea] api` | **required** for `forge = gitea` | `https://<gitea host>/api/v1` |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
 | `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file`; see "GitHub push" in [docs/security.md](security.md) |
-| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh`. Read whichever forge is selected, and it should stay read-only |
+| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh`, and it should stay read-only. Read for every session EXCEPT when `[core] forge = github` and `push_token_file` is set: both fill `GH_TOKEN`, the forge's wins, and the launch says so. Which token can push is the half that matters |
 
 ### `[mounts]` - extra host paths
 
