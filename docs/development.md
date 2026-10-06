@@ -121,12 +121,13 @@ that neither the in-memory batch nor the unread tail is lost to the kill that
 ends a session.
 
 One assertion is worth calling out because it can only run for real on a
-Docker host: `runtime.bats` proves that a service bound to the host's
-loopback is unreachable from inside a container while one bound to the
-bridge gateway *is* reachable. The second half is a positive control - it is
-what stops the first from passing in an environment where the container
-reaches nothing at all. That pair is the ttyd front door's whole containment
-argument, so run it before trusting a front door you just set up.
+Docker host: `runtime.bats` proves that a service on the host is unreachable
+from inside a container - bound to loopback, and bound to the bridge gateway
+on a port the policy was not told to open. A second container, given that one
+port, reaches it; that is the positive control, and it is what stops the
+others from passing in an environment where the container reaches nothing at
+all. That set is the ttyd front door's whole containment argument, so run it
+before trusting a front door you just set up.
 
 Every mutation in `runtime.bats` (firewall rules, address-set entries) happens
 inside the test container's own network namespace, same as any other
