@@ -503,7 +503,7 @@ at a fixed host path.
 
 `.dejima.md` at a project's root is that project's agent-instruction file, the
 harness-agnostic equivalent of `CLAUDE.md`, loaded into the session's context
-with no authority over the sandbox itself. A `SessionStart` hook also briefs the
+with no authority over the sandbox itself. dejima also briefs the
 session on where it is running and on the instructions belonging to whichever
 workflow you selected, so a session under `local-only` is told something
 different from one under `worktree-pr`.
