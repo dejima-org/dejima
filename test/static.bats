@@ -10042,3 +10042,77 @@ _collapse() { run "$SANDBOX_DIR/cidr-collapse" "$@"; }
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# The host entry is the only destination in the policy nobody declared: it is
+# the gateway of the default route, and Docker publishes container ports there.
+# Driven for real rather than grepped, because what matters is the rule text nft
+# is handed - see runtime.bats for the same property enforced end to end.
+_host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
+    run env EGRESS_HOST_PORTS="$1" bash -c '
+        set -Eeuo pipefail
+        HOST_PORTS=${EGRESS_HOST_PORTS:-}
+        die() { printf "FAILED: %s\n" "$*" >&2; exit 1; }
+        eval "$(sed -n "/^emit_host_clamp()/,/^}/p;/^validate_host_ports()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+        validate_host_ports
+        emit_host_clamp host_v4'
+}
+
+@test "the host entry opens no port unless it was told one" {
+    _host_clamp ""
+    [ "$status" -eq 0 ]
+    # One rule, and it is the refusal. A permit here would be the unclamped
+    # grant over every port the host publishes.
+    [ "$(grep -c . <<< "$output")" -eq 1 ]
+    [[ "$output" == *"ip daddr @host_v4 goto refuse"* ]]
+    [[ "$output" != *permit* ]]
+}
+
+@test "the host entry permits the ports it was given, and refuses the rest" {
+    _host_clamp "3100"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ip daddr @host_v4 tcp dport { 3100 } goto permit"* ]]
+    # The refusal has to sit immediately after the permission, for the same
+    # reason the forge clamp's does: it is what makes the narrow rule win when
+    # the address is also matched by something wider.
+    [ "$(sed -n '$=' <<< "$output")" -eq 2 ]
+    [[ "$(tail -1 <<< "$output")" == *"goto refuse"* ]]
+
+    # Commas, spaces and both, and a low-high range: each becomes one element,
+    # never an empty one, which nft rejects outright.
+    _host_clamp "22,443"
+    [[ "$output" == *"{ 22, 443 }"* ]]
+    _host_clamp "22 443"
+    [[ "$output" == *"{ 22, 443 }"* ]]
+    _host_clamp "3100, 8443 9090-9095"
+    [[ "$output" == *"{ 3100, 8443, 9090-9095 }"* ]]
+}
+
+@test "EGRESS_HOST_PORTS=any restores the unclamped rule, and says so in the ruleset" {
+    _host_clamp any
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . <<< "$output")" -eq 1 ]
+    [[ "$output" == *"ip daddr @host_v4 goto permit"* ]]
+    [[ "$output" != *refuse* ]]
+}
+
+@test "a port that is not a port stops the container rather than becoming a rule" {
+    # Same reasoning as classify_entry's: a destination that looks configured
+    # and is silently refused is the worst of the three outcomes.
+    for bad in 0 70000 99-11 ssh '443;rm -rf /' '-1' '443/tcp'; do
+        _host_clamp "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad': $output"; return 1; }
+        [[ "$output" == *"EGRESS_HOST_PORTS"* ]] || { echo "'$bad': $output"; return 1; }
+        [[ "$output" != *"goto permit"* ]] || { echo "'$bad' emitted a rule"; return 1; }
+    done
+}
+
+@test "the filter container is given the two variables the host entry reads" {
+    # egress-policy defaults both, and neither has a config key, so the only
+    # way an operator can set them is through the launcher's own run line.
+    # Without this the clamp above would have no escape hatch they could reach.
+    for v in EGRESS_HOST_ADDR EGRESS_HOST_PORTS; do
+        run grep -F -- "-e $v" "$REPO_ROOT/bin/dejima"
+        [ "$status" -eq 0 ] \
+            || { echo "bin/dejima does not pass $v to the filter container"; return 1; }
+    done
+}
