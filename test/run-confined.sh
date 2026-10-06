@@ -264,14 +264,21 @@ wait
 # suite that fails to run at all - a syntax error, or duplicate test names,
 # which bats refuses outright - exits nonzero having run nothing, and reporting
 # that as "0 failures" is how a green board comes to mean nothing.
+#
+# Skips are counted and shown separately because bats emits one as `ok N ...
+# # skip`, so a test that decided not to run is indistinguishable from one that
+# passed. Several here skip on host state - an empty /opt/dejima, a missing
+# tool - so the column is the only thing that says how much of the suite the
+# number above actually covers.
 failed=0
-printf '%-16s %6s %8s\n' suite ran failed
+printf '%-16s %6s %8s %8s\n' suite ran skipped failed
 for s in "${selected[@]}"; do
-    ran="$(grep -cE '^(ok|not ok)' "$out/$s")"
+    emitted="$(grep -cE '^(ok|not ok)' "$out/$s")"
+    n_skipped="$(grep -cE '^ok [0-9]+ .* # skip' "$out/$s")"
     bad="$(grep -cE '^not ok' "$out/$s")"
     status="$(cat "$out/$s.status" 2>/dev/null || echo 1)"
-    printf '%-16s %6s %8s' "$s" "$ran" "$bad"
-    if [ "$ran" -eq 0 ]; then
+    printf '%-16s %6s %8s %8s' "$s" "$(( emitted - n_skipped ))" "$n_skipped" "$bad"
+    if [ "$emitted" -eq 0 ]; then
         printf '   <- ran nothing\n'
         failed=1
     elif [ "$bad" -gt 0 ] || [ "$status" -ne 0 ]; then
@@ -282,14 +289,18 @@ for s in "${selected[@]}"; do
     fi
 done
 
+for s in "${selected[@]}"; do
+    grep -hE '^ok [0-9]+ .* # skip' "$out/$s" | sed -E "s/^ok [0-9]+ /    $s: /"
+done | { grep . && echo "    (skipped, so the counts above do not cover them)"; } || true
+
 if [ "$failed" -ne 0 ]; then
     echo
     for s in "${selected[@]}"; do
-        ran="$(grep -cE '^(ok|not ok)' "$out/$s")"
+        emitted="$(grep -cE '^(ok|not ok)' "$out/$s")"
         bad="$(grep -cE '^not ok' "$out/$s")"
-        { [ "$bad" -gt 0 ] || [ "$ran" -eq 0 ]; } || continue
+        { [ "$bad" -gt 0 ] || [ "$emitted" -eq 0 ]; } || continue
         echo "--- $s"
-        if [ "$ran" -eq 0 ]; then
+        if [ "$emitted" -eq 0 ]; then
             head -20 "$out/$s"
         else
             grep -E '^not ok' -A 20 "$out/$s"
