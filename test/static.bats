@@ -2109,6 +2109,100 @@ _reference_has_key() {  # <doc> <section> <leaf>
     done
 }
 
+@test "a changed path selects every suite that reads it, not just the one that owns it" {
+    # .dejima.md says nothing can tell that a rule is too narrow. A human
+    # cannot; this can. For each mapped path, every suite whose text names its
+    # basename has to appear in that rule's answer - and nearly none did:
+    # bin/dejima-provider-lib.sh selected only `providers` while config.bats
+    # sets LIB= to that very file, and bin/dejima-harness-lib.sh selected a
+    # suite that does not mention it at all.
+    #
+    # Over-selection is safe and under-selection is the bug, so naming a suite
+    # that merely mentions a file in a comment costs a suite run; missing one
+    # reports an edit as green from a lane that never loaded it.
+    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r missing=() bad=()
+    sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" > "$sf"
+    [ -s "$sf" ] || { echo "could not extract suites_for"; return 1; }
+
+    while IFS= read -r path; do
+        mapped="$(bash -c 'source "$1"; suites_for "$2"' _ "$sf" "$path" 2>/dev/null)"
+        [ "$mapped" = ALL ] && continue
+        missing=()
+        # The basename normally, because that is how a suite names a file -
+        # but the full path when the tree holds more than one file by that
+        # name, or web/README.md inherits every mention of the root one.
+        local needle="${path##*/}"
+        [ "$(cd "$REPO_ROOT" && git ls-files "*/$needle" "$needle" | wc -l)" -gt 1 ] \
+            && needle="$path"
+        refs="$(grep -ln -- "$needle" "$REPO_ROOT"/test/*.bats 2>/dev/null \
+                | xargs -r -n1 basename | sed 's/\.bats$//' | sort -u)"
+        for r in $refs; do
+            case "$r" in runtime|ci-runner) continue ;; esac
+            grep -qw "$r" <<< "$mapped" || missing+=("$r")
+        done
+        [ ${#missing[@]} -eq 0 ] || bad+=("$path -> [$mapped] misses: ${missing[*]}")
+    done < <(cd "$REPO_ROOT" && git ls-files 'bin/*' 'hooks/*' 'web/*' 'systemd/*' install.sh)
+
+    [ ${#bad[@]} -eq 0 ] \
+        || { echo "these rules select fewer suites than read the file:"
+             printf '  %s\n' "${bad[@]}"; return 1; }
+}
+
+@test "the release pass names a manual check for the boundary itself" {
+    # Its patterns matched the launcher, the forges, the guards, the web page -
+    # and nothing in the egress policy, the capability floor or the credential
+    # path. So a release that rewrote the firewall was reported as touching
+    # nothing that needs a manual check, over exactly what this project exists
+    # to hold.
+    #
+    # Each path is tested against the script's own patterns rather than against
+    # a list copied here, so a pattern edited to no longer match is caught.
+    local rp="$SANDBOX_DIR/../test/release-pass.sh" pats p path unmatched=()
+    pats="$(grep -oE "^touches '[^']+'" "$rp" | sed "s/^touches '//; s/'$//")"
+    [ -n "$pats" ] || { echo "release-pass.sh declares no touches patterns"; return 1; }
+
+    for path in docker/egress-policy docker/firewall-up.sh docker/fixed-domains.sh \
+                docker/caps-lib.sh bin/dejima-credential-proxy \
+                docker/credential-proxy-forwarder.js backends/anthropic/backend.conf; do
+        local hit=0
+        while IFS= read -r p; do
+            grep -qE "$p" <<< "$path" && { hit=1; break; }
+        done <<< "$pats"
+        [ "$hit" = 1 ] || unmatched+=("$path")
+    done
+    [ ${#unmatched[@]} -eq 0 ] \
+        || { echo "no manual check is named for:"; printf '  %s\n' "${unmatched[@]}"; return 1; }
+}
+
+@test "every shell file in the tree is shellchecked, shebang or not" {
+    # The list is built by matching a shebang, with named exceptions for the
+    # sourced fragments that carry none. That exception list was a pattern
+    # rather than a roll of names precisely so nobody would have to remember to
+    # extend it - and it was still short by one: bin/*-lib.sh went unchecked,
+    # which is dejima-harness-lib.sh, the code deciding which host paths may be
+    # mounted where.
+    #
+    # Derived from the tree rather than from a list here, so the next fragment
+    # added in a new place fails this instead of being silently skipped.
+    local covered f first missing=()
+    covered="$(bash "$REPO_ROOT/test/shellcheck.sh" --list)"
+    while IFS= read -r f; do
+        [ -f "$REPO_ROOT/$f" ] || continue
+        first="$(head -1 "$REPO_ROOT/$f")"
+        case "$first" in
+            '#!'*python*|'#!'*node*|'#!'*perl*) continue ;;   # not shell
+            '#!'*sh*) ;;                                      # shell, by shebang
+            *)
+                # No shebang: a sourced fragment counts, anything else does not.
+                case "$f" in *.sh) ;; *) continue ;; esac ;;
+        esac
+        grep -qx "$f" <<< "$covered" || missing+=("$f")
+    done < <(cd "$REPO_ROOT" && git ls-files | grep -vE '^(web/node_modules|tools/)')
+
+    [ ${#missing[@]} -eq 0 ] \
+        || { echo "not shellchecked:"; printf '  %s\n' "${missing[@]}"; return 1; }
+}
+
 @test "CI runs every confined suite, not just the ones someone remembered" {
     # The matrix in tests.yml is enumerated by hand, and test/run-confined.sh
     # discovers suites from the directory. So a suite added to the tree runs

@@ -308,10 +308,10 @@ emit_host_exec() {
             echo "Harness plugin emitted a host-exec leaf or label containing a tab or newline" >&2
             exit 1 ;;
     esac
-    [ -n "$leaf" ] && [ -n "$label" ] || {
+    if [ -z "$leaf" ] || [ -z "$label" ]; then
         echo "Harness plugin emitted a host-exec surface with no leaf or label" >&2
         exit 1
-    }
+    fi
     DEJIMA_HOST_EXEC+=("$ns"$'\t'"$leaf"$'\t'"$path"$'\t'"$label")
 }
 
