@@ -9967,3 +9967,78 @@ _cline_providers_json() {
         return 1
     }
 }
+
+# cidr-collapse is the only validation between a forge's published ranges
+# document and the live allowlist: egress-policy pipes the fetched ranges and
+# the operator's own forge addresses through it, and loads whatever comes back.
+# Both halves of that matter - the collapse keeps the interval sets small, and
+# the validation is the only thing that looks at what the document contained.
+_collapse() { run "$SANDBOX_DIR/cidr-collapse" "$@"; }
+
+@test "cidr-collapse merges adjacent and nested ranges into the smallest list" {
+    _collapse 192.0.2.0/25 192.0.2.128/25
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # A range already inside another contributes nothing.
+    _collapse 192.0.2.0/24 192.0.2.64/26
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # Not adjacent, so both survive - the collapse must not over-merge, or the
+    # allowlist would grow to cover addresses the forge never published.
+    _collapse 192.0.2.0/25 198.51.100.0/25
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/25
+198.51.100.0/25" ]
+}
+
+@test "cidr-collapse prints v4 before v6 and collapses each family alone" {
+    _collapse 2001:db8::/33 192.0.2.0/24 2001:db8:8000::/33
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24
+2001:db8::/32" ]
+}
+
+@test "cidr-collapse reads stdin when given no arguments" {
+    run bash -c "printf '192.0.2.0/25, 192.0.2.128/25\n' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # Whitespace and commas both separate, because the forge filter and
+    # entries_of produce different shapes into the same pipe.
+    run bash -c "printf '192.0.2.0/25\n192.0.2.128/25 198.51.100.1\n' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24
+198.51.100.1/32" ]
+}
+
+@test "cidr-collapse refuses a malformed range rather than dropping it" {
+    # The whole point: a bad entry from an upstream document has to stop the
+    # caller. Silently skipping it would load a short allowlist and look fine.
+    for bad in 192.0.2.0/33 192.0.2.300/24 'not-an-address' '192.0.2.0-192.0.2.5'; do
+        _collapse 192.0.2.0/25 "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad'"; return 1; }
+        [[ "$output" == *"cidr-collapse:"* ]] || { echo "'$bad': $output"; return 1; }
+        # And prints nothing usable on stdout, so a caller substituting the
+        # output cannot end up with a partial list.
+        [[ "$output" != *"192.0.2.0/25"* ]] || { echo "'$bad' leaked a range"; return 1; }
+    done
+}
+
+@test "cidr-collapse accepts a bare address and a host-bits range" {
+    # entries_of forge addr yields bare addresses, and a published document may
+    # carry host bits; strict=False is what lets both through the same pipe.
+    _collapse 192.0.2.5 192.0.2.1/24
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+}
+
+@test "cidr-collapse on empty input exits clean and prints nothing" {
+    # egress-policy checks for an empty forge list itself and dies with a
+    # message naming the forge; this filter must not be the thing that fails,
+    # or that message is never reached.
+    run bash -c "printf '' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
