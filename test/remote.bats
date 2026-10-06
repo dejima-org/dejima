@@ -2459,7 +2459,7 @@ PY
     local web="$REPO_ROOT/web"
     [ -f "$web/index.html" ]
     [ -f "$web/sources.sha256" ]
-    run bash -c "cd '$web' && sha256sum src/* package-lock.json | LC_ALL=C sort -k2"
+    run bash -c "cd '$web' && sha256sum build.mjs src/* package-lock.json | LC_ALL=C sort -k2"
     [ "$status" -eq 0 ]
     [ "$output" = "$(cat "$web/sources.sha256")" ] || {
         echo "web/sources.sha256 is stale. Rebuild it:" >&2

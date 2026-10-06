@@ -41,6 +41,12 @@ const CLIENT_SOURCES = [
 // needed, since the first alone passes on a commit that rebuilds the manifest
 // and leaves the page behind.
 const MANIFEST_SOURCES = [
+  // The builder itself. Without it, editing this file - the escaping, the fill
+  // order, which sources get inlined - produces a different page with a
+  // byte-identical manifest and stamp, so the staleness check passes on a page
+  // nobody rebuilt. web/README.md defends committing the artifact precisely so
+  // nobody has to run the build, which is what makes that check load-bearing.
+  'build.mjs',
   'package-lock.json',
   'src/config.js',
   'src/favicon.png',
