@@ -10,7 +10,7 @@
 //
 // Usage: npm ci && node build.mjs
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -64,6 +64,16 @@ const MANIFEST_SOURCES = [
   'src/toolbar.js',
   'src/viewport.js'
 ];
+
+// The order above is hand-written because it is load-bearing, so the list
+// cannot be a glob. A src/*.js omitted from it is still hashed into the
+// manifest and still fails no test - it is simply never inlined, and the page
+// is missing a module. Reading the directory catches that at build time.
+const uninlined = readdirSync(join(here, 'src'))
+  .filter((f) => f.endsWith('.js') && !CLIENT_SOURCES.includes(`src/${f}`));
+if (uninlined.length) {
+  throw new Error(`src/*.js not in CLIENT_SOURCES, so never inlined: ${uninlined.join(', ')}`);
+}
 
 const read = (relative) => readFileSync(join(here, relative), 'utf8');
 const readBytes = (relative) => readFileSync(join(here, relative));
