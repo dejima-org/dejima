@@ -27,12 +27,12 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
 
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "Dockerfile never creates a sudoers entry" {
     run grep -i "sudoers" "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "Dockerfile creates a SANDBOX_USER matching the host user, not a hardcoded node" {
@@ -46,13 +46,13 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     # No literal "USER node" anywhere - the mid-build USER switch must use
     # the parametrized variable, not the old hardcoded name.
     run grep -E '^USER\s+node\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -qE '^USER\s+\$SANDBOX_USER\s*$' "$SANDBOX_DIR/Dockerfile"
 }
 
 @test "entrypoint.sh drops privilege via SANDBOX_USER, not a literal node" {
     run grep -E 'gosu "?node\b|--user="?node\b' "$SANDBOX_DIR/entrypoint.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Both spellings, because the session's own drop is not the gosu one: it
     # goes through capsh, which reduces the bounding set in the same process
     # that changes uid. A check that only knew about gosu would keep passing
@@ -928,7 +928,7 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
 
 @test "docker-compose.yml never mounts the Docker socket" {
     run grep -i "docker.sock" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "docker-compose.yml never mounts host SSH/cloud credential directories" {
@@ -937,7 +937,7 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     # as a *destination* path now that it mirrors the host's $HOME, which
     # isn't the same thing as mounting the host's real ~/.ssh directory in.
     run grep -E '^\s*-\s*\$\{HOME\}/\.(ssh|aws|gcloud|azure)(/|:)' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "~/.claude is not mounted as a whole - its contents are enumerated" {
@@ -950,9 +950,9 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     # handing the sandbox the operator's real OAuth token (#50). With no
     # parent mount, a detachment falls through to container-local emptiness.
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude:\$\{HOME\}/\.claude\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude/\.credentials' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 # Whether the selected harness declares a directory its image layer creates.
@@ -1115,7 +1115,7 @@ _declared_config_dirs() {
 
 @test "docker-compose.yml never mounts the whole ~/.claude/projects tree" {
     run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/projects:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the projects tree is mounted whole again:" >&2
         echo "$output" >&2
         false
@@ -1149,7 +1149,7 @@ _declared_config_dirs() {
 # puts chosen content into a later restore there.
 @test "docker-compose.yml never mounts the whole ~/.claude/file-history tree" {
     run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/file-history:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the file-history tree is mounted whole again:" >&2
         echo "$output" >&2
         false
@@ -1176,7 +1176,7 @@ _declared_config_dirs() {
     grep -q 'dejima-slug-lib.sh"$' "$REPO_ROOT/bin/dejima-audit"
     # and neither keeps a private copy of the sed scheme
     run grep -n "s/\[^a-zA-Z0-9\]/-/g" "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "an inline copy of the slug scheme is back:" >&2
         echo "$output" >&2
         false
@@ -1205,13 +1205,13 @@ _declared_config_dirs() {
     # And never mounted at their real paths, which is the property staging
     # exists for: a single-file mount detaches on a host-side rename.
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md|statusline\.sh):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # The staging tree mirrors the destination, so entrypoint.sh names no
     # harness's paths - it installs <rel> at $SANDBOX_HOME/<rel>.
     grep -q 'rel="${staged#/etc/dejima-harness/}"' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'dest="$SANDBOX_HOME/$rel"' "$SANDBOX_DIR/entrypoint.sh"
     run grep -n 'dejima-claude' "$SANDBOX_DIR/entrypoint.sh"
-    [ "$status" -ne 0 ] || { echo "entrypoint still names a harness path"; return 1; }
+    [ "$status" -eq 1 ] || { echo "entrypoint still names a harness path"; return 1; }
 }
 
 @test "~/.claude/hooks is mounted read-only" {
@@ -1421,7 +1421,7 @@ _declared_config_dirs() {
     # bin/dejima instead - see the next test. A hardcoded path here
     # would silently break for anyone whose hooks live somewhere else.
     run grep -i 'dotfiles' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima dynamically discovers and mounts hook-symlink targets" {
@@ -1993,9 +1993,9 @@ _reference_has_key() {  # <doc> <section> <leaf>
     local conf="$REPO_ROOT/tools/rtk/tool.conf"
     [ -f "$conf" ] || { echo "the rtk manifest is gone"; return 1; }
     run grep -nE '^(hook|hooks|install_hook|init)' "$conf"
-    [ "$status" -ne 0 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
     run grep -rn 'rtk init\|rtk hook' "$REPO_ROOT/bin" "$REPO_ROOT/docker" "$REPO_ROOT/hooks"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "something runs rtk's own installer:"; echo "$output"; return 1; }
 
     # And the guards are still registered the way they were - a tool layer
@@ -2030,7 +2030,7 @@ _reference_has_key() {  # <doc> <section> <leaf>
     grep -q 'approved_entries "$(config_root)" tools' "$REPO_ROOT/bin/dejima" \
         || { echo "the launcher no longer reads approved tools"; return 1; }
     run grep -n 'dejima/tools' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the launcher reads the declaration directly:"; echo "$output"; return 1; }
 }
 
@@ -2707,9 +2707,9 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # own settings schema - are the plugin's now. Core creates the file and
     # decides where it is mounted; what goes in it is the harness's.
     run grep -nE '\$HOME/\.claude/(settings\.json|CLAUDE\.md)' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
     run grep -n 'sandbox: {enabled' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] || { echo "core still generates the harness's settings schema"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still generates the harness's settings schema"; return 1; }
 }
 
 @test "the override layer is mounted outside ~/.claude and passed as --settings" {
@@ -2719,7 +2719,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # A container-local path can't be renamed over from the host.
     grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:/etc/dejima-settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     run grep -E '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Which only takes effect if the flag is actually passed. It goes in the
     # wrapper rather than the entrypoint so it also covers invocations the
     # entrypoint never sees (an interactive shell, claudecode.nvim).
@@ -2790,7 +2790,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # Nothing needs them now that sandbox.enabled is forced off - if they
     # come back, it's worth asking why before just re-adding them.
     run grep -E '^\s*(bubblewrap|socat)\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the briefing never tells the agent to worktree outside the mounted project" {
@@ -2802,7 +2802,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # something the hook carries anymore - see providers.bats/config.bats
     # for the hook's own (much narrower) job.
     run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q '.worktrees/' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
@@ -3010,7 +3010,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     local f
     for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue forges/gitea/bin/gitea-actions; do
         run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
-        [ "$status" -ne 0 ]
+        [ "$status" -eq 1 ]
         grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
     done
 }
@@ -3442,7 +3442,7 @@ STUB
     # under the same-looking /actions/runs/N/jobs/M prefix, and it is fine.
     local f="$REPO_ROOT/forges/gitea/bin/gitea-actions"
     run grep -nE '\$\{?GITEA_API\}?[^"]*actions/(runs|jobs)' "$f"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # The three it may use instead, each reachable with plain read access.
     grep -q 'actions/tasks' "$f"
     grep -q 'commits/.*statuses' "$f"
@@ -3457,7 +3457,7 @@ STUB
     # printf for the same reason; this keeps the forge CLIs consistent with
     # them.
     run grep -rn 'column -t' "$REPO_ROOT/forges/"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
@@ -4257,7 +4257,7 @@ _repo_guard_shim() {
     # write is a POST to one endpoint with the verb in the query body, so it
     # matches no subcommand and needs no --method (#245).
     run grep -nEi '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method|\bmutation\b' "$tool"
-    [ "$status" -ne 0 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
 }
 
 # --- the authorship disclosure ----------------------------------------------
@@ -5208,7 +5208,7 @@ registered_commands() {
     [ ! -e "$REPO_ROOT/config/env" ]
     [ ! -e "$REPO_ROOT/bin/dejima-env.sh" ]
     run grep -n 'config/env\|dejima-env' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains' "$REPO_ROOT/bin/dejima"
 }
 
@@ -5357,7 +5357,7 @@ registered_commands() {
     # container would otherwise not have, not a mask over the operator's.
     grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIAL_PROXY_DIR:\$SANDBOX_CREDENTIAL_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
     run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the proxy's log lives outside the directory the session mounts" {
@@ -5562,9 +5562,9 @@ sandbox_context() {
     # --global persists to the host-side approval store now (Task 3); the old
     # sed -i rewrite of config/env's ALLOWED_DOMAINS is gone for good.
     run grep -F 'config/env' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -F 'sed -i' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima scans only the mounted ~/.claude dirs for symlink targets" {
@@ -5612,7 +5612,7 @@ sandbox_context() {
     # hardcoded per filename.
     grep -q 'install -o root -g root -m 555' "$SANDBOX_DIR/entrypoint.sh"
     run grep -F 'extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima refuses to launch rather than silently skip a dangling statusline.sh symlink" {
@@ -5631,7 +5631,7 @@ sandbox_context() {
     grep -q 'if \[ -L "\$_ssrc" \] && \[ ! -e "\$_ssrc" \]' "$REPO_ROOT/bin/dejima"
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/dejima"
     run grep -n '\[ -e "\$HOME/\.claude/\$f" \]' "$REPO_ROOT/bin/harness/claude-code.sh"
-    [ "$status" -ne 0 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
 }
 
 @test "bin/dejima-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
@@ -5725,7 +5725,7 @@ this line is not json'
     n=$(grep -cE '^(container|network)_name\(\).*BATS_RUN_TMPDIR' "$rt")
     [ "$n" -eq 2 ] || { echo "expected 2 helpers keyed on BATS_RUN_TMPDIR, found $n"; return 1; }
     run grep -nE '^(container|network)_name\(\).*BATS_FILE_TMPDIR' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "a name helper is back on BATS_FILE_TMPDIR, whose basename is always 0:" >&2
         echo "$output" >&2
         return 1
@@ -5892,7 +5892,7 @@ STUB
     # an open namespace, passing egress tests for the wrong reason.
     grep -qF "pgrep -x -f 'sleep infinity'" "$REPO_ROOT/test/runtime.bats"
     run grep -nE 'docker exec.*pgrep -x sleep' "$REPO_ROOT/test/runtime.bats"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "dejima-allow has no env-triggered path that skips the live session" {
@@ -5905,7 +5905,7 @@ STUB
     # still name it in a comment explaining why it is gone, and a grep that
     # tripped on its own rationale would have to be deleted to pass.
     run grep -n '\${\?DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -rn --exclude=static.bats 'DEJIMA_ALLOW_SKIP_SESSION=' \
         "$REPO_ROOT/test" "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
@@ -5926,7 +5926,7 @@ STUB
     # read by the reporting/approval path, never by the launcher deciding
     # what to allow.
     run grep -n '\.dejima/' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "docker-compose.yml image honors SANDBOX_IMAGE with today's default" {
@@ -5995,7 +5995,7 @@ STUB
     # A root-context build with the untrusted project as context would let a
     # session's own files influence the image it then runs in.
     run grep -n 'docker build.*"\$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/dejima"
 }
 
@@ -6046,7 +6046,7 @@ STUB
     local cap
     for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
         run grep -nE "^\s*- $cap\s*$" "$c"
-        [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
+        [ "$status" -eq 1 ] || { echo "$cap is declared and nothing uses it"; return 1; }
     done
 }
 
@@ -6068,7 +6068,7 @@ STUB
     local c="$SANDBOX_DIR/docker-compose.yml" cap
     for cap in NET_ADMIN NET_RAW; do
         run grep -nE "^\s*- $cap\s*$" "$c"
-        [ "$status" -ne 0 ] \
+        [ "$status" -eq 1 ] \
             || { echo "the session container declares $cap, so it can reach the filter"; return 1; }
         grep -q -- "--cap-add $cap" "$REPO_ROOT/bin/dejima" \
             || { echo "$cap left the session container without arriving at the filter"; return 1; }
@@ -6084,7 +6084,7 @@ STUB
     # The same split for the one sysctl: a property of a namespace the session
     # container does not own, so it is set by the container that does.
     run grep -nE '^\s*sysctls:' "$c"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the session container declares a sysctl for a namespace it does not own"; return 1; }
     grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
         || { echo "nothing sets the unprivileged port floor the TLS terminator needs"; return 1; }
@@ -6121,7 +6121,7 @@ STUB
         || { echo "a container in the pair runs without no-new-privileges"; return 1; }
 
     run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$pair"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "a capability is hardcoded in the pair:"; echo "$output"; return 1; }
 
     # And the fixture that stands in for a session goes through it, or the
@@ -6159,7 +6159,7 @@ STUB
         "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
     run grep -nE '^\s*extra_mounts\+=.*(PROJECT_STORE|config_root)' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Both greps are literal, so neither can see a mount whose path is
     # computed at run time - and two of those reached the store (#15): a
     # [mounts] readonly entry naming it, and a ~/.claude symlink pointing
@@ -6184,7 +6184,7 @@ STUB
     # could plainly reach. What is left to pin is that it does not go back to
     # reading a file it has no access to.
     run grep -n 'dnsmasq\|servers.conf\|/run/egress-policy' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the probe reads the filter container's files again:"; echo "$output"; return 1; }
     grep -q 'dig +short' "$REPO_ROOT/hooks/dejima-briefing-render.sh" \
         || { echo "nothing asks the resolver whether a declared domain is permitted"; return 1; }
@@ -6263,7 +6263,7 @@ STUB
 @test "the base image ships none of the packages used as dependency fixtures" {
     for pkg in $(grep -oE "apt:[a-z0-9.+-]+" "$REPO_ROOT/test/runtime.bats" | cut -d: -f2 | sort -u); do
         run grep -nE "^ +$pkg \\\\$" "$SANDBOX_DIR/Dockerfile"
-        [ "$status" -ne 0 ] || {
+        [ "$status" -eq 1 ] || {
             echo "$pkg is a dependency-test fixture and is also in the base image" >&2
             false
         }
@@ -6335,7 +6335,7 @@ STUB
     # The context must not travel as a single argv element even so - staying
     # just inside a limit is not the same as not having one.
     run grep -n 'jq -n --arg context' "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "sandbox-context probes each ecosystem once, not once per declared entry" {
@@ -6418,7 +6418,7 @@ EOF
 
 @test "README no longer documents the removed config/env flow" {
     run grep -n 'config/env\|dejima-env' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README documents dejima-dep --global" {
@@ -6478,7 +6478,7 @@ EOF
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
 }
 
 # The CI disclosure is the one part of issue #72 that helps a reader whatever
@@ -6999,7 +6999,7 @@ EOF
     # first one's paths with nothing erroring anywhere. A silent wrong
     # answer, so it gets a test rather than a convention.
     run grep -rn 'config_get["'"'"' ]*harness\.[a-z]' "$REPO_ROOT/bin"
-    [ "$status" -ne 0 ] || { echo "use harness_config_get instead:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "use harness_config_get instead:"; echo "$output"; return 1; }
     grep -q '^harness_config_get()' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
@@ -7054,7 +7054,7 @@ EOF
     done < <(grep -n 'dejima-epitaph' "$REPO_ROOT/bin/dejima" | grep -v '^\s*#')
     for f in "$REPO_ROOT/hooks/sandbox-context.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"; do
         run grep -n 'dejima-epitaph' "$f"
-        [ "$status" -ne 0 ] || { echo "$f reaches for epitaph: $output"; return 1; }
+        [ "$status" -eq 1 ] || { echo "$f reaches for epitaph: $output"; return 1; }
     done
 }
 
@@ -7189,7 +7189,7 @@ EOF
     # is refused without it - but the opening paragraph still read "Claude
     # Code by default", which is the promise that change exists to not make.
     run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     # The same promise in the Usage section's spelling, which survived the
     # first fix because it named the binary rather than the harness.
     run grep -c 'entry point is bare' <<< "$(flat_prose "$REPO_ROOT/README.md")"
@@ -7287,7 +7287,7 @@ EOF
     grep -q 'A label is not a boundary' "$REPO_ROOT/docs/ci.md"
     grep -q 'weakest runner it can reach' "$REPO_ROOT/docs/ci.md"
     run grep -n 'cannot land anywhere else' "$REPO_ROOT/docs/ci.md"
-    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "$output" >&2; false; }
 }
 
 # The shared-identity point is what decides whether an operator's branch
@@ -7540,7 +7540,7 @@ EOF
 @test "the marker-directory check reports rather than repairs" {
     local f="$REPO_ROOT/docker/entrypoint.sh"
     run grep -nE 'chown[^|]*DEJIMA_NOTIFY_DIR|chmod[^|]*DEJIMA_NOTIFY_DIR' "$f"
-    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "$output" >&2; false; }
     grep -q "start a new session with 'dejima'" "$f"
 }
 
@@ -7559,7 +7559,7 @@ EOF
 
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 # The repo is public; the operator's own network is not. Both shapes below
@@ -8141,13 +8141,13 @@ _provider_proxied_domain() {
     # it must break a test rather than silently opening the boundary.
     # ~/.local/share/nvim is mounted (a named volume); its PARENT must not be.
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share/dejima' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "every suite is run by CI, and the two that need their own job have one" {
@@ -8225,20 +8225,20 @@ _provider_proxied_domain() {
     # _briefing_core_preamble is a quoted heredoc rendered by placeholder
     # substitution; a literal $container_id would reach the agent unexpanded.
     run grep -n 'dejima-allow --container \$container_id' "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'dejima-allow --container {{container_id}}' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
 @test "README documents dejima-allow with flags before the domain" {
     grep -q 'dejima-allow --global crates.io' "$REPO_ROOT/README.md"
     run grep -nE 'dejima-allow [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README documents dejima-dep with flags before the spec" {
     grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
     run grep -nE 'dejima-dep (add|remove) [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README does not claim --global/--project patch a running session" {
@@ -8246,7 +8246,7 @@ _provider_proxied_domain() {
     # see bin/dejima-allow. Claiming otherwise sends an operator to expect a
     # live update they will not get.
     run grep -nE 'which also (updates|patches) the running session' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'deliberately do not touch a running container' "$REPO_ROOT/README.md"
 }
 
@@ -8255,7 +8255,7 @@ _provider_proxied_domain() {
     # bin/dejima-project's approve case), so a failure there is a persistence
     # failure, never a live-session one.
     run grep -n 'could not apply to a running session' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'never attempts to patch a running session' "$REPO_ROOT/README.md"
 }
 
@@ -8264,7 +8264,7 @@ _provider_proxied_domain() {
     # the multiple-containers ambiguity check at all - only the bare form
     # (or bare + --container) does. Only the bare form can ever refuse on it.
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the docs say the harness must be signed in on the host first" {
@@ -8301,7 +8301,7 @@ _provider_proxied_domain() {
     # security model becomes one per harness. The plugins are trusted code,
     # so this is held at review time rather than by isolating them.
     run grep -rn 'extra_mounts' "$REPO_ROOT/bin/harness"
-    [ "$status" -ne 0 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
 }
 
 @test "a harness plugin defines only hooks core actually calls" {
@@ -8355,7 +8355,7 @@ _provider_proxied_domain() {
     # bin/, hooks/, docker/ and test/ - and not the provider directories.
     [ -d "$REPO_ROOT/bin/harness" ] || { echo "plugins are not under bin/"; return 1; }
     run grep -rn 'harness_state_mounts\|harness_plugin_load' "$REPO_ROOT/harnesses"
-    [ "$status" -ne 0 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
     sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" | grep -q 'for dir in bin '
 }
 
@@ -8369,11 +8369,11 @@ _provider_proxied_domain() {
     local w="$SANDBOX_DIR/harness-wrapper.sh"
     [ -f "$w" ] || { echo "the generic wrapper is gone"; return 1; }
     run grep -niE 'claude|anthropic' "$w"
-    [ "$status" -ne 0 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
     grep -q 'COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper' \
         "$SANDBOX_DIR/Dockerfile"
     run grep -n 'COPY docker/claude-wrapper' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "the old fixed-name copy is back"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the old fixed-name copy is back"; return 1; }
 }
 
 @test "the wrapper's directory beats the one npm installs the real binary into" {
@@ -8427,7 +8427,7 @@ _provider_proxied_domain() {
     # harness's command name while the manifest's own `command` key was read
     # by nothing.
     run grep -nE '^core\.command\s+identifier\s+claude' "$REPO_ROOT/bin/dejima-config-lib.sh"
-    [ "$status" -ne 0 ] || { echo "core still defaults to a harness command"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still defaults to a harness command"; return 1; }
     grep -qE '^core\.command\s+\?identifier' "$REPO_ROOT/bin/dejima-config-lib.sh"
     grep -q 'SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"' "$REPO_ROOT/bin/dejima"
 }
@@ -8462,7 +8462,7 @@ _provider_proxied_domain() {
     # every guard there is.
     grep -q '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-provider-lib.sh"
     run grep -n '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
-    [ "$status" -ne 0 ] || { echo "the set is defined in two places"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the set is defined in two places"; return 1; }
 }
 
 @test "core gates guard work on the declaration, not on the plugin defining a hook" {
@@ -8476,7 +8476,7 @@ _provider_proxied_domain() {
     # business. install.sh knowing ~/.claude/settings.json's schema is the
     # coupling; it delegates to the harness's plugin now.
     run grep -nE '\.claude/(settings\.json|hooks)' "$REPO_ROOT/install.sh"
-    [ "$status" -ne 0 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
     grep -q 'harness_register_guards' "$REPO_ROOT/install.sh"
     grep -q '^harness_register_guards()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
@@ -8500,14 +8500,14 @@ _provider_proxied_domain() {
     # are a plugin hook rather than a manifest key.
     grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
     run grep -rn 'HOST-CODE-EXECUTION' "$REPO_ROOT/harnesses"
-    [ "$status" -ne 0 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
     run grep -rniE 'host_exec_paths|host_exec_label' "$REPO_ROOT/harnesses" "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
 }
 
 @test "the audit resolves host-execution paths from the harness, not a hardcoded one" {
     run grep -n 'STATUSLINE_PATH' "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
     grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
@@ -8538,7 +8538,7 @@ _provider_proxied_domain() {
     # the file promises about its own provenance are dejima's.
     grep -q 'isCompactSummary' "$REPO_ROOT/bin/harness/claude-code.sh"
     run grep -n 'isCompactSummary\|compact_boundary\|\.jsonl' "$REPO_ROOT/bin/dejima-epitaph"
-    [ "$status" -ne 0 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
     # The provenance note is dejima's promise about the artefact, so it is
     # defined once rather than phrased per harness.
     grep -q '^DEJIMA_EPITAPH_NOTE=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
@@ -8559,7 +8559,7 @@ _provider_proxied_domain() {
     local f
     for f in bin/dejima-conversation-ship bin/harness/claude-code.sh; do
         run grep -nE '\$slug-\*|\$\{slug\}-\*|\$key-\*' "$REPO_ROOT/$f"
-        [ "$status" -ne 0 ] || { echo "prefix matching is back in $f:"; echo "$output"; return 1; }
+        [ "$status" -eq 1 ] || { echo "prefix matching is back in $f:"; echo "$output"; return 1; }
     done
 }
 
@@ -8573,7 +8573,7 @@ _provider_proxied_domain() {
     for f in bin/dejima-epitaph bin/dejima-conversation-ship; do
         for pat in 'projects_dir' '\.jsonl' 'messages\.json' '/sessions/'; do
             run grep -nE "$pat" "$REPO_ROOT/$f"
-            [ "$status" -ne 0 ] \
+            [ "$status" -eq 1 ] \
                 || { echo "$f still knows a harness layout ($pat):"; echo "$output"; return 1; }
         done
     done
@@ -8727,7 +8727,7 @@ _emit_mount_at() {
     # A static test already holds entrypoint.sh to the current name; nothing
     # held the docs, so they kept the old one after the rename.
     run grep -rn 'dejima-claude' "$REPO_ROOT/docs" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     grep -q 'etc/dejima-harness' "$REPO_ROOT/docs/security.md"
 }
 
@@ -8770,10 +8770,10 @@ _emit_mount_at() {
 # chosen between.
 @test "the base image installs no harness" {
     run grep -nE 'npm install -g .*(claude-code|opencode|aider)' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
     # And no build arg pinning one, which is the shape it had.
     run grep -nE '^ARG .*(CLAUDE|HARNESS).*VERSION' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     # The Dockerfile says where the harness went, so the absence reads as a
     # decision rather than as something dropped.
     grep -qi 'harness' "$SANDBOX_DIR/Dockerfile"
@@ -8823,10 +8823,10 @@ _emit_mount_at() {
     local doc="$REPO_ROOT/docs/development.md"
     # The inventory named a RUN line and a build arg, both gone.
     run grep -nE 'npm install -g .*claude-code|CLAUDE_CODE_VERSION' "$doc"
-    [ "$status" -ne 0 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
     # And the file list said the base image carries the harness.
     run grep -nE '^\| `docker/Dockerfile` \|.*[Cc]laude' "$doc"
-    [ "$status" -ne 0 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
 }
 
 @test "every Claude Code path the base image still names has an inventory row" {
@@ -8837,7 +8837,7 @@ _emit_mount_at() {
     local dockerfile="$SANDBOX_DIR/Dockerfile"
     # Lines of actual instruction, not comments.
     run grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the base image is back to naming a harness:"; echo "$output"; return 1; }
     # A row for each, naming where it is satisfied now.
     grep -q 'State directories' "$doc" || { echo "no inventory row for the state directories"; return 1; }
@@ -8870,7 +8870,7 @@ _emit_mount_at() {
     # Instruction lines only: a comment may name a harness as an example of a
     # general rule, and several do.
     run grep -nE '^[^#]*(\.claude|CLAUDE_CODE|\.aider|\.opencode)' "$d"
-    [ "$status" -ne 0 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
     # .ssh still is the base image's own, so the mkdir it shares has not
     # simply been deleted along with them.
     grep -qE '^RUN mkdir -p \$SANDBOX_HOME/\.ssh' "$d"
@@ -8880,7 +8880,7 @@ _emit_mount_at() {
     # A default here decides for every harness, and names a binary an image
     # built for a different one does not contain.
     run grep -nE 'SANDBOX_CMD:-[a-z]' "$SANDBOX_DIR/entrypoint.sh" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
     # Refused rather than defaulted, so an unset one says why.
     grep -q 'SANDBOX_CMD is unset' "$SANDBOX_DIR/entrypoint.sh"
 }
@@ -8888,7 +8888,7 @@ _emit_mount_at() {
 @test "the compose service and its shared volumes are named for dejima, not a harness" {
     local y="$SANDBOX_DIR/docker-compose.yml"
     run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
-    [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
     grep -qE '^  sandbox:' "$y"
     # And EVERY compose invocation in bin/dejima names that same service, with
     # at least one build and one run. Counted by shape rather than pinned to a
@@ -8914,7 +8914,7 @@ _emit_mount_at() {
     # name of one API in the cert, the SAN and the /etc/hosts pin.
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
-    [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
     grep -q 'SANDBOX_BACKEND_PROXIED_DOMAIN' "$e" \
         || { echo "the entrypoint does not read the declared domain"; return 1; }
     # And a proxy socket with no domain declared for it is refused, rather
@@ -8942,7 +8942,7 @@ _emit_mount_at() {
 @test "the shared entrypoint names no harness's paths" {
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '^[^#]*(\$SANDBOX_HOME|\$HOME|~)/\.(claude|aider|opencode)' "$e"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "entrypoint.sh reaches into one harness's home directory:" >&2
         echo "$output" >&2
         echo "It runs in every image, including the base one on its own." >&2
@@ -9013,7 +9013,7 @@ _emit_mount_at() {
     # cover: it changed the two helpers and left twenty per-test names alone.
     local rt="$REPO_ROOT/test/runtime.bats"
     run grep -nE 'dejima-test-[a-z-]*\$?\(?basename "\$BATS_FILE_TMPDIR"' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "a container or image name is keyed on the file index:" >&2
         echo "$output" >&2
         return 1
@@ -9105,7 +9105,7 @@ _emit_mount_at() {
     # whichever assertions happen to depend on the harness's directories.
     local rt="$REPO_ROOT/test/runtime.bats"
     run grep -n 'export SESSION_IMAGE="\$(build_harness_layer' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the layer build's failure is masked by export:" >&2; echo "$output" >&2; return 1; }
     grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
         || { echo "the layer build's status is not checked"; return 1; }
@@ -9946,4 +9946,24 @@ _cline_providers_json() {
     # reader choosing between them actually needs.
     [[ "$prose" == *"most miles on it"* ]] \
         || { echo "it does not say which to choose absent another reason"; return 1; }
+}
+
+# grep exits 2 for a file it could not read, which satisfies `-ne 0` just as
+# well as "the pattern is absent". The absence assertions in this suite are the
+# dangerous-thing-is-absent ones - no sudo in the Dockerfile, no docker socket
+# in compose, no ~/.ssh mount - so a renamed or moved file would turn every one
+# of them green while nothing was checked. `-eq 1` is the exit status that
+# means the file was read and the pattern was not in it.
+@test "every absence assertion distinguishes absent from unreadable" {
+    run awk '
+        /^[[:space:]]*run grep/ { pending = NR; next }
+        pending && /\$status" -ne 0/ { print FILENAME ":" NR; bad = 1 }
+        { pending = 0 }
+        END { exit bad }
+    ' "$BATS_TEST_FILENAME"
+    [ "$status" -eq 0 ] || {
+        echo "these assert -ne 0 after a run grep, so a missing file passes:"
+        echo "$output"
+        return 1
+    }
 }
