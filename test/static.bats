@@ -7115,6 +7115,17 @@ EOF
         || { echo "the opening pitch is $words words, budget is 100"; return 1; }
     [ "$words" -ge 30 ] \
         || { echo "the opening pitch is only $words words"; return 1; }
+
+    # The paragraph after the pitch is the same real estate, and a budget that
+    # stopped at the pitch let a sentence there grow into a paragraph of
+    # self-explanation about which harness install.sh seeds - which belongs in
+    # the install steps, where a reader meets the file. So the budget covers
+    # everything before "What bounds it:", which is where the opening ends.
+    local opening_words
+    opening_words="$(sed -n "/^\*\*Agents work best/,/^\*\*What bounds it:\*\*/p" \
+        "$REPO_ROOT/README.md" | sed '$d' | wc -w)"
+    [ "$opening_words" -le 160 ] \
+        || { echo "the whole opening is $opening_words words, budget is 160"; return 1; }
 }
 
 @test "the README's axis lists match what is shipped" {

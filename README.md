@@ -184,7 +184,9 @@ ones you want.
    config.
 3. **Put `~/.local/bin` on your `PATH`** if it isn't already.
 4. **Set `[core] harness`.** It has no default and a launch is refused without
-   it, which is what stops a later release changing your selection for you.
+   it, which is what stops a later release changing your selection for you. The
+   starter config states `claude-code`, because a file with no default to fall
+   back on has to name a choice; change that line for Cline.
 
 That is enough to run `dejima`, and no push credential is needed to get this
 far. Everything else runs at its default, which means `[core] forge = none` and
@@ -503,7 +505,7 @@ at a fixed host path.
 
 `.dejima.md` at a project's root is that project's agent-instruction file, the
 harness-agnostic equivalent of `CLAUDE.md`, loaded into the session's context
-with no authority over the sandbox itself. A `SessionStart` hook also briefs the
+with no authority over the sandbox itself. dejima also briefs the
 session on where it is running and on the instructions belonging to whichever
 workflow you selected, so a session under `local-only` is told something
 different from one under `worktree-pr`.
