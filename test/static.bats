@@ -4294,6 +4294,9 @@ _repo_guard_shim() {
     # core stays forge-neutral.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repopath.XXXXXX")"
     _repo_guard_shim "$d"
+    # A real newline, so the comment form below is the document a CLI would be
+    # handed rather than a backslash-n a test invented.
+    local NL=$'\n'
     local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
                       DEJIMA_FORGE_REPO=own/thing
                       DEJIMA_FORGE_REPO_PATHS="api:repos")
@@ -4325,14 +4328,19 @@ _repo_guard_shim() {
                 "mutation Merge { mergePullRequest }" \
                 "  mutation (\$id: ID!) { mergePullRequest }" \
                 "query A{x}mutation B{mergePullRequest(input:{x:1}){y}}" \
-                "query{x},mutation M{mergePullRequest}"; do
+                "query{x},mutation M{mergePullRequest}" \
+                "mutation,{mergePullRequest}" \
+                "mutation#why not${NL}{mergePullRequest}" \
+                "mutation"; do
         run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form"
         assert_forge_refused "GraphQL mutation" "a mutation document" || return 1
     done
-    # The last two carry the mutation as a second operation, so a `}` sits
-    # immediately before it. The left boundary is anything that cannot continue
-    # an identifier for that reason - which still has to leave a field merely
-    # NAMED for one alone, or the check costs an honest query.
+    # Both boundaries are anything that cannot continue an identifier, because
+    # each of these sits just outside a narrower one: a second operation puts
+    # `}` before the word, and GraphQL treats commas and comments as ignored
+    # tokens, so a comma or a `#` comment can stand between the word and the
+    # body. Which still has to leave a field merely NAMED for one alone, or the
+    # check costs an honest query.
     for form in 'query($owner: String!) { repository(owner: $owner) { id } }' \
                 'query{foo_mutation}' 'query{fooMutation(x:1)}'; do
         run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form" \
