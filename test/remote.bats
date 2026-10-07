@@ -2003,15 +2003,16 @@ EOF
 }
 ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 
-# Reports no listener, whatever the host is actually running. Opt-in, and
-# deliberately not part of stub_ttyd: the port-in-use refusal has its own test
-# below, which binds a real socket and needs the real ss to see it.
+# Reports no listener, whatever the host is actually running. Called beside
+# stub_ttyd by every ttyd test but one, and deliberately not folded into it:
+# the port-in-use refusal binds a real socket and needs the real ss to see it.
 #
 # For every OTHER ttyd test the port being free is a precondition, not the
 # subject - and one that was being inherited from the machine rather than
 # stated. The default-port case asserts against 7681, which is exactly the
 # port a real dejima-ttyd front door holds, so it failed on any host running
 # the feature: the machine a developer is most likely to run this suite on.
+# The rest name 12345, which is free on most machines and on none reliably.
 # Same shape as #56 - a test reading its environment instead of setting it.
 stub_ss_no_listeners() {
     STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
@@ -2087,6 +2088,8 @@ unit_exec_start() {
 @test "dejima-ttyd refuses to start when something else already holds its port" {
     command -v ss >/dev/null 2>&1 || skip "ss is not available"
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    # The one ttyd test with no stub_ss_no_listeners beside stub_ttyd: ss
+    # seeing the socket bound below is the subject here, not a precondition.
     stub_ttyd
 
     # The distro's ttyd package ships an enabled service that binds every
@@ -2143,6 +2146,7 @@ PY
 @test "dejima-ttyd refuses to start when remote access is unconfigured, before ttyd is reached" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not configured"* ]]
@@ -2254,6 +2258,7 @@ PY
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 99999'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     # Named, so this cannot pass because ttyd was missing or the config was.
@@ -2270,6 +2275,7 @@ PY
     # currently happens to agree with it.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
@@ -2299,6 +2305,7 @@ PY
     local bad
     for bad in 0 7 73 999 abc 1e2 -20; do
         stub_ttyd
+        stub_ss_no_listeners
         : > "$STUB_DIR/ttyd-argv"
         write_remote_config 'ttyd_port = 12345' "ttyd_font_size = $bad"
         run "$REPO_ROOT/bin/dejima-ttyd"
@@ -2319,6 +2326,7 @@ PY
     # moment either default moves.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
@@ -2347,6 +2355,7 @@ PY
     # a host-wide "off" written here would be a different thing from silence.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     run grep -c 'buttonColors' "$STUB_DIR/ttyd-argv"
@@ -2378,6 +2387,7 @@ PY
     # would be wrong for whichever half of the clients it did not match.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     run grep -c 'focusOnTap' "$STUB_DIR/ttyd-argv"
@@ -2413,6 +2423,7 @@ PY
     local bad
     for bad in b M-b C-ab C- ctrl-a 2 'C-\' ; do
         stub_ttyd
+        stub_ss_no_listeners
         : > "$STUB_DIR/ttyd-argv"
         write_remote_config 'ttyd_port = 12345' "ttyd_tmux_prefix = $bad"
         run "$REPO_ROOT/bin/dejima-ttyd"
@@ -2442,6 +2453,7 @@ PY
        "$REPO_ROOT/bin/dejima-provider-lib.sh" "$fake/bin/"
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$fake/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     [[ "$output" == *"$fake/web/index.html"* ]]
@@ -2541,6 +2553,7 @@ PY
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     # Executed, not grepped: the flag has to reach ttyd's argv.
@@ -2944,6 +2957,7 @@ nginx_blocks() {
     printf '[remote-access]\nenabled = on\nbase_url = https://d.example\nttyd_port = 12345\n' \
         > "$FAKE_HOME/.config/dejima/config"
     stub_ttyd
+    stub_ss_no_listeners
 
     local exec_start
     exec_start="$(unit_exec_start dejima-ttyd.service "$FAKE_HOME")"

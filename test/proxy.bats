@@ -292,17 +292,18 @@ teardown() {
 
 @test "forwarder bridges TCP to the proxy's unix socket" {
     start_proxy
-    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_PROXY_PORT=18399 \
+    local fport; fport="$(free_port)"
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_PROXY_PORT="$fport" \
         SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
     for _ in $(seq 1 50); do
-        if curl -s -o /dev/null http://127.0.0.1:18399/echo; then ok=1; break; fi
+        if curl -s -o /dev/null http://127.0.0.1:$fport/echo; then ok=1; break; fi
         sleep 0.1
     done
     [ -n "$ok" ]
-    run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:18399/v1/messages
+    run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:$fport/v1/messages
     kill "$FWD_PID" 2>/dev/null || true
     [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
 }
@@ -353,6 +354,20 @@ PYEOF
     [[ "$output" != *"501"* ]]
 }
 
+# The forwarder is given a port rather than asking for one, so these tests
+# have to name a number. Asking the kernel for a free one and handing that over
+# leaves a window where something else could take it; naming a constant leaves
+# the test failing on any machine already using it, which is the precondition
+# these tests were reading from the environment instead of stating. The window
+# is the smaller of the two, and the suites run on a developer's machine.
+free_port() {
+    python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
 # The forwarder is the container-side half of the chain. In tls mode it
 # terminates TLS for api.anthropic.com on loopback so Claude Code needs no
 # ANTHROPIC_BASE_URL at all, then pipes raw bytes into the same unix socket
@@ -382,13 +397,14 @@ make_cert() {
 @test "forwarder tls mode: https to api.anthropic.com reaches the proxy, which injects the real token" {
     make_cert
     start_proxy
-    start_forwarder tls 18443
+    local fport; fport="$(free_port)"
+    start_forwarder tls "$fport"
     # --resolve is what stands in for the container's /etc/hosts entry: the
     # name must really be api.anthropic.com for certificate verification to
     # be a meaningful check, not a hostname the test picked to be easy.
     run curl -s --cacert "$TD/cert.pem" \
-        --resolve "api.anthropic.com:18443:127.0.0.1" \
-        -X POST "https://api.anthropic.com:18443/v1/messages" -d '{}'
+        --resolve "api.anthropic.com:$fport:127.0.0.1" \
+        -X POST "https://api.anthropic.com:$fport/v1/messages" -d '{}'
     kill "$FWD_PID" 2>/dev/null || true
     [ "$status" -eq 0 ]
     [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
@@ -403,8 +419,9 @@ make_cert() {
     # no HTTP awareness to catch it.
     make_cert
     start_proxy
-    start_forwarder tls 18444
-    run openssl s_client -connect 127.0.0.1:18444 -alpn h2,http/1.1 \
+    local fport; fport="$(free_port)"
+    start_forwarder tls "$fport"
+    run openssl s_client -connect "127.0.0.1:$fport" -alpn h2,http/1.1 \
         -servername api.anthropic.com -CAfile "$TD/cert.pem" </dev/null
     kill "$FWD_PID" 2>/dev/null || true
     [[ "$output" == *"ALPN protocol: http/1.1"* ]]
@@ -412,8 +429,9 @@ make_cert() {
 
 @test "forwarder loopback mode serves plaintext http on the port it is given" {
     start_proxy
-    start_forwarder loopback 18445
-    run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
+    local fport; fport="$(free_port)"
+    start_forwarder loopback "$fport"
+    run curl -s -X POST "http://127.0.0.1:$fport/v1/messages" -d '{}'
     kill "$FWD_PID" 2>/dev/null || true
     [ "$status" -eq 0 ]
     [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
@@ -437,7 +455,7 @@ make_cert() {
     # today, so a fall-through lands on an unused port if that ever changes.
     run env -u SANDBOX_CREDENTIAL_TLS_CERT -u SANDBOX_CREDENTIAL_TLS_KEY \
         SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_TRANSPORT=tls \
-        SANDBOX_CREDENTIAL_PROXY_PORT=18398 \
+        SANDBOX_CREDENTIAL_PROXY_PORT="$(free_port)" \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js"
     [ "$status" -ne 0 ]
     [[ "$output" == *"SANDBOX_CREDENTIAL_TLS_CERT"* ]]

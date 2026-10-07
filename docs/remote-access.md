@@ -52,11 +52,16 @@ running.
 
 ## The bind address is the one thing to get right
 
-`docker/egress-policy` deliberately permits traffic to the session's
-default-route address - the Docker bridge gateway, which is your host. That is
-the one host address a sandbox can reach at all. Combine it with the fact above
-(a tmux client is a host shell) and the consequence is direct: **a front door
-the sandbox can reach is a compromised session's own escape hatch.**
+The session's default-route address - the Docker bridge gateway - is your
+host, and it is the one host address a sandbox can route to at all. Combine
+that with the fact above (a tmux client is a host shell) and the consequence
+is direct: **a front door the sandbox can reach is a compromised session's own
+escape hatch.**
+
+`docker/egress-policy` opens no port on that address unless told to, so a
+front door bound to it is refused by the packet filter as well. Do not spend
+that: the clamp is the second layer, and binding the proxy correctly is the
+first.
 
 So:
 

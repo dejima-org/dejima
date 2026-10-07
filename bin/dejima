@@ -3558,6 +3558,12 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # docker-compose.yml declares for the sandbox. A static test reads the same
 # names back out of the firewall scripts, so a script that starts reading a new
 # one fails rather than silently allowlisting less than it was told to.
+# The only two names here this launcher does not derive: they come from the
+# operator's own environment and travel through untouched. Marked exported
+# anyway, so that `-e NAME` carries a value rather than an empty string on a
+# shell where they were set without being exported.
+export EGRESS_HOST_ADDR EGRESS_HOST_PORTS
+
 filter_env=(
     -e ENABLE_FIREWALL       # whether to install rules at all
     -e ALLOWED_DOMAINS       # the operator's approved names
@@ -3567,6 +3573,13 @@ filter_env=(
     -e LOKI_URL              # its host is allowlisted, and the shipper needs it
     -e DEJIMA_INTERNAL_DOMAINS  # approved names that really do resolve inside
     -e DEJIMA_BACKEND_HOST   # a self-served model's host, from its base_url
+    # The host entry: which address stands for "this container's host", and
+    # which of its TCP ports open. Both default inside egress-policy and
+    # neither has a config key, so passing them is what makes them reachable
+    # at all - without this the clamp would have no escape hatch an operator
+    # could use.
+    -e EGRESS_HOST_ADDR
+    -e EGRESS_HOST_PORTS
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET

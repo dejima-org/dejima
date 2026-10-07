@@ -126,6 +126,11 @@ INTERNAL_OK=${EGRESS_INTERNAL_OK:-}
 INTERNAL_OK_HINT=${EGRESS_INTERNAL_OK_HINT:-EGRESS_INTERNAL_OK}
 FORGE_SSH=${EGRESS_FORGE_SSH:-0}
 HOST_ADDR=${EGRESS_HOST_ADDR:-}
+# Which TCP ports the host entry opens. Empty - the default - opens none, so
+# the address is a known destination that is refused rather than an implicit
+# grant over everything the host publishes. `any` restores the unclamped rule,
+# explicitly. See the clamp below for why none is the right default.
+HOST_PORTS=${EGRESS_HOST_PORTS:-}
 # Self-check probes. example.com is reserved by RFC 2606 for documentation and
 # resolves globally, which is what makes it a usable negative: if it does not
 # resolve here, the resolver is restricting names rather than simply broken.
@@ -449,6 +454,56 @@ emit_forge_clamp() {
   printf '    %s daddr @%s goto refuse\n' "$family" "$set"
 }
 
+# The host entry is the one destination nobody declared: it is the gateway of
+# the default route, derived rather than configured. Docker publishes container
+# ports on that address, so permitting it on every port reached the host's sshd,
+# anything bound to 0.0.0.0, and every published port of every other container
+# on the machine - including the remote-access front door dejima itself ships,
+# which is a host shell behind a tmux prefix key (#363).
+#
+# Nothing in a launch needs it. A host-resident forge, Loki or self-served model
+# is reached through its own entry, by name or as a literal address, and either
+# way lands in a set of its own. So the default here is no ports at all, and the
+# address stays a named destination that is refused rather than one that falls
+# through to the end of the chain - the counter says the host was reached for,
+# which an operator debugging a clamp needs to see.
+#
+# TCP only: nothing here has ever permitted UDP to the host, and DNS to it is
+# refused above with everyone else's.
+emit_host_clamp() {
+  local set=$1 p list=""
+  if [ "$HOST_PORTS" = any ]; then
+    printf '    ip daddr @%s goto permit\n' "$set"
+    return
+  fi
+  # Rebuilt element by element rather than by substituting the separators: the
+  # value may be comma-separated, space-separated or both, and a substitution
+  # turns ", " into an empty element that nft rejects.
+  for p in ${HOST_PORTS//,/ }; do
+    list="${list:+$list, }$p"
+  done
+  if [ -n "$list" ]; then
+    printf '    ip daddr @%s tcp dport { %s } goto permit\n' "$set" "$list"
+  fi
+  printf '    ip daddr @%s goto refuse\n' "$set"
+}
+
+# A typo stops the container rather than becoming a rule that permits the wrong
+# port or a ruleset nft refuses after the fact, which is the same reasoning as
+# classify_entry's: a destination that looks configured and is silently refused
+# is the worst of the three.
+validate_host_ports() {
+  local p
+  [ "$HOST_PORTS" = any ] && return 0
+  for p in ${HOST_PORTS//,/ }; do
+    [[ $p =~ ^[0-9]+(-[0-9]+)?$ ]] \
+      || die "EGRESS_HOST_PORTS entry '$p' is not a TCP port or a low-high range (or the whole value 'any')"
+    local lo=${p%%-*} hi=${p##*-}
+    { [ "$lo" -ge 1 ] && [ "$hi" -le 65535 ] && [ "$lo" -le "$hi" ]; } \
+      || die "EGRESS_HOST_PORTS entry '$p' is not within 1-65535, low first"
+  done
+}
+
 # Rules are generated into one file and loaded with `nft -f`, which is a single
 # transaction: the namespace is never left half-filtered. The table is replaced
 # rather than the ruleset flushed - the runtime has its own rules in this
@@ -656,8 +711,12 @@ EOF
     ip daddr @oname_v4 goto permit
     ip daddr @literal_v4 goto permit
 
-    # The container's own host, as a single address.
-    ip daddr @host_v4 goto permit
+    # The container's own host, as a single address, on the ports it was told
+    # to open and no others.
+EOF
+    emit_host_clamp host_v4
+
+    cat <<EOF
 
     # Anything else: logged, then refused. The chain policy is drop as a
     # backstop, but nothing should ever reach it.
@@ -1306,6 +1365,7 @@ cmd_apply() {
   discover_upstreams
 
   local host_addrs forge_host
+  validate_host_ports
   host_addrs=$(discover_host_addr)
   forge_host=$(host_of_url "$FORGE_META_URL")
 
@@ -1339,7 +1399,7 @@ cmd_apply() {
   resolver_uid=$(id -u "$RESOLVER_USER")
 
   apply_ruleset "$forge4" "$host_addrs" "$resolver_uid"
-  say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs), forge ssh=$FORGE_SSH"
+  say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs) on ports ${HOST_PORTS:-none}, forge ssh=$FORGE_SSH"
 
   write_log_config
   start_connection_log

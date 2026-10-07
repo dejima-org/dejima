@@ -1823,18 +1823,22 @@ session_pid() {  # [container], defaulting to the file-wide one
     # verdict rides on which NFLOG group the rule named, so the two groups
     # swapped would log every refusal as "allowed" - and a check that only
     # asked for the field would stay green while it did.
-    local gw
-    gw="$(dexec sh -c "ip route | grep default | cut -d' ' -f3")"
-    [ -n "$gw" ] || { echo "no default route in the session container"; return 1; }
+    # The permitted half needs a destination nothing has to answer on: the allow
+    # record is written when the first packet is accepted, not when a service
+    # replies, and a test that waited for a reply would be testing the network.
+    # A documentation address permitted as a literal is exactly that - in
+    # @literal_v4, on any port, routed nowhere. Added live rather than declared
+    # at launch so the file-wide pair keeps the permitted set a real one has.
+    local allowed=198.51.100.1
+    run dexec_filter /usr/local/sbin/egress-policy permit "$allowed"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
     dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
-    # The bridge gateway is in @host_v4, so this attempt is permitted at the
-    # filter whether or not the host answers on the port - the allow record is
-    # written when the first packet is accepted, not when a service replies.
-    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$gw:9/" 2>/dev/null || true
+    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$allowed:9/" 2>/dev/null || true
     local found="" i
     for i in 1 2 3 4 5 6; do
         if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null \
-            && dexec_filter grep -F "$gw" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
+            && dexec_filter grep -F "$allowed" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
             found=yes; break
         fi
         sleep 0.5
@@ -2289,49 +2293,69 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     timeout 5 bash -c "cat < /dev/null > /dev/tcp/$bind_addr/$HOST_LISTENER_PORT"
 }
 
-@test "a host service bound to loopback is unreachable from inside the container, one bound to the bridge gateway is reachable" {
+@test "the host is unreachable on every port by default, and on exactly the ports EGRESS_HOST_PORTS names" {
     # The regression test for the escape path bin/dejima-ttyd's
-    # --interface 127.0.0.1 exists to close. The egress policy deliberately
-    # ACCEPTs OUTPUT to the Docker bridge gateway, and a tmux client attached
-    # through ttyd is a host shell - the prefix key opens a window outside the
-    # container - so a ttyd the sandbox could reach would be a full escape.
-    # Prove the containment property holds rather than trusting the flag.
-    local container host_ip loopback_port gateway_port
+    # --interface 127.0.0.1 exists to close, now one layer stronger. The host
+    # entry used to be accepted on every port, so a ttyd bound to 0.0.0.0 - and
+    # a tmux client attached through ttyd is a host shell, the prefix key opens
+    # a window outside the container - was reachable from the session. It now
+    # opens only the ports it was told to (#363).
+    local container host_ip loopback_port named_port other_port
+    local test_container="$(test_container_name hostports)"
     container="$(container_name)"
 
-    # Derived exactly as the egress policy derives the host address, so this is the one
-    # host address the container's OUTPUT chain accepts at all.
+    # Derived exactly as the egress policy derives the host address, so this is
+    # the one host address the container's OUTPUT chain names at all.
     host_ip="$(docker exec "$container" sh -c "ip route | grep default | cut -d' ' -f3")"
     [ -n "$host_ip" ]
 
     start_host_listener 127.0.0.1
     loopback_port="$HOST_LISTENER_PORT"
     start_host_listener "$host_ip"
-    gateway_port="$HOST_LISTENER_PORT"
+    named_port="$HOST_LISTENER_PORT"
+    start_host_listener "$host_ip"
+    other_port="$HOST_LISTENER_PORT"
 
     # Setup check, from the host's own vantage point: the loopback listener's
     # port must answer on 127.0.0.1 only. bind(0) on two different addresses
     # can legally return the same port number, and if it had, the container
-    # probe below would be hitting the gateway listener and failing for a
-    # reason that has nothing to do with containment.
+    # probes below would be hitting a gateway listener and failing for a reason
+    # that has nothing to do with containment.
     run timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
     [ "$status" -ne 0 ]
 
-    # Positive control, and the reason the negative one means anything: same
-    # container, same docker exec, same timeout/bash /dev/tcp probe, same
-    # gateway address - only the port differs. Without it a `status -ne 0` is
-    # equally satisfied by docker exec failing (125), bash or timeout missing
-    # from the image (127), or a container that can reach nothing at all, none
-    # of which say anything about loopback.
-    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$gateway_port"
+    # The default, on the file-wide pair, which sets no EGRESS_HOST_PORTS: a
+    # real listener on the gateway address, and the session cannot reach it.
+    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$named_port"
+    [ "$status" -ne 0 ]
+
+    # A pair told to open that one port, and nothing else about it changed.
+    start_pair hostports "$SESSION_IMAGE" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e EGRESS_HOST_PORTS="$named_port"
+
+    # Positive control, and the reason the negatives mean anything: without it
+    # a `status -ne 0` is equally satisfied by docker exec failing (125), bash
+    # or timeout missing from the image (127), or a container that can reach
+    # nothing at all, none of which say anything about the clamp.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$named_port"
     [ "$status" -eq 0 ]
 
-    # Deliberately not asserting the exact status. 1 (the host RSTs, since
-    # nothing is bound on the gateway address at this port) is what it should
-    # be, but a host that DROPs on its own docker bridge instead yields 124
-    # from timeout, and that is still containment.
-    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    # The clamp itself: same container, same address, same kind of listener,
+    # only the port differs from the one above.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$other_port"
     [ "$status" -ne 0 ]
+
+    # And the original containment property, which the clamp does not replace:
+    # a host service bound to loopback is not on the gateway address at all.
+    #
+    # Deliberately not asserting the exact status on any of the negatives. 1
+    # (the host RSTs) is what a refusal should look like, but a drop yields 124
+    # from timeout, and that is still containment.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    [ "$status" -ne 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
 
