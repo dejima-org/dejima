@@ -10376,3 +10376,27 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     # Agreement on allowing everything would satisfy the loop above.
     [ "$refused" -ge 4 ] || { echo "only $refused of those were refused"; return 1; }
 }
+
+@test "a forge that can be aimed elsewhere names the CLI the guard is linked over" {
+    # The repository rules are applied to the commands in merge_block and
+    # disclose, because those are the only two keys that name a CLI: that set
+    # is what entrypoint.sh links the shadow over and what hooks/merge-guard.sh
+    # checks a command against. So a forge declaring repo_flags, repo_env or
+    # repo_paths and neither of those would get the rule applied to nothing -
+    # silently, since there is no command for it to be absent from.
+    #
+    # Asserted over what ships rather than enforced in the manifest validator,
+    # which is where it would belong if a third-party forge ever hit it;
+    # docs/providers.md states the precondition for that reader.
+    local forge aimable named
+    for forge in $(lib provider_list forge); do
+        aimable=""
+        for key in repo_flags repo_env repo_paths; do
+            [ -n "$(lib manifest_get forge "$forge" "$key")" ] && aimable=1
+        done
+        [ -n "$aimable" ] || continue
+        named="$(lib manifest_get forge "$forge" merge_block)$(lib manifest_get forge "$forge" disclose)"
+        [ -n "$named" ] \
+            || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
+    done
+}
