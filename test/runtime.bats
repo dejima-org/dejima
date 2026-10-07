@@ -1823,18 +1823,22 @@ session_pid() {  # [container], defaulting to the file-wide one
     # verdict rides on which NFLOG group the rule named, so the two groups
     # swapped would log every refusal as "allowed" - and a check that only
     # asked for the field would stay green while it did.
-    local gw
-    gw="$(dexec sh -c "ip route | grep default | cut -d' ' -f3")"
-    [ -n "$gw" ] || { echo "no default route in the session container"; return 1; }
+    # The permitted half needs a destination nothing has to answer on: the allow
+    # record is written when the first packet is accepted, not when a service
+    # replies, and a test that waited for a reply would be testing the network.
+    # A documentation address permitted as a literal is exactly that - in
+    # @literal_v4, on any port, routed nowhere. Added live rather than declared
+    # at launch so the file-wide pair keeps the permitted set a real one has.
+    local allowed=198.51.100.1
+    run dexec_filter /usr/local/sbin/egress-policy permit "$allowed"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
     dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
-    # The bridge gateway is in @host_v4, so this attempt is permitted at the
-    # filter whether or not the host answers on the port - the allow record is
-    # written when the first packet is accepted, not when a service replies.
-    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$gw:9/" 2>/dev/null || true
+    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$allowed:9/" 2>/dev/null || true
     local found="" i
     for i in 1 2 3 4 5 6; do
         if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null \
-            && dexec_filter grep -F "$gw" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
+            && dexec_filter grep -F "$allowed" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
             found=yes; break
         fi
         sleep 0.5
