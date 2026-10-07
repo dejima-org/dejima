@@ -3996,18 +3996,32 @@ _guard_repo() {
     for cmd in "git --no-pager push origin main" \
                "git -c core.pager=cat push origin main" \
                "git --git-dir=$repo/.git push origin main" \
-               "ls && git push origin main"; do
+               "ls && git push origin main" \
+               "/usr/bin/git push origin main" \
+               "/opt/elsewhere/git push origin main"; do
         hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
             | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
               DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
         [[ "$hook_out" == *"Blocked by"* ]] \
             || { echo "not seen as a push: $cmd"; return 1; }
     done
-    # And a token that merely says push is not a git invocation.
-    hook_out="$(printf '{"tool_input":{"command":"echo push origin main"},"cwd":"%s"}' "$repo" \
-        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
-          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
-    [ -z "$hook_out" ] || { echo "blocked something that is not a push: $hook_out"; return 1; }
+    # The path-qualified pair above is the form the library's header names as
+    # the reason both layers exist: the absolute path steps over the PATH
+    # shadow, so the hook is the only thing left that can see it. Comparing the
+    # whole first word meant it did not, and the same spelling was already
+    # fixed and tested for the forge CLI beside it.
+
+    # And a word that merely ends in git, or a token that merely says push, is
+    # not a git invocation - the basename above must not widen into a suffix
+    # match.
+    local cmd_ok
+    for cmd_ok in "echo push origin main" "mygit push origin main" \
+                  "git-annex push origin main"; do
+        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd_ok" "$repo" \
+            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+        [ -z "$hook_out" ] || { echo "blocked '$cmd_ok': $hook_out"; return 1; }
+    done
 }
 
 @test "both push guards refuse a remote they cannot resolve" {

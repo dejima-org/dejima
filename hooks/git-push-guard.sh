@@ -33,10 +33,15 @@ source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
 # verdict function the shadow calls, on the words after `git` - so a spelling
 # this file does not recognise is not a spelling that goes unchecked: it is argv
 # either way.
+# Basenamed, like hooks/merge-guard.sh and like the shadow, which reads its own
+# $0. `/usr/bin/git push origin main` is the one spelling that reaches neither
+# layer otherwise - the absolute path steps over the PATH shadow, and comparing
+# the whole word meant this hook did not see a git invocation at all. It is
+# also the form the library's own header names as the reason both layers exist.
 while IFS= read -r segment; do
     read -ra tokens <<< "$segment"
     [ "${#tokens[@]}" -gt 0 ] || continue
-    [ "${tokens[0]}" = git ] || continue
+    [ "$(basename -- "${tokens[0]}")" = git ] || continue
     if ! dejima_push_verdict "$cwd" "${tokens[@]:1}"; then
         echo "Blocked by git-push-guard.sh: $DEJIMA_GUARD_REASON" >&2
         exit 2
