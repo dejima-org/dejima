@@ -4025,6 +4025,73 @@ _guard_repo() {
     [[ "$hook_out" == *"cannot resolve the remote"* ]] || { echo "hook: $hook_out"; return 1; }
 }
 
+@test "a push that writes more than one branch is checked for all of them" {
+    # Each of these resolved exactly one branch and checked that: --all and
+    # --mirror were opaque flags, and only the first positional after the
+    # remote was read. So `git push --all origin` from a feature branch pushed
+    # main, and `git push origin feature main` checked feature alone (#365).
+    local repo form hook_out
+    repo="$(_guard_repo)"
+    git -C "$repo" branch main
+
+    for form in "push --all origin" "push --mirror origin" \
+                "push origin feature main" "push origin main feature" \
+                "push origin feature refs/heads/x:refs/heads/main"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"Blocked by dejima"* ]] \
+            || { echo "the shadow allowed 'git $form': $output"; return 1; }
+        hook_out="$(_push_hook "$repo" "git $form")"
+        [[ "$hook_out" == *"Blocked by"* ]] \
+            || { echo "the hook allowed 'git $form': $hook_out"; return 1; }
+    done
+
+    # --all with no protected branch in the checkout is an ordinary push. The
+    # refusal above has to come from the branch being there, or it is a guard
+    # that refuses the flag and proves nothing about the policy.
+    git -C "$repo" branch -D main
+    run _git_guard "$repo" push --all origin
+    [[ "$output" != *"Blocked by dejima"* ]] \
+        || { echo "--all refused with no protected branch present: $output"; return 1; }
+
+    # --mirror stays refused, because it also deletes the remote refs this
+    # checkout does not have - so a mirror from a repository with no main is
+    # exactly how the remote's main disappears.
+    run _git_guard "$repo" push --mirror origin
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a push that names its own repository is refused rather than checked against this one" {
+    # --git-dir and --work-tree were consumed and ignored, so the remote was
+    # resolved in the mounted project while git ran against a repository whose
+    # origin points somewhere else (#365). Honouring them would mean
+    # reimplementing how they combine with -C and with each other; refusing is
+    # the direction the unresolvable-remote case already takes.
+    local repo other form hook_out
+    repo="$(_guard_repo)"
+    other="$(mktemp -d "$BATS_TEST_TMPDIR/elsewhere.XXXXXX")"
+    git -C "$other" init -q -b main
+    git -C "$other" remote add origin git@evil.invalid:o/r.git
+
+    for form in "--git-dir $other/.git push origin main" \
+                "--git-dir=$other/.git push origin main" \
+                "--work-tree $other push origin main" \
+                "--work-tree=$other push origin main"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"--git-dir or --work-tree"* ]] \
+            || { echo "the shadow allowed 'git $form': $output"; return 1; }
+        hook_out="$(_push_hook "$repo" "git $form")"
+        [[ "$hook_out" == *"--git-dir or --work-tree"* ]] \
+            || { echo "the hook allowed 'git $form': $hook_out"; return 1; }
+    done
+
+    # Not every git command: the refusal is about a push it cannot check, so
+    # anything else carrying the flag is left alone.
+    run _git_guard "$repo" --git-dir "$other/.git" status --short
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+}
+
 @test "the two push guards agree on the same pushes" {
     # Two implementations of one rule is the drift this repo warns about, and
     # they had already drifted: the shadow skipped -o and read --repo, the hook
@@ -4223,6 +4290,35 @@ _repo_guard_shim() {
         assert_forge_refused "Blocked by dejima" "gh api $form" || return 1
     done
 
+    # An endpoint under no declared segment names no repository for this to
+    # compare, so there was nothing to refuse and nothing was - `gh api` then
+    # reached every endpoint the token did, with a write among them (#365).
+    # Under the declared subcommand the question is inverted: a target this can
+    # read has to be present.
+    for form in "user/repos" "/orgs/someone/repos" "-X POST /user/repos" "rate_limit"; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" api $form
+        assert_forge_refused "names no endpoint under" "gh api $form" || return 1
+    done
+
+    # graphql is the one unscopable target that passes, because dejima's own
+    # github-pr reads review threads through it and the API has no other route
+    # to them. A query can only read, which the read-only token could do
+    # anyway. A mutation is what an agent reaches for once `gh pr merge`
+    # refuses, and no repository scoping can be read out of a GraphQL
+    # document, so that is refused however the document is spelled.
+    for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
+                "mutation Merge { mergePullRequest }" \
+                "  mutation (\$id: ID!) { mergePullRequest }"; do
+        run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form"
+        assert_forge_refused "GraphQL mutation" "a mutation document" || return 1
+    done
+    # And the read-only query github-pr actually sends is not caught by it.
+    run env "${env_common[@]}" "$d/gh" api graphql \
+        -f 'query=query($owner: String!) { repository(owner: $owner) { id } }' \
+        -f owner=own -f name=thing
+    [[ "$output" == real:* ]] || { echo "a graphql query was blocked: $output"; return 1; }
+
     # The launched-against repository goes through, and so do the two shapes
     # a false refusal would land on. Both matter more than the catches do: a
     # fast-fail that blocks an honest command costs an agent a working tool,
@@ -4234,7 +4330,7 @@ _repo_guard_shim() {
     #     that happens to look like an API path is not argv to compare.
     for form in "api repos/own/thing/issues" "api repos/{owner}/{repo}/issues" \
                 "issue create --title repos/other/thing" \
-                "api user/repos" "api graphql"; do
+                "api graphql"; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" $form
         [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }

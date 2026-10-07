@@ -67,11 +67,18 @@ dejima_guard_segments() {
 # different configuration than the one about to be used. A one-command
 # `-c remote.origin.pushurl=...` is exactly that case.
 #
+# --git-dir and --work-tree are REFUSED rather than skipped or honoured. Both
+# used to be consumed and ignored, so `git --git-dir /tmp/x/.git push origin
+# main` resolved `origin` in the mounted project, found it allowed, and then
+# ran against a repository whose origin points somewhere else. Honouring them
+# would mean reimplementing how they combine with -C and with each other;
+# refusing is the direction the unresolvable-remote case below already takes,
+# and a session with a second repository to push from can cd into it or use -C.
 dejima_push_verdict() {  # <repo-dir> <git argv...>
     local repo_dir="$1"; shift
-    local argv=("$@") i=0 subcommand="" branch refspec=""
-    local -a config_overrides=()
-    local remote=""
+    local argv=("$@") i=0 subcommand="" branch
+    local -a config_overrides=() refspecs=()
+    local remote="" push_all=0 push_mirror=0 repo_override=0
     DEJIMA_GUARD_REASON=""
     DEJIMA_GUARD_PUSH=0
 
@@ -86,7 +93,14 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
                 [ "$i" -lt "${#argv[@]}" ] \
                     && config_overrides+=(-c "${argv[$i]}")
                 ;;
-            --exec-path|--git-dir|--work-tree|--namespace|--super-prefix)
+            --git-dir|--work-tree)
+                repo_override=1
+                i=$((i + 1))
+                ;;
+            --git-dir=*|--work-tree=*)
+                repo_override=1
+                ;;
+            --exec-path|--namespace|--super-prefix)
                 i=$((i + 1))
                 ;;
             -*)
@@ -102,12 +116,24 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     [ "$subcommand" = push ] || return 0
     DEJIMA_GUARD_PUSH=1
 
+    # Noted while parsing and refused here, so that only a push is refused:
+    # these say nothing about any other git command, and a guard that refused
+    # `git --git-dir X status` would be refusing the flag rather than the push.
+    if [ "$repo_override" = 1 ]; then
+        DEJIMA_GUARD_REASON="a push carrying --git-dir or --work-tree cannot be checked, because the repository it writes from is not the one this would resolve the remote in. Run it from that repository, or name it with -C."
+        return 1
+    fi
+
     # What comes after `push`. --repo names the remote in git's own legacy form
     # and wins over a positional, so it is read rather than treated as an
     # opaque flag: skipping it would leave `git push --repo=origin main`
     # looking like a push to a remote called "main", which resolves to no URL -
     # and passing that through unchecked is a push to origin/main that nothing
     # looked at.
+    #
+    # Every positional after the remote is a refspec, not just the first.
+    # `git push origin feature main` checked `feature` alone and let `main`
+    # through beside it.
     i=$((i + 1))
     while [ "$i" -lt "${#argv[@]}" ]; do
         case "${argv[$i]}" in
@@ -116,6 +142,8 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
                 i=$((i + 1))
                 [ "$i" -lt "${#argv[@]}" ] && remote="${argv[$i]}"
                 ;;
+            --all) push_all=1 ;;
+            --mirror) push_mirror=1 ;;
             -o|--push-option|--receive-pack|--exec)
                 i=$((i + 1))
                 ;;
@@ -123,8 +151,8 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
             *)
                 if [ -z "$remote" ]; then
                     remote="${argv[$i]}"
-                elif [ -z "$refspec" ]; then
-                    refspec="${argv[$i]}"
+                else
+                    refspecs+=("${argv[$i]}")
                 fi
                 ;;
         esac
@@ -164,23 +192,52 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
         return 1
     fi
 
-    # The refspec's destination. `src:dst` names it outright, a bare name is
-    # both, and `HEAD` or no refspec at all means the current branch - `git
-    # push origin` and `git push origin HEAD` both push it. The shadow read
-    # HEAD as a branch name, which matches no policy entry, so it allowed
-    # `git push origin HEAD` from a protected branch; the hook resolved it.
-    # One implementation cannot carry both readings, and the stricter one is
-    # the only safe choice.
-    case "${refspec:-HEAD}" in
-        *:*) branch="${refspec##*:}" ;;
-        HEAD) branch="$("$DEJIMA_GUARD_GIT" -C "$repo_dir" branch --show-current 2>/dev/null)" ;;
-        *) branch="$refspec" ;;
-    esac
-    branch="${branch#refs/heads/}"
-    if _dejima_branch_blocked "$branch"; then
-        DEJIMA_GUARD_REASON="direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead."
+    # --mirror puts every ref under refs/ on the remote AND deletes the ones
+    # that are gone locally, so what it does to a protected branch cannot be
+    # read off the command: a mirror from a checkout that has no `main` deletes
+    # the remote's. Refused outright rather than resolved, because there is no
+    # branch list that makes it safe.
+    if [ "$push_mirror" = 1 ]; then
+        DEJIMA_GUARD_REASON="--mirror writes every ref and deletes the remote refs this checkout does not have, so it cannot be checked against a branch policy. Push the branch you mean."
         return 1
     fi
+
+    # --all pushes every local branch, so every local branch is what the policy
+    # has to be applied to. The refspec list is empty here - git refuses --all
+    # with one - and reading only the current branch is what let `git push
+    # --all origin` from a feature branch push `main` beside it.
+    if [ "$push_all" = 1 ]; then
+        local local_branch
+        while IFS= read -r local_branch; do
+            [ -n "$local_branch" ] || continue
+            if _dejima_branch_blocked "$local_branch"; then
+                DEJIMA_GUARD_REASON="--all pushes every local branch, and '$local_branch' is one of them. Direct pushes to '$local_branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead."
+                return 1
+            fi
+        done < <("$DEJIMA_GUARD_GIT" -C "$repo_dir" for-each-ref \
+                    --format='%(refname:short)' refs/heads/ 2>/dev/null)
+        return 0
+    fi
+
+    # Each refspec's destination. `src:dst` names it outright, a bare name is
+    # both, and `HEAD` or no refspec at all means the current branch - `git
+    # push origin` and `git push origin HEAD` both push it.
+    if [ "${#refspecs[@]}" -eq 0 ]; then
+        refspecs=(HEAD)
+    fi
+    local refspec
+    for refspec in "${refspecs[@]}"; do
+        case "$refspec" in
+            *:*) branch="${refspec##*:}" ;;
+            HEAD) branch="$("$DEJIMA_GUARD_GIT" -C "$repo_dir" branch --show-current 2>/dev/null)" ;;
+            *) branch="$refspec" ;;
+        esac
+        branch="${branch#refs/heads/}"
+        if _dejima_branch_blocked "$branch"; then
+            DEJIMA_GUARD_REASON="direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead."
+            return 1
+        fi
+    done
 
     return 0
 }
@@ -384,22 +441,59 @@ _dejima_forge_repo_verdict() {
 # inspecting every positional that contains two slashes, which would refuse
 # `gh issue create --title repos/a/b` - and a false refusal costs an honest
 # agent a working command, which is the wrong way for a fast-fail to be wrong.
+#
+# Under that subcommand the rule is inverted: rather than looking for a path
+# naming the wrong repository, it requires one naming the right one. `gh api`
+# reaches every endpoint the token does, and an endpoint that is not under the
+# declared segment - `user/repos`, `/orgs/<org>/repos`, `graphql` - names no
+# repository for this to compare, so there was nothing to refuse and nothing
+# was (#365). Telling an endpoint apart from a header value or a field value
+# would mean knowing which of the CLI's flags take a separate value, which is
+# the coupling this guard exists to avoid - so the question asked is whether a
+# target it CAN read is present, which needs no such knowledge.
+#
+# graphql counts as one, because dejima's own github-pr reads review threads
+# through it and the API has no other route to them. A mutation does not:
+# `gh api graphql -f query='mutation{mergePullRequest(...)}'` is what an agent
+# reaches for once `gh pr merge` refuses, and no repository scoping can be read
+# out of a GraphQL document. Queries through it can only read, which the
+# read-only token could do anyway.
 _dejima_forge_path_verdict() {
     [ -n "${DEJIMA_FORGE_REPO_PATHS:-}" ] && [ "$#" -gt 0 ] || return 0
 
     local -a repo_paths
     read -ra repo_paths <<< "$DEJIMA_FORGE_REPO_PATHS"
-    local spec segment arg path owner name
+    local spec segment arg path owner name scopable
     for spec in "${repo_paths[@]}"; do
         [ "$1" = "${spec%%:*}" ] || continue
         segment="${spec#*:}"
         scopable=0
         for arg in "$@"; do
             case "$arg" in -*) continue ;; esac
+            # A GraphQL document whose operation is a mutation. Matched
+            # anywhere in the argument, because the document arrives as the
+            # value of a field flag - `-f query=mutation{...}` - rather than as
+            # an argument of its own. Matched before the brace test below,
+            # which a document would otherwise satisfy.
+            if [[ "$arg" =~ (^|=|[[:space:]])mutation([[:space:]]|\(|\{) ]]; then
+                DEJIMA_GUARD_REASON="a GraphQL mutation reaches any repository and any write the token allows, and no repository scoping can be read out of it. Use the subcommands, and leave a merge to the operator."
+                return 1
+            fi
+            # A field value read from a file keeps the document out of argv
+            # entirely, so there is nothing here to tell a query from a
+            # mutation. Refused under this subcommand only; the document is one
+            # argument, so passing it inline is the fix.
+            case "$arg" in
+                *=@*)
+                    DEJIMA_GUARD_REASON="'$1' reads a field value from a file, so the document it sends is not in the command for this to read. Pass it inline."
+                    return 1
+                    ;;
+            esac
+            [ "$arg" = graphql ] && { scopable=1; continue; }
             # gh substitutes {owner} and {repo} from the checkout, so a path
             # carrying them names this repository by construction and comparing
             # the literal braces would refuse it.
-            case "$arg" in *'{'*) continue ;; esac
+            case "$arg" in *'{'*) scopable=1; continue ;; esac
             path="${arg#/}"
             case "$path" in "$segment"/*/*) ;; *) continue ;; esac
             path="${path#"$segment"/}"
@@ -411,7 +505,12 @@ _dejima_forge_path_verdict() {
                 _dejima_refuse_repo "the path '$arg'" "$owner/$name"
                 return 1
             fi
+            scopable=1
         done
+        if [ "$scopable" = 0 ]; then
+            DEJIMA_GUARD_REASON="'$1' names no endpoint under '$segment/', so there is nothing here saying which repository this reaches. Name the endpoint as '$segment/${DEJIMA_FORGE_REPO:-<owner>/<name>}/...', or use the subcommands."
+            return 1
+        fi
     done
     return 0
 }
