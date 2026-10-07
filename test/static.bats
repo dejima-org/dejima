@@ -4323,15 +4323,23 @@ _repo_guard_shim() {
     # document, so that is refused however the document is spelled.
     for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
                 "mutation Merge { mergePullRequest }" \
-                "  mutation (\$id: ID!) { mergePullRequest }"; do
+                "  mutation (\$id: ID!) { mergePullRequest }" \
+                "query A{x}mutation B{mergePullRequest(input:{x:1}){y}}" \
+                "query{x},mutation M{mergePullRequest}"; do
         run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form"
         assert_forge_refused "GraphQL mutation" "a mutation document" || return 1
     done
-    # And the read-only query github-pr actually sends is not caught by it.
-    run env "${env_common[@]}" "$d/gh" api graphql \
-        -f 'query=query($owner: String!) { repository(owner: $owner) { id } }' \
-        -f owner=own -f name=thing
-    [[ "$output" == real:* ]] || { echo "a graphql query was blocked: $output"; return 1; }
+    # The last two carry the mutation as a second operation, so a `}` sits
+    # immediately before it. The left boundary is anything that cannot continue
+    # an identifier for that reason - which still has to leave a field merely
+    # NAMED for one alone, or the check costs an honest query.
+    for form in 'query($owner: String!) { repository(owner: $owner) { id } }' \
+                'query{foo_mutation}' 'query{fooMutation(x:1)}'; do
+        run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form" \
+            -f owner=own -f name=thing
+        [[ "$output" == real:* ]] \
+            || { echo "a graphql query was blocked: $form -> $output"; return 1; }
+    done
 
     # The launched-against repository goes through, and so do the two shapes
     # a false refusal would land on. Both matter more than the catches do: a

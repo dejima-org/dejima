@@ -475,7 +475,13 @@ _dejima_forge_path_verdict() {
             # value of a field flag - `-f query=mutation{...}` - rather than as
             # an argument of its own. Matched before the brace test below,
             # which a document would otherwise satisfy.
-            if [[ "$arg" =~ (^|=|[[:space:]])mutation([[:space:]]|\(|\{) ]]; then
+            #
+            # The left boundary is anything that cannot continue an identifier,
+            # not whitespace or `=`: a document carrying more than one
+            # operation puts `}` immediately before the second one, and a
+            # narrower boundary read that as part of a name. The class still
+            # excludes `_`, so a field called foo_mutation is not a mutation.
+            if [[ "$arg" =~ (^|[^A-Za-z0-9_])mutation([[:space:]]|\(|\{) ]]; then
                 DEJIMA_GUARD_REASON="a GraphQL mutation reaches any repository and any write the token allows, and no repository scoping can be read out of it. Use the subcommands, and leave a merge to the operator."
                 return 1
             fi
