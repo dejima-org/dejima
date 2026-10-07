@@ -36,7 +36,7 @@ through.**
 dejima is a **sandboxed development environment for unsupervised agentic
 work**: a coding agent running with its permission prompts off, inside a
 firewalled Docker container, against a project bind-mounted from your host.
-Claude Code and Cline today, selected in the config, and neither is a default: dejima refuses to start with `[core] harness` unset. `install.sh` writes a starter config that selects `claude-code`, because the file has to state a choice when there is no default to fall back on - change the line to pick the other.
+Claude Code and Cline today, selected in the config, and neither is a default.
 A prompt injection or a poisoned dependency can turn it mid-session and it will
 not announce that, so what it can reach, take and break is decided before it
 starts.
@@ -184,7 +184,9 @@ ones you want.
    config.
 3. **Put `~/.local/bin` on your `PATH`** if it isn't already.
 4. **Set `[core] harness`.** It has no default and a launch is refused without
-   it, which is what stops a later release changing your selection for you.
+   it, which is what stops a later release changing your selection for you. The
+   starter config states `claude-code`, because a file with no default to fall
+   back on has to name a choice; change that line for Cline.
 
 That is enough to run `dejima`, and no push credential is needed to get this
 far. Everything else runs at its default, which means `[core] forge = none` and
