@@ -90,13 +90,11 @@ fi
 # Linked here rather than COPYed into place at build time because both depend
 # on values that are only known per launch: which hosts this forge may be
 # pushed to, and which subcommand this workflow blocks.
-# Unconditionally, because DEJIMA_PUSH_HOSTS fails CLOSED: empty means no host
-# may be pushed to, which is how a no-forge or non-pushing workflow becomes
-# enforced rather than described. Installing the shadow only when one of these
-# is non-empty inverted that - it was absent in exactly the case it exists for.
-# The shipped default workflow is local-only, which sets push off and no blocked
-# branches, so that case was the ordinary one; a harness declaring no guards had
-# nothing left checking a push at all.
+# The git shadow is installed unconditionally, because DEJIMA_PUSH_HOSTS fails
+# CLOSED: empty means no host may be pushed to, which is how a no-forge or
+# non-pushing workflow becomes enforced rather than described. Gating the
+# shadow on a non-empty value would leave it absent in exactly that case - and
+# local-only, the shipped default, is exactly that case.
 #
 # /usr/local/bin precedes /usr/bin, so this shadows git without moving it and
 # the guard execs /usr/bin/git directly.

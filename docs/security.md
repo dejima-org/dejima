@@ -1322,13 +1322,29 @@ Docker host itself can resolve it: containers inherit the host's resolver.
 
 ### The host entry
 
-Every other destination in the policy is there because something declared it. The host entry is not: it is the gateway of the container's default route, derived from the routing table. Docker publishes container ports on that address, so permitting it on every port would reach the host's sshd, anything bound to `0.0.0.0`, and every published port of every other container on the machine - including dejima's own remote-access front door, which is a host shell behind a tmux prefix key.
+Every other destination in the policy is there because something declared it.
+The host entry is not: it is the gateway of the container's default route,
+derived from the routing table. Docker publishes container ports on that
+address, so permitting it on every port would reach the host's sshd, anything
+bound to `0.0.0.0`, and every published port of every other container on the
+machine - including dejima's own remote-access front door, which is a host
+shell behind a tmux prefix key.
 
-So it opens no ports. The address is still named in the ruleset, with its own refusal rather than a fall-through to the end of the chain, so that a session reaching for the host shows up as a counted refusal instead of an anonymous one.
+So it opens no ports. The address is still named in the ruleset, with its own
+refusal rather than a fall-through to the end of the chain, so that a session
+reaching for the host shows up as a counted refusal instead of an anonymous
+one.
 
-Nothing in a launch needs it open. A host-resident forge, a host-resident Loki and a self-served model endpoint are each reached through their own entry - by name, or as a literal address - and each lands in a set of its own with its own rules. Configuring one of those is how a host service becomes reachable.
+Nothing in a launch needs it open. A host-resident forge, a host-resident Loki
+and a self-served model endpoint are each reached through their own entry - by
+name, or as a literal address - and each lands in a set of its own with its own
+rules. Configuring one of those is how a host service becomes reachable.
 
-For anything else, `EGRESS_HOST_PORTS` on the filter container takes TCP ports and low-high ranges, comma or space separated; `EGRESS_HOST_PORTS=any` restores the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the entry altogether. A value that is not a port stops the container rather than becoming a rule nobody meant.
+For anything else, `EGRESS_HOST_PORTS` on the filter container takes TCP ports
+and low-high ranges, comma or space separated; `EGRESS_HOST_PORTS=any` restores
+the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the
+entry altogether. A value that is not a port stops the container rather than
+becoming a rule nobody meant.
 
 ### DNS is allowlisted too
 

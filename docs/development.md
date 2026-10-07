@@ -249,12 +249,12 @@ and the forge CLI (`docker/git-guard.sh`, `docker/forge-guard.sh`), which hold
 whatever the harness can or cannot intercept, and read argv rather than
 regex-matching a reconstructed command string. The hooks beside them read argv
 too: they split the reported command into words and ask the same library
-(`docker/guard-lib.sh`), so the overlap cannot become a disagreement. That left one guard depending
-on interception, and it is the one this repository already describes as "a
-fast-fail guard against an overeager agent doing something obviously
-destructive, not a boundary against one that's actively trying to get around
-them" (docs/security.md). A gate that costs a harness its support should be
-guarding more than that.
+(`docker/guard-lib.sh`), so the overlap cannot become a disagreement. That
+left one guard depending on interception, and it is the one this repository
+already describes as "a fast-fail guard against an overeager agent doing
+something obviously destructive, not a boundary against one that's actively
+trying to get around them" (docs/security.md). A gate that costs a harness its
+support should be guarding more than that.
 
 Declaring one absent is a real decision with a visible cost, not a
 formality. It is there so a harness can be supported honestly at a smaller

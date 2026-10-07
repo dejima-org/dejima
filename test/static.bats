@@ -3996,18 +3996,32 @@ _guard_repo() {
     for cmd in "git --no-pager push origin main" \
                "git -c core.pager=cat push origin main" \
                "git --git-dir=$repo/.git push origin main" \
-               "ls && git push origin main"; do
+               "ls && git push origin main" \
+               "/usr/bin/git push origin main" \
+               "/opt/elsewhere/git push origin main"; do
         hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
             | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
               DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
         [[ "$hook_out" == *"Blocked by"* ]] \
             || { echo "not seen as a push: $cmd"; return 1; }
     done
-    # And a token that merely says push is not a git invocation.
-    hook_out="$(printf '{"tool_input":{"command":"echo push origin main"},"cwd":"%s"}' "$repo" \
-        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
-          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
-    [ -z "$hook_out" ] || { echo "blocked something that is not a push: $hook_out"; return 1; }
+    # The path-qualified pair above is the form the library's header names as
+    # the reason both layers exist: the absolute path steps over the PATH
+    # shadow, so the hook is the only thing left that can see it. Comparing the
+    # whole first word meant it did not, and the same spelling was already
+    # fixed and tested for the forge CLI beside it.
+
+    # And a word that merely ends in git, or a token that merely says push, is
+    # not a git invocation - the basename above must not widen into a suffix
+    # match.
+    local cmd_ok
+    for cmd_ok in "echo push origin main" "mygit push origin main" \
+                  "git-annex push origin main"; do
+        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd_ok" "$repo" \
+            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+        [ -z "$hook_out" ] || { echo "blocked '$cmd_ok': $hook_out"; return 1; }
+    done
 }
 
 @test "both push guards refuse a remote they cannot resolve" {
@@ -4280,6 +4294,9 @@ _repo_guard_shim() {
     # core stays forge-neutral.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repopath.XXXXXX")"
     _repo_guard_shim "$d"
+    # A real newline, so the comment form below is the document a CLI would be
+    # handed rather than a backslash-n a test invented.
+    local NL=$'\n'
     local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
                       DEJIMA_FORGE_REPO=own/thing
                       DEJIMA_FORGE_REPO_PATHS="api:repos")
@@ -4309,15 +4326,28 @@ _repo_guard_shim() {
     # document, so that is refused however the document is spelled.
     for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
                 "mutation Merge { mergePullRequest }" \
-                "  mutation (\$id: ID!) { mergePullRequest }"; do
+                "  mutation (\$id: ID!) { mergePullRequest }" \
+                "query A{x}mutation B{mergePullRequest(input:{x:1}){y}}" \
+                "query{x},mutation M{mergePullRequest}" \
+                "mutation,{mergePullRequest}" \
+                "mutation#why not${NL}{mergePullRequest}" \
+                "mutation"; do
         run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form"
         assert_forge_refused "GraphQL mutation" "a mutation document" || return 1
     done
-    # And the read-only query github-pr actually sends is not caught by it.
-    run env "${env_common[@]}" "$d/gh" api graphql \
-        -f 'query=query($owner: String!) { repository(owner: $owner) { id } }' \
-        -f owner=own -f name=thing
-    [[ "$output" == real:* ]] || { echo "a graphql query was blocked: $output"; return 1; }
+    # Both boundaries are anything that cannot continue an identifier, because
+    # each of these sits just outside a narrower one: a second operation puts
+    # `}` before the word, and GraphQL treats commas and comments as ignored
+    # tokens, so a comma or a `#` comment can stand between the word and the
+    # body. Which still has to leave a field merely NAMED for one alone, or the
+    # check costs an honest query.
+    for form in 'query($owner: String!) { repository(owner: $owner) { id } }' \
+                'query{foo_mutation}' 'query{fooMutation(x:1)}'; do
+        run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form" \
+            -f owner=own -f name=thing
+        [[ "$output" == real:* ]] \
+            || { echo "a graphql query was blocked: $form -> $output"; return 1; }
+    done
 
     # The launched-against repository goes through, and so do the two shapes
     # a false refusal would land on. Both matter more than the catches do: a
@@ -10353,4 +10383,28 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     done
     # Agreement on allowing everything would satisfy the loop above.
     [ "$refused" -ge 4 ] || { echo "only $refused of those were refused"; return 1; }
+}
+
+@test "a forge that can be aimed elsewhere names the CLI the guard is linked over" {
+    # The repository rules are applied to the commands in merge_block and
+    # disclose, because those are the only two keys that name a CLI: that set
+    # is what entrypoint.sh links the shadow over and what hooks/merge-guard.sh
+    # checks a command against. So a forge declaring repo_flags, repo_env or
+    # repo_paths and neither of those would get the rule applied to nothing -
+    # silently, since there is no command for it to be absent from.
+    #
+    # Asserted over what ships rather than enforced in the manifest validator,
+    # which is where it would belong if a third-party forge ever hit it;
+    # docs/providers.md states the precondition for that reader.
+    local forge aimable named
+    for forge in $(lib provider_list forge); do
+        aimable=""
+        for key in repo_flags repo_env repo_paths; do
+            [ -n "$(lib manifest_get forge "$forge" "$key")" ] && aimable=1
+        done
+        [ -n "$aimable" ] || continue
+        named="$(lib manifest_get forge "$forge" merge_block)$(lib manifest_get forge "$forge" disclose)"
+        [ -n "$named" ] \
+            || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
+    done
 }
