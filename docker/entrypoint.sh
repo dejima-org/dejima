@@ -102,25 +102,15 @@ fi
 # the guard execs /usr/bin/git directly.
 ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
 
-# Every CLI the shadow has something to do about: the one whose merge a
-# workflow blocks, and every one that writes a body the session authored. More
-# than one, because a forge can have a CLI per artifact rather than one with
-# subcommands, and because a forge with nothing blocked can still have
-# something to disclose.
-#
-# The first word of each record names the CLI. The real one is already behind
-# the symlink this replaces (see install-forge-bins.sh), so the guard has a
-# fixed path to exec.
-_shadow_clis() {
-    [ -z "${DEJIMA_MERGE_BLOCK:-}" ] || printf '%s\n' "${DEJIMA_MERGE_BLOCK%% *}"
-    # "<kind> <cli> <subcommand>...", so the CLI is the second word.
-    [ -z "${DEJIMA_DISCLOSE:-}" ] || printf '%s\n' "$DEJIMA_DISCLOSE" |
-        while read -r _ _cli _; do
-            [ -z "$_cli" ] || printf '%s\n' "$_cli"
-        done
-}
+# Every CLI the shadow has something to do about. Derived by the same function
+# hooks/merge-guard.sh uses to decide whether a command is one of these, so the
+# set the shadow is linked over and the set the hook checks against cannot
+# disagree. The real CLI is already behind the symlink this replaces (see
+# install-forge-bins.sh), so the guard has a fixed path to exec.
+# shellcheck source=guard-lib.sh
+source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
 
-_shadow_cli_list="$(_shadow_clis | sort -u)"
+_shadow_cli_list="$(dejima_forge_commands | sort -u)"
 if [ -n "$_shadow_cli_list" ]; then
     while read -r _cli; do
         [ -n "$_cli" ] || continue

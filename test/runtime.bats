@@ -2647,3 +2647,27 @@ EOF
     [[ "$output" != *"dejima-notify"* ]]
     [[ "$output" != *"remote access is enabled"* ]]
 }
+
+@test "the git shadow loads its policy in the image, and leaves other git commands alone" {
+    # The decision lives in a file the Dockerfile copies in
+    # (docker/guard-lib.sh), and every git command in a session goes through
+    # the shadow that sources it - so a COPY line that stopped matching the
+    # path would break git outright, in every session, and nothing in the
+    # confined suites would notice: they point the guards at the checkout.
+    #
+    # The file-wide pair sets no DEJIMA_PUSH_HOSTS, which fails closed, so any
+    # push is refused. Which refusal does not matter; that the guard is the one
+    # speaking does.
+    run dexec bash -c 'cd /tmp && git init -q -b feature r && cd r && git push origin feature'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Blocked by dejima's git guard"* ]] \
+        || { echo "the shadow did not reach its policy: $output"; return 1; }
+    [[ "$output" != *"No such file"* ]] \
+        || { echo "the shadow could not load the policy file: $output"; return 1; }
+
+    # And the pass-through path: everything that is not a push has to reach
+    # real git, or the shadow is a broken git rather than a guarded one.
+    run dexec git --version
+    [ "$status" -eq 0 ]
+    [[ "$output" == git\ version* ]] || { echo "$output"; return 1; }
+}

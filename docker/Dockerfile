@@ -324,6 +324,9 @@ COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
 # nothing until something puts them on PATH.
 COPY docker/git-guard.sh /usr/local/lib/dejima/git-guard.sh
 COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
+# The policy both of those apply, and that the two hooks beside them apply to
+# the same command from the other side. One copy, so a bypass is fixed once.
+COPY docker/guard-lib.sh /usr/local/lib/dejima/guard-lib.sh
 # The briefing renderer, which every harness needs and no harness owns. Baked
 # in rather than reached through the ~/.claude/hooks mount, because that mount
 # is Claude Code's configuration: sandbox-context.sh calls this, and so does
