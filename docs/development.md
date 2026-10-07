@@ -25,9 +25,10 @@ run them.
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
-| `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
+| `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches. Turns the reported command into argv and asks `docker/guard-lib.sh` |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/merge-guard.sh` | `PreToolUse` hook: blocks the configured forge's merge command (`DEJIMA_MERGE_BLOCK`) in the sandbox: merging is a human decision |
+| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), and a command aimed at another repository - to a reported command. Named for the merge block, which is the rule it was created for |
+| `docker/guard-lib.sh` | The push and merge policy itself, read out of argv. The two hooks above and the two PATH shadows all call it, so a bypass is fixed once rather than twice |
 | `hooks/dejima-notify.sh` | Drops an empty `waiting`/`done` marker for a remote-enabled session. Registered as a `Stop` hook only; `waiting` is there for a harness that can say it without having stopped - see [docs/remote-access.md](remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
@@ -246,7 +247,9 @@ R2 was a hard gate until the guards stopped needing it. Two of the three it
 hosted - the push guard and the merge guard - are now PATH shadows over `git`
 and the forge CLI (`docker/git-guard.sh`, `docker/forge-guard.sh`), which hold
 whatever the harness can or cannot intercept, and read argv rather than
-regex-matching a reconstructed command string. That left one guard depending
+regex-matching a reconstructed command string. The hooks beside them read argv
+too: they split the reported command into words and ask the same library
+(`docker/guard-lib.sh`), so the overlap cannot become a disagreement. That left one guard depending
 on interception, and it is the one this repository already describes as "a
 fast-fail guard against an overeager agent doing something obviously
 destructive, not a boundary against one that's actively trying to get around

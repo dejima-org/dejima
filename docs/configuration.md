@@ -1158,12 +1158,20 @@ GitHub push is blocked by default too (see
 docs/security.md) unless `--allow-github-push` is given. For a real guarantee
 against pushes to main/master, use branch protection on the remote itself.
 
-`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
-`gitea-pr merge` inside the sandbox. It's the API-side counterpart to the rule
-above: a merge puts a branch on `main` without ever performing a push, so
-`git-push-guard.sh` never sees it. A hook is handed a command rather than a
-conversation, so it can't tell an instructed merge from an unprompted one -
-which is why it's scoped to the sandbox rather than applied everywhere. On the
+Both this hook and the PATH shadow beside it read the decision out of
+`docker/guard-lib.sh`, which is the only copy of the rules. A push that the
+library cannot read is refused rather than passed through: an unresolvable
+remote, `--mirror`, and `--git-dir` or `--work-tree`, each of which names a
+repository other than the one the remote would be resolved in.
+
+`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) applies the configured
+forge's policy inside the sandbox: the blocked merge command, and a command
+aimed at a repository the session was not launched against. It's the API-side
+counterpart to the rule above: a merge puts a branch on `main` without ever
+performing a push, so `git-push-guard.sh` never sees it. A hook is handed a
+command rather than a conversation, so it can't tell an instructed merge from
+an unprompted one - which is why it's scoped to the sandbox rather than
+applied everywhere. On the
 host it does nothing, and you can still ask an agent to merge. The same
 fast-fail caveat applies with more force than usual here: the session has the
 Gitea token in its environment and could call the merge endpoint with `curl`
