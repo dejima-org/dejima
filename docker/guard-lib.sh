@@ -131,9 +131,9 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     #
     # It LOSES to a positional, which is what git documents: "this option is
     # equivalent to the <repository> argument. If both are specified, the
-    # command-line argument takes precedence." Reading it the other way round
-    # meant `git push --repo=origin other-remote feature` was checked against
-    # origin and pushed to other-remote, whose host nothing had looked at.
+    # command-line argument takes precedence." So in `git push --repo=origin
+    # other-remote feature` the remote is other-remote, and checking origin
+    # instead would approve a host this push never goes to.
     #
     # Every positional after the remote is a refspec, not just the first.
     # `git push origin feature main` checked `feature` alone and let `main`
