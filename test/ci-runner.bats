@@ -77,14 +77,10 @@ PY
     [ -e /var/run/docker.sock ]
 }
 
-# "The two runners are not the same runner" was a test here, and it could not
-# be one: a suite sees the job it is running in, so the branch it took was
-# whichever of the two assertions above already applies - one job's answer
-# restated, under a name claiming both. Checking it needs the two jobs' results
-# compared, which is the workflow's job and not a suite's.
-#
-# The two directions ARE covered, one per job: the confined runner must not
-# have the socket, and the privileged one must.
+# The two directions above are each one job's answer: the confined runner must
+# not have the docker socket and the privileged one must. That the two jobs land
+# on DIFFERENT runners does not follow from either, and a suite cannot see it -
+# it runs in one job. Comparing the two jobs' results is the workflow's to do.
 
 # --- egress, for the tier the rules actually apply to ------------------------
 #

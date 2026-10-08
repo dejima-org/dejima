@@ -106,6 +106,11 @@ suites_for() {
         # against by more than static.bats - the README's axis lists, the
         # provider tables, the nginx example and the remote-access page each
         # have a suite checking the code agrees with them.
+        #
+        # So a doc-only edit runs four suites, not one. That is the cost of the
+        # lane answering for what actually reads a file, and it is the safe
+        # direction: narrowing this back to static alone would report a doc
+        # change as green from suites that assert against it.
         docs/*|README.md|*.md)               echo 'static config providers remote' ;;
 
         *) echo ALL ;;
