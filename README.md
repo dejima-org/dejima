@@ -160,8 +160,8 @@ layers below the container rather than into a harder one.
 This repo only holds the tooling; no project lives here. Point it at a project
 on disk and that project is bind-mounted into the container at runtime.
 
-**Prerequisites:** Docker with the `docker compose` v2 plugin, and `python3`
-(stdlib only, no packages) for the host-side credential proxy.
+**Prerequisites:** Docker with the `docker compose` v2 plugin, `jq`, and
+`python3` (stdlib only, no packages) for the host-side credential proxy.
 
 Only the first block below is required. The rest are independent, so take the
 ones you want.
@@ -296,9 +296,9 @@ dejima --ro ~/other-project ~/myproject
 both forms, and which host paths a mount is refused over and why.
 
 **Ctrl-Z backgrounds all of dejima**, and `fg` brings back a working session.
-It makes no progress while suspended, though, so for one that should keep
-working while you are away, run dejima inside tmux and use
-[`dejima-attach`](docs/remote-access.md).
+It gets your terminal back rather than pausing the agent - the container keeps
+running - so for a session you want to leave working and pick up elsewhere, run
+dejima inside tmux and use [`dejima-attach`](docs/remote-access.md).
 → [why that takes doing](docs/configuration.md#suspending-a-session)
 
 ## Sign in on the host first
@@ -535,16 +535,10 @@ name, on a queue its maintainers are already drowning in.
 
 The sandbox can always read from GitHub. By default it can never push there:
 GitHub's IP ranges are only allowlisted on port 443, so port 22 is physically
-unreachable rather than merely discouraged by a hook. Two properties carry
-that, both worth naming because the claim stays readable if either quietly
-stops being true. The restriction belongs to the *destination* rather than to
-the path it was reached by, so resolving a GitHub name cannot open a port its
-published ranges do not have. And IPv6 is refused as a whole family, because an
-allowlist naming one address family says nothing about the other - so "port 22
-is closed on those ranges" would mean nothing if a v6 route to the same host
-stayed open. The refusal is the first rule of the chain and there is no v6
-permit path anywhere in it, which the policy checks at startup rather than
-assuming.
+unreachable rather than merely discouraged by a hook. What carries that claim -
+a restriction belonging to the destination rather than to the path it was
+reached by, and IPv6 refused as a whole family - is in
+[docs/security.md](docs/security.md).
 
 `--allow-github-push` opens port 22 for one launch, paired with a repo-scoped
 deploy key in `[core] ssh_key` rather than a forwarded personal agent. The one
@@ -565,8 +559,7 @@ After the container exits it diffs them and tells you what changed.
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in
 that repo. Its diff is time-windowed: a finding says a path changed while the
-session was running, not that the session changed it. Findings are a time
-window, not a verdict on who caused them.
+session was running, not that the session changed it.
 
 `dejima-audit show` indexes what is waiting and `dejima-audit ack` walks it, one
 finding at a time. `[audit] strict` refuses a headless launch while CRITICAL
