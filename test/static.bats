@@ -2125,7 +2125,7 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # Over-selection is safe and under-selection is the bug, so naming a suite
     # that merely mentions a file in a comment costs a suite run; missing one
     # reports an edit as green from a lane that never loaded it.
-    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r missing=() bad=()
+    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r suite missing=() bad=()
     sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" > "$sf"
     [ -s "$sf" ] || { echo "could not extract suites_for"; return 1; }
 
@@ -2139,14 +2139,23 @@ _reference_has_key() {  # <doc> <section> <leaf>
         local needle="${path##*/}"
         [ "$(cd "$REPO_ROOT" && git ls-files "*/$needle" "$needle" | wc -l)" -gt 1 ] \
             && needle="$path"
-        refs="$(grep -ln -- "$needle" "$REPO_ROOT"/test/*.bats 2>/dev/null \
-                | xargs -r -n1 basename | sed 's/\.bats$//' | sort -u)"
+        # Comment lines excluded, because a suite that merely NAMES a file in
+        # prose does not read it - and suites cite each other in prose
+        # constantly, so counting those would push every rule towards ALL and
+        # leave the lane selecting everything. Over-selection is still the safe
+        # direction; this is about what "reads it" means, not about relaxing.
+        refs=""
+        for suite in "$REPO_ROOT"/test/*.bats; do
+            grep -v '^[[:space:]]*#' "$suite" | grep -q -- "$needle" || continue
+            refs="$refs $(basename "$suite" .bats)"
+        done
+        refs="$(printf '%s\n' $refs | sort -u)"
         for r in $refs; do
             case "$r" in runtime|ci-runner) continue ;; esac
             grep -qw "$r" <<< "$mapped" || missing+=("$r")
         done
         [ ${#missing[@]} -eq 0 ] || bad+=("$path -> [$mapped] misses: ${missing[*]}")
-    done < <(cd "$REPO_ROOT" && git ls-files 'bin/*' 'hooks/*' 'web/*' 'systemd/*' install.sh)
+    done < <(cd "$REPO_ROOT" && git ls-files)
 
     [ ${#bad[@]} -eq 0 ] \
         || { echo "these rules select fewer suites than read the file:"
