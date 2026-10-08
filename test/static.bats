@@ -10495,3 +10495,40 @@ _permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
     [ "$line_daemon" -lt "$line_unset" ] \
         || { echo "the header is scrubbed before the request that uses it"; return 1; }
 }
+
+@test "the briefing renderer runs as the session user, not as root" {
+    # It reads the project's own .dejima.md and asks the package managers what
+    # is installed, with its cwd inside the workspace a session can write.
+    # Nothing about that needs root - and running as root got the answer wrong
+    # as well: the dependency layers install npm and cargo packages as the
+    # sandbox user, into that user's HOME, so root's cargo home has none of
+    # them and every declared cargo dependency was reported missing.
+    #
+    # hooks/sandbox-context.sh already reaches it as that user, since a hook
+    # runs inside the session. This is the other route agreeing with it.
+    local e="$SANDBOX_DIR/entrypoint.sh" line
+    line="$(grep -n 'dejima-briefing-render.sh' "$e" | head -1)"
+    [ -n "$line" ] || { echo "entrypoint.sh no longer renders the briefing"; return 1; }
+    [[ "$line" == *'gosu "$SANDBOX_USER"'* ]] \
+        || { echo "the renderer still runs as root: $line"; return 1; }
+
+    # The file it writes stays root-owned and read-only, which is the half that
+    # must NOT be deprivileged: a session that could write this would be
+    # writing its own next briefing.
+    grep -q 'chown root:root "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer root-owned"; return 1; }
+    grep -q 'chmod 444 "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer read-only"; return 1; }
+}
+
+@test "the pty chown tests the descriptor tty(1) reports on" {
+    # `tty` reads stdin; testing stdout instead meant a container with one
+    # attached and the other not produced an empty path and a chown that
+    # silently did nothing - which is the nvim clipboard fallback failing with
+    # nothing to point at.
+    local block
+    block="$(grep -B2 -A2 'chown "$SANDBOX_USER" "$(tty)"' "$SANDBOX_DIR/entrypoint.sh")"
+    [ -n "$block" ] || { echo "the pty chown is gone"; return 1; }
+    grep -q '\[ -t 0 \]' <<< "$block" \
+        || { echo "the guard tests a descriptor other than the one tty reads: $block"; return 1; }
+}
