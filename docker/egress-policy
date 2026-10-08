@@ -1486,13 +1486,23 @@ rollback_entries() {
 # An address needs no resolution and no restart: it goes straight into the sets
 # its class uses. Both sets are interval sets, so a prefix works as well as a
 # single address.
+# A forge-class address needs to be in both sets, and the second add failing
+# used to leave the first standing: the address the forge class says is
+# HTTPS-only stayed in literal_v4, which permits every port, for the rest of the
+# session - and the entries file was rolled back, so neither `entries` nor
+# `status` showed it. The element goes back too, or the refusal reports a
+# narrowing that did not happen.
 permit_address() {
   local class=$1 value=$2
   nft add element inet "$TABLE" literal_v4 "{ $value }" \
     || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the allow-list"; }
   if [ "$class" = forge ]; then
-    nft add element inet "$TABLE" forge_v4 "{ $value }" \
-      || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the forge class"; }
+    nft add element inet "$TABLE" forge_v4 "{ $value }" || {
+      nft delete element inet "$TABLE" literal_v4 "{ $value }" 2>/dev/null \
+        || say "WARNING: $value is still in the any-port allow-list and could not be removed; restart the session"
+      mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"
+      die "could not add $value to the forge class"
+    }
   fi
   say "$value permitted ($class class, direct)"
 }

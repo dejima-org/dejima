@@ -10408,3 +10408,53 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
             || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
     done
 }
+
+# permit_address puts a forge-class address in two sets, and the second add
+# failing used to leave the first standing: the address the forge class says is
+# HTTPS-only stayed in literal_v4, which permits every port, while the entries
+# file rolled back so nothing reported it. Driven with a stub nft, because the
+# real one needs a namespace to act on.
+_permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
+    run env FAIL_SET="$2" bash -c '
+        set -u
+        TABLE=t
+        ENTRIES_FILE="$BATS_TEST_TMPDIR/entries"
+        : > "$ENTRIES_FILE"
+        printf "before\n" > "$ENTRIES_FILE.prev"
+        say() { printf "say: %s\n" "$*"; }
+        die() { printf "die: %s\n" "$*"; exit 1; }
+        nft() {
+            printf "nft: %s\n" "$*"
+            case "$*" in
+                *"add element"*" ${FAIL_SET:-__none__} "*) return 1 ;;
+            esac
+            return 0
+        }
+        eval "$(sed -n "/^permit_address()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+        permit_address "$1" 198.51.100.7
+    ' _ "$1"
+}
+
+@test "a forge-class permit that half-lands takes back the any-port element" {
+    _permit_address forge forge_v4
+    [ "$status" -ne 0 ] || { echo "the failure was not reported: $output"; return 1; }
+    [[ "$output" == *"could not add 198.51.100.7 to the forge class"* ]] \
+        || { echo "$output"; return 1; }
+    # The point of the fix: the any-port element is removed again, so the
+    # address is not left permitted on every port by a command that refused.
+    [[ "$output" == *"nft: delete element inet t literal_v4 { 198.51.100.7 }"* ]] \
+        || { echo "the any-port element was left behind: $output"; return 1; }
+
+    # The whole add still succeeding touches neither rollback.
+    _permit_address forge ""
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "rolled back a success: $output"; return 1; }
+    [[ "$output" == *"198.51.100.7 permitted (forge class, direct)"* ]] || { echo "$output"; return 1; }
+
+    # An open-class permit never touches forge_v4, so there is nothing to undo
+    # and the first add failing is reported on its own terms.
+    _permit_address open literal_v4
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not add 198.51.100.7 to the allow-list"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "undid an add that never landed: $output"; return 1; }
+}
