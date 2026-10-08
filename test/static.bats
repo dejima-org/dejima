@@ -4370,6 +4370,20 @@ _repo_guard_shim() {
     # anyway. A mutation is what an agent reaches for once `gh pr merge`
     # refuses, and no repository scoping can be read out of a GraphQL
     # document, so that is refused however the document is spelled.
+    # Over every argument including the dash-prefixed ones, because a flag can
+    # carry its value attached: these put the document inside one word that the
+    # scoping loop skips, while positional `graphql` still looked scopable.
+    for form in "--field=query=mutation{mergePullRequest}" "-Fquery=mutation{mergePullRequest}" \
+                "--field=query=@doc.graphql" "-fquery=@doc.graphql"; do
+        run env "${env_common[@]}" "$d/gh" api graphql "$form"
+        assert_forge_refused "Blocked by dejima" "gh api graphql $form" || return 1
+    done
+    # A flag whose value is an ordinary header, which the same pass now sees
+    # and must have nothing to say about.
+    run env "${env_common[@]}" "$d/gh" api repos/own/thing/issues \
+        -H "Accept: application/vnd.github+json"
+    [[ "$output" == real:* ]] || { echo "a header was blocked: $output"; return 1; }
+
     for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
                 "mutation Merge { mergePullRequest }" \
                 "  mutation (\$id: ID!) { mergePullRequest }" \

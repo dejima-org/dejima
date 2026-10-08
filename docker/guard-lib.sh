@@ -479,13 +479,18 @@ _dejima_forge_path_verdict() {
         segment="${spec#*:}"
         scopable=0
         for arg in "$@"; do
-            case "$arg" in -*) continue ;; esac
             # A GraphQL document whose operation is a mutation. Matched
             # anywhere in the argument, because the document arrives as the
             # value of a field flag - `-f query=mutation{...}` - rather than as
             # an argument of its own. Matched before the brace test below,
             # which a document would otherwise satisfy.
-
+            #
+            # Over EVERY argument, including the dash-prefixed ones, because a
+            # flag can carry its value attached: `--field=query=mutation{...}`
+            # and `-Fquery=mutation{...}` put the document inside one word that
+            # the scoping loop below skips. This check needs no flag table to
+            # read it, which is what lets it look at all of them - unlike the
+            # repository scoping, which does.
             #
             # Both boundaries are anything that cannot continue an
             # identifier, rather than whitespace and a brace. GraphQL treats
@@ -509,6 +514,9 @@ _dejima_forge_path_verdict() {
                     return 1
                     ;;
             esac
+            # Everything from here needs to know which argument is the
+            # endpoint, so the flags go.
+            case "$arg" in -*) continue ;; esac
             [ "$arg" = graphql ] && { scopable=1; continue; }
             # gh substitutes {owner} and {repo} from the checkout, so a path
             # carrying them names this repository by construction and comparing
