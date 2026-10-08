@@ -1156,6 +1156,13 @@ if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
     echo "[core] ssh_key is set but not a file: $SANDBOX_SSH_KEY" >&2
     exit 1
 fi
+# Non-empty, because selecting a key is what stops the forwarded agent being
+# mounted: an empty file passes the check above, loads nothing in the
+# container, and would leave a pushing session with no agent at all.
+if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -s "$SANDBOX_SSH_KEY" ]; then
+    echo "[core] ssh_key is set but the file is empty: $SANDBOX_SSH_KEY" >&2
+    exit 1
+fi
 if [ -n "$SANDBOX_SSH_KEY" ]; then
     key_perms=$(stat -c '%a' "$SANDBOX_SSH_KEY")
     if [ "${key_perms: -2}" != "00" ]; then
@@ -1853,6 +1860,13 @@ export SANDBOX_GITCONFIG_DIR
 # forwarded either - left empty here, docker-compose.yml's
 # ${SSH_AUTH_SOCK:-/dev/null} mounts nothing.
 [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] || SSH_AUTH_SOCK=""
+# And neither does a launch that configured its own key. entrypoint.sh loads
+# that key into an agent of its own and points SSH_AUTH_SOCK at it, so the
+# forwarded one was already unused - but it stayed mounted at the path
+# docker-compose.yml names, where `SSH_AUTH_SOCK=/ssh-agent ssh ...` signs with
+# the operator's personal identities. Choosing a dedicated key has to mean the
+# personal agent is not in the container, not that it is merely not the default.
+[ -z "$SANDBOX_SSH_KEY" ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS

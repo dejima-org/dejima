@@ -70,6 +70,9 @@ fi
 # Mounted at /root (not under $SANDBOX_HOME) so only this root-run block
 # can ever read it - copied out, loaded into the agent, and the copy
 # deleted, all before dropping to the sandbox user below.
+# The forwarded agent is not mounted when this key is configured (bin/dejima
+# blanks SSH_AUTH_SOCK), so this is the only agent in the container rather than
+# the preferred one of two.
 SANDBOX_SSH_KEY_SRC="/root/.ssh-sandbox-key-src"
 if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 "$SANDBOX_SSH_KEY_SRC" "$SANDBOX_HOME/.ssh/sandbox-key"

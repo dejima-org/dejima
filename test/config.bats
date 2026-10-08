@@ -1831,6 +1831,114 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
     rm -rf "$workspace"
 }
 
+# A launch that really reaches `docker compose`, with a pushing workflow, so the
+# rule that blanks the agent socket for a workflow that never pushes is not the
+# one doing the work. Its own fixture rather than _rw_setup's: this needs a
+# forge configured, and stdin closed because a full launch opens /dev/tty,
+# which under bats is not the terminal it expects.
+#
+# The stub records its own environment rather than its arguments, because the
+# volume line resolves ${SSH_AUTH_SOCK:-/dev/null} inside docker-compose - so
+# the environment handed to it IS whether the agent is mounted. Into a file,
+# because the launch prints plenty of its own and the assertion is about one
+# value.
+#
+# Leaves AGENT_LOG and AGENT_OUT for the caller to read on failure.
+_agent_launch() {  # <ssh_key or "">
+    local key="$1" h c s w
+    # The suite exports DEJIMA_CONFIG_DIR, which is where a launch under it
+    # reads its config from - a config written under $HOME would not be found.
+    h="$(mktemp -d)"; c="$CONFIG_DIR"
+    printf 'tok\n' > "$c/token"
+    {
+        printf '[core]\nharness = claude-code\nfirewall = on\nupdate_check = off\n'
+        printf 'forge = gitea\nworkflow = worktree-pr\n'
+        printf '[harness.claude-code]\nbackend = anthropic\n'
+        printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example\n'
+        # The forge credential moves under the identity when there is one: an
+        # identity that leaves one behind is a session acting under whichever
+        # account owns it, which the launch refuses outright.
+        if [ -n "$key" ]; then
+            printf '[identity.default]\nssh_key = %s\ntoken_file = %s/token\n' "$key" "$c"
+        else
+            printf 'token_file = %s/token\n' "$c"
+        fi
+    } > "$c/config"
+    AGENT_LOG="$(mktemp)"
+    s="$(mktemp -d)"
+    cat > "$s/docker" <<'STUB'
+#!/bin/sh
+printf 'SSH_AUTH_SOCK=[%s]\n' "${SSH_AUTH_SOCK-unset}" >> "$AGENT_SOCK_LOG"
+exit 0
+STUB
+    chmod +x "$s/docker"
+    w="$(mktemp -d)"; git -C "$w" init -q
+    # `|| true` because a launch here ends however the stubbed session ended,
+    # and this is not a test about its exit status.
+    AGENT_OUT="$(HOME="$h" PATH="$s:$PATH" SSH_AUTH_SOCK="$AGENT_SOCK" \
+        AGENT_SOCK_LOG="$AGENT_LOG" \
+        bash "$REPO_ROOT/bin/dejima" "$w" </dev/null 2>&1 || true)"
+    rm -rf "$h" "$s" "$w"
+}
+
+# A real agent, because bin/dejima tests the socket with `[ -S ]` and refuses a
+# path that is not one.
+_real_agent() {
+    eval "$(ssh-agent -s)" >/dev/null
+    AGENT_SOCK="$SSH_AUTH_SOCK"
+    AGENT_PID="$SSH_AGENT_PID"
+}
+
+@test "a configured ssh_key means the operator's agent is not in the container at all" {
+    # entrypoint.sh loads that key into an agent of its own and points
+    # SSH_AUTH_SOCK at it, so the forwarded one was already unused - but it
+    # stayed mounted at the path docker-compose.yml names, where
+    # `SSH_AUTH_SOCK=/ssh-agent ssh ...` signs with the operator's personal
+    # identities. Choosing a dedicated key has to mean the personal agent is
+    # not in the container, not that it is merely not the default.
+    local key
+    _real_agent
+    key="$(mktemp)"; printf 'not-a-real-key\n' > "$key"; chmod 600 "$key"
+
+    _agent_launch "$key"
+    kill "$AGENT_PID" 2>/dev/null || true
+    rm -f "$key"
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "SSH_AUTH_SOCK=[]" ] \
+        || { echo "the forwarded agent still reached compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "without a configured ssh_key the forwarded agent still reaches the container" {
+    # The positive control for the test above, and the reason it means
+    # anything: without it, a launch that simply never set the variable would
+    # satisfy that assertion too.
+    _real_agent
+
+    _agent_launch ""
+    local want="SSH_AUTH_SOCK=[$AGENT_SOCK]"
+    kill "$AGENT_PID" 2>/dev/null || true
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "$want" ] \
+        || { echo "the forwarded agent did not reach compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "an empty ssh_key file is refused rather than leaving a pushing session with no agent" {
+    # It passes the is-a-file check, loads nothing in the container, and is now
+    # the thing that stops the forwarded agent being mounted - so the three
+    # together would be a push with no credential at all.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    : > "$CONFIG_DIR/empty-key"
+    chmod 600 "$CONFIG_DIR/empty-key"
+    write_config '[core]' "ssh_key = $CONFIG_DIR/empty-key" 'forge = none' 'workflow = local-only'
+    _rw_launch "$workspace"
+    [ "$status" -ne 0 ] || { echo "an empty key was accepted: $output"; return 1; }
+    [[ "$output" == *"empty"* ]] || { echo "$output"; return 1; }
+    rm -rf "$workspace"
+}
+
 # The positive control for the test above: with no key configured the
 # forwarded agent really is the only way to push, and an empty one is worth
 # saying so before it fails deep into a session.
