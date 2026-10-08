@@ -10459,6 +10459,29 @@ _permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
     [[ "$output" != *"delete element"* ]] || { echo "undid an add that never landed: $output"; return 1; }
 }
 
+@test "nothing capability-dropped is started through env" {
+    # drop_caps is a shell function (caps-lib.sh), so `env` in front of it
+    # cannot find anything to exec: the line becomes exit 127. Every caller
+    # backgrounds or execs it, so that status is either hidden by `&` or is the
+    # whole process - which is how a prefix added for one reason took the log
+    # shipper out without a word.
+    # Continuations flattened first, because the prefix that broke it was
+    # written across two lines - a per-line grep did not see it, which is the
+    # same reason launch.bats flattens before matching. Comments dropped after
+    # that, or the line explaining why the prefix is absent is itself a match.
+    local f line bad=""
+    for f in "$SANDBOX_DIR"/*.sh; do
+        while IFS= read -r line; do
+            bad="$bad
+$(basename "$f"): $line"
+        done < <(sed -z 's/\\\n[[:space:]]*/ /g' "$f" \
+                 | grep -vE '^[[:space:]]*#' \
+                 | grep -nE '\benv\b[^;&|]*\b(drop_caps|require_setpcap)\b')
+    done
+    [ -z "$bad" ] \
+        || { echo "env cannot exec a shell function, so these are exit 127:$bad"; return 1; }
+}
+
 @test "no daemon the policy starts inherits the forge credential" {
     # The resolver, the two log readers and the shipper all parse content the
     # session's own traffic decides. The published-ranges fetch is the only
@@ -10489,21 +10512,25 @@ _permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
         || { echo "the scrub no longer names both halves of the credential"; return 1; }
 
     # The shipper is started by firewall-up.sh rather than by the policy, so
-    # NO_CREDENTIAL does not reach it: it carries the scrub on its own start
-    # line, and the script drops both names once the fetch has happened.
-    local up="$SANDBOX_DIR/firewall-up.sh" shipper
-    shipper="$(grep -n -B1 'log-shipper.sh &' "$up")"
-    [ -n "$shipper" ] || { echo "the shipper is no longer started here"; return 1; }
-    [[ "$shipper" == *'env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH'* ]] \
-        || { echo "the shipper starts with the credential in reach: $shipper"; return 1; }
-    local drop_token drop_hdr apply_at
+    # NO_CREDENTIAL does not reach it. What covers it is ORDER: both names are
+    # gone from this script's environment before the line that starts it. That
+    # is asserted rather than a scrub on the line itself, because drop_caps is a
+    # shell function and `env` can only exec a binary - a prefix there is exit
+    # 127, which the `&` hides from set -e, and a shipper that never starts
+    # takes Loki logging with it silently.
+    local up="$SANDBOX_DIR/firewall-up.sh" drop_token drop_hdr apply_at ship_at
     drop_token="$(grep -n '^unset GH_TOKEN$' "$up" | cut -d: -f1)"
     drop_hdr="$(grep -n '^unset EGRESS_FORGE_META_AUTH$' "$up" | cut -d: -f1)"
     apply_at="$(grep -n 'egress-policy apply' "$up" | head -1 | cut -d: -f1)"
-    [ -n "$drop_token" ] && [ -n "$drop_hdr" ] && [ -n "$apply_at" ] \
+    ship_at="$(grep -n 'log-shipper.sh &' "$up" | head -1 | cut -d: -f1)"
+    [ -n "$drop_token" ] && [ -n "$drop_hdr" ] && [ -n "$apply_at" ] && [ -n "$ship_at" ] \
         || { echo "firewall-up.sh no longer drops both names around the policy run"; return 1; }
-    [ "$drop_token" -lt "$apply_at" ] && [ "$drop_hdr" -gt "$apply_at" ] \
-        || { echo "the raw token outlives the policy run, or the header dies before it"; return 1; }
+    [ "$drop_token" -lt "$apply_at" ] \
+        || { echo "the raw token outlives the policy run"; return 1; }
+    [ "$drop_hdr" -gt "$apply_at" ] \
+        || { echo "the header dies before the request that uses it"; return 1; }
+    [ "$drop_hdr" -lt "$ship_at" ] \
+        || { echo "the shipper starts while the header is still in the environment"; return 1; }
 
     # The header is still there for the fetch that needs it, so the scrub
     # cannot pass by breaking the request.
