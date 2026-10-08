@@ -3927,7 +3927,6 @@ _guard_repo() {
     # was compared as "+main" and matched no policy entry, which left the
     # force-push spelling as the one that went through.
     for form in "push origin main" "push origin HEAD:main" \
-                "push --repo=origin main" "push --repo origin main" \
                 "push -o ci.skip origin main" \
                 "push origin +main" "push origin +refs/heads/main" \
                 "push origin +feature:main" "push --force origin main" \
@@ -3943,6 +3942,37 @@ _guard_repo() {
     run _git_guard "$repo" push origin +feature
     [[ "$output" != *"Blocked by dejima"* ]] \
         || { echo "a forced push to an unprotected branch was refused: $output"; return 1; }
+}
+
+@test "a positional remote beats --repo, the way git documents it" {
+    # git: "this option is equivalent to the <repository> argument. If both are
+    # specified, the command-line argument takes precedence." Read the other
+    # way round, `git push --repo=origin other-remote feature` resolved and
+    # approved origin's URL while git pushed to other-remote - whose host
+    # nothing had checked.
+    local repo; repo="$(_guard_repo)"
+
+    for form in "push --repo=origin elsewhere feature" "push --repo origin elsewhere feature"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"may only push to"* ]] \
+            || { echo "checked the wrong remote: git $form -> $output"; return 1; }
+        [[ "$output" == *"evil.invalid"* ]] \
+            || { echo "it named the wrong host: $output"; return 1; }
+    done
+
+    # And --repo alone still names the remote, or it would be an opaque flag
+    # and the push would be checked against a remote the command never named.
+    run _git_guard "$repo" push --repo=elsewhere
+    [[ "$output" == *"evil.invalid"* ]] || { echo "$output"; return 1; }
+    run _git_guard "$repo" push --repo=origin
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+
+    # `git push --repo=origin main` is a push to a remote called "main" by the
+    # rule above, which is exactly how git reads it - so the refusal is the
+    # unresolvable-remote one rather than the branch policy.
+    run _git_guard "$repo" push --repo=origin main
+    [[ "$output" == *"cannot resolve the remote 'main'"* ]] || { echo "$output"; return 1; }
 }
 
 @test "the git guard leaves everything that is not a blocked push alone" {
@@ -4134,7 +4164,7 @@ _guard_repo() {
                "git push" "git push origin" "git push origin HEAD" \
                "git push -o ci.skip origin main" "git push --push-option=x origin main" \
                "git push --repo origin main" "git push --repo=origin main" \
-               "git push origin +main" \
+               "git push origin +main" "git push --repo=origin elsewhere feature" \
                "git push --receive-pack /bin/true origin main" \
                "git push --all origin" "git push --mirror origin" \
                "git push origin feature main" \

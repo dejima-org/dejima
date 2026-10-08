@@ -78,7 +78,7 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     local repo_dir="$1"; shift
     local argv=("$@") i=0 subcommand="" branch
     local -a config_overrides=() refspecs=()
-    local remote="" push_all=0 push_mirror=0 repo_override=0
+    local remote="" repo_flag="" push_all=0 push_mirror=0 repo_override=0
     DEJIMA_GUARD_REASON=""
     DEJIMA_GUARD_PUSH=0
 
@@ -125,11 +125,15 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     fi
 
     # What comes after `push`. --repo names the remote in git's own legacy form
-    # and wins over a positional, so it is read rather than treated as an
-    # opaque flag: skipping it would leave `git push --repo=origin main`
-    # looking like a push to a remote called "main", which resolves to no URL -
-    # and passing that through unchecked is a push to origin/main that nothing
-    # looked at.
+    # and is read rather than treated as an opaque flag, because skipping it
+    # would leave `git push --repo=origin main` looking like a bare push and
+    # resolve a remote the command never named.
+    #
+    # It LOSES to a positional, which is what git documents: "this option is
+    # equivalent to the <repository> argument. If both are specified, the
+    # command-line argument takes precedence." Reading it the other way round
+    # meant `git push --repo=origin other-remote feature` was checked against
+    # origin and pushed to other-remote, whose host nothing had looked at.
     #
     # Every positional after the remote is a refspec, not just the first.
     # `git push origin feature main` checked `feature` alone and let `main`
@@ -137,10 +141,10 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     i=$((i + 1))
     while [ "$i" -lt "${#argv[@]}" ]; do
         case "${argv[$i]}" in
-            --repo=*) remote="${argv[$i]#--repo=}" ;;
+            --repo=*) repo_flag="${argv[$i]#--repo=}" ;;
             --repo)
                 i=$((i + 1))
-                [ "$i" -lt "${#argv[@]}" ] && remote="${argv[$i]}"
+                [ "$i" -lt "${#argv[@]}" ] && repo_flag="${argv[$i]}"
                 ;;
             --all) push_all=1 ;;
             --mirror) push_mirror=1 ;;
@@ -158,6 +162,7 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
         esac
         i=$((i + 1))
     done
+    [ -n "$remote" ] || remote="$repo_flag"
     [ -n "$remote" ] || remote=origin
 
     # --push, because that is the URL the push will use. Without it this reads
