@@ -101,20 +101,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -261,20 +254,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -546,20 +532,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -617,20 +596,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
