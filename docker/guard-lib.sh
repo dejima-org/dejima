@@ -368,7 +368,9 @@ dejima_forge_verdict() {
 #
 # A forge whose CLI can be aimed elsewhere declares how (repo_flags, repo_env,
 # repo_paths). The gitea CLIs declare none, because they resolve the repo from
-# origin and refuse another host; `gh` declares all three, so on that path the
+# origin and refuse another host - which leaves nothing here to compare, not
+# that they are confined to one repository: origin is session-writable. `gh`
+# declares all three, so on that path the
 # most ordinary way to name a PR from outside its checkout is also the way to
 # file an issue on a repository the session has nothing to do with (#187).
 #

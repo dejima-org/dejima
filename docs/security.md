@@ -176,8 +176,8 @@ the sandbox at it instead of at you:
 - `[forge.gitea] token_file`: that account's token, rather than one issued
   under yours.
 - `[core] ssh_key`: a deploy key belonging to it, rather than your forwarded
-  agent. See "Headless git push without agent forwarding" in
-  [docs/configuration.md](configuration.md).
+  agent - which is then not mounted at all. See "Headless git push without
+  agent forwarding" in [docs/configuration.md](configuration.md).
 
 With the two identities separated, the same settings stop being decorative:
 
@@ -1014,6 +1014,9 @@ reasoning below is what both are built on.
   Gitea repo it has access to" shape as the forwarded agent above - the
   mitigation is that it's meant to be a dedicated deploy key scoped to only
   the repos that actually need push access, not your personal identity.
+  Setting it also withdraws the forwarded agent: `SSH_AUTH_SOCK` is not passed
+  to the container, so the two paths are alternatives rather than both being
+  open at once.
   That scoping is a convention, not something enforced here: nothing checks
   what `[core] ssh_key` actually points at, so pointing it at your real
   `~/.ssh/id_ed25519`/`id_rsa` instead of a dedicated key would load your

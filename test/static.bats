@@ -7939,7 +7939,7 @@ echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
 exit 0
 EOF
     chmod +x "$DEJIMA_T/docker"
-    : > "$DEJIMA_T/sandbox-key"
+    printf "not-a-real-key\n" > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of the audit-startup path these tests are actually about, and the
@@ -10489,4 +10489,174 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
         [ -n "$named" ] \
             || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
     done
+}
+
+# permit_address puts a forge-class address in two sets, and the second add
+# failing used to leave the first standing: the address the forge class says is
+# HTTPS-only stayed in literal_v4, which permits every port, while the entries
+# file rolled back so nothing reported it. Driven with a stub nft, because the
+# real one needs a namespace to act on.
+_permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
+    run env FAIL_SET="$2" bash -c '
+        set -u
+        TABLE=t
+        ENTRIES_FILE="$BATS_TEST_TMPDIR/entries"
+        : > "$ENTRIES_FILE"
+        printf "before\n" > "$ENTRIES_FILE.prev"
+        say() { printf "say: %s\n" "$*"; }
+        die() { printf "die: %s\n" "$*"; exit 1; }
+        nft() {
+            printf "nft: %s\n" "$*"
+            case "$*" in
+                *"add element"*" ${FAIL_SET:-__none__} "*) return 1 ;;
+            esac
+            return 0
+        }
+        eval "$(sed -n "/^permit_address()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+        permit_address "$1" 198.51.100.7
+    ' _ "$1"
+}
+
+@test "a forge-class permit that half-lands takes back the any-port element" {
+    _permit_address forge forge_v4
+    [ "$status" -ne 0 ] || { echo "the failure was not reported: $output"; return 1; }
+    [[ "$output" == *"could not add 198.51.100.7 to the forge class"* ]] \
+        || { echo "$output"; return 1; }
+    # The point of the fix: the any-port element is removed again, so the
+    # address is not left permitted on every port by a command that refused.
+    [[ "$output" == *"nft: delete element inet t literal_v4 { 198.51.100.7 }"* ]] \
+        || { echo "the any-port element was left behind: $output"; return 1; }
+
+    # The whole add still succeeding touches neither rollback.
+    _permit_address forge ""
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "rolled back a success: $output"; return 1; }
+    [[ "$output" == *"198.51.100.7 permitted (forge class, direct)"* ]] || { echo "$output"; return 1; }
+
+    # An open-class permit never touches forge_v4, so there is nothing to undo
+    # and the first add failing is reported on its own terms.
+    _permit_address open literal_v4
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not add 198.51.100.7 to the allow-list"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "undid an add that never landed: $output"; return 1; }
+}
+
+@test "nothing capability-dropped is started through env" {
+    # drop_caps is a shell function (caps-lib.sh), so `env` in front of it
+    # cannot find anything to exec: the line becomes exit 127. Every caller
+    # backgrounds or execs it, so that status is either hidden by `&` or is the
+    # whole process - which is how a prefix added for one reason took the log
+    # shipper out without a word.
+    # Continuations flattened first, because the prefix that broke it was
+    # written across two lines - a per-line grep did not see it, which is the
+    # same reason launch.bats flattens before matching. Comments dropped after
+    # that, or the line explaining why the prefix is absent is itself a match.
+    local f line bad=""
+    for f in "$SANDBOX_DIR"/*.sh; do
+        while IFS= read -r line; do
+            bad="$bad
+$(basename "$f"): $line"
+        done < <(sed -z 's/\\\n[[:space:]]*/ /g' "$f" \
+                 | grep -vE '^[[:space:]]*#' \
+                 | grep -nE '\benv\b[^;&|]*\b(drop_caps|require_setpcap)\b')
+    done
+    [ -z "$bad" ] \
+        || { echo "env cannot exec a shell function, so these are exit 127:$bad"; return 1; }
+}
+
+@test "no daemon the policy starts inherits the forge credential" {
+    # The resolver, the two log readers and the shipper all parse content the
+    # session's own traffic decides. The published-ranges fetch is the only
+    # thing in the firewall path that needs GH_TOKEN or the header derived from
+    # it, and these are reachable without ever passing through that fetch:
+    # `dejima-allow` runs `egress-policy permit` through `docker exec`, which
+    # gets the filter container's configured environment, and both permit_name
+    # and rollback_entries restart the resolver. So an unset upstream of one
+    # call path says nothing about the others.
+    #
+    # Asserted at the start lines themselves rather than by line order, which
+    # is what makes it independent of how a daemon was reached.
+    local f="$SANDBOX_DIR/egress-policy" line
+    while IFS= read -r line; do
+        [[ "$line" == *'NO_CREDENTIAL[@]'* ]] \
+            || { echo "a daemon starts with the credential still in reach: $line"; return 1; }
+    done < <(grep -nE '^\s*(nohup )?("\$\{NO_CREDENTIAL\[@\]\}" )?(dnsmasq|ulogd|gosu "\$LOGGER_USER") ' "$f")
+
+    # Three of them, so a daemon dropped from the sweep is not a daemon that
+    # passed it.
+    [ "$(grep -cE '^\s*(nohup )?"\$\{NO_CREDENTIAL\[@\]\}" ' "$f")" -eq 3 ] \
+        || { echo "expected three scrubbed daemon starts in $f"; return 1; }
+
+    # And both names are what it removes. The header carries the token in
+    # another wrapper, so dropping either from the list leaves a credential
+    # behind.
+    grep -q 'NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)' "$f" \
+        || { echo "the scrub no longer names both halves of the credential"; return 1; }
+
+    # The shipper is started by firewall-up.sh rather than by the policy, so
+    # NO_CREDENTIAL does not reach it. What covers it is ORDER: both names are
+    # gone from this script's environment before the line that starts it. That
+    # is asserted rather than a scrub on the line itself, because drop_caps is a
+    # shell function and `env` can only exec a binary - a prefix there is exit
+    # 127, which the `&` hides from set -e, and a shipper that never starts
+    # takes Loki logging with it silently.
+    local up="$SANDBOX_DIR/firewall-up.sh" drop_token drop_hdr apply_at ship_at
+    drop_token="$(grep -n '^unset GH_TOKEN$' "$up" | cut -d: -f1)"
+    drop_hdr="$(grep -n '^unset EGRESS_FORGE_META_AUTH$' "$up" | cut -d: -f1)"
+    apply_at="$(grep -n 'egress-policy apply' "$up" | head -1 | cut -d: -f1)"
+    ship_at="$(grep -n 'log-shipper.sh &' "$up" | head -1 | cut -d: -f1)"
+    [ -n "$drop_token" ] && [ -n "$drop_hdr" ] && [ -n "$apply_at" ] && [ -n "$ship_at" ] \
+        || { echo "firewall-up.sh no longer drops both names around the policy run"; return 1; }
+    [ "$drop_token" -lt "$apply_at" ] \
+        || { echo "the raw token outlives the policy run"; return 1; }
+    [ "$drop_hdr" -gt "$apply_at" ] \
+        || { echo "the header dies before the request that uses it"; return 1; }
+    [ "$drop_hdr" -lt "$ship_at" ] \
+        || { echo "the shipper starts while the header is still in the environment"; return 1; }
+
+    # The header is still there for the fetch that needs it, so the scrub
+    # cannot pass by breaking the request.
+    local fetch unset_at
+    fetch="$(grep -n 'fetch_forge_ranges "\$meta"' "$f" | head -1 | cut -d: -f1)"
+    unset_at="$(grep -n '^  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH$' "$f" | cut -d: -f1)"
+    [ -n "$fetch" ] && [ -n "$unset_at" ] || { echo "the fetch or the unset is gone"; return 1; }
+    [ "$fetch" -lt "$unset_at" ] \
+        || { echo "the header is scrubbed before the request that uses it"; return 1; }
+}
+
+@test "the briefing renderer runs as the session user, not as root" {
+    # It reads the project's own .dejima.md and asks the package managers what
+    # is installed, with its cwd inside the workspace a session can write.
+    # Nothing about that needs root - and running as root got the answer wrong
+    # as well: the dependency layers install npm and cargo packages as the
+    # sandbox user, into that user's HOME, so root's cargo home has none of
+    # them and every declared cargo dependency was reported missing.
+    #
+    # hooks/sandbox-context.sh already reaches it as that user, since a hook
+    # runs inside the session. This is the other route agreeing with it.
+    local e="$SANDBOX_DIR/entrypoint.sh" line
+    line="$(grep -n 'dejima-briefing-render.sh' "$e" | head -1)"
+    [ -n "$line" ] || { echo "entrypoint.sh no longer renders the briefing"; return 1; }
+    [[ "$line" == *'gosu "$SANDBOX_USER"'* ]] \
+        || { echo "the renderer still runs as root: $line"; return 1; }
+
+    # The file it writes stays root-owned and read-only, which is the half that
+    # must NOT be deprivileged: a session that could write this would be
+    # writing its own next briefing.
+    grep -q 'chown root:root "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer root-owned"; return 1; }
+    grep -q 'chmod 444 "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer read-only"; return 1; }
+}
+
+@test "the pty chown tests the descriptor tty(1) reports on" {
+    # `tty` reads stdin; testing stdout instead meant a container with one
+    # attached and the other not produced an empty path and a chown that
+    # silently did nothing - which is the nvim clipboard fallback failing with
+    # nothing to point at.
+    local block
+    block="$(grep -B2 -A2 'chown "$SANDBOX_USER" "$(tty)"' "$SANDBOX_DIR/entrypoint.sh")"
+    [ -n "$block" ] || { echo "the pty chown is gone"; return 1; }
+    grep -q '\[ -t 0 \]' <<< "$block" \
+        || { echo "the guard tests a descriptor other than the one tty reads: $block"; return 1; }
 }

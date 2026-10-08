@@ -791,7 +791,7 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
 
 _identity_fixture() {
     ID_DIR="$(mktemp -d)"
-    : > "$ID_DIR/default-key"; : > "$ID_DIR/work-key"; : > "$ID_DIR/oss-key"
+    printf "k\n" | tee "$ID_DIR/default-key" "$ID_DIR/work-key" > "$ID_DIR/oss-key"
     : > "$ID_DIR/default-token"; : > "$ID_DIR/work-token"
     write_config '[core]' 'forge = gitea' "ssh_key = $ID_DIR/default-key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
@@ -1009,7 +1009,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of this check, and the default gitea/worktree-pr pair is refused
@@ -1285,7 +1285,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
@@ -1315,7 +1315,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
@@ -1449,7 +1449,7 @@ EOF
     # dedicated key file is the headless form of that, and keeps this test
     # independent of whether the host running it has an agent.
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = github' 'workflow = worktree-pr' \
         "ssh_key = $key" \
@@ -1506,7 +1506,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = gitea' 'workflow = branch-push' \
         "ssh_key = $key" \
@@ -1530,7 +1530,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only' \
         '[logging]' 'loki_url = https://loki.example.invalid'
@@ -1707,7 +1707,7 @@ _rw_setup() {
     mkdir -p "$RW_HOME/.claude"
     echo '{}' > "$RW_HOME/.claude/settings.json"
     RW_KEY="$RW_HOME/sandbox-key"
-    : > "$RW_KEY"
+    printf "not-a-real-key\n" > "$RW_KEY"
     chmod 600 "$RW_KEY"
 }
 
@@ -1829,6 +1829,118 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *"no identities loaded"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
+}
+
+# A launch that really reaches `docker compose`, with a pushing workflow, so the
+# rule that blanks the agent socket for a workflow that never pushes is not the
+# one doing the work. Its own fixture rather than _rw_setup's: this needs a
+# forge configured, and stdin closed because a full launch opens /dev/tty,
+# which under bats is not the terminal it expects.
+#
+# The stub records its own environment rather than its arguments, because the
+# volume line resolves ${SSH_AUTH_SOCK:-/dev/null} inside docker-compose - so
+# the environment handed to it IS whether the agent is mounted. Into a file,
+# because the launch prints plenty of its own and the assertion is about one
+# value.
+#
+# Leaves AGENT_LOG and AGENT_OUT for the caller to read on failure.
+_agent_launch() {  # <ssh_key or "">
+    local key="$1" h c s w
+    # The suite exports DEJIMA_CONFIG_DIR, which is where a launch under it
+    # reads its config from - a config written under $HOME would not be found.
+    h="$(mktemp -d)"; c="$CONFIG_DIR"
+    printf 'tok\n' > "$c/token"
+    {
+        printf '[core]\nharness = claude-code\nfirewall = on\nupdate_check = off\n'
+        printf 'forge = gitea\nworkflow = worktree-pr\n'
+        printf '[harness.claude-code]\nbackend = anthropic\n'
+        printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example\n'
+        # The forge credential moves under the identity when there is one: an
+        # identity that leaves one behind is a session acting under whichever
+        # account owns it, which the launch refuses outright.
+        if [ -n "$key" ]; then
+            printf '[identity.default]\nssh_key = %s\ntoken_file = %s/token\n' "$key" "$c"
+        else
+            printf 'token_file = %s/token\n' "$c"
+        fi
+    } > "$c/config"
+    AGENT_LOG="$(mktemp)"
+    s="$(mktemp -d)"
+    cat > "$s/docker" <<'STUB'
+#!/bin/sh
+printf 'SSH_AUTH_SOCK=[%s]\n' "${SSH_AUTH_SOCK-unset}" >> "$AGENT_SOCK_LOG"
+exit 0
+STUB
+    chmod +x "$s/docker"
+    w="$(mktemp -d)"; git -C "$w" init -q
+    # `|| true` because a launch here ends however the stubbed session ended,
+    # and this is not a test about its exit status.
+    AGENT_OUT="$(HOME="$h" PATH="$s:$PATH" SSH_AUTH_SOCK="$AGENT_SOCK" \
+        AGENT_SOCK_LOG="$AGENT_LOG" \
+        bash "$REPO_ROOT/bin/dejima" "$w" </dev/null 2>&1 || true)"
+    rm -rf "$h" "$s" "$w"
+}
+
+# A real agent, because bin/dejima tests the socket with `[ -S ]` and refuses a
+# path that is not one.
+_real_agent() {
+    eval "$(ssh-agent -s)" >/dev/null
+    AGENT_SOCK="$SSH_AUTH_SOCK"
+    AGENT_PID="$SSH_AGENT_PID"
+}
+
+@test "a configured ssh_key means the operator's agent is not in the container at all" {
+    # entrypoint.sh loads that key into an agent of its own and points
+    # SSH_AUTH_SOCK at it, so the forwarded one was already unused - but it
+    # stayed mounted at the path docker-compose.yml names, where
+    # `SSH_AUTH_SOCK=/ssh-agent ssh ...` signs with the operator's personal
+    # identities. Choosing a dedicated key has to mean the personal agent is
+    # not in the container, not that it is merely not the default.
+    local key
+    _real_agent
+    key="$(mktemp)"; printf 'not-a-real-key\n' > "$key"; chmod 600 "$key"
+
+    _agent_launch "$key"
+    kill "$AGENT_PID" 2>/dev/null || true
+    rm -f "$key"
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "SSH_AUTH_SOCK=[]" ] \
+        || { echo "the forwarded agent still reached compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "without a configured ssh_key the forwarded agent still reaches the container" {
+    # The positive control for the test above, and the reason it means
+    # anything: without it, a launch that simply never set the variable would
+    # satisfy that assertion too.
+    _real_agent
+
+    _agent_launch ""
+    local want="SSH_AUTH_SOCK=[$AGENT_SOCK]"
+    kill "$AGENT_PID" 2>/dev/null || true
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "$want" ] \
+        || { echo "the forwarded agent did not reach compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "an empty ssh_key file is not a key, and a pushing launch says so" {
+    # It passes the is-a-file check and loads nothing in the container, so it
+    # cannot be what stops the forwarded agent being mounted. Treated as no key
+    # at all: harmless for a workflow that never pushes - which is what most of
+    # this suite's fixtures are, with an empty file standing in for a path -
+    # and named for one that does.
+    # A pushing workflow with an empty key and no agent: the one case where it
+    # costs anything, and the message names the file rather than only saying no
+    # key is set. The with-an-agent direction is its own test above.
+    AGENT_SOCK=""
+    local key; key="$(mktemp)"; chmod 600 "$key"
+    _agent_launch "$key"
+    rm -f "$key"
+    [[ "$AGENT_OUT" == *"names an empty file"* ]] \
+        || { echo "an empty key went unmentioned:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    [ ! -s "$AGENT_LOG" ] \
+        || { echo "the launch reached docker with no credential at all"; return 1; }
 }
 
 # The positive control for the test above: with no key configured the
@@ -3469,7 +3581,7 @@ EOF
     # The unnamed default gets a name, which is what lets it carry a git name
     # and a forge credential beside the key rather than those coming from
     # three different places.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/tok"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/default-key" > "$ID_DIR/tok"
     write_config '[core]' 'forge = gitea' \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
@@ -3484,7 +3596,7 @@ EOF
 @test "[core] ssh_key alongside [identity.default] is refused, not ranked" {
     # Two spellings of one thing. Which key a session pushed with is not
     # something to work out from precedence rules.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/new-key"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/old-key" > "$ID_DIR/new-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         '[identity.default]' "ssh_key = $ID_DIR/new-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3497,7 +3609,7 @@ EOF
 @test "[core] ssh_key on its own still works, and says what replaced it" {
     # Deprecated, not removed: it is how every config written before
     # identities existed says this.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key"
     run "$REPO_ROOT/bin/dejima" --print-config
     [ "$status" -eq 0 ] || { echo "a pre-identity config stopped working: $output"; return 1; }
@@ -3508,7 +3620,7 @@ EOF
 }
 
 @test "a named identity still beats [identity.default]" {
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/default-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
         '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
@@ -3523,7 +3635,7 @@ EOF
     # from the refusal - adding [identity.default] would stop it starting.
     # Finding that out on the launch that breaks is worse than being told now,
     # so the warning is about the config rather than about this launch.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         'identity = bot' '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3544,7 +3656,7 @@ EOF
     # The other half of a deprecation warning: it has to stop. One that fires
     # after the migration is one an operator learns to ignore, which is how
     # the next warning gets missed too.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/key" 'user_name = dejima agent'
     run "$REPO_ROOT/bin/dejima" --print-config

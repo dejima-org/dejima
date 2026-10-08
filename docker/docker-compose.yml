@@ -289,7 +289,10 @@ services:
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim
       # Required only if SANDBOX_SSH_KEY isn't set - bin/dejima
-      # itself enforces that at least one of the two is present.
+      # itself enforces that at least one of the two is present, and blanks
+      # SSH_AUTH_SOCK when the key is the one chosen, so this mounts nothing
+      # then. A forwarded agent left here signs with the operator's personal
+      # identities for anything in the container that names this path.
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
       - ${SSH_KNOWN_HOSTS:-/dev/null}:${HOME}/.ssh/known_hosts:ro
       # Dedicated, purpose-built key for headless git push - see README

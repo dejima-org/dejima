@@ -44,7 +44,10 @@ fi
 # involved), leaving the tty root-owned. nvim's clipboard fallback needs to
 # write to it directly as the sandbox user, so fix the ownership up here,
 # before dropping privileges.
-if [ -t 1 ]; then
+# Both halves read stdin, because that is what `tty` reports on. Testing stdout
+# instead meant a container with one attached and the other not produced an
+# empty path and a chown that silently did nothing.
+if [ -t 0 ]; then
     chown "$SANDBOX_USER" "$(tty)" 2>/dev/null || true
 fi
 
@@ -70,6 +73,9 @@ fi
 # Mounted at /root (not under $SANDBOX_HOME) so only this root-run block
 # can ever read it - copied out, loaded into the agent, and the copy
 # deleted, all before dropping to the sandbox user below.
+# The forwarded agent is not mounted when this key is configured (bin/dejima
+# blanks SSH_AUTH_SOCK), so this is the only agent in the container rather than
+# the preferred one of two.
 SANDBOX_SSH_KEY_SRC="/root/.ssh-sandbox-key-src"
 if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 "$SANDBOX_SSH_KEY_SRC" "$SANDBOX_HOME/.ssh/sandbox-key"
@@ -309,7 +315,11 @@ if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ] || [ -n "${SANDBOX_HARNESS_BRIEFI
     mkdir -p /etc/dejima
     # Written and renamed, so a harness starting while this is written reads
     # either the whole briefing or no file at all.
-    if ! /usr/local/lib/dejima/dejima-briefing-render.sh "" "$PWD" \
+    # As the sandbox user, not as root. It reads the project's own .dejima.md
+    # and asks the package managers what is installed, with its cwd inside the
+    # workspace the session can write - and the file it produces is written by
+    # the redirect out here, which root still owns.
+    if ! gosu "$SANDBOX_USER" /usr/local/lib/dejima/dejima-briefing-render.sh "" "$PWD" \
             > "$DEJIMA_BRIEFING_RENDERED.part"; then
         rm -f "$DEJIMA_BRIEFING_RENDERED.part"
         echo "entrypoint: could not render the session briefing. Refusing to" >&2

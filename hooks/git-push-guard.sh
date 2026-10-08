@@ -30,9 +30,13 @@ source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
 
 # A push can be the second half of a compound command, and only a segment whose
 # first word is git is a git invocation. Every segment that is one gets the same
-# verdict function the shadow calls, on the words after `git` - so a spelling
-# this file does not recognise is not a spelling that goes unchecked: it is argv
-# either way.
+# verdict function the shadow calls, on the words after `git`, so git's own
+# options do not need anticipating here: they are argv either way.
+#
+# What a segment's FIRST word has to be is still git. A `FOO=bar git push`
+# prefix, or `env git push`, is a git invocation this does not see - the PATH
+# shadow does, which is the division of labour the pair exists for rather than
+# a gap in it.
 # Basenamed, like hooks/merge-guard.sh and like the shadow, which reads its own
 # $0. `/usr/bin/git push origin main` is the one spelling that reaches neither
 # layer otherwise - the absolute path steps over the PATH shadow, and comparing

@@ -163,7 +163,7 @@ done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
-    : > "$LAUNCH_DIR/sandbox-key"
+    printf "not-a-real-key\n" > "$LAUNCH_DIR/sandbox-key"
     chmod 600 "$LAUNCH_DIR/sandbox-key"
     PROJ="$(mktemp -d)"
 }

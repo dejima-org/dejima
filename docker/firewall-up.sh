@@ -136,8 +136,17 @@ export EGRESS_FORGE_SSH="${ALLOW_GITHUB_PUSH:-0}"
 # was available. Same read-only token `gh` already gets (docker-compose.yml),
 # sent to the API it belongs to and nowhere else.
 [ -n "${GH_TOKEN:-}" ] && export EGRESS_FORGE_META_AUTH="Authorization: Bearer $GH_TOKEN"
+# The raw token has no other use here, and the header is the only thing the
+# policy needs it for. Both are a credential anything started below has no
+# reason to hold: they parse content the session's own traffic decides.
+unset GH_TOKEN
 
 /usr/local/sbin/egress-policy apply
+# The header carries the token in another wrapper, so it goes the moment the
+# request that needed it is made. egress-policy scrubs its own daemons at the
+# line that starts each one; nothing started below this point can hold either
+# half, which is how the shipper is covered.
+unset EGRESS_FORGE_META_AUTH
 
 # Best-effort visibility on top of the enforcement above, not part of it -
 # log-shipper.sh no-ops if LOKI_URL isn't set. It stays root, deliberately:
@@ -154,4 +163,8 @@ export EGRESS_FORGE_SSH="${ALLOW_GITHUB_PUSH:-0}"
 # It outlives this script, and reparents to the container's init when this one
 # exits - which is where a daemon watching a session belongs. Started from the
 # entrypoint, it was a child of the very session process it exists to watch.
+# No `env -u` prefix here, unlike the daemons egress-policy starts: drop_caps
+# is a shell function, and env can only exec a binary - so a prefix turns this
+# line into exit 127, which the `&` hides from set -e. The two unsets above
+# already ran, which is what this one relies on instead.
 drop_caps -- -c 'exec "$@"' dejima /usr/local/bin/log-shipper.sh &

@@ -804,8 +804,15 @@ ssh_key = ~/.ssh/dejima_ed25519
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
 deletes the plaintext copy immediately after - the sandbox user itself never
 has a path to the raw key, only the agent socket (see
-[security notes](security.md) for the full mount rationale). Setting it means
-a live forwarded agent is no longer required at all.
+[security notes](security.md) for the full mount rationale).
+
+Setting it means a forwarded agent is not merely unnecessary but **not
+mounted**: your own `SSH_AUTH_SOCK` is not passed to the container at all, so
+nothing in a session can sign with your personal identities by naming the
+socket directly. That is the point of choosing a dedicated key, and it is worth
+knowing before you choose one - a session that also needed the forwarded agent
+for something else (a second remote, a private submodule over ssh) no longer
+has it. Leave this unset to keep the agent.
 
 ## Using a different editor/application
 
