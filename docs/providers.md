@@ -676,8 +676,13 @@ knowing about because they are what a second forge costs:
   as such, and a count of what was hidden. Everything else `gitea-pr` does has
   a `gh` subcommand already.
 - **`gh` can be aimed past the sandboxed repository, and is stopped.** The
-  gitea CLIs refuse an origin that is not on the configured host, so they can
-  only act on the repo the sandbox was launched against. `gh` takes `--repo`
+  gitea CLIs resolve the repository from `origin` and refuse an origin that is
+  not on the configured host, so there is no flag or variable to compare and
+  nothing for this guard to declare. That is a narrower confinement than it
+  sounds: `origin` lives in `.git/config`, inside the read-write project mount,
+  and the gitea token is account-wide - so a session that rewrites `origin` to
+  another repository **on the same host** reaches it. What bounds that is the
+  token's scope, as it is for `gh`. `gh` takes `--repo`
   on nearly every subcommand, reads `GH_REPO`, and names repositories in `gh
   api` paths, so this forge declares all three (`repo_flags`, `repo_env`,
   `repo_paths`) and `docker/forge-guard.sh` refuses a value that is not the
