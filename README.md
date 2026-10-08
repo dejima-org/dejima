@@ -295,10 +295,11 @@ dejima --ro ~/other-project ~/myproject
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
 
-**Ctrl-Z backgrounds all of dejima**, and `fg` brings back a working session.
-It gets your terminal back rather than pausing the agent - the container keeps
-running - so for a session you want to leave working and pick up elsewhere, run
-dejima inside tmux and use [`dejima-attach`](docs/remote-access.md).
+**Ctrl-Z backgrounds dejima's host side**, and `fg` brings back a working
+session. It gets your terminal back rather than pausing the agent - the
+container keeps running - so for a session you want to leave working and pick
+up elsewhere, run dejima inside tmux and use
+[`dejima-attach`](docs/remote-access.md).
 → [why that takes doing](docs/configuration.md#suspending-a-session)
 
 ## Sign in on the host first

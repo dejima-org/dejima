@@ -956,9 +956,9 @@ dejima takes that one character back for the host while a session runs
 still reach the session, which is how a harness expects to be interrupted.
 
 Suspending is not pausing, and the difference is worth knowing before you
-reach for it. What stops is the host side: this script, the container run, the
-credential proxy and the conversation shipper, which share one process group so
-the kernel stops and continues them together. The container is not in that
+reach for it. What stops is the host side: `dejima` itself, the container run,
+the credential proxy and the conversation shipper, which share one process
+group so the kernel stops and continues them together. The container is not in that
 group. It keeps running under the container runtime, with its mounts, its
 firewall grants and its forge token, and keeps making requests while the
 terminal looks stopped - see
