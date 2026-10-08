@@ -174,9 +174,11 @@ echo "       launch on the other configured harness to confirm it starts."
 # turns the obvious rollback into a second outage, so it is worth knowing
 # before rather than after.
 note "Config keys this release adds (a rollback refuses a config using them)"
+# Both sides through git, because this reports on $base...$head and the working
+# tree is neither of them once a head is named explicitly.
 added="$(comm -13 \
     <(git show "$base:bin/dejima-config-lib.sh" 2>/dev/null | grep -oE "^[a-z-]+\\.[a-z_]+" | sort -u) \
-    <(grep -oE "^[a-z-]+\\.[a-z_]+" bin/dejima-config-lib.sh | sort -u))"
+    <(git show "$head:bin/dejima-config-lib.sh" 2>/dev/null | grep -oE "^[a-z-]+\\.[a-z_]+" | sort -u))"
 # Providers too, and this is the sharper half: a [harness.<name>] section for
 # a harness the older dejima does not ship is an unknown SECTION, which fails
 # validation exactly as an unknown key does. So adopting a new provider is
@@ -209,12 +211,12 @@ new_providers=""
 for pair in $DEJIMA_RELEASE_AXES; do
     axis="${pair%%:*}"
     one="${pair#*:}"
-    [ -d "$axis" ] || continue
+    git cat-file -e "$head:$axis" 2>/dev/null || continue
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         git cat-file -e "$base:$axis/$name/$one.conf" 2>/dev/null ||
             new_providers="$new_providers $one.$name"
-    done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+    done < <(git ls-tree -d --name-only "$head:$axis" 2>/dev/null | sort)
 done
 
 # And the keys a provider DECLARES, which are config keys an operator writes
@@ -226,18 +228,18 @@ new_keys=""
 for pair in $DEJIMA_RELEASE_AXES; do
     axis="${pair%%:*}"
     one="${pair#*:}"
-    [ -d "$axis" ] || continue
+    git cat-file -e "$head:$axis" 2>/dev/null || continue
     while IFS= read -r name; do
         [ -n "$name" ] || continue
-        now="$(sed -n 's/^keys *= *//p' "$axis/$name/$one.conf" 2>/dev/null \
-               | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
+        now="$(git show "$head:$axis/$name/$one.conf" 2>/dev/null \
+               | sed -n 's/^keys *= *//p' | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
         was="$(git show "$base:$axis/$name/$one.conf" 2>/dev/null \
                | sed -n 's/^keys *= *//p' | tr ' ' '\n' | sed 's/:.*//' | sort -u)"
         while IFS= read -r k; do
             [ -n "$k" ] || continue
             new_keys="$new_keys [$one.$name]|$k"
         done < <(comm -13 <(printf '%s\n' "$was") <(printf '%s\n' "$now"))
-    done < <(find "$axis" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+    done < <(git ls-tree -d --name-only "$head:$axis" 2>/dev/null | sort)
 done
 
 if [ -n "$added" ] || [ -n "$new_providers" ] || [ -n "$new_keys" ]; then
