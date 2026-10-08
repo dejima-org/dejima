@@ -1156,12 +1156,13 @@ if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
     echo "[core] ssh_key is set but not a file: $SANDBOX_SSH_KEY" >&2
     exit 1
 fi
-# Non-empty, because selecting a key is what stops the forwarded agent being
-# mounted: an empty file passes the check above, loads nothing in the
-# container, and would leave a pushing session with no agent at all.
-if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -s "$SANDBOX_SSH_KEY" ]; then
-    echo "[core] ssh_key is set but the file is empty: $SANDBOX_SSH_KEY" >&2
-    exit 1
+# An empty file is not a key: it passes the check above and loads nothing in the
+# container. Treated as no key at all rather than refused, because the only
+# launch it costs anything is one that pushes - and that case is Rule 4's
+# below, which already says what to do about having neither.
+have_usable_key=1
+if [ -z "$SANDBOX_SSH_KEY" ] || [ ! -s "$SANDBOX_SSH_KEY" ]; then
+    have_usable_key=0
 fi
 if [ -n "$SANDBOX_SSH_KEY" ]; then
     key_perms=$(stat -c '%a' "$SANDBOX_SSH_KEY")
@@ -1192,7 +1193,10 @@ fi
 # Rule 4: a workflow that never pushes has no use for either - skip the
 # requirement entirely rather than force an operator doing local-only work
 # to set up an agent or a deploy key for nothing.
-if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ -z "$SANDBOX_SSH_KEY" ]; then
+if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ "$have_usable_key" = 0 ]; then
+    if [ -n "$SANDBOX_SSH_KEY" ]; then
+        echo "[core] ssh_key names an empty file, so there is no key to load: $SANDBOX_SSH_KEY" >&2
+    fi
     echo "SSH_AUTH_SOCK is not set or not a valid socket, and [core] ssh_key is not set." >&2
     echo "Either start ssh-agent and run ssh-add, or set [core] ssh_key in $(config_path) to a" >&2
     echo "dedicated key for headless use - see docs/configuration.md." >&2
@@ -1866,7 +1870,7 @@ export SANDBOX_GITCONFIG_DIR
 # docker-compose.yml names, where `SSH_AUTH_SOCK=/ssh-agent ssh ...` signs with
 # the operator's personal identities. Choosing a dedicated key has to mean the
 # personal agent is not in the container, not that it is merely not the default.
-[ -z "$SANDBOX_SSH_KEY" ] || SSH_AUTH_SOCK=""
+[ "$have_usable_key" = 0 ] || SSH_AUTH_SOCK=""
 export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS

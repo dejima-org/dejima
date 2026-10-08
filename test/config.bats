@@ -791,7 +791,7 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
 
 _identity_fixture() {
     ID_DIR="$(mktemp -d)"
-    : > "$ID_DIR/default-key"; : > "$ID_DIR/work-key"; : > "$ID_DIR/oss-key"
+    printf "k\n" | tee "$ID_DIR/default-key" "$ID_DIR/work-key" > "$ID_DIR/oss-key"
     : > "$ID_DIR/default-token"; : > "$ID_DIR/work-token"
     write_config '[core]' 'forge = gitea' "ssh_key = $ID_DIR/default-key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
@@ -1009,7 +1009,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of this check, and the default gitea/worktree-pr pair is refused
@@ -1285,7 +1285,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
@@ -1315,7 +1315,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
@@ -1449,7 +1449,7 @@ EOF
     # dedicated key file is the headless form of that, and keeps this test
     # independent of whether the host running it has an agent.
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = github' 'workflow = worktree-pr' \
         "ssh_key = $key" \
@@ -1506,7 +1506,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = gitea' 'workflow = branch-push' \
         "ssh_key = $key" \
@@ -1530,7 +1530,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only' \
         '[logging]' 'loki_url = https://loki.example.invalid'
@@ -1707,7 +1707,7 @@ _rw_setup() {
     mkdir -p "$RW_HOME/.claude"
     echo '{}' > "$RW_HOME/.claude/settings.json"
     RW_KEY="$RW_HOME/sandbox-key"
-    : > "$RW_KEY"
+    printf "not-a-real-key\n" > "$RW_KEY"
     chmod 600 "$RW_KEY"
 }
 
@@ -1924,19 +1924,28 @@ _real_agent() {
         || { echo "the forwarded agent did not reach compose:"; sort -u "$AGENT_LOG"; return 1; }
 }
 
-@test "an empty ssh_key file is refused rather than leaving a pushing session with no agent" {
-    # It passes the is-a-file check, loads nothing in the container, and is now
-    # the thing that stops the forwarded agent being mounted - so the three
-    # together would be a push with no credential at all.
-    _rw_setup
-    workspace="$(mktemp -d)"
-    : > "$CONFIG_DIR/empty-key"
-    chmod 600 "$CONFIG_DIR/empty-key"
-    write_config '[core]' "ssh_key = $CONFIG_DIR/empty-key" 'forge = none' 'workflow = local-only'
-    _rw_launch "$workspace"
-    [ "$status" -ne 0 ] || { echo "an empty key was accepted: $output"; return 1; }
-    [[ "$output" == *"empty"* ]] || { echo "$output"; return 1; }
-    rm -rf "$workspace"
+@test "an empty ssh_key file is not a key, and a pushing launch says so" {
+    # It passes the is-a-file check and loads nothing in the container, so it
+    # cannot be what stops the forwarded agent being mounted. Treated as no key
+    # at all: harmless for a workflow that never pushes - which is what most of
+    # this suite's fixtures are, with an empty file standing in for a path -
+    # and named for one that does.
+    local out
+    _real_agent
+    _agent_launch ""   # no key: the agent is the credential, and arrives
+    kill "$AGENT_PID" 2>/dev/null || true
+
+    # A pushing workflow with an empty key and no agent: the one case where it
+    # costs anything, and the message names the file rather than only saying no
+    # key is set.
+    AGENT_SOCK=""
+    local key; key="$(mktemp)"; chmod 600 "$key"
+    _agent_launch "$key"
+    rm -f "$key"
+    [[ "$AGENT_OUT" == *"names an empty file"* ]] \
+        || { echo "an empty key went unmentioned:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    [ ! -s "$AGENT_LOG" ] \
+        || { echo "the launch reached docker with no credential at all"; return 1; }
 }
 
 # The positive control for the test above: with no key configured the
@@ -3577,7 +3586,7 @@ EOF
     # The unnamed default gets a name, which is what lets it carry a git name
     # and a forge credential beside the key rather than those coming from
     # three different places.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/tok"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/default-key" > "$ID_DIR/tok"
     write_config '[core]' 'forge = gitea' \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
@@ -3592,7 +3601,7 @@ EOF
 @test "[core] ssh_key alongside [identity.default] is refused, not ranked" {
     # Two spellings of one thing. Which key a session pushed with is not
     # something to work out from precedence rules.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/new-key"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/old-key" > "$ID_DIR/new-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         '[identity.default]' "ssh_key = $ID_DIR/new-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3605,7 +3614,7 @@ EOF
 @test "[core] ssh_key on its own still works, and says what replaced it" {
     # Deprecated, not removed: it is how every config written before
     # identities existed says this.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key"
     run "$REPO_ROOT/bin/dejima" --print-config
     [ "$status" -eq 0 ] || { echo "a pre-identity config stopped working: $output"; return 1; }
@@ -3616,7 +3625,7 @@ EOF
 }
 
 @test "a named identity still beats [identity.default]" {
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/default-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
         '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
@@ -3631,7 +3640,7 @@ EOF
     # from the refusal - adding [identity.default] would stop it starting.
     # Finding that out on the launch that breaks is worse than being told now,
     # so the warning is about the config rather than about this launch.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         'identity = bot' '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3652,7 +3661,7 @@ EOF
     # The other half of a deprecation warning: it has to stop. One that fires
     # after the migration is one an operator learns to ignore, which is how
     # the next warning gets missed too.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/key" 'user_name = dejima agent'
     run "$REPO_ROOT/bin/dejima" --print-config

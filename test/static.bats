@@ -7857,7 +7857,7 @@ echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
 exit 0
 EOF
     chmod +x "$DEJIMA_T/docker"
-    : > "$DEJIMA_T/sandbox-key"
+    printf "not-a-real-key\n" > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of the audit-startup path these tests are actually about, and the
