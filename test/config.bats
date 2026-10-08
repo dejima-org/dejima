@@ -1930,14 +1930,9 @@ _real_agent() {
     # at all: harmless for a workflow that never pushes - which is what most of
     # this suite's fixtures are, with an empty file standing in for a path -
     # and named for one that does.
-    local out
-    _real_agent
-    _agent_launch ""   # no key: the agent is the credential, and arrives
-    kill "$AGENT_PID" 2>/dev/null || true
-
     # A pushing workflow with an empty key and no agent: the one case where it
     # costs anything, and the message names the file rather than only saying no
-    # key is set.
+    # key is set. The with-an-agent direction is its own test above.
     AGENT_SOCK=""
     local key; key="$(mktemp)"; chmod 600 "$key"
     _agent_launch "$key"
