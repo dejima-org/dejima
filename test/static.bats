@@ -3922,13 +3922,11 @@ _guard_repo() {
     # supplements matched a regex over a command string and had to anticipate
     # the spelling; argv does not care.
     #
-    # `+` is the force marker and belongs to the refspec, not to the branch, so
-    # the destination has to be read with it removed - `git push origin +main`
-    # was compared as "+main" and matched no policy entry, which left the
-    # force-push spelling as the one that went through.
-    # heads/main and main are the same destination: a refspec destination that
-    # does not start with refs/ is matched against the remote's refs by git's
-    # rev-parse rules, so both name refs/heads/main.
+    # Every one of these names the same branch. `+` is the force marker and
+    # belongs to the refspec rather than to the branch, so the destination is
+    # read with it removed. And a destination that does not start with refs/ is
+    # matched against the remote's refs by git's rev-parse rules, so heads/main
+    # and main are both refs/heads/main.
     for form in "push origin main" "push origin HEAD:main" \
                 "push -o ci.skip origin main" \
                 "push origin +main" "push origin +refs/heads/main" \
