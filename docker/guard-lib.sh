@@ -227,6 +227,11 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     fi
     local refspec
     for refspec in "${refspecs[@]}"; do
+        # One leading `+` is the force marker, and it belongs to the refspec
+        # rather than to the branch - so `git push origin +main` names main and
+        # was compared as "+main", which matched no policy entry. The escaping
+        # form was the destructive one.
+        refspec="${refspec#+}"
         case "$refspec" in
             *:*) branch="${refspec##*:}" ;;
             HEAD) branch="$("$DEJIMA_GUARD_GIT" -C "$repo_dir" branch --show-current 2>/dev/null)" ;;
@@ -475,6 +480,7 @@ _dejima_forge_path_verdict() {
             # value of a field flag - `-f query=mutation{...}` - rather than as
             # an argument of its own. Matched before the brace test below,
             # which a document would otherwise satisfy.
+
             #
             # Both boundaries are anything that cannot continue an
             # identifier, rather than whitespace and a brace. GraphQL treats
