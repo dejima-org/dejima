@@ -143,6 +143,9 @@ PROBE_AAAA_NAME=${EGRESS_PROBE_AAAA_NAME:-registry.npmjs.org}
 PROBE_ADDR4=${EGRESS_PROBE_ADDR4:-192.0.2.1}
 FETCH_ATTEMPTS=${EGRESS_FETCH_ATTEMPTS:-5}
 FETCH_TIMEOUT=${EGRESS_FETCH_TIMEOUT:-20}
+# The ceiling on one wait between attempts, so a Retry-After nobody expected
+# cannot turn a boot into an indefinite hang.
+FETCH_MAX_BACKOFF=${EGRESS_FETCH_MAX_BACKOFF:-60}
 
 say() { printf '[egress-policy] %s\n' "$*" >&2; }
 die() { printf '[egress-policy] FAILED: %s\n' "$*" >&2; exit 1; }
@@ -362,8 +365,20 @@ host_of_url() {
 # through the policy. The session container has not been started at this point -
 # the launcher waits for the readiness file - so the window is not one the agent
 # can be in.
+# The seconds the endpoint asked us to wait, if it asked. Header names are
+# case-insensitive, and the value is either a count of seconds or an HTTP date
+# - only the numeric form is honoured, because a date needs parsing to compare
+# against a clock and a wrong answer there is a sleep nobody chose.
+retry_after_from() {
+  local v
+  v=$(tr -d '\r' < "$1" 2>/dev/null \
+      | awk -F': *' 'tolower($1) == "retry-after" { print $2; exit }') || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$v"
+}
+
 fetch_forge_ranges() {
-  local out=$1 attempt rc http err
+  local out=$1 attempt rc http err retry wait limited
   # Authenticated when the launcher supplied a token. The endpoint this
   # defaults to is rate-limited per source address, unauthenticated, across
   # everything on the host - so a host that starts sandboxes in a loop exhausts
@@ -374,9 +389,11 @@ fetch_forge_ranges() {
   [ -n "$FORGE_META_AUTH" ] && auth=(-H "$FORGE_META_AUTH")
   for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
     rc=0
+    : > "$out.hdr"
     http=$(curl --silent --show-error --location \
                 --max-time "$FETCH_TIMEOUT" \
                 --write-out '%{http_code}' \
+                --dump-header "$out.hdr" \
                 --output "$out.part" \
                 ${auth[@]+"${auth[@]}"} \
                 "$FORGE_META_URL" 2>"$out.err") || rc=$?
@@ -412,12 +429,39 @@ fetch_forge_ranges() {
       # reason at all - which is the diagnostic this whole path exists to give.
       err=$(jq -re '.message' < "$out.part" 2>/dev/null || true)
       [ -n "$err" ] || err="response carried no ranges"
-      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: $err"
+      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: http $http, $err"
     else
-      err=$(tr '\n' ' ' < "$out.err")
+      # The body first, because an HTTP failure from this endpoint carries one
+      # and curl's stderr does not: "API rate limit exceeded" names the cause,
+      # where "curl exit 0, http 403" names only the symptom. curl's own
+      # message is what is left when there was no response to carry a body.
+      err=$(jq -re '.message' < "$out.part" 2>/dev/null || true)
+      [ -n "$err" ] || err=$(tr '\n' ' ' < "$out.err")
       say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: curl exit $rc, http ${http:-none}${err:+, }$err"
     fi
-    [ "$attempt" -lt "$FETCH_ATTEMPTS" ] && sleep $((attempt * 2))
+
+    # A rate limit is the one failure here that clears by waiting, and the only
+    # one worth waiting long for. GitHub reports a secondary limit as 403 with
+    # a Retry-After, and a primary one as 403 or 429 - but it will also answer
+    # 200 with a message and no ranges, so the body counts as evidence too.
+    limited=0
+    case "$http" in 403|429) limited=1 ;; esac
+    case "${err,,}" in *"rate limit"*|*"abuse"*|*"too many requests"*) limited=1 ;; esac
+
+    # attempt*2 spends twenty seconds over five tries, and a secondary limit is
+    # measured in tens of seconds - so the whole sequence could sit inside one
+    # window and exhaust itself without ever reaching the other side (#357).
+    wait=$((attempt * 2))
+    [ "$limited" -eq 1 ] && wait=$((attempt * 15))
+    # What the endpoint asked for beats what this guessed, which is the only
+    # number here that is not an estimate.
+    retry=$(retry_after_from "$out.hdr") && wait=$retry
+    [ "$wait" -le "$FETCH_MAX_BACKOFF" ] || wait=$FETCH_MAX_BACKOFF
+    if [ "$attempt" -lt "$FETCH_ATTEMPTS" ]; then
+      say "waiting ${wait}s before attempt $((attempt + 1))${retry:+ (Retry-After: ${retry}s)}"
+      sleep "$wait"
+    fi
+    retry=""
   done
   die "could not fetch the forge address ranges after $FETCH_ATTEMPTS attempts; the reason for each is above. The sandbox cannot start without them - the policy would refuse every forge range, so git, gh and the API would all fail once inside."
 }
