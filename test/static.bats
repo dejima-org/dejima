@@ -2122,12 +2122,28 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # sets LIB= to that very file, and bin/dejima-harness-lib.sh selected a
     # suite that does not mention it at all.
     #
-    # Over-selection is safe and under-selection is the bug, so naming a suite
-    # that merely mentions a file in a comment costs a suite run; missing one
-    # reports an edit as green from a lane that never loaded it.
+    # Over-selection is safe and under-selection is the bug: missing a suite
+    # reports an edit as green from a lane that never loaded it, while naming
+    # one too many costs a suite run. What counts as reading a file is defined
+    # below, and it is deliberately narrower than "mentions it".
     local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r suite missing=() bad=()
     sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" > "$sf"
     [ -s "$sf" ] || { echo "could not extract suites_for"; return 1; }
+
+    # Comment lines excluded, because a suite that merely NAMES a file in prose
+    # does not read it - and suites cite each other in prose constantly, so
+    # counting those would push every rule towards ALL and leave the lane
+    # selecting everything. Over-selection is still the safe direction; this is
+    # about what "reads it" means, not about relaxing it.
+    #
+    # Stripped once per suite rather than once per path: this walks the whole
+    # tree, so doing it inside the loop meant one grep pass over every suite
+    # for every tracked file, and .dejima.md warns about what a slow test does
+    # to a bounded deadline under load.
+    mkdir -p "$BATS_TEST_TMPDIR/code"
+    for suite in "$REPO_ROOT"/test/*.bats; do
+        grep -v '^[[:space:]]*#' "$suite" > "$BATS_TEST_TMPDIR/code/$(basename "$suite" .bats)"
+    done
 
     while IFS= read -r path; do
         mapped="$(bash -c 'source "$1"; suites_for "$2"' _ "$sf" "$path" 2>/dev/null)"
@@ -2139,17 +2155,8 @@ _reference_has_key() {  # <doc> <section> <leaf>
         local needle="${path##*/}"
         [ "$(cd "$REPO_ROOT" && git ls-files "*/$needle" "$needle" | wc -l)" -gt 1 ] \
             && needle="$path"
-        # Comment lines excluded, because a suite that merely NAMES a file in
-        # prose does not read it - and suites cite each other in prose
-        # constantly, so counting those would push every rule towards ALL and
-        # leave the lane selecting everything. Over-selection is still the safe
-        # direction; this is about what "reads it" means, not about relaxing.
-        refs=""
-        for suite in "$REPO_ROOT"/test/*.bats; do
-            grep -v '^[[:space:]]*#' "$suite" | grep -q -- "$needle" || continue
-            refs="$refs $(basename "$suite" .bats)"
-        done
-        refs="$(printf '%s\n' $refs | sort -u)"
+        refs="$(grep -ln -- "$needle" "$BATS_TEST_TMPDIR"/code/* 2>/dev/null \
+                | xargs -r -n1 basename | sort -u)"
         for r in $refs; do
             case "$r" in runtime|ci-runner) continue ;; esac
             grep -qw "$r" <<< "$mapped" || missing+=("$r")
