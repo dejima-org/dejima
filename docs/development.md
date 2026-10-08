@@ -108,19 +108,18 @@ name outside `waiting`/`done` is ever acted on. `audit.bats` covers
 
 `config.bats`, `providers.bats`, `proxy.bats`, `launch.bats` and `share.bats`
 round out the suites that need no Docker either: `config.bats` covers
-`~/.config/dejima/config`
-parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
-since the fast CI job's container deliberately has no daemon), `providers.bats`
-covers the forge/workflow/harness manifest contract documented in
-[docs/providers.md](providers.md), `proxy.bats` covers the credential
-proxy's own request handling, `launch.bats` the command line a launch builds,
-and `share.bats` the shared scratch directory's own layout. `conversation.bats` runs
-`bin/dejima-conversation-ship` against a real transcript and a real HTTP
-endpoint standing in for Loki, and asserts on what arrives: that a session's
-lines ship, that a torn line waits until it is whole, that a sibling project
-whose directory name merely extends this one is not swept up with it, and
-that neither the in-memory batch nor the unread tail is lost to the kill that
-ends a session.
+`~/.config/dejima/config` parsing and `install.sh`'s legacy-variable warnings
+(stubbing `docker` itself, since the fast CI job's container deliberately has
+no daemon), `providers.bats` covers the forge/workflow/harness manifest
+contract documented in [docs/providers.md](providers.md), `proxy.bats` covers
+the credential proxy's own request handling, `launch.bats` the command line a
+launch builds, and `share.bats` the shared scratch directory's own layout.
+`conversation.bats` runs `bin/dejima-conversation-ship` against a real
+transcript and a real HTTP endpoint standing in for Loki, and asserts on what
+arrives: that a session's lines ship, that a torn line waits until it is whole,
+that a sibling project whose directory name merely extends this one is not
+swept up with it, and that neither the in-memory batch nor the unread tail is
+lost to the kill that ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service on the host is unreachable
