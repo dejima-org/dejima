@@ -10459,40 +10459,40 @@ _permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
     [[ "$output" != *"delete element"* ]] || { echo "undid an add that never landed: $output"; return 1; }
 }
 
-@test "the forge credential is gone before the deprivileged daemons inherit it" {
+@test "no daemon the policy starts inherits the forge credential" {
     # The resolver, the two log readers and the shipper all parse content the
-    # session's own traffic decides, and all inherit the environment of the
-    # process that starts them - which held GH_TOKEN and the Authorization
-    # header derived from it. The one request that needs the credential is the
-    # published-ranges fetch, so it stops there.
+    # session's own traffic decides. The published-ranges fetch is the only
+    # thing in the firewall path that needs GH_TOKEN or the header derived from
+    # it, and these are reachable without ever passing through that fetch:
+    # `dejima-allow` runs `egress-policy permit` through `docker exec`, which
+    # gets the filter container's configured environment, and both permit_name
+    # and rollback_entries restart the resolver. So an unset upstream of one
+    # call path says nothing about the others.
     #
-    # Asserted by ORDER, not presence: an unset after the daemons start is the
-    # same as no unset at all, and that is the shape this is guarding.
-    local f line_unset line_daemon
-    f="$SANDBOX_DIR/firewall-up.sh"
-    line_unset="$(grep -n '^unset GH_TOKEN$' "$f" | cut -d: -f1)"
-    [ -n "$line_unset" ] || { echo "firewall-up.sh keeps GH_TOKEN in the environment"; return 1; }
-    line_daemon="$(grep -n 'egress-policy apply' "$f" | head -1 | cut -d: -f1)"
-    [ -n "$line_daemon" ] || { echo "firewall-up.sh no longer applies the policy"; return 1; }
-    [ "$line_unset" -lt "$line_daemon" ] \
-        || { echo "GH_TOKEN survives into the policy run and everything it starts"; return 1; }
+    # Asserted at the start lines themselves rather than by line order, which
+    # is what makes it independent of how a daemon was reached.
+    local f="$SANDBOX_DIR/egress-policy" line
+    while IFS= read -r line; do
+        [[ "$line" == *'NO_CREDENTIAL[@]'* ]] \
+            || { echo "a daemon starts with the credential still in reach: $line"; return 1; }
+    done < <(grep -nE '^\s*(nohup )?("\$\{NO_CREDENTIAL\[@\]\}" )?(dnsmasq|ulogd|gosu "\$LOGGER_USER") ' "$f")
 
-    f="$SANDBOX_DIR/egress-policy"
-    line_unset="$(grep -n '^  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH$' "$f" | cut -d: -f1)"
-    [ -n "$line_unset" ] || { echo "egress-policy keeps the auth header"; return 1; }
-    local d
-    for d in start_connection_log start_lookup_log start_resolver; do
-        line_daemon="$(grep -n "^  $d\$" "$f" | head -1 | cut -d: -f1)"
-        [ -n "$line_daemon" ] || { echo "$d is no longer started from apply"; return 1; }
-        [ "$line_unset" -lt "$line_daemon" ] \
-            || { echo "the auth header survives into $d"; return 1; }
-    done
+    # Three of them, so a daemon dropped from the sweep is not a daemon that
+    # passed it.
+    [ "$(grep -cE '^\s*(nohup )?"\$\{NO_CREDENTIAL\[@\]\}" ' "$f")" -eq 3 ] \
+        || { echo "expected three scrubbed daemon starts in $f"; return 1; }
 
-    # And it is still there for the fetch that needs it, or the scrub has
-    # simply broken the authenticated request.
-    line_daemon="$(grep -n 'fetch_forge_ranges "\$meta"' "$f" | head -1 | cut -d: -f1)"
-    [ -n "$line_daemon" ] || { echo "the ranges fetch is gone"; return 1; }
-    [ "$line_daemon" -lt "$line_unset" ] \
+    # And both names are what it removes.
+    grep -q 'NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)' "$f" \
+        || { echo "the scrub no longer names both halves of the credential"; return 1; }
+
+    # The header is still there for the fetch that needs it, so the scrub
+    # cannot pass by breaking the request.
+    local fetch unset_at
+    fetch="$(grep -n 'fetch_forge_ranges "\$meta"' "$f" | head -1 | cut -d: -f1)"
+    unset_at="$(grep -n '^  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH$' "$f" | cut -d: -f1)"
+    [ -n "$fetch" ] && [ -n "$unset_at" ] || { echo "the fetch or the unset is gone"; return 1; }
+    [ "$fetch" -lt "$unset_at" ] \
         || { echo "the header is scrubbed before the request that uses it"; return 1; }
 }
 

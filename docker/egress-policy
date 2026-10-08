@@ -830,9 +830,21 @@ EOF
   fi
 }
 
+# The forge credential, removed from a daemon's environment at the point it
+# starts rather than somewhere upstream of it. All three of these parse content
+# the session's own traffic decides, and all three are reachable by more than
+# one call path: `dejima-allow` runs `egress-policy permit` through `docker
+# exec`, which gets the filter container's configured environment, and both
+# permit_name and rollback_entries restart the resolver. An unset earlier in
+# one path says nothing about the others; this says it where it has to hold.
+#
+# `env -u` rather than an unset, so the scrub is visible on the line that
+# starts the daemon and cannot be separated from it by an edit elsewhere.
+readonly NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)
+
 start_resolver() {
   stop_daemon "$RESOLVER_PID" dnsmasq
-  dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
+  "${NO_CREDENTIAL[@]}" dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
   wait_for_daemon dnsmasq
 
   # Waiting for the process is not waiting for the resolver. dnsmasq
@@ -921,7 +933,7 @@ start_connection_log() {
   stop_daemon "$ULOGD_PID" ulogd
   id -u "$LOGGER_USER" >/dev/null 2>&1 \
     || die "the image did not create the $LOGGER_USER account, which the connection logger drops to"
-  ulogd -d -u "$LOGGER_USER" -c "$ULOGD_CONF" -p "$ULOGD_PID" \
+  "${NO_CREDENTIAL[@]}" ulogd -d -u "$LOGGER_USER" -c "$ULOGD_CONF" -p "$ULOGD_PID" \
     || die "the connection logger did not start"
   wait_for_daemon ulogd
 }
@@ -944,7 +956,7 @@ start_lookup_log() {
   # resolver's log - and that is the last thing in this container that should
   # be running with privilege. It opens two files and then only reads and
   # writes them, so the drop costs it nothing.
-  nohup gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
+  nohup "${NO_CREDENTIAL[@]}" gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
     >/dev/null 2>>"$LOGDIR/lookup-log.err" &
   echo $! > "$LOOKUP_PID"
   sleep 0.3
@@ -1380,9 +1392,10 @@ cmd_apply() {
 
   local meta="$RUNDIR/forge-meta.json"
   fetch_forge_ranges "$meta"
-  # The one request that needed the credential has been made. The daemons
-  # started further down parse content the session's own traffic decides, and
-  # they inherit this process's environment, so the token stops here.
+  # The one request that needed the credential has been made, so it stops here
+  # for the rest of this process too. Each daemon start scrubs its own
+  # environment as well (NO_CREDENTIAL), because `permit` reaches them without
+  # ever coming through here.
   unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH
 
   local ranges forge4
@@ -1490,12 +1503,15 @@ rollback_entries() {
 # An address needs no resolution and no restart: it goes straight into the sets
 # its class uses. Both sets are interval sets, so a prefix works as well as a
 # single address.
-# A forge-class address needs to be in both sets, and the second add failing
-# used to leave the first standing: the address the forge class says is
-# HTTPS-only stayed in literal_v4, which permits every port, for the rest of the
-# session - and the entries file was rolled back, so neither `entries` nor
-# `status` showed it. The element goes back too, or the refusal reports a
-# narrowing that did not happen.
+# A forge-class address belongs in both sets, and the adds are not one
+# transaction: if the second fails, the first has to come back out. Otherwise
+# the address the forge class says is HTTPS-only is left in literal_v4, which
+# permits every port, while the entries file rolls back - so nothing reports a
+# grant that is live for the rest of the session.
+#
+# Deleting it is unconditional, which can take back an element that was in that
+# set from somewhere else. That direction is safe: the refusal already rolled
+# the record back, so a narrower live set agrees with what `entries` says.
 permit_address() {
   local class=$1 value=$2
   nft add element inet "$TABLE" literal_v4 "{ $value }" \
