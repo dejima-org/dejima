@@ -136,13 +136,16 @@ export EGRESS_FORGE_SSH="${ALLOW_GITHUB_PUSH:-0}"
 # was available. Same read-only token `gh` already gets (docker-compose.yml),
 # sent to the API it belongs to and nowhere else.
 [ -n "${GH_TOKEN:-}" ] && export EGRESS_FORGE_META_AUTH="Authorization: Bearer $GH_TOKEN"
-# And nothing below this line sees it. The header above is the only use for it
-# here, and everything this script goes on to start - the resolver, the two log
-# readers, the shipper - parses content the session's own traffic decides, with
-# a credential in the environment it has no reason to hold.
+# The raw token has no other use here, and the header is the only thing the
+# policy needs it for. Both are a credential anything started below has no
+# reason to hold: they parse content the session's own traffic decides.
 unset GH_TOKEN
 
 /usr/local/sbin/egress-policy apply
+# The header carries the token in another wrapper, so it goes the moment the
+# request that needed it is made. egress-policy scrubs its own daemons at the
+# line that starts each one; this is the same guarantee for what starts here.
+unset EGRESS_FORGE_META_AUTH
 
 # Best-effort visibility on top of the enforcement above, not part of it -
 # log-shipper.sh no-ops if LOKI_URL isn't set. It stays root, deliberately:
@@ -159,4 +162,5 @@ unset GH_TOKEN
 # It outlives this script, and reparents to the container's init when this one
 # exits - which is where a daemon watching a session belongs. Started from the
 # entrypoint, it was a child of the very session process it exists to watch.
-drop_caps -- -c 'exec "$@"' dejima /usr/local/bin/log-shipper.sh &
+env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH \
+    drop_caps -- -c 'exec "$@"' dejima /usr/local/bin/log-shipper.sh &

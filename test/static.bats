@@ -10482,9 +10482,28 @@ _permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
     [ "$(grep -cE '^\s*(nohup )?"\$\{NO_CREDENTIAL\[@\]\}" ' "$f")" -eq 3 ] \
         || { echo "expected three scrubbed daemon starts in $f"; return 1; }
 
-    # And both names are what it removes.
+    # And both names are what it removes. The header carries the token in
+    # another wrapper, so dropping either from the list leaves a credential
+    # behind.
     grep -q 'NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)' "$f" \
         || { echo "the scrub no longer names both halves of the credential"; return 1; }
+
+    # The shipper is started by firewall-up.sh rather than by the policy, so
+    # NO_CREDENTIAL does not reach it: it carries the scrub on its own start
+    # line, and the script drops both names once the fetch has happened.
+    local up="$SANDBOX_DIR/firewall-up.sh" shipper
+    shipper="$(grep -n -B1 'log-shipper.sh &' "$up")"
+    [ -n "$shipper" ] || { echo "the shipper is no longer started here"; return 1; }
+    [[ "$shipper" == *'env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH'* ]] \
+        || { echo "the shipper starts with the credential in reach: $shipper"; return 1; }
+    local drop_token drop_hdr apply_at
+    drop_token="$(grep -n '^unset GH_TOKEN$' "$up" | cut -d: -f1)"
+    drop_hdr="$(grep -n '^unset EGRESS_FORGE_META_AUTH$' "$up" | cut -d: -f1)"
+    apply_at="$(grep -n 'egress-policy apply' "$up" | head -1 | cut -d: -f1)"
+    [ -n "$drop_token" ] && [ -n "$drop_hdr" ] && [ -n "$apply_at" ] \
+        || { echo "firewall-up.sh no longer drops both names around the policy run"; return 1; }
+    [ "$drop_token" -lt "$apply_at" ] && [ "$drop_hdr" -gt "$apply_at" ] \
+        || { echo "the raw token outlives the policy run, or the header dies before it"; return 1; }
 
     # The header is still there for the fetch that needs it, so the scrub
     # cannot pass by breaking the request.
