@@ -3921,13 +3921,66 @@ _guard_repo() {
     # Each of these is the same push wearing different clothes. The hook this
     # supplements matched a regex over a command string and had to anticipate
     # the spelling; argv does not care.
-    for form in "push origin main" "push origin HEAD:main" "push --repo=origin main" \
-                "push --repo origin main" "push -o ci.skip origin main"; do
+    #
+    # Every one of these names the same branch. `+` is the force marker and
+    # belongs to the refspec rather than to the branch, so the destination is
+    # read with it removed. And a destination that does not start with refs/ is
+    # matched against the remote's refs by git's rev-parse rules, so heads/main
+    # and main are both refs/heads/main.
+    for form in "push origin main" "push origin HEAD:main" \
+                "push -o ci.skip origin main" \
+                "push origin +main" "push origin +refs/heads/main" \
+                "push origin +feature:main" "push --force origin main" \
+                "push --force-with-lease origin main" "push origin :main" \
+                "push origin heads/main" "push origin feature:heads/main" \
+                "push origin +feature:heads/main" "push origin refs/heads/main"; do
         # shellcheck disable=SC2086
         run _git_guard "$repo" $form
         [[ "$output" == *"aren't allowed in the sandbox"* ]] \
             || { echo "not blocked: git $form -> $output"; return 1; }
     done
+
+    # Each strip above has to leave an unprotected destination alone, or it is
+    # the stripping that refuses rather than the policy.
+    local ok
+    for ok in "push origin +feature" "push origin feature:heads/other" \
+              "push origin heads/other"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $ok
+        [[ "$output" != *"Blocked by dejima"* ]] \
+            || { echo "refused an unprotected destination: git $ok -> $output"; return 1; }
+    done
+}
+
+@test "a positional remote beats --repo, the way git documents it" {
+    # git: "this option is equivalent to the <repository> argument. If both are
+    # specified, the command-line argument takes precedence." Read the other
+    # way round, `git push --repo=origin other-remote feature` resolved and
+    # approved origin's URL while git pushed to other-remote - whose host
+    # nothing had checked.
+    local repo; repo="$(_guard_repo)"
+
+    for form in "push --repo=origin elsewhere feature" "push --repo origin elsewhere feature"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"may only push to"* ]] \
+            || { echo "checked the wrong remote: git $form -> $output"; return 1; }
+        [[ "$output" == *"evil.invalid"* ]] \
+            || { echo "it named the wrong host: $output"; return 1; }
+    done
+
+    # And --repo alone still names the remote, or it would be an opaque flag
+    # and the push would be checked against a remote the command never named.
+    run _git_guard "$repo" push --repo=elsewhere
+    [[ "$output" == *"evil.invalid"* ]] || { echo "$output"; return 1; }
+    run _git_guard "$repo" push --repo=origin
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+
+    # `git push --repo=origin main` is a push to a remote called "main" by the
+    # rule above, which is exactly how git reads it - so the refusal is the
+    # unresolvable-remote one rather than the branch policy.
+    run _git_guard "$repo" push --repo=origin main
+    [[ "$output" == *"cannot resolve the remote 'main'"* ]] || { echo "$output"; return 1; }
 }
 
 @test "the git guard leaves everything that is not a blocked push alone" {
@@ -4119,6 +4172,7 @@ _guard_repo() {
                "git push" "git push origin" "git push origin HEAD" \
                "git push -o ci.skip origin main" "git push --push-option=x origin main" \
                "git push --repo origin main" "git push --repo=origin main" \
+               "git push origin +main" "git push --repo=origin elsewhere feature" \
                "git push --receive-pack /bin/true origin main" \
                "git push --all origin" "git push --mirror origin" \
                "git push origin feature main" \
@@ -4324,6 +4378,34 @@ _repo_guard_shim() {
     # anyway. A mutation is what an agent reaches for once `gh pr merge`
     # refuses, and no repository scoping can be read out of a GraphQL
     # document, so that is refused however the document is spelled.
+    # Over every argument including the dash-prefixed ones, because a flag can
+    # carry its value attached: these put the document inside one word that the
+    # scoping loop skips, while positional `graphql` still looked scopable.
+    for form in "--field=query=mutation{mergePullRequest}" "-Fquery=mutation{mergePullRequest}" \
+                "--field=query=@doc.graphql" "-fquery=@doc.graphql" \
+                "--input" "--input=m.json"; do
+        run env "${env_common[@]}" "$d/gh" api graphql "$form"
+        assert_forge_refused "Blocked by dejima" "gh api graphql $form" || return 1
+    done
+    # --input takes the whole request body from a file, or from stdin with `-`,
+    # so the document is not in the command at any spelling - not as a field
+    # value this could read, and not as something the `=@` shape catches. The
+    # positional graphql beside it still counted as a readable target.
+    for form in "m.json" "-"; do
+        run env "${env_common[@]}" "$d/gh" api graphql --input "$form"
+        assert_forge_refused "takes its body from a file" "gh api graphql --input $form" \
+            || return 1
+    done
+    # Outside the declared subcommand it is a flag this has nothing to say
+    # about, or the refusal is about the word rather than about the body.
+    run env "${env_common[@]}" "$d/gh" issue create --input body.json
+    [[ "$output" == real:* ]] || { echo "--input was refused outside api: $output"; return 1; }
+    # A flag whose value is an ordinary header, which the same pass now sees
+    # and must have nothing to say about.
+    run env "${env_common[@]}" "$d/gh" api repos/own/thing/issues \
+        -H "Accept: application/vnd.github+json"
+    [[ "$output" == real:* ]] || { echo "a header was blocked: $output"; return 1; }
+
     for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
                 "mutation Merge { mergePullRequest }" \
                 "  mutation (\$id: ID!) { mergePullRequest }" \

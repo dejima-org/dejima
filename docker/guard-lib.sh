@@ -78,7 +78,7 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     local repo_dir="$1"; shift
     local argv=("$@") i=0 subcommand="" branch
     local -a config_overrides=() refspecs=()
-    local remote="" push_all=0 push_mirror=0 repo_override=0
+    local remote="" repo_flag="" push_all=0 push_mirror=0 repo_override=0
     DEJIMA_GUARD_REASON=""
     DEJIMA_GUARD_PUSH=0
 
@@ -125,11 +125,15 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     fi
 
     # What comes after `push`. --repo names the remote in git's own legacy form
-    # and wins over a positional, so it is read rather than treated as an
-    # opaque flag: skipping it would leave `git push --repo=origin main`
-    # looking like a push to a remote called "main", which resolves to no URL -
-    # and passing that through unchecked is a push to origin/main that nothing
-    # looked at.
+    # and is read rather than treated as an opaque flag, because skipping it
+    # would leave `git push --repo=origin main` looking like a bare push and
+    # resolve a remote the command never named.
+    #
+    # It LOSES to a positional, which is what git documents: "this option is
+    # equivalent to the <repository> argument. If both are specified, the
+    # command-line argument takes precedence." So in `git push --repo=origin
+    # other-remote feature` the remote is other-remote, and checking origin
+    # instead would approve a host this push never goes to.
     #
     # Every positional after the remote is a refspec, not just the first.
     # `git push origin feature main` checked `feature` alone and let `main`
@@ -137,10 +141,10 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     i=$((i + 1))
     while [ "$i" -lt "${#argv[@]}" ]; do
         case "${argv[$i]}" in
-            --repo=*) remote="${argv[$i]#--repo=}" ;;
+            --repo=*) repo_flag="${argv[$i]#--repo=}" ;;
             --repo)
                 i=$((i + 1))
-                [ "$i" -lt "${#argv[@]}" ] && remote="${argv[$i]}"
+                [ "$i" -lt "${#argv[@]}" ] && repo_flag="${argv[$i]}"
                 ;;
             --all) push_all=1 ;;
             --mirror) push_mirror=1 ;;
@@ -158,6 +162,7 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
         esac
         i=$((i + 1))
     done
+    [ -n "$remote" ] || remote="$repo_flag"
     [ -n "$remote" ] || remote=origin
 
     # --push, because that is the URL the push will use. Without it this reads
@@ -227,12 +232,22 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     fi
     local refspec
     for refspec in "${refspecs[@]}"; do
+        # One leading `+` is the force marker and belongs to the refspec rather
+        # than to the branch, so it comes off before the destination is read -
+        # `git push origin +main` names main, and the force spelling is the
+        # destructive one to be wrong about.
+        refspec="${refspec#+}"
         case "$refspec" in
             *:*) branch="${refspec##*:}" ;;
             HEAD) branch="$("$DEJIMA_GUARD_GIT" -C "$repo_dir" branch --show-current 2>/dev/null)" ;;
             *) branch="$refspec" ;;
         esac
-        branch="${branch#refs/heads/}"
+        # A destination that does not start with refs/ is matched against the
+        # remote's refs by git's rev-parse rules, so `heads/main` and `main`
+        # both name refs/heads/main. Stripping only the full prefix left
+        # `feature:heads/main` naming a branch no policy entry matched.
+        branch="${branch#refs/}"
+        branch="${branch#heads/}"
         if _dejima_branch_blocked "$branch"; then
             DEJIMA_GUARD_REASON="direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead."
             return 1
@@ -469,12 +484,18 @@ _dejima_forge_path_verdict() {
         segment="${spec#*:}"
         scopable=0
         for arg in "$@"; do
-            case "$arg" in -*) continue ;; esac
             # A GraphQL document whose operation is a mutation. Matched
             # anywhere in the argument, because the document arrives as the
             # value of a field flag - `-f query=mutation{...}` - rather than as
             # an argument of its own. Matched before the brace test below,
             # which a document would otherwise satisfy.
+            #
+            # Over EVERY argument, including the dash-prefixed ones, because a
+            # flag can carry its value attached: `--field=query=mutation{...}`
+            # and `-Fquery=mutation{...}` put the document inside one word that
+            # the scoping loop below skips. This check needs no flag table to
+            # read it, which is what lets it look at all of them - unlike the
+            # repository scoping, which does.
             #
             # Both boundaries are anything that cannot continue an
             # identifier, rather than whitespace and a brace. GraphQL treats
@@ -488,16 +509,20 @@ _dejima_forge_path_verdict() {
                 DEJIMA_GUARD_REASON="a GraphQL mutation reaches any repository and any write the token allows, and no repository scoping can be read out of it. Use the subcommands, and leave a merge to the operator."
                 return 1
             fi
-            # A field value read from a file keeps the document out of argv
-            # entirely, so there is nothing here to tell a query from a
-            # mutation. Refused under this subcommand only; the document is one
-            # argument, so passing it inline is the fix.
+            # A body this cannot read is a body it cannot tell a query from a
+            # mutation in. Two spellings put one out of reach: a field value
+            # read from a file, and --input, which takes the whole request body
+            # from a file or from stdin. Refused under this subcommand only;
+            # the document is one argument, so passing it inline is the fix.
             case "$arg" in
-                *=@*)
-                    DEJIMA_GUARD_REASON="'$1' reads a field value from a file, so the document it sends is not in the command for this to read. Pass it inline."
+                *=@*|--input|--input=*)
+                    DEJIMA_GUARD_REASON="'$1' takes its body from a file or from stdin, so what it sends is not in the command for this to read. Pass the document inline."
                     return 1
                     ;;
             esac
+            # Everything from here needs to know which argument is the
+            # endpoint, so the flags go.
+            case "$arg" in -*) continue ;; esac
             [ "$arg" = graphql ] && { scopable=1; continue; }
             # gh substitutes {owner} and {repo} from the checkout, so a path
             # carrying them names this repository by construction and comparing
