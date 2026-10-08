@@ -136,6 +136,11 @@ export EGRESS_FORGE_SSH="${ALLOW_GITHUB_PUSH:-0}"
 # was available. Same read-only token `gh` already gets (docker-compose.yml),
 # sent to the API it belongs to and nowhere else.
 [ -n "${GH_TOKEN:-}" ] && export EGRESS_FORGE_META_AUTH="Authorization: Bearer $GH_TOKEN"
+# And nothing below this line sees it. The header above is the only use for it
+# here, and everything this script goes on to start - the resolver, the two log
+# readers, the shipper - parses content the session's own traffic decides, with
+# a credential in the environment it has no reason to hold.
+unset GH_TOKEN
 
 /usr/local/sbin/egress-policy apply
 

@@ -1380,6 +1380,10 @@ cmd_apply() {
 
   local meta="$RUNDIR/forge-meta.json"
   fetch_forge_ranges "$meta"
+  # The one request that needed the credential has been made. The daemons
+  # started further down parse content the session's own traffic decides, and
+  # they inherit this process's environment, so the token stops here.
+  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH
 
   local ranges forge4
   ranges=$(jq -r "$FORGE_META_FILTER" < "$meta" | grep -v '^null$' | grep -v '^$') \
