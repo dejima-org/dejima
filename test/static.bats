@@ -3926,22 +3926,32 @@ _guard_repo() {
     # the destination has to be read with it removed - `git push origin +main`
     # was compared as "+main" and matched no policy entry, which left the
     # force-push spelling as the one that went through.
+    # heads/main and main are the same destination: a refspec destination that
+    # does not start with refs/ is matched against the remote's refs by git's
+    # rev-parse rules, so both name refs/heads/main.
     for form in "push origin main" "push origin HEAD:main" \
                 "push -o ci.skip origin main" \
                 "push origin +main" "push origin +refs/heads/main" \
                 "push origin +feature:main" "push --force origin main" \
-                "push --force-with-lease origin main" "push origin :main"; do
+                "push --force-with-lease origin main" "push origin :main" \
+                "push origin heads/main" "push origin feature:heads/main" \
+                "push origin +feature:heads/main" "push origin refs/heads/main"; do
         # shellcheck disable=SC2086
         run _git_guard "$repo" $form
         [[ "$output" == *"aren't allowed in the sandbox"* ]] \
             || { echo "not blocked: git $form -> $output"; return 1; }
     done
 
-    # A `+` on a branch that is not protected is still an ordinary push, so the
-    # strip above cannot be doing the refusing.
-    run _git_guard "$repo" push origin +feature
-    [[ "$output" != *"Blocked by dejima"* ]] \
-        || { echo "a forced push to an unprotected branch was refused: $output"; return 1; }
+    # Each strip above has to leave an unprotected destination alone, or it is
+    # the stripping that refuses rather than the policy.
+    local ok
+    for ok in "push origin +feature" "push origin feature:heads/other" \
+              "push origin heads/other"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $ok
+        [[ "$output" != *"Blocked by dejima"* ]] \
+            || { echo "refused an unprotected destination: git $ok -> $output"; return 1; }
+    done
 }
 
 @test "a positional remote beats --repo, the way git documents it" {

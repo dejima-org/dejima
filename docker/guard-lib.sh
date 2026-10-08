@@ -232,17 +232,22 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
     fi
     local refspec
     for refspec in "${refspecs[@]}"; do
-        # One leading `+` is the force marker, and it belongs to the refspec
-        # rather than to the branch - so `git push origin +main` names main and
-        # was compared as "+main", which matched no policy entry. The escaping
-        # form was the destructive one.
+        # One leading `+` is the force marker and belongs to the refspec rather
+        # than to the branch, so it comes off before the destination is read -
+        # `git push origin +main` names main, and the force spelling is the
+        # destructive one to be wrong about.
         refspec="${refspec#+}"
         case "$refspec" in
             *:*) branch="${refspec##*:}" ;;
             HEAD) branch="$("$DEJIMA_GUARD_GIT" -C "$repo_dir" branch --show-current 2>/dev/null)" ;;
             *) branch="$refspec" ;;
         esac
-        branch="${branch#refs/heads/}"
+        # A destination that does not start with refs/ is matched against the
+        # remote's refs by git's rev-parse rules, so `heads/main` and `main`
+        # both name refs/heads/main. Stripping only the full prefix left
+        # `feature:heads/main` naming a branch no policy entry matched.
+        branch="${branch#refs/}"
+        branch="${branch#heads/}"
         if _dejima_branch_blocked "$branch"; then
             DEJIMA_GUARD_REASON="direct pushes to '$branch' aren't allowed in the sandbox. Push a feature branch and open a PR/MR instead."
             return 1
