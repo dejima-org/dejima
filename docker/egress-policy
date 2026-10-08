@@ -387,6 +387,23 @@ fetch_forge_ranges() {
   # the launcher's to choose.
   local -a auth=()
   [ -n "$FORGE_META_AUTH" ] && auth=(-H "$FORGE_META_AUTH")
+
+  # A file:// source is a test fixture and nothing else. test/runtime.bats
+  # starts twenty-seven container pairs in one run, each of which fetched the
+  # ranges for itself - which is what trips the endpoint's secondary limit
+  # (#357) - so the suite fetches once and points every pair at the result.
+  #
+  # Refused outside a test container, because the ranges decide which addresses
+  # the forge class reaches: a launch that could name its own source could name
+  # its own ranges. SANDBOX_TEST_MODE is set by that suite and by nothing in
+  # bin/dejima, so there is no launch this is reachable from.
+  case "$FORGE_META_URL" in
+    file://*)
+      [ "${SANDBOX_TEST_MODE:-0}" = 1 ] \
+        || die "EGRESS_FORGE_META_URL names a file:// source, which is a test fixture only. The forge's address ranges decide what the forge class reaches, so they are not read from the filesystem in a real launch."
+      ;;
+  esac
+
   for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
     rc=0
     : > "$out.hdr"
@@ -397,7 +414,11 @@ fetch_forge_ranges() {
                 --output "$out.part" \
                 ${auth[@]+"${auth[@]}"} \
                 "$FORGE_META_URL" 2>"$out.err") || rc=$?
-    if [ "$rc" -eq 0 ] && [ "$http" = 200 ]; then
+    # curl reports no status for a scheme that has none, so what counts as a
+    # good transfer is the scheme's own answer rather than 200 always.
+    local want_http=200
+    case "$FORGE_META_URL" in file://*) want_http=000 ;; esac
+    if [ "$rc" -eq 0 ] && [ "$http" = "$want_http" ]; then
       # Whether the body carries ranges is part of whether the fetch worked,
       # so it is decided here rather than after the loop. A rate limit is the
       # reason: it answers with a message and no ranges, sometimes over a 200,

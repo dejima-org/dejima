@@ -10782,3 +10782,74 @@ $(basename "$f"): $line"
     grep -q '\[ -t 0 \]' <<< "$block" \
         || { echo "the guard tests a descriptor other than the one tty reads: $block"; return 1; }
 }
+
+@test "a file:// ranges source is a test fixture and refuses to be anything else" {
+    # The suite fetches GitHub's ranges once per run and points every container
+    # pair at the result, because twenty-seven filters each fetching for
+    # themselves is the burst that trips the endpoint's secondary limit (#357).
+    # Those ranges decide which addresses the forge class reaches, so a launch
+    # that could name its own source could name its own ranges.
+    printf '%s' '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}' \
+        > "$BATS_TEST_TMPDIR/meta.json"
+    _file_fetch() {
+        run env ${1:+SANDBOX_TEST_MODE=1} bash -c '
+            set -u
+            say() { printf "say: %s\n" "$*" >&2; }
+            die() { printf "die: %s\n" "$*" >&2; exit 1; }
+            FORGE_META_URL="file://$2/meta.json"
+            FORGE_META_FILTER="[.git[]?, .api[]?, .web[]?] | unique | .[]"
+            FORGE_META_AUTH=""; FETCH_ATTEMPTS=1; FETCH_TIMEOUT=5; FETCH_MAX_BACKOFF=60
+            eval "$(sed -n "/^retry_after_from()/,/^}/p" "$1/egress-policy")"
+            eval "$(sed -n "/^fetch_forge_ranges()/,/^}/p" "$1/egress-policy")"
+            fetch_forge_ranges "$2/out.json"
+        ' _ "$SANDBOX_DIR" "$BATS_TEST_TMPDIR"
+    }
+
+    _file_fetch ""
+    [ "$status" -ne 0 ] || { echo "a file source was read outside a test container"; return 1; }
+    [[ "$output" == *"test fixture only"* ]] || { echo "$output"; return 1; }
+
+    # And it works where the suite uses it, or the fixture is no use: curl
+    # reports no status for a scheme that has none, so 200 cannot be what
+    # counts as a good transfer here.
+    _file_fetch 1
+    [ "$status" -eq 0 ] || { echo "the fixture path does not work: $output"; return 1; }
+    grep -q '192.0.2.0/24' "$BATS_TEST_TMPDIR/out.json" \
+        || { echo "the ranges did not land"; return 1; }
+}
+
+@test "the run's cached ranges are written where the suite reads them, to the filter only" {
+    # Two halves that have to name the same path, in two files, with the suite
+    # falling back silently when it is absent - so a rename would quietly
+    # restore the per-container fetch this exists to stop.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" rt="$REPO_ROOT/test/runtime.bats"
+    local cache=/tmp/dejima-ci/github-meta.json
+    grep -qF "out=$cache" "$wf" \
+        || { echo "the privileged job no longer caches the ranges at $cache"; return 1; }
+    grep -qF "$cache:/run/forge-meta-cache.json:ro" "$rt" \
+        || { echo "runtime.bats does not mount $cache read-only"; return 1; }
+    grep -qF 'EGRESS_FORGE_META_URL=file:///run/forge-meta-cache.json' "$rt" \
+        || { echo "runtime.bats does not point the policy at the mount"; return 1; }
+
+    # Read-only, and to the filter container rather than to both: the session
+    # half has no business holding a path that names the forge's ranges.
+    local filter_run
+    filter_run="$(sed -n '/docker run -d --init --name "\$filter"/,/^    wait_filter/p' "$rt")"
+    [ -n "$filter_run" ] || { echo "could not find the filter run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$filter_run" \
+        || { echo "the cache does not reach the filter container"; return 1; }
+    local session_run
+    session_run="$(sed -n '/docker run -d --init --name "\$session"/,/^    wait_ready/p' "$rt")"
+    [ -n "$session_run" ] || { echo "could not find the session run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$session_run" \
+        && { echo "the cache is mounted into the session container too"; return 1; }
+
+    # The job clears that directory before writing, so a run cannot read the
+    # ranges a previous one cached.
+    local clear_at write_at
+    clear_at="$(grep -n 'find /tmp/dejima-ci -mindepth 1 -delete' "$wf" | cut -d: -f1)"
+    write_at="$(grep -n "out=$cache" "$wf" | cut -d: -f1)"
+    [ -n "$clear_at" ] && [ -n "$write_at" ] || { echo "the clear or the write is gone"; return 1; }
+    [ "$clear_at" -lt "$write_at" ] \
+        || { echo "the cache is written before the directory is cleared"; return 1; }
+}

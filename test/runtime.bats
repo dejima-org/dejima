@@ -518,17 +518,39 @@ start_pair() {  # <purpose|""> <image> [docker run args...]
         filter="$(test_container_name "$purpose-filter")"
     fi
 
+    # The run's cached GitHub ranges, when the job fetched them. Each filter
+    # fetched its own, which is twenty-seven requests in about five minutes
+    # across this suite - inside the hourly ceiling a token buys, and exactly
+    # the burst GitHub's secondary limit answers with a 403 (#357).
+    #
+    # Read-only, and only ever this one file. egress-policy refuses a file://
+    # source unless SANDBOX_TEST_MODE is set, which start_pair's callers supply
+    # and no launch does.
+    #
+    # Absent when the job could not fetch, or when the suite is run by hand
+    # outside CI: every container then fetches for itself, which is the
+    # behaviour this replaces rather than a failure.
+    local -a meta=()
+    if [ -r /tmp/dejima-ci/github-meta.json ]; then
+        meta=(-v /tmp/dejima-ci/github-meta.json:/run/forge-meta-cache.json:ro
+              -e EGRESS_FORGE_META_URL=file:///run/forge-meta-cache.json
+              -e SANDBOX_TEST_MODE=1)
+    fi
+
     local -a fcaps=() scaps=()
     while IFS= read -r cap; do fcaps+=(--cap-add="$cap"); done < <(launcher_filter_cap_add)
     while IFS= read -r cap; do scaps+=(--cap-add="$cap"); done < <(compose_cap_add)
     [ "${#fcaps[@]}" -gt 0 ] || { echo "no --cap-add found in bin/dejima's filter run" >&2; return 1; }
     [ "${#scaps[@]}" -gt 0 ] || { echo "no cap_add found in docker-compose.yml" >&2; return 1; }
 
+    # The cache goes to the FILTER only: it is the half that fetches the ranges,
+    # and the session container has no business holding a path that names them.
     docker run -d --init --name "$filter" \
         --cap-drop=ALL "${fcaps[@]}" \
         --security-opt=no-new-privileges:true \
         --sysctl net.ipv4.ip_unprivileged_port_start=0 \
         --network "$(network_name)" \
+        ${meta[@]+"${meta[@]}"} \
         "$@" \
         --entrypoint /usr/local/bin/filter-entrypoint.sh \
         "$image" >/dev/null
