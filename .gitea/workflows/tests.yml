@@ -147,7 +147,11 @@ jobs:
       - name: Install test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates
+          # iproute2 for `ss`: the one test asserting dejima-ttyd refuses to
+          # start when something already holds its port skips without it, and a
+          # permanent skip on the check guarding a reverse-proxy port takeover
+          # is the same as not having it.
+          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates iproute2
       # The code under test, named explicitly - see the header. Without `ref`
       # this checks out the base branch and the suite passes without ever
       # seeing the change.

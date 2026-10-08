@@ -10417,3 +10417,22 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
             || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
     done
 }
+
+@test "the confined CI job installs the tool its port-collision test needs" {
+    # remote.bats skips the dejima-ttyd port-collision refusal without `ss`,
+    # and the confined job installed no iproute2 - so the one check guarding a
+    # reverse-proxy port takeover was a permanent `ok # skip` in CI, which is
+    # the same as not having it.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" job
+    # The confined job's own install line, not the privileged one's: they are
+    # separate steps and only this suite's tests need the tool.
+    job="$(sed -n '/^  confined:/,/^  [a-z]/p' "$wf")"
+    [ -n "$job" ] || { echo "no confined job in the workflow"; return 1; }
+    grep -q 'apt-get install.*iproute2' <<< "$job" \
+        || { echo "the confined job installs no iproute2, so the port test skips"; return 1; }
+
+    # And the test really does key on that tool, or this pins an install
+    # nothing needs.
+    grep -q "command -v ss >/dev/null 2>&1 || skip" "$REPO_ROOT/test/remote.bats" \
+        || { echo "remote.bats no longer skips on ss; drop this"; return 1; }
+}
