@@ -535,10 +535,16 @@ name, on a queue its maintainers are already drowning in.
 
 The sandbox can always read from GitHub. By default it can never push there:
 GitHub's IP ranges are only allowlisted on port 443, so port 22 is physically
-unreachable rather than merely discouraged by a hook. What carries that claim -
-a restriction belonging to the destination rather than to the path it was
-reached by, and IPv6 refused as a whole family - is in
-[docs/security.md](docs/security.md).
+unreachable rather than merely discouraged by a hook. Two properties carry
+that, both worth naming because the claim stays readable if either quietly
+stops being true. The restriction belongs to the *destination* rather than to
+the path it was reached by, so resolving a GitHub name cannot open a port its
+published ranges do not have. And IPv6 is refused as a whole family, because an
+allowlist naming one address family says nothing about the other - so "port 22
+is closed on those ranges" would mean nothing if a v6 route to the same host
+stayed open. The refusal is the first rule of the chain and there is no v6
+permit path anywhere in it, which the policy checks at startup rather than
+assuming.
 
 `--allow-github-push` opens port 22 for one launch, paired with a repo-scoped
 deploy key in `[core] ssh_key` rather than a forwarded personal agent. The one
@@ -558,8 +564,8 @@ After the container exits it diffs them and tells you what changed.
 
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in
-that repo. Its diff is time-windowed: a finding says a path changed while the
-session was running, not that the session changed it.
+that repo. Its findings are a time window, not a verdict on who caused them:
+one says a path changed while the session was running.
 
 `dejima-audit show` indexes what is waiting and `dejima-audit ack` walks it, one
 finding at a time. `[audit] strict` refuses a headless launch while CRITICAL

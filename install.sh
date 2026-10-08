@@ -140,7 +140,9 @@ else
     # only what the operator has actually decided.
     {
         printf '# dejima configuration. See README.md.\n'
-        printf '# Every key below is shown at its default; uncomment to change one.\n'
+        printf '# This file holds what you have decided, not every key there is.\n'
+        printf '# defaults.conf beside it is the complete reference, rewritten by\n'
+        printf '# every ./install.sh - do not edit that one.\n'
         printf '#\n'
         printf '# [core] harness, forge and workflow are written out uncommented, so\n'
         printf '# this file states what it selects rather than inheriting a future\n'
