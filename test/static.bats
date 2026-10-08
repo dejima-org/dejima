@@ -2136,10 +2136,10 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # selecting everything. Over-selection is still the safe direction; this is
     # about what "reads it" means, not about relaxing it.
     #
-    # Stripped once per suite rather than once per path: this walks the whole
-    # tree, so doing it inside the loop meant one grep pass over every suite
-    # for every tracked file, and .dejima.md warns about what a slow test does
-    # to a bounded deadline under load.
+    # Stripped once per suite rather than once per path, because this walks the
+    # whole tree: inside the loop it would be one grep pass over every suite
+    # per tracked file, and .dejima.md warns what a slow test does to a bounded
+    # deadline under load.
     mkdir -p "$BATS_TEST_TMPDIR/code"
     for suite in "$REPO_ROOT"/test/*.bats; do
         grep -v '^[[:space:]]*#' "$suite" > "$BATS_TEST_TMPDIR/code/$(basename "$suite" .bats)"
@@ -2222,6 +2222,25 @@ _reference_has_key() {  # <doc> <section> <leaf>
 
     [ ${#missing[@]} -eq 0 ] \
         || { echo "not shellchecked:"; printf '  %s\n' "${missing[@]}"; return 1; }
+}
+
+@test "the confined CI job installs the tool its port-collision test needs" {
+    # remote.bats skips the dejima-ttyd port-collision refusal without `ss`,
+    # and the confined job installed no iproute2 - so the one check guarding a
+    # reverse-proxy port takeover was a permanent `ok # skip` in CI, which is
+    # the same as not having it.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" job
+    # The confined job's own install line, not the privileged one's: they are
+    # separate steps and only this suite's tests need the tool.
+    job="$(sed -n '/^  confined:/,/^  [a-z]/p' "$wf")"
+    [ -n "$job" ] || { echo "no confined job in the workflow"; return 1; }
+    grep -q 'apt-get install.*iproute2' <<< "$job" \
+        || { echo "the confined job installs no iproute2, so the port test skips"; return 1; }
+
+    # And the test really does key on that tool, or this pins an install
+    # nothing needs.
+    grep -q "command -v ss >/dev/null 2>&1 || skip" "$REPO_ROOT/test/remote.bats" \
+        || { echo "remote.bats no longer skips on ss; drop this"; return 1; }
 }
 
 @test "CI runs every confined suite, not just the ones someone remembered" {
@@ -10423,23 +10442,4 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
         [ -n "$named" ] \
             || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
     done
-}
-
-@test "the confined CI job installs the tool its port-collision test needs" {
-    # remote.bats skips the dejima-ttyd port-collision refusal without `ss`,
-    # and the confined job installed no iproute2 - so the one check guarding a
-    # reverse-proxy port takeover was a permanent `ok # skip` in CI, which is
-    # the same as not having it.
-    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" job
-    # The confined job's own install line, not the privileged one's: they are
-    # separate steps and only this suite's tests need the tool.
-    job="$(sed -n '/^  confined:/,/^  [a-z]/p' "$wf")"
-    [ -n "$job" ] || { echo "no confined job in the workflow"; return 1; }
-    grep -q 'apt-get install.*iproute2' <<< "$job" \
-        || { echo "the confined job installs no iproute2, so the port test skips"; return 1; }
-
-    # And the test really does key on that tool, or this pins an install
-    # nothing needs.
-    grep -q "command -v ss >/dev/null 2>&1 || skip" "$REPO_ROOT/test/remote.bats" \
-        || { echo "remote.bats no longer skips on ss; drop this"; return 1; }
 }
