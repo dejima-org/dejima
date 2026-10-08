@@ -4374,10 +4374,24 @@ _repo_guard_shim() {
     # carry its value attached: these put the document inside one word that the
     # scoping loop skips, while positional `graphql` still looked scopable.
     for form in "--field=query=mutation{mergePullRequest}" "-Fquery=mutation{mergePullRequest}" \
-                "--field=query=@doc.graphql" "-fquery=@doc.graphql"; do
+                "--field=query=@doc.graphql" "-fquery=@doc.graphql" \
+                "--input" "--input=m.json"; do
         run env "${env_common[@]}" "$d/gh" api graphql "$form"
         assert_forge_refused "Blocked by dejima" "gh api graphql $form" || return 1
     done
+    # --input takes the whole request body from a file, or from stdin with `-`,
+    # so the document is not in the command at any spelling - not as a field
+    # value this could read, and not as something the `=@` shape catches. The
+    # positional graphql beside it still counted as a readable target.
+    for form in "m.json" "-"; do
+        run env "${env_common[@]}" "$d/gh" api graphql --input "$form"
+        assert_forge_refused "takes its body from a file" "gh api graphql --input $form" \
+            || return 1
+    done
+    # Outside the declared subcommand it is a flag this has nothing to say
+    # about, or the refusal is about the word rather than about the body.
+    run env "${env_common[@]}" "$d/gh" issue create --input body.json
+    [[ "$output" == real:* ]] || { echo "--input was refused outside api: $output"; return 1; }
     # A flag whose value is an ordinary header, which the same pass now sees
     # and must have nothing to say about.
     run env "${env_common[@]}" "$d/gh" api repos/own/thing/issues \

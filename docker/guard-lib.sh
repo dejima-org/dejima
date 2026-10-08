@@ -504,13 +504,14 @@ _dejima_forge_path_verdict() {
                 DEJIMA_GUARD_REASON="a GraphQL mutation reaches any repository and any write the token allows, and no repository scoping can be read out of it. Use the subcommands, and leave a merge to the operator."
                 return 1
             fi
-            # A field value read from a file keeps the document out of argv
-            # entirely, so there is nothing here to tell a query from a
-            # mutation. Refused under this subcommand only; the document is one
-            # argument, so passing it inline is the fix.
+            # A body this cannot read is a body it cannot tell a query from a
+            # mutation in. Two spellings put one out of reach: a field value
+            # read from a file, and --input, which takes the whole request body
+            # from a file or from stdin. Refused under this subcommand only;
+            # the document is one argument, so passing it inline is the fix.
             case "$arg" in
-                *=@*)
-                    DEJIMA_GUARD_REASON="'$1' reads a field value from a file, so the document it sends is not in the command for this to read. Pass it inline."
+                *=@*|--input|--input=*)
+                    DEJIMA_GUARD_REASON="'$1' takes its body from a file or from stdin, so what it sends is not in the command for this to read. Pass the document inline."
                     return 1
                     ;;
             esac
