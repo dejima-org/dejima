@@ -5354,19 +5354,54 @@ registered_commands() {
         || { echo "the reachability check is not retried"; return 1; }
 
     # The negatives: not.
-    local line
+    local line seen=0
     while IFS= read -r line; do
+        seen=$((seen + 1))
         case "$line" in
             *retry_positive*) echo "a negative control is retried: $line"; return 1 ;;
         esac
     done < <(grep -E 'verify_refused|verify_port_refused|verify_ipv6_refused|PROBE_NAME\)' <<< "$v")
+    # Counted, because a loop over nothing passes: renaming those helpers would
+    # leave this asserting that none of zero lines retries.
+    [ "$seen" -ge 3 ] \
+        || { echo "found $seen negative controls in verify(), so this checked almost nothing"; return 1; }
 
-    # And the lookup has to report emptiness, or retrying it is a no-op: it
-    # returns 0 whether or not it found an address otherwise.
-    local r
-    r=$(sed -n '/^resolve_one()/,/^}/p' "$p")
-    [ "$(grep -c 'return 1' <<< "$r")" -ge 1 ] \
-        || { echo "resolve_one cannot signal 'no address', so retrying it does nothing"; return 1; }
+    # And the lookup has to report BOTH ways of having no address, or retrying
+    # it is a no-op for one of them. Driven rather than grepped: `return 1`
+    # appears in that function for the empty-answer case, so its presence was
+    # satisfied while a failing dig still returned 0 (#345).
+    local case_name
+    for case_name in failed empty; do
+        run bash -c '
+            set -u
+            d="$2/digstub"; mkdir -p "$d"
+            if [ "$3" = failed ]; then
+                printf "#!/bin/bash\nexit 9\n" > "$d/dig"
+            else
+                printf "#!/bin/bash\nexit 0\n" > "$d/dig"
+            fi
+            chmod +x "$d/dig"
+            PATH="$d:$PATH"
+            eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+            resolve_one some.example
+        ' _ "$p" "$BATS_TEST_TMPDIR" "$case_name"
+        [ "$status" -ne 0 ] \
+            || { echo "resolve_one reported success for a $case_name lookup, so retrying it does nothing"; return 1; }
+    done
+
+    # And it still succeeds when there IS an address, or the retry would spin
+    # on every name and the boot would fail on all of them.
+    run bash -c '
+        set -u
+        d="$2/digok"; mkdir -p "$d"
+        printf "#!/bin/bash\necho 192.0.2.7\n" > "$d/dig"
+        chmod +x "$d/dig"
+        PATH="$d:$PATH"
+        eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+        resolve_one some.example
+    ' _ "$p" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ] || { echo "resolve_one failed on a good answer: $output"; return 1; }
+    [ "$output" = 192.0.2.7 ] || { echo "resolve_one did not print the address: $output"; return 1; }
 }
 
 @test "a retried check reports the status the command actually returned" {
