@@ -2122,12 +2122,28 @@ _reference_has_key() {  # <doc> <section> <leaf>
     # sets LIB= to that very file, and bin/dejima-harness-lib.sh selected a
     # suite that does not mention it at all.
     #
-    # Over-selection is safe and under-selection is the bug, so naming a suite
-    # that merely mentions a file in a comment costs a suite run; missing one
-    # reports an edit as green from a lane that never loaded it.
-    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r missing=() bad=()
+    # Over-selection is safe and under-selection is the bug: missing a suite
+    # reports an edit as green from a lane that never loaded it, while naming
+    # one too many costs a suite run. What counts as reading a file is defined
+    # below, and it is deliberately narrower than "mentions it".
+    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r suite missing=() bad=()
     sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" > "$sf"
     [ -s "$sf" ] || { echo "could not extract suites_for"; return 1; }
+
+    # Comment lines excluded, because a suite that merely NAMES a file in prose
+    # does not read it - and suites cite each other in prose constantly, so
+    # counting those would push every rule towards ALL and leave the lane
+    # selecting everything. Over-selection is still the safe direction; this is
+    # about what "reads it" means, not about relaxing it.
+    #
+    # Stripped once per suite rather than once per path, because this walks the
+    # whole tree: inside the loop it would be one grep pass over every suite
+    # per tracked file, and .dejima.md warns what a slow test does to a bounded
+    # deadline under load.
+    mkdir -p "$BATS_TEST_TMPDIR/code"
+    for suite in "$REPO_ROOT"/test/*.bats; do
+        grep -v '^[[:space:]]*#' "$suite" > "$BATS_TEST_TMPDIR/code/$(basename "$suite" .bats)"
+    done
 
     while IFS= read -r path; do
         mapped="$(bash -c 'source "$1"; suites_for "$2"' _ "$sf" "$path" 2>/dev/null)"
@@ -2139,14 +2155,14 @@ _reference_has_key() {  # <doc> <section> <leaf>
         local needle="${path##*/}"
         [ "$(cd "$REPO_ROOT" && git ls-files "*/$needle" "$needle" | wc -l)" -gt 1 ] \
             && needle="$path"
-        refs="$(grep -ln -- "$needle" "$REPO_ROOT"/test/*.bats 2>/dev/null \
-                | xargs -r -n1 basename | sed 's/\.bats$//' | sort -u)"
+        refs="$(grep -ln -- "$needle" "$BATS_TEST_TMPDIR"/code/* 2>/dev/null \
+                | xargs -r -n1 basename | sort -u)"
         for r in $refs; do
             case "$r" in runtime|ci-runner) continue ;; esac
             grep -qw "$r" <<< "$mapped" || missing+=("$r")
         done
         [ ${#missing[@]} -eq 0 ] || bad+=("$path -> [$mapped] misses: ${missing[*]}")
-    done < <(cd "$REPO_ROOT" && git ls-files 'bin/*' 'hooks/*' 'web/*' 'systemd/*' install.sh)
+    done < <(cd "$REPO_ROOT" && git ls-files)
 
     [ ${#bad[@]} -eq 0 ] \
         || { echo "these rules select fewer suites than read the file:"
@@ -2206,6 +2222,25 @@ _reference_has_key() {  # <doc> <section> <leaf>
 
     [ ${#missing[@]} -eq 0 ] \
         || { echo "not shellchecked:"; printf '  %s\n' "${missing[@]}"; return 1; }
+}
+
+@test "the confined CI job installs the tool its port-collision test needs" {
+    # remote.bats skips the dejima-ttyd port-collision refusal without `ss`,
+    # and the confined job installed no iproute2 - so the one check guarding a
+    # reverse-proxy port takeover was a permanent `ok # skip` in CI, which is
+    # the same as not having it.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" job
+    # The confined job's own install line, not the privileged one's: they are
+    # separate steps and only this suite's tests need the tool.
+    job="$(sed -n '/^  confined:/,/^  [a-z]/p' "$wf")"
+    [ -n "$job" ] || { echo "no confined job in the workflow"; return 1; }
+    grep -q 'apt-get install.*iproute2' <<< "$job" \
+        || { echo "the confined job installs no iproute2, so the port test skips"; return 1; }
+
+    # And the test really does key on that tool, or this pins an install
+    # nothing needs.
+    grep -q "command -v ss >/dev/null 2>&1 || skip" "$REPO_ROOT/test/remote.bats" \
+        || { echo "remote.bats no longer skips on ss; drop this"; return 1; }
 }
 
 @test "CI runs every confined suite, not just the ones someone remembered" {

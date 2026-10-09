@@ -72,7 +72,11 @@ suites_for() {
         bin/dejima-provider-lib.sh)          echo 'providers config remote share static' ;;
         bin/dejima-harness-lib.sh)           echo 'providers config remote static' ;;
         bin/harness/*)                       echo 'providers remote static' ;;
-        forges/*|workflows/*|harnesses/*|tools/*) echo 'providers static' ;;
+        # A manifest is read by more than the suite that owns the schema: the
+        # audit reads a workflow's briefing, conversation.bats sed-injects a
+        # harness.conf, and config.bats copies the whole set in.
+        forges/*|workflows/*|harnesses/*|tools/*) \
+            echo 'providers static audit config conversation' ;;
         install.sh)                          echo 'config audit providers remote static' ;;
 
         # static.bats asserts on files it does not own, so a shipped doc or a
@@ -81,16 +85,33 @@ suites_for() {
         # file are read by nearly every suite that builds a launch.
         docker/*)                            echo ALL ;;
         hooks/*)                             echo 'static config providers project remote' ;;
-        docs/*|README.md|*.md)               echo static ;;
         .gitea/*|.shellcheckrc)              echo static ;;
         .dejima/*)                           echo 'static config project providers' ;;
 
-        test/*.bats) local n="${1##*/}"; echo "${n%.bats}" ;;
+        # A suite file is read by static.bats as well as run by bats: it
+        # asserts invariants over the text of the others, so an edit to one
+        # that only selected itself was reported green by a lane that never
+        # loaded the assertions about it.
+        test/*.bats) local n="${1##*/}"; echo "${n%.bats} static" ;;
         # Fixtures are executed by the suites that consume them, not merely
         # read: fake-anthropic.py is the upstream in proxy.bats (and in
-        # runtime.bats, which no confined selection can carry).
-        test/fixtures/*)                     echo 'proxy static' ;;
+        # runtime.bats, which no confined selection can carry), and
+        # answer-prompt.py drives config.bats' prompts.
+        test/fixtures/*)                     echo 'proxy static config' ;;
         test/*)                              echo static ;;
+
+        # Last of the specific rules, not before them: a .md under test/ or
+        # .dejima/ belongs to whatever reads that directory, and this pattern
+        # would otherwise answer for it. The docs themselves are asserted
+        # against by more than static.bats - the README's axis lists, the
+        # provider tables, the nginx example and the remote-access page each
+        # have a suite checking the code agrees with them.
+        #
+        # So a doc-only edit runs more than static alone. That is the cost of
+        # the lane answering for what reads a file, and it is the safe
+        # direction: narrowing this back would report a doc change as green
+        # from suites that assert against it.
+        docs/*|README.md|*.md)               echo 'static config providers remote' ;;
 
         *) echo ALL ;;
     esac
