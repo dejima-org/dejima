@@ -432,6 +432,40 @@ jobs:
           fi
           echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
 
+      # One fetch for the whole run, into the directory the job already shares
+      # with the containers it starts. test/runtime.bats starts twenty-seven
+      # container pairs and each filter fetched the ranges for itself, which is
+      # roughly twenty-seven requests in five minutes - comfortably inside the
+      # 5000/hour a token allows, and exactly the burst GitHub's SECONDARY limit
+      # answers with a 403 (#357). One request cannot be a burst.
+      #
+      # Best-effort: a failure here leaves no file, and runtime.bats falls back
+      # to each container fetching for itself. That is the behaviour this
+      # replaces, so the worst case is the status quo rather than a red job -
+      # and the step says which of the two the run is getting.
+      - name: Fetch the GitHub ranges once for the whole run
+        env:
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+        run: |
+          mkdir -p /tmp/dejima-ci
+          auth=()
+          [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
+          out=/tmp/dejima-ci/github-meta.json
+          rm -f "$out"
+          # Written only once it parses AND carries ranges, because a rate-limit
+          # body is a 200 with a message and no ranges - and a cached one would
+          # then fail every container in the run instead of one.
+          if curl -fsS --max-time 30 "${auth[@]}" https://api.github.com/meta                -o "$out.part" 2>/dev/null              && [ -n "$(jq -r '[.git[]?, .api[]?, .web[]?] | unique | .[]' < "$out.part" 2>/dev/null)" ]; then
+            mv "$out.part" "$out"
+            echo "Cached GitHub ranges for this run: $(jq -r '[.git[]?, .api[]?, .web[]?] | unique | length' < "$out") CIDRs."
+          else
+            rm -f "$out.part"
+            echo "Could not cache the ranges, so each container will fetch its own."
+            echo "That is the pre-#357 behaviour, not a new failure - but it is what"
+            echo "trips the secondary limit, so a 403 in a container boot below is"
+            echo "explained by this line."
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}

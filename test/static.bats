@@ -265,8 +265,9 @@ EOF
 # cannot be sourced - it would try to change the packet filter - so the function
 # is extracted and run against a stubbed curl. No container, no network.
 #
-# `sleep` is shadowed by a no-op: the retry delays are deliberate in production
-# and pure cost here.
+# `sleep` is shadowed: the retry delays are deliberate in production and pure
+# cost here, and what they would have been is the subject of some of the tests
+# below - so it reports rather than simply returning.
 run_fetch() {
     local behaviour="$1"
     STUB_DIR="$BATS_TEST_TMPDIR/stub"
@@ -274,7 +275,7 @@ run_fetch() {
     cp "$behaviour" "$STUB_DIR/curl"
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
-    sleep() { :; }
+    sleep() { printf 'slept %s\n' "$1" >&2; }
     say() { printf '%s\n' "$*" >&2; }
     die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
     FORGE_META_URL="https://forge.example/meta"
@@ -282,6 +283,8 @@ run_fetch() {
     FORGE_META_AUTH=""
     FETCH_ATTEMPTS=3
     FETCH_TIMEOUT=5
+    FETCH_MAX_BACKOFF=${FETCH_MAX_BACKOFF:-60}
+    eval "$(sed -n '/^retry_after_from()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     eval "$(sed -n '/^fetch_forge_ranges()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     fetch_forge_ranges "$BATS_TEST_TMPDIR/meta" && cat "$BATS_TEST_TMPDIR/meta"
 }
@@ -295,15 +298,21 @@ meta_json() {
 # Writes a body to wherever curl was told to --output, and prints the status
 # code curl's --write-out would have. Both are what the real fetch reads.
 stub_curl() {
-    local status_code="$1" body="$2" extra="${3:-}"
+    local status_code="$1" body="$2" extra="${3:-}" headers="${4:-}"
     cat > "$BATS_TEST_TMPDIR/stubsrc" <<EOF
 #!/bin/bash
 $extra
 out=""
+hdr=""
 while [ \$# -gt 0 ]; do
-    case "\$1" in --output) out="\$2"; shift 2 ;; *) shift ;; esac
+    case "\$1" in
+        --output) out="\$2"; shift 2 ;;
+        --dump-header) hdr="\$2"; shift 2 ;;
+        *) shift ;;
+    esac
 done
 printf '%s' '$body' > "\$out"
+[ -z "\$hdr" ] || printf '$headers' > "\$hdr"
 printf '%s' '$status_code'
 EOF
     printf '%s' "$BATS_TEST_TMPDIR/stubsrc"
@@ -379,6 +388,84 @@ EOF
     [[ "$output" == *"curl exit 7"* ]]
     [[ "$output" == *"$(meta_json)"* ]]
 }
+
+@test "the ranges fetch waits as long as a rate limit asks, and says which failure it is" {
+    # 403 with a Retry-After is how GitHub reports a secondary limit, and it
+    # clears on a scale of tens of seconds - against which attempt*2 spent
+    # twenty seconds over five tries and could sit inside one window and
+    # exhaust itself without ever reaching the other side (#357).
+    run run_fetch "$(stub_curl 403 '{"message":"API rate limit exceeded"}' '' \
+        'HTTP/2 403\r\nretry-after: 37\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    # The endpoint's own number beats anything this would have guessed.
+    [[ "$output" == *"slept 37"* ]] \
+        || { echo "Retry-After was not honoured: $output"; return 1; }
+    [[ "$output" == *"Retry-After: 37s"* ]] \
+        || { echo "the wait was not reported with its source: $output"; return 1; }
+    # And the diagnosis names the code and what the API said, not just one.
+    [[ "$output" == *"http 403"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"API rate limit exceeded"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a rate limit with no Retry-After still gets a wait long enough to outlast one" {
+    run run_fetch "$(stub_curl 429 '{"message":"Too Many Requests"}')"
+    [ "$status" -ne 0 ]
+    # attempt*15 rather than attempt*2, so three attempts cover 45s instead of
+    # 6s. Asserted by value, since the point of the change is the magnitude.
+    [[ "$output" == *"slept 15"* ]] && [[ "$output" == *"slept 30"* ]] \
+        || { echo "a rate limit got the ordinary backoff: $output"; return 1; }
+}
+
+@test "a rate limit answered over a 200 is recognised from the body" {
+    # The endpoint will report one with a message and no ranges over a 200, so
+    # the status code alone does not decide it.
+    run run_fetch "$(stub_curl 200 '{"message":"You have exceeded a secondary rate limit"}')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 15"* ]] \
+        || { echo "a 200-wrapped rate limit got the ordinary backoff: $output"; return 1; }
+}
+
+@test "a failure that is not a rate limit keeps the short backoff" {
+    # The positive control for the two above: waiting a minute on a connection
+    # error would be a boot spending a minute on something no wait fixes.
+    cat > "$BATS_TEST_TMPDIR/refused" <<'EOF'
+#!/bin/bash
+echo "curl: (7) Failed to connect" >&2
+exit 7
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/refused"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 2"* ]] \
+        || { echo "a connection failure did not get the short backoff: $output"; return 1; }
+    [[ "$output" != *"slept 15"* ]] \
+        || { echo "a connection failure was treated as a rate limit: $output"; return 1; }
+}
+
+@test "a Retry-After nobody expected cannot turn a boot into a hang" {
+    # Set here rather than as a command prefix: run_fetch is a shell function,
+    # and `env` cannot exec one.
+    FETCH_MAX_BACKOFF=30
+    run run_fetch "$(stub_curl 403 '{"message":"rate limit"}' '' \
+        'HTTP/2 403\r\nRetry-After: 86400\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 30"* ]] \
+        || { echo "the cap did not apply: $output"; return 1; }
+    [[ "$output" != *"slept 86400"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a Retry-After that is an HTTP date is not read as a number of seconds" {
+    # The header may carry a date instead, and parsing one to compare against a
+    # clock is a wrong answer away from a sleep nobody chose - so only the
+    # numeric form is honoured and the rest falls back to the backoff.
+    run run_fetch "$(stub_curl 403 '{"message":"rate limit"}' '' \
+        'HTTP/2 403\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 15"* ]] \
+        || { echo "a date was not ignored: $output"; return 1; }
+    [[ "$output" != *"Retry-After:"* ]] \
+        || { echo "a date was reported as a honoured wait: $output"; return 1; }
+}
+
 # The same harness for the other half: what happens to a permitted name that
 # does not come back the way the policy needs. Two outcomes have to stay
 # distinct, and conflating them is how a container either dies over nothing or
@@ -688,6 +775,41 @@ EOF
     run run_fetch "$(stub_curl 200 '')"
     [ "$status" -ne 0 ]
     [[ "$output" == *"carried no ranges"* ]]
+}
+
+@test "a file:// ranges source is a test fixture and refuses to be anything else" {
+    # The suite fetches GitHub's ranges once per run and points every container
+    # pair at the result, because twenty-seven filters each fetching for
+    # themselves is the burst that trips the endpoint's secondary limit (#357).
+    # Those ranges decide which addresses the forge class reaches, so a launch
+    # that could name its own source could name its own ranges.
+    printf '%s' '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}' \
+        > "$BATS_TEST_TMPDIR/meta.json"
+    _file_fetch() {
+        run env ${1:+SANDBOX_TEST_MODE=1} bash -c '
+            set -u
+            say() { printf "say: %s\n" "$*" >&2; }
+            die() { printf "die: %s\n" "$*" >&2; exit 1; }
+            FORGE_META_URL="file://$2/meta.json"
+            FORGE_META_FILTER="[.git[]?, .api[]?, .web[]?] | unique | .[]"
+            FORGE_META_AUTH=""; FETCH_ATTEMPTS=1; FETCH_TIMEOUT=5; FETCH_MAX_BACKOFF=60
+            eval "$(sed -n "/^retry_after_from()/,/^}/p" "$1/egress-policy")"
+            eval "$(sed -n "/^fetch_forge_ranges()/,/^}/p" "$1/egress-policy")"
+            fetch_forge_ranges "$2/out.json"
+        ' _ "$SANDBOX_DIR" "$BATS_TEST_TMPDIR"
+    }
+
+    _file_fetch ""
+    [ "$status" -ne 0 ] || { echo "a file source was read outside a test container"; return 1; }
+    [[ "$output" == *"test fixture only"* ]] || { echo "$output"; return 1; }
+
+    # And it works where the suite uses it, or the fixture is no use: curl
+    # reports no status for a scheme that has none, so 200 cannot be what
+    # counts as a good transfer here.
+    _file_fetch 1
+    [ "$status" -eq 0 ] || { echo "the fixture path does not work: $output"; return 1; }
+    grep -q '192.0.2.0/24' "$BATS_TEST_TMPDIR/out.json" \
+        || { echo "the ranges did not land"; return 1; }
 }
 
 @test "the ranges fetch sends the launcher's credential when it has one" {
@@ -2222,6 +2344,42 @@ _reference_has_key() {  # <doc> <section> <leaf>
 
     [ ${#missing[@]} -eq 0 ] \
         || { echo "not shellchecked:"; printf '  %s\n' "${missing[@]}"; return 1; }
+}
+
+@test "the run's cached ranges are written where the suite reads them, to the filter only" {
+    # Two halves that have to name the same path, in two files, with the suite
+    # falling back silently when it is absent - so a rename would quietly
+    # restore the per-container fetch this exists to stop.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" rt="$REPO_ROOT/test/runtime.bats"
+    local cache=/tmp/dejima-ci/github-meta.json
+    grep -qF "out=$cache" "$wf" \
+        || { echo "the privileged job no longer caches the ranges at $cache"; return 1; }
+    grep -qF "$cache:/run/forge-meta-cache.json:ro" "$rt" \
+        || { echo "runtime.bats does not mount $cache read-only"; return 1; }
+    grep -qF 'EGRESS_FORGE_META_URL=file:///run/forge-meta-cache.json' "$rt" \
+        || { echo "runtime.bats does not point the policy at the mount"; return 1; }
+
+    # Read-only, and to the filter container rather than to both: the session
+    # half has no business holding a path that names the forge's ranges.
+    local filter_run
+    filter_run="$(sed -n '/docker run -d --init --name "\$filter"/,/^    wait_filter/p' "$rt")"
+    [ -n "$filter_run" ] || { echo "could not find the filter run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$filter_run" \
+        || { echo "the cache does not reach the filter container"; return 1; }
+    local session_run
+    session_run="$(sed -n '/docker run -d --init --name "\$session"/,/^    wait_ready/p' "$rt")"
+    [ -n "$session_run" ] || { echo "could not find the session run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$session_run" \
+        && { echo "the cache is mounted into the session container too"; return 1; }
+
+    # The job clears that directory before writing, so a run cannot read the
+    # ranges a previous one cached.
+    local clear_at write_at
+    clear_at="$(grep -n 'find /tmp/dejima-ci -mindepth 1 -delete' "$wf" | cut -d: -f1)"
+    write_at="$(grep -n "out=$cache" "$wf" | cut -d: -f1)"
+    [ -n "$clear_at" ] && [ -n "$write_at" ] || { echo "the clear or the write is gone"; return 1; }
+    [ "$clear_at" -lt "$write_at" ] \
+        || { echo "the cache is written before the directory is cleared"; return 1; }
 }
 
 @test "the confined CI job installs the tool its port-collision test needs" {
