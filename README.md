@@ -160,8 +160,8 @@ layers below the container rather than into a harder one.
 This repo only holds the tooling; no project lives here. Point it at a project
 on disk and that project is bind-mounted into the container at runtime.
 
-**Prerequisites:** Docker with the `docker compose` v2 plugin, and `python3`
-(stdlib only, no packages) for the host-side credential proxy.
+**Prerequisites:** Docker with the `docker compose` v2 plugin, `jq`, and
+`python3` (stdlib only, no packages) for the host-side credential proxy.
 
 Only the first block below is required. The rest are independent, so take the
 ones you want.
@@ -295,9 +295,10 @@ dejima --ro ~/other-project ~/myproject
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
 
-**Ctrl-Z backgrounds all of dejima**, and `fg` brings back a working session.
-It makes no progress while suspended, though, so for one that should keep
-working while you are away, run dejima inside tmux and use
+**Ctrl-Z backgrounds dejima's host side**, and `fg` brings back a working
+session. It gets your terminal back rather than pausing the agent - the
+container keeps running - so for a session you want to leave working and pick
+up elsewhere, run dejima inside tmux and use
 [`dejima-attach`](docs/remote-access.md).
 → [why that takes doing](docs/configuration.md#suspending-a-session)
 
@@ -564,9 +565,8 @@ After the container exits it diffs them and tells you what changed.
 
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in
-that repo. Its diff is time-windowed: a finding says a path changed while the
-session was running, not that the session changed it. Findings are a time
-window, not a verdict on who caused them.
+that repo. Its findings are a time window, not a verdict on who caused them:
+one says a path changed while the session was running.
 
 `dejima-audit show` indexes what is waiting and `dejima-audit ack` walks it, one
 finding at a time. `[audit] strict` refuses a headless launch while CRITICAL

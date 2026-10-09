@@ -50,7 +50,6 @@ run them.
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. `save` runs from `bin/dejima`'s exit trap; `list`/`search`/`show` are the operator's, and only ever read |
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
-| `bin/dejima-color-lib.sh` | The colour and terminal-detection helpers the CLIs share. Not on PATH |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
@@ -107,19 +106,20 @@ notification path carries no sandbox-controlled byte, and that no marker
 name outside `waiting`/`done` is ever acted on. `audit.bats` covers
 `bin/dejima-audit`'s own diffing.
 
-`config.bats`, `providers.bats` and `proxy.bats` round out the suites that
-need no Docker either: `config.bats` covers `~/.config/dejima/config`
-parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
-since the fast CI job's container deliberately has no daemon), `providers.bats`
-covers the forge/workflow/harness manifest contract documented in
-[docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling. `conversation.bats` runs
-`bin/dejima-conversation-ship` against a real transcript and a real HTTP
-endpoint standing in for Loki, and asserts on what arrives: that a session's
-lines ship, that a torn line waits until it is whole, that a sibling project
-whose directory name merely extends this one is not swept up with it, and
-that neither the in-memory batch nor the unread tail is lost to the kill that
-ends a session.
+`config.bats`, `providers.bats`, `proxy.bats`, `launch.bats` and `share.bats`
+round out the suites that need no Docker either: `config.bats` covers
+`~/.config/dejima/config` parsing and `install.sh`'s legacy-variable warnings
+(stubbing `docker` itself, since the fast CI job's container deliberately has
+no daemon), `providers.bats` covers the forge/workflow/harness manifest
+contract documented in [docs/providers.md](providers.md), `proxy.bats` covers
+the credential proxy's own request handling, `launch.bats` the command line a
+launch builds, and `share.bats` the shared scratch directory's own layout.
+`conversation.bats` runs `bin/dejima-conversation-ship` against a real
+transcript and a real HTTP endpoint standing in for Loki, and asserts on what
+arrives: that a session's lines ship, that a torn line waits until it is whole,
+that a sibling project whose directory name merely extends this one is not
+swept up with it, and that neither the in-memory batch nor the unread tail is
+lost to the kill that ends a session.
 
 One assertion is worth calling out because it can only run for real on a
 Docker host: `runtime.bats` proves that a service on the host is unreachable
@@ -180,10 +180,12 @@ subset has.
 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
-Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
-`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
-a dejima sandbox itself, which has no Docker daemon by design.
+`ci-runner.bats` needs something rarer - a real CI runner of either tier - and
+skips itself anywhere else. Everything in between runs anywhere a shell does,
+including inside a dejima sandbox itself, which has no Docker daemon by design.
+`test/run-confined.sh` discovers that set rather than naming it, so a suite
+added under `test/` is in the lane the day it lands - which is also why no list
+of them is kept here.
 
 `.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
 the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
@@ -201,9 +203,10 @@ obscurely partway through; the file says why each is needed.
 ## Adding a new harness
 
 `[core] harness` picks a directory under `harnesses/`, and that harness's
-manifest declares eleven keys (see [providers.md](providers.md)). The
-inventory below is everything dejima does that is shaped by *which* harness is
-selected: which parts are the manifest's, which are the plugin's, and
+manifest declares what dejima needs to know about it - every key is in
+[providers.md](providers.md). The inventory below is everything dejima does
+that is shaped by *which* harness is selected: which parts are the manifest's,
+which are the plugin's, and
 which are still written against Claude Code by name. Taken from a pass over
 the tree, so each row names the file rather than describing a sketch - and a
 row that says "in the plugin" is one a second harness supplies rather than one

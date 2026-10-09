@@ -962,11 +962,18 @@ dejima takes that one character back for the host while a session runs
 (`bin/dejima-tty-suspend`). Ctrl-C and Ctrl-\ are deliberately left alone and
 still reach the session, which is how a harness expects to be interrupted.
 
-Suspending is not detaching. A suspended session is stopped, so it makes no
-progress until you resume it, and it belongs to the terminal you started it
-from. For a session that keeps working while you are away, or that you want to
-pick up from somewhere else, run dejima inside tmux and use
-[`dejima-attach`](remote-access.md).
+Suspending is not pausing, and the difference is worth knowing before you reach
+for it. What stops is the host side: `dejima` itself, the container run, the
+credential proxy and the conversation shipper, which share one process group so
+the kernel stops and continues them together. The container is not in that
+group. It keeps running under the container runtime, with its mounts, its
+firewall grants and its forge token, and keeps making requests while the
+terminal looks stopped - see
+[what dejima does not sandbox](security.md#what-dejima-does-not-sandbox).
+
+Suspending is not detaching either: the job belongs to the terminal you started
+it from. For a session you want to pick up from somewhere else, run dejima
+inside tmux and use [`dejima-attach`](remote-access.md).
 
 ## Shared scratch space
 
@@ -1155,11 +1162,14 @@ without the reason it is normally off (see
 [docs/security.md](security.md#github-push-blocked-by-default-optional-opt-in)),
 so the reason is supplied where it will be read.
 
-`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
-any `git push` whose resolved remote isn't the Gitea host, and any push to
-`main`/`master` even there. Like the other hooks, this is a fast-fail guard
-against an overeager agent, not a hard security boundary - a session has full
-shell access and could in principle edit `.git/config` to route around it.
+`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks any `git
+push` whose resolved remote is not one of the configured forge's hosts, and any
+push straight to a branch the workflow protects. Neither list is named here:
+both are resolved host-side from the selected forge and workflow, so this is
+the same rule whichever forge is in use. Like the other hooks, this is a
+fast-fail guard against an overeager agent, not a hard security boundary - a
+session has full shell access and could in principle edit `.git/config` to
+route around it.
 GitHub push is blocked by default too (see
 [GitHub push](security.md#github-push-blocked-by-default-optional-opt-in) in
 docs/security.md) unless `--allow-github-push` is given. For a real guarantee

@@ -905,10 +905,11 @@ invisibly, and on the same `XDG_RUNTIME_DIR` as the gotcha above.
 
 **The marker directory is a write channel into your runtime tmpfs**, and
 nothing bounds it. `/run/user/<uid>` is RAM-backed and sized at a fraction of
-physical memory, so a session filling `/run/dejima-notify` degrades your
-whole login session - D-Bus, the systemd user manager - not just dejima. A
-session can already fill the workspace mount, so this is an increment rather
-than a new exposure, but a RAM-backed filesystem fails harder and sooner.
+physical memory, so a session filling `${XDG_RUNTIME_DIR}/dejima/notify`
+degrades your whole login session - D-Bus, the systemd user manager - not just
+dejima. A session can already fill the workspace mount, so this is an increment
+rather than a new exposure, but a RAM-backed filesystem fails harder and
+sooner.
 There is deliberately no quota here; `rm -rf` on that run's marker directory (or
 logging out, which discards the tmpfs) is the recovery.
 
@@ -1018,7 +1019,7 @@ name, the session's age, its state, and the container id.
 The picker is coloured (gruvbox) when stdout is a terminal that says it can
 show it; `NO_COLOR=1` or a `dumb` `$TERM` turns that off, along with the
 box-drawing glyphs. `--list` is never coloured, terminal or not - the picker
-parses those rows itself and the README calls them scriptable.
+parses those rows itself and `dejima-attach --help` calls them scriptable.
 
 Three states, from a registry `dejima` writes on launch and removes on
 exit:

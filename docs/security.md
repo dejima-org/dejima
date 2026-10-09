@@ -202,8 +202,7 @@ collaborator on the repositories it works on. Write is the ceiling here, not
 a floor: an account that owns a repository, or holds admin on it, can merge
 its own work and edit the settings in the table above, so every row of that
 table goes back to being decorative. `write:repository` and `write:issue` are
-the scopes its token needs (README, "Gitea/Forgejo PR workflow"), and nothing
-about that changes for a collaborator.
+the scopes its token needs, and nothing about that changes for a collaborator.
 
 One consequence presents as a misconfiguration, and the obvious fix is the
 wrong one. Parts of Gitea's API are gated on *ownership* rather than on
@@ -1550,7 +1549,8 @@ execution, and the audit reports the config change it took.
 
 ## Network request logging
 
-If `[logging] loki_url` is set (see Prerequisites in the README), every DNS query and every new
+If `[logging] loki_url` is set (see [docs/configuration.md](configuration.md)),
+every DNS query and every new
 outbound connection attempt - allowed or rejected - is shipped to that Loki
 endpoint. Two sources, both tailed and pushed by `log-shipper.sh`:
 
