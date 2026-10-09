@@ -21,6 +21,9 @@ import select
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import loadscale  # noqa: E402
+
 # The default is the credential scan's prompt. --marker takes another, so a
 # test for a different prompt does not need a second copy of this.
 MARKER = "[s/a/o/r]"
@@ -33,9 +36,12 @@ AMBIENT = "Press Enter to continue"
 # An IDLE timeout: how long to wait with no output before giving up. Generous
 # because the thing it guards against is a command that never finishes, and
 # any finite bound catches that - while a tight one just times the machine.
-# Sixty seconds was enough on an idle box and not enough under the full gate,
-# where every suite runs at once (#295).
-TIMEOUT = 240.0
+#
+# Multiplied by how oversubscribed the run asked the machine to be, rather than
+# raised again the next time it is not enough: this one went from sixty seconds
+# to this because sixty was ample on an idle box and expired under the full
+# gate, which is the shape of guess loadscale exists to stop (#295).
+TIMEOUT = loadscale.deadline(240.0)
 
 
 def main():

@@ -171,7 +171,11 @@ jobs:
       # otherwise refuses --jobs outright when GNU parallel is absent.
       - run: |
           chown -R node:node .
-          su node -c "TERM=xterm-256color bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
+          # DEJIMA_TEST_CONCURRENCY is what this job asks the machine for, which
+          # the fixtures that wait on a bounded deadline multiply their bounds
+          # by - see test/fixtures/loadscale.py. One suite per job here, so it
+          # is the --jobs value and nothing more.
+          su node -c "TERM=xterm-256color DEJIMA_TEST_CONCURRENCY=$(nproc) bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
 
   shellcheck:
     # Its own job rather than a matrix entry: it installs a different package,
