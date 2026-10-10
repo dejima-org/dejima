@@ -10900,3 +10900,57 @@ $(cat "$f.name"): $(head -1 "$f.err")"
     [ "$checked" -ge 5 ] \
         || { echo "only $checked run: blocks were parsed, so this checked almost nothing"; return 1; }
 }
+
+@test "the resolver checks have a permitted name to use when the meta URL has no host" {
+    # The cached-ranges fixture points EGRESS_FORGE_META_URL at a file:// path
+    # (#357), and a file URL has no host - so the checks that resolve "the meta
+    # URL's host" were handed an empty string, asked the resolver to look up
+    # "", and failed every container's boot on it. The whole privileged suite
+    # went down that way.
+    #
+    # The property those checks state is about the policy: that a permitted
+    # name resolves and that its address lands in that name's own set. So the
+    # subject falls back to a permitted forge-class name, which is what the
+    # meta URL's host was an instance of.
+    local p="$SANDBOX_DIR/egress-policy"
+    _subject() {  # _subject <host> <entries-file-contents>
+        run bash -c '
+            set -uo pipefail
+            ENTRIES_FILE="$3"
+            printf "%s" "$4" > "$ENTRIES_FILE"
+            eval "$(sed -n "/^entries_of()/,/^}/p" "$1")"
+            eval "$(sed -n "/^verify_subject()/,/^}/p" "$1")"
+            verify_subject "$2"
+        ' _ "$p" "$1" "$BATS_TEST_TMPDIR/entries" "$2"
+    }
+    local forge_entries='forge name strict github.com
+forge name strict api.github.com
+open name strict registry.npmjs.org
+'
+    # A host present is used as-is - the file:// case must not change the
+    # ordinary one.
+    _subject api.github.com "$forge_entries"
+    [ "$output" = api.github.com ] || { echo "a real host was not used: $output"; return 1; }
+
+    # No host: the first permitted FORGE-class name, not an open-class one -
+    # check 4 looks the answer up in the forge class's own set.
+    _subject "" "$forge_entries"
+    [ "$output" = github.com ] \
+        || { echo "the fallback was not a forge-class name: $output"; return 1; }
+
+    # And nothing at all is empty, which check 3 turns into a refusal naming
+    # the cause rather than a lookup of "".
+    _subject "" ""
+    [ -z "$output" ] || { echo "invented a subject from nothing: $output"; return 1; }
+    grep -q 'there is no permitted forge-class name to check the resolver against' "$p" \
+        || { echo "an empty subject is not refused with a reason"; return 1; }
+
+    # check 5 asserts reachability THROUGH the policy, so a file source cannot
+    # satisfy it and must be skipped out loud rather than passing on a local
+    # read.
+    local c5
+    c5="$(sed -n '/check 5 skipped/,/esac/p' "$p")"
+    [ -n "$c5" ] || { echo "check 5 does not skip a file source"; return 1; }
+    grep -q 'file://\*' <<< "$(sed -n '/# Skipped for a file:\/\/ source/,/esac/p' "$p")" \
+        || { echo "the skip is not keyed to the file scheme"; return 1; }
+}
