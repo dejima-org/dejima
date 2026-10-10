@@ -1711,6 +1711,10 @@ What this means:
     dejima-allow --container {{container_id}} <domain>  # just this session
     dejima-allow --project <path> <domain>              # this project, always
     dejima-allow --global <domain>                      # every project
+  Several domains can go on one line, up to twenty, and more than one is
+  printed back for the operator to confirm before anything is added. So ask
+  for the whole set a task needs in one command rather than one at a time -
+  but ask only for what it needs, because the list is read.
   Pick deliberately rather than asking for all three: a domain this project
   needs is --project, not --global - a global grant widens every other
   project's firewall too, which is rarely what one project's dependency

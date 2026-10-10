@@ -6,11 +6,12 @@
 # actually needs, it should tell you the exact command to run here rather
 # than try to work around the firewall.
 #
-# Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>
+# Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>...
 #   dejima-allow crates.io                      # this running session only
 #   dejima-allow --global crates.io             # persist for every project
 #   dejima-allow --project crates.io            # persist for the project in $PWD
 #   dejima-allow --project ~/myproj crates.io   # persist for one named project
+#   dejima-allow dl.example.com files.example.org   # several, confirmed first
 #
 # --project and --global are approvals for future sessions and deliberately do
 # not touch a running container: a scope flag means "record this", not "patch
@@ -25,32 +26,32 @@ case "${1:-}" in
         cat <<'DEJIMA_ALLOW_HELP'
 dejima-allow - let a sandbox reach a domain the egress firewall blocks
 
-Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>
+Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>...
+       Up to twenty. More than one is confirmed first, defaulting to no, which
+       needs a terminal - so a script does them one at a time.
 
 Scope, which decides who the grant is for and how long it lasts:
   (none)             the running container, right now, until it exits. Finds it
-                     if exactly one is running. With several, it offers them to
-                     pick from on a terminal, and lists them and stops anywhere
-                     else - a prompt is no use to a script.
+                     if exactly one is running. With several it offers them to
+                     pick from on a terminal, by project and by the number the
+                     dejima-attach picker gives each; anywhere else it lists
+                     them and stops, a prompt being no use to a script.
   --container <id>   the same, for a named container. Use this when a session
                      told you its own id rather than letting anything guess.
-                     With several running, they are listed by project and by
-                     the number the dejima-attach picker gives each one. On a
-                     terminal it offers them to pick from instead.
   --project [path]   every future session in one project. Also writes the domain
                      to that project's .dejima/allowed-domains, so it is shared
                      with everyone working on it. Path defaults to $PWD.
   --global           every future session in every project on this host.
 
-They combine. --project and --global deliberately do NOT touch a session that
-is already running: they are approvals for future ones. Pass --container as
-well to do both at once.
+They combine, and --project/--global deliberately do NOT touch a running
+session: they are approvals for future ones, so pass --container to do both.
+Prefer --project to --global - a domain one project needs is that project's,
+and a global grant widens every other project's firewall too.
 
-Prefer --project to --global. A domain one project needs is that project's, and
-a global grant widens every other project's firewall too.
-
-With --container, the domain is verified reachable afterwards and a warning is
+With --container, each domain is verified reachable afterwards and a warning is
 printed if it is not, so a typo or a blocked port does not look like success.
+One that fails stops there naming what landed; a scope flag has them all by
+then regardless.
 
 See docs/configuration.md; docs/security.md explains what the allowlist bounds.
 DEJIMA_ALLOW_HELP
@@ -73,32 +74,136 @@ source "$SCRIPT_DIR/../docker/fixed-domains.sh"
 source "$SCRIPT_DIR/dejima-tui-lib.sh"
 
 usage() {
-    echo "Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>" >&2
+    echo "Usage: dejima-allow [--global] [--project [path]] [--container <id>] <domain>..." >&2
     exit 1
 }
 
-# 1: the domain is the required trailing positional, which is what tells
-# parse_scope_args whether a token after --project is a path or the domain.
+# The most domains one command will take. A cap rather than no limit, because
+# the confirmation below only works if the operator reads the list, and a list
+# long enough to scroll is one nobody reads to the end of - which is where
+# something would be hidden. Twenty is enough for the real case (a toolchain
+# that fetches from several hosts) and short enough to take in at once.
+readonly DEJIMA_ALLOW_MAX=20
+
+# 1: at least one trailing positional, which is what tells parse_scope_args
+# whether a token after --project is a path or a domain. It is a minimum, not
+# an exact count - several domains may follow.
 parse_scope_args 1 "$@" || usage
-[ "${#dj_positional[@]}" -eq 1 ] || usage
-domain="${dj_positional[0]}"
+[ "${#dj_positional[@]}" -ge 1 ] || usage
+domains=("${dj_positional[@]}")
 global="$dj_global"
 project=""
 if [ "$dj_project_set" -eq 1 ]; then
+    # parse_scope_args consumes a token after --project as the path whenever
+    # enough positionals follow it, which with several domains is any of them.
+    # A path that is not a directory and does read as a domain was the first
+    # domain: `dejima-allow --project a.com b.com` means both of those, in the
+    # project in $PWD. A directory wins, so a project whose name happens to
+    # look like a hostname still works.
+    if [ -n "$dj_project" ] && [ ! -d "$dj_project" ] \
+        && [[ "$dj_project" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]; then
+        domains=("$dj_project" "${domains[@]}")
+        dj_project=""
+    fi
     project="$(cd "${dj_project:-$PWD}" && pwd)"
     disclose_project_symlink "$project"
 fi
 container="$dj_container"
 
-# Validated up front, not just passed as a positional arg below: this also
-# has to be a well-formed hostname to be a valid dnsmasq server=/domain/...
-# line (e.g. no embedded "/"), on top of ruling out shell metacharacters. A
-# sandboxed agent can suggest this exact command to the user to copy-paste
-# (see sandbox-context.sh), so a prompt-injected agent handing back a
-# malicious "domain" is a real path here, not just a theoretical one.
-if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]]; then
-    echo "Not a valid domain: $domain" >&2
+# Repeats dropped, order kept. A list with the same name twice asks the
+# operator to approve it twice and makes the count they are reading wrong.
+_seen=""
+_unique=()
+for _d in "${domains[@]}"; do
+    case "$_seen" in *"|${_d,,}|"*) continue ;; esac
+    _seen="$_seen|${_d,,}|"
+    _unique+=("$_d")
+done
+domains=("${_unique[@]}")
+
+# What to call this request where it is described as a whole, rather than once
+# per name. Anything outside the per-domain loops below has no $domain to use,
+# and under set -u reaching for one is fatal rather than merely wrong - which is
+# how the container picker's own prompt took this script down.
+if [ "${#domains[@]}" -eq 1 ]; then
+    domain_label="${domains[0]}"
+else
+    domain_label="${#domains[@]} domains"
+fi
+
+if [ "${#domains[@]}" -gt "$DEJIMA_ALLOW_MAX" ]; then
+    echo "That is ${#domains[@]} domains, and this takes at most $DEJIMA_ALLOW_MAX at once." >&2
+    echo "" >&2
+    echo "The limit is there because the confirmation below is only worth anything if" >&2
+    echo "you read the whole list. Split it up, and read each part." >&2
     exit 1
+fi
+
+# Every domain validated BEFORE any of them is shown or recorded, and the whole
+# command refused if any fails. Two reasons beyond the obvious one.
+#
+# The list the operator confirms has to be the list that gets added: validating
+# as we went would ask them to approve names, then add a prefix of them and
+# fail. And the confirmation rests on the list being readable as printed - this
+# pattern allows letters, digits, hyphens and dots and nothing else, so no
+# entry can carry a carriage return or an escape sequence that rewrites the
+# lines above it on the way past.
+#
+# It also has to be a well-formed hostname to be a valid dnsmasq
+# server=/domain/... line (e.g. no embedded "/"), on top of ruling out shell
+# metacharacters. A sandboxed agent can suggest this exact command for the
+# operator to copy-paste (see sandbox-context.sh), so a prompt-injected agent
+# handing back a malicious "domain" is a real path here, not a theoretical one.
+#
+# All of them reported, not the first: an operator fixing a typo in a list of
+# ten should not have to run it ten times to find the second one.
+_bad=()
+for _d in "${domains[@]}"; do
+    [[ "$_d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62}\.)*[a-zA-Z0-9-]{1,63}$ ]] || _bad+=("$_d")
+done
+if [ "${#_bad[@]}" -gt 0 ]; then
+    if [ "${#_bad[@]}" -eq 1 ]; then
+        echo "Not a valid domain: ${_bad[0]}" >&2
+    else
+        echo "Not valid domains:" >&2
+        printf '  %s\n' "${_bad[@]}" >&2
+    fi
+    exit 1
+fi
+
+# One domain goes through as it always has. More than one is confirmed first,
+# because a list is where something unwanted can ride along unread - and the
+# agent that suggested the command is exactly what might have put it there.
+#
+# Default no, and the list on stdout one per line so nothing is off the right
+# edge of a narrow terminal.
+#
+# No terminal means no confirmation is possible, so it refuses rather than
+# assuming either answer. A script that wants several does them one at a time,
+# which is the behaviour this had before and still has for one.
+if [ "${#domains[@]}" -gt 1 ]; then
+    echo "About to allow ${#domains[@]} domains:"
+    printf '  %s\n' "${domains[@]}"
+    echo ""
+    _where=()
+    [ -n "$project" ] && _where+=("every future session in $project")
+    [ "$global" -eq 1 ] && _where+=("every future session in every project")
+    [ -n "$container" ] && _where+=("the running session $container")
+    [ "${#_where[@]}" -gt 0 ] || _where=("the running session")
+    printf 'This grants them to: %s\n' "$(printf '%s; ' "${_where[@]}" | sed 's/; $//')"
+    echo ""
+    if [ ! -t 0 ]; then
+        echo "Several domains at once needs a terminal to confirm on, and this is not one." >&2
+        echo "Run them one at a time, which needs no confirmation." >&2
+        exit 1
+    fi
+    printf 'Add all %s? [y/N] ' "${#domains[@]}"
+    read -r _reply || _reply=""
+    case "$_reply" in
+        y|Y|yes|YES|Yes) ;;
+        *) echo "Nothing was added."; exit 1 ;;
+    esac
+    echo ""
 fi
 
 # Recorded first, and unconditionally: --project/--global are the user's
@@ -111,6 +216,7 @@ fi
 # given together, and each persists to its own store.
 if [ -n "$project" ]; then
     store="$(ensure_project_store "$project")"
+    for domain in "${domains[@]}"; do
     approve_entry "$store" allowed-domains "$domain"
     echo "Added $domain to the approved domains for $project (applies to every future session in it)."
     # Printed only after the approval above, and guarded rather than left to
@@ -124,11 +230,14 @@ if [ -n "$project" ]; then
         echo "The approval above IS recorded and applies to every future session in it;" >&2
         echo "only the project's own .dejima declaration could not be written." >&2
     fi
+    done
 fi
 if [ "$global" -eq 1 ]; then
     store="$(ensure_global_store)"
-    approve_entry "$store" allowed-domains "$domain"
-    echo "Added $domain to the global approved domains (applies to every future session)."
+    for domain in "${domains[@]}"; do
+        approve_entry "$store" allowed-domains "$domain"
+        echo "Added $domain to the global approved domains (applies to every future session)."
+    done
 fi
 
 # A scope flag means "record this approval", not "patch what is running now" -
@@ -225,7 +334,7 @@ pick_container() {
             "$C_LINK" "$CT_W_NAME" "${CT_NAMES[$i]}" "$C_OFF" \
             "$C_MUTED" "${CT_ATTACH[$i]}" "$C_OFF"
     done
-    tui_pick "${#CT_IDS[@]}" "allow $domain in"
+    tui_pick "${#CT_IDS[@]}" "allow $domain_label in"
     container="${CT_NAMES[$((TUI_CHOICE - 1))]}"
 }
 
@@ -313,7 +422,7 @@ if [ "$session_wanted" -eq 1 ]; then
                 echo "inside it - either half of the pair is accepted here. If the session has" >&2
                 echo "already exited, record the domain for the next one instead:" >&2
                 echo "" >&2
-                echo "  dejima-allow --project $domain" >&2
+                echo "  dejima-allow --project ${domains[*]}" >&2
                 exit 1
             fi
             filter="$container"
@@ -348,83 +457,92 @@ if [ "$session_wanted" -eq 1 ]; then
     # on the same name - with the failed launch as the operator's first hint
     # that the two commands had different ideas.
     #
-    # $domain reaches the container as an argument rather than inside the
-    # command string: it is validated above, and this keeps it that way if that
-    # validation is ever loosened.
+    # Each domain reaches the container as an argument rather than inside the
+    # command string: they are validated above, and this keeps it that way if
+    # that validation is ever loosened.
     #
     # Guarded on the file existing: config_get says so on stderr when it does
     # not, which is right for a launch and noise for this, where a host with no
     # configuration at all is an ordinary case and the answer is simply "not
     # listed". A config that exists and is malformed still reports itself.
-    internal=0
-    if [ -f "$(config_path)" ]; then
-        # `|| [ -n "$_d" ]`, because config_get prints its value with no
-        # trailing newline - so a single-entry list is one line read never
-        # returns, and the loop body would not run at all.
-        # Case-folded, like the class decision below and dejima_mark_internal:
-        # a live add that misses the exemption the operator configured leaves
-        # the name without it until the next launch, which then refuses to
-        # start on the same mismatch.
-        while IFS= read -r _d || [ -n "$_d" ]; do
-            [ "${_d,,}" = "${domain,,}" ] && internal=1
-        done < <(config_get core internal_domains | tr ':' '\n')
-    fi
-
-    permit_args=(permit "$domain")
-    [ "$(dejima_class_for "$domain")" = forge ] && permit_args+=(--forge)
-    [ "$internal" -eq 1 ] && permit_args+=(--internal-ok)
-
-    echo "Permitting $domain in $filter, this session's egress control..."
-    if ! docker exec -u root "$filter" /usr/local/sbin/egress-policy "${permit_args[@]}"; then
-        echo "" >&2
-        echo "The permitted set was left as it was - the reason is above." >&2
-        if [ "$internal" -eq 0 ]; then
-            echo "" >&2
-            echo "If $domain resolves inside your own network, say so in the config and" >&2
-            echo "relaunch - an answer pointing inside is refused for every name that is" >&2
-            echo "not listed there, whether or not it is approved:" >&2
-            echo "" >&2
-            echo "  [core]" >&2
-            echo "  internal_domains = $domain" >&2
-            echo "" >&2
-            echo "It still needs an approval to be reachable at all:" >&2
-            echo "" >&2
-            echo "  dejima-allow --global $domain" >&2
+    # One domain at a time, because each is its own change to the running
+    # policy: the class it belongs to, whether the operator declared it
+    # internal, and whether it then answers. A failure stops the loop rather
+    # than carrying on, so what did and did not land is the order printed
+    # above - and the names after it are still recorded under any scope flag
+    # given, which happened before this and is not undone by a live add
+    # failing.
+    for domain in "${domains[@]}"; do
+        internal=0
+        if [ -f "$(config_path)" ]; then
+            # `|| [ -n "$_d" ]`, because config_get prints its value with no
+            # trailing newline - so a single-entry list is one line read never
+            # returns, and the loop body would not run at all.
+            # Case-folded, like the class decision below and dejima_mark_internal:
+            # a live add that misses the exemption the operator configured leaves
+            # the name without it until the next launch, which then refuses to
+            # start on the same mismatch.
+            while IFS= read -r _d || [ -n "$_d" ]; do
+                [ "${_d,,}" = "${domain,,}" ] && internal=1
+            done < <(config_get core internal_domains | tr ':' '\n')
         fi
-        exit 1
-    fi
 
-    echo "$domain allowed for the running session ($container)."
+        permit_args=(permit "$domain")
+        [ "$(dejima_class_for "$domain")" = forge ] && permit_args+=(--forge)
+        [ "$internal" -eq 1 ] && permit_args+=(--internal-ok)
 
-    # TCP-level truth check from inside the very container that was just
-    # updated - this script's job is the firewall, so "TCP connect succeeded"
-    # is the claim to verify. curl exit 6 (resolve failed), 7 (connect
-    # refused/blocked) and 28 (connect or overall timeout) mean still
-    # unreachable; anything else (0, or a TLS/HTTP-layer code like 35/52) means
-    # the connection itself went through the firewall fine. --max-time bounds
-    # the whole request, not just the connect phase - without it, a server that
-    # accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
-    # would hang this script indefinitely; curl maps that case to the same
-    # exit 28 the case below already handles, so no new branch is needed. This
-    # is a report on this run, not a gate on either scope's approval: both
-    # --project and --global are already recorded above, deliberately - a
-    # declared host may legitimately not answer on 443 (an internal service,
-    # an SSH-only host, an apex that only serves a subdomain), and the natural
-    # moment to add a global approval is precisely when nothing is running to
-    # probe in the first place. The exit 2 below still means what it says:
-    # the live patch to this session did not verify.
-    echo "Verifying $domain is reachable from $container..."
-    rc=0
-    docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
-    case "$rc" in
-        6|7|28)
-            echo "WARNING: $domain is still NOT reachable from $container (curl exit $rc)." >&2
-            echo "If the service doesn't listen on 443 this check can fail spuriously;" >&2
-            echo "otherwise the allow did not take effect - re-check the container ID." >&2
-            exit 2
-            ;;
-        *)
-            echo "Verified: $domain is reachable from $container."
-            ;;
-    esac
+        echo "Permitting $domain in $filter, this session's egress control..."
+        if ! docker exec -u root "$filter" /usr/local/sbin/egress-policy "${permit_args[@]}"; then
+            echo "" >&2
+            echo "The permitted set was left as it was - the reason is above." >&2
+            if [ "$internal" -eq 0 ]; then
+                echo "" >&2
+                echo "If $domain resolves inside your own network, say so in the config and" >&2
+                echo "relaunch - an answer pointing inside is refused for every name that is" >&2
+                echo "not listed there, whether or not it is approved:" >&2
+                echo "" >&2
+                echo "  [core]" >&2
+                echo "  internal_domains = $domain" >&2
+                echo "" >&2
+                echo "It still needs an approval to be reachable at all:" >&2
+                echo "" >&2
+                echo "  dejima-allow --global $domain" >&2
+            fi
+            exit 1
+        fi
+
+        echo "$domain allowed for the running session ($container)."
+
+        # TCP-level truth check from inside the very container that was just
+        # updated - this script's job is the firewall, so "TCP connect succeeded"
+        # is the claim to verify. curl exit 6 (resolve failed), 7 (connect
+        # refused/blocked) and 28 (connect or overall timeout) mean still
+        # unreachable; anything else (0, or a TLS/HTTP-layer code like 35/52) means
+        # the connection itself went through the firewall fine. --max-time bounds
+        # the whole request, not just the connect phase - without it, a server that
+        # accepts the TCP connection and then stalls (never sends TLS/HTTP bytes)
+        # would hang this script indefinitely; curl maps that case to the same
+        # exit 28 the case below already handles, so no new branch is needed. This
+        # is a report on this run, not a gate on either scope's approval: both
+        # --project and --global are already recorded above, deliberately - a
+        # declared host may legitimately not answer on 443 (an internal service,
+        # an SSH-only host, an apex that only serves a subdomain), and the natural
+        # moment to add a global approval is precisely when nothing is running to
+        # probe in the first place. The exit 2 below still means what it says:
+        # the live patch to this session did not verify.
+        echo "Verifying $domain is reachable from $container..."
+        rc=0
+        docker exec "$container" curl -sI --connect-timeout 5 --max-time 10 "https://$domain/" >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+            6|7|28)
+                echo "WARNING: $domain is still NOT reachable from $container (curl exit $rc)." >&2
+                echo "If the service doesn't listen on 443 this check can fail spuriously;" >&2
+                echo "otherwise the allow did not take effect - re-check the container ID." >&2
+                exit 2
+                ;;
+            *)
+                echo "Verified: $domain is reachable from $container."
+                ;;
+        esac
+    done
 fi

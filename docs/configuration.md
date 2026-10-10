@@ -277,6 +277,7 @@ dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # review and approve the declared set
 dejima-allow --project ~/myproject crates.io
 dejima-allow --global crates.io       # applies to every project
+dejima-allow --container <id> dl.example.com files.example.org  # several
 dejima-dep add --project ~/myproject cargo:cargo-nextest
 dejima-dep add --global cargo:cargo-nextest
 ```
@@ -284,7 +285,19 @@ dejima-dep add --global cargo:cargo-nextest
 Two of those tools also write the declaration, so an approval you make by
 hand does not stay invisible to everyone else on the project:
 `dejima-allow --project` appends to `.dejima/allowed-domains`, and
-`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
+`dejima-dep add --project` appends to `.dejima/dependencies`.
+
+`dejima-allow` takes up to twenty domains at once, which is what a toolchain
+fetching from several hosts actually needs. One goes through as a single
+decision you already made by typing it; more than one is printed back to you
+one per line and confirmed before anything is added, defaulting to no. The cap
+and the confirmation are the same point: a list is where an unwanted name rides
+along unread, the agent that suggested the command is what might have put it
+there, and neither mechanism helps if the list is too long to finish reading.
+Every name is validated before any of them is shown, so what you are confirming
+is what will be added and no entry can carry an escape sequence that rewrites
+the lines above it. Confirming needs a terminal, so a script does them one at a
+time. Both write the
 approval first - that is the part that grants - and report separately on the
 declaration, so a project you can't write to still gets you the approval.
 `--global` writes no declaration at all: there is no project to declare in.
