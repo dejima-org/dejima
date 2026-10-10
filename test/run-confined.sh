@@ -247,6 +247,15 @@ fi
 bats_flags=()
 [ "$jobs" -gt 1 ] && bats_flags=(--jobs "$jobs" --no-parallelize-across-files)
 
+# What this run asks the machine for, for the fixtures that wait on a bounded
+# deadline. They multiply their bounds by how oversubscribed that makes it
+# rather than carrying a number picked to survive the gate, which is a number
+# that is then far too generous anywhere else (#295, test/fixtures/loadscale.py).
+#
+# Exported rather than passed, because it has to reach a python fixture several
+# processes below bats.
+export DEJIMA_TEST_CONCURRENCY=$(( ${#selected[@]} * jobs ))
+
 {
     if [ "$lane" = changed ]; then
         printf 'lane: CHANGED - %d of %d confined suites, from %d changed path(s)\n' \

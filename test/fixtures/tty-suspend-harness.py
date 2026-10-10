@@ -25,6 +25,9 @@ import sys
 import termios
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from loadscale import deadline  # noqa: E402
+
 HELPER = os.path.abspath(sys.argv[1])
 SHELL = sys.argv[2] if len(sys.argv) > 2 else "bash"
 # Required, not defaulted. The fallback was "/tmp", and the three paths below
@@ -200,7 +203,7 @@ def pump(seconds):
 
 def expect(text, timeout=8.0):
     """Wait for text to appear in output since the last call to forget()."""
-    end = time.time() + timeout
+    end = time.time() + deadline(timeout)
     while time.time() < end:
         if text in "".join(seen):
             return True
@@ -238,7 +241,7 @@ def reclaimed():
 
 
 def await_reclaim(timeout=10.0):
-    end = time.time() + timeout
+    end = time.time() + deadline(timeout)
     while time.time() < end:
         if reclaimed():
             return True
@@ -259,8 +262,13 @@ def await_raw(timeout=15.0):
     scheduling later. Sampling the flags right after fg was timing the machine,
     and on a loaded one it read the shell's own canonical mode and reported it
     as a failure to restore - the same shape as the reclaim wait above.
+
+    Every bound in this file is multiplied by how oversubscribed the run asked
+    the machine to be (loadscale), because lengthening them until both an idle
+    box and the full gate pass means picking a number that is wrong in one of
+    the two. They are unchanged when nothing says otherwise.
     """
-    end = time.time() + timeout
+    end = time.time() + deadline(timeout)
     while time.time() < end:
         if raw_restored():
             return True

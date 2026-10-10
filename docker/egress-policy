@@ -1418,7 +1418,12 @@ resolve_one() {
   local answers line
   # A only: the resolver is configured to answer no AAAA at all, so asking for
   # one spends a query to be told nothing.
-  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 0
+  # Non-zero when dig itself failed, not zero: that is a lookup which did not
+  # come back - a resolver a moment behind the container is exactly it - and so
+  # the one case the positive checks' retry exists to absorb. Returning 0 there
+  # reported success with no address, which retry_positive takes as an answer
+  # and the caller then dies on (#345).
+  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 1
   while IFS= read -r line; do
     [[ "$line" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || continue
     printf '%s\n' "$line"

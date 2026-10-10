@@ -1479,11 +1479,37 @@ session_pid() {  # [container], defaulting to the file-wide one
     # running session, and it is the operator's to run from the host. From
     # inside the session it must do nothing - it is the same binary in the same
     # image, and only the container it runs in differs.
+    # What the policy would have CHANGED is re-read after each refusal, not
+    # just the exit status checked: an amendment that landed and then failed on
+    # something later would exit non-zero with the destination permitted, which
+    # is the outcome this test is named for and the one a status cannot see.
+    #
+    # The entries file and the resolver configuration, because a permit for a
+    # NAME writes both - the address sets only ever hold addresses, so grepping
+    # those for a hostname is a check that cannot fail.
+    local before_entries before_conf after_entries after_conf
+    before_entries="$(dexec_filter cat /run/egress-policy/entries)"
+    before_conf="$(dexec_filter cat /run/egress-policy/resolver.conf)"
+    [ -n "$before_entries" ] && [ -n "$before_conf" ] \
+        || { echo "could not read the policy's own record of what is permitted"; return 1; }
+
     run dexec_node /usr/local/sbin/egress-policy permit evil.example.com
     [ "$status" -ne 0 ]
     run docker exec -u root "$(container_name)" /usr/local/sbin/egress-policy permit evil.example.com
     [ "$status" -ne 0 ] \
         || { echo "root in the session container amended the permitted set"; return 1; }
+
+    after_entries="$(dexec_filter cat /run/egress-policy/entries)"
+    after_conf="$(dexec_filter cat /run/egress-policy/resolver.conf)"
+    [ "$after_entries" = "$before_entries" ] \
+        || { echo "the entries file changed despite both refusals"; return 1; }
+    [ "$after_conf" = "$before_conf" ] \
+        || { echo "the resolver configuration changed despite both refusals"; return 1; }
+    # Named directly as well, so this does not rest on two snapshots matching:
+    # an entry already present before the test would make them match anyway.
+    grep -q evil.example <<< "$after_entries$after_conf" \
+        && { echo "evil.example.com reached the policy's record of what is permitted"; return 1; }
+    return 0
 }
 
 @test "node has no working sudo" {

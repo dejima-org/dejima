@@ -2236,6 +2236,70 @@ _reference_has_key() {  # <doc> <section> <leaf>
     done
 }
 
+@test "a bounded wait is lengthened by what the run asked the machine for" {
+    # The suites wait on things that take as long as the machine makes them
+    # take, and each wait has a deadline. One that is right on an idle box is
+    # wrong under the gate, and raising it until both pass means picking a
+    # number that is wrong in one of them - which is how a fixture's idle bound
+    # went from sixty seconds to two hundred and forty (#295).
+    local ls="$REPO_ROOT/test/fixtures/loadscale.py"
+    [ -f "$ls" ] || { echo "the shared scale is gone"; return 1; }
+
+    # Both runners say what they asked for, or the multiplier is always 1 and
+    # this does nothing. Derived on each side from the concurrency it chose,
+    # not a constant either of them picked.
+    grep -qF 'export DEJIMA_TEST_CONCURRENCY=$(( ${#selected[@]} * jobs ))' \
+        "$REPO_ROOT/test/run-confined.sh" \
+        || { echo "the gate does not say how much concurrency it asked for"; return 1; }
+    grep -qF 'DEJIMA_TEST_CONCURRENCY=$(nproc) bats --jobs' \
+        "$REPO_ROOT/.gitea/workflows/tests.yml" \
+        || { echo "the CI job does not say how much concurrency it asked for"; return 1; }
+
+    # And every fixture that waits on one uses it, rather than carrying a bound
+    # chosen to survive the gate.
+    # The import, not the word: both files mention loadscale in a comment
+    # explaining why their bounds are what they are, so a grep for the name
+    # passes on a file that stopped using it.
+    local f
+    for f in tty-suspend-harness.py answer-prompt.py; do
+        grep -qE '^(import loadscale|from loadscale import)' "$REPO_ROOT/test/fixtures/$f" \
+            || { echo "$f has bounded waits that do not scale with the run"; return 1; }
+    done
+
+    # Driven, because the shape is easy to get right and the arithmetic is what
+    # matters. Never below 1, so an idle run and one with nothing set behave
+    # exactly as they do today; capped, because a wrong value here turns a test
+    # that should fail in seconds into one that hangs for the whole job.
+    local cores; cores="$(nproc)"
+    run env -u DEJIMA_TEST_CONCURRENCY python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$status" -eq 0 ] && [ "$output" = "10.0" ] \
+        || { echo "an unset variable changed a deadline: $output"; return 1; }
+
+    run env DEJIMA_TEST_CONCURRENCY=$(( cores * 2 )) python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$output" = "20.0" ] \
+        || { echo "twice the cores did not double a deadline: $output"; return 1; }
+
+    run env DEJIMA_TEST_CONCURRENCY=$(( cores / 2 )) python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$output" = "10.0" ] \
+        || { echo "an under-subscribed run shortened a deadline: $output"; return 1; }
+
+    local junk
+    for junk in 99999999 -5 "" notanumber; do
+        run env DEJIMA_TEST_CONCURRENCY="$junk" python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.scale())"
+        [ "$status" -eq 0 ] || { echo "'$junk' made the scale raise: $output"; return 1; }
+        awk -v s="$output" 'BEGIN { exit !(s >= 1.0 && s <= 4.0) }' \
+            || { echo "'$junk' produced a scale of $output"; return 1; }
+    done
+}
+
 @test "a changed path selects every suite that reads it, not just the one that owns it" {
     # .dejima.md says nothing can tell that a rule is too narrow. A human
     # cannot; this can. For each mapped path, every suite whose text names its
@@ -5354,19 +5418,54 @@ registered_commands() {
         || { echo "the reachability check is not retried"; return 1; }
 
     # The negatives: not.
-    local line
+    local line seen=0
     while IFS= read -r line; do
+        seen=$((seen + 1))
         case "$line" in
             *retry_positive*) echo "a negative control is retried: $line"; return 1 ;;
         esac
     done < <(grep -E 'verify_refused|verify_port_refused|verify_ipv6_refused|PROBE_NAME\)' <<< "$v")
+    # Counted, because a loop over nothing passes: renaming those helpers would
+    # leave this asserting that none of zero lines retries.
+    [ "$seen" -ge 3 ] \
+        || { echo "found $seen negative controls in verify(), so this checked almost nothing"; return 1; }
 
-    # And the lookup has to report emptiness, or retrying it is a no-op: it
-    # returns 0 whether or not it found an address otherwise.
-    local r
-    r=$(sed -n '/^resolve_one()/,/^}/p' "$p")
-    [ "$(grep -c 'return 1' <<< "$r")" -ge 1 ] \
-        || { echo "resolve_one cannot signal 'no address', so retrying it does nothing"; return 1; }
+    # And the lookup has to report BOTH ways of having no address, or retrying
+    # it is a no-op for one of them. Driven rather than grepped: `return 1`
+    # appears in that function for the empty-answer case, so its presence was
+    # satisfied while a failing dig still returned 0 (#345).
+    local case_name
+    for case_name in failed empty; do
+        run bash -c '
+            set -u
+            d="$2/digstub"; mkdir -p "$d"
+            if [ "$3" = failed ]; then
+                printf "#!/bin/bash\nexit 9\n" > "$d/dig"
+            else
+                printf "#!/bin/bash\nexit 0\n" > "$d/dig"
+            fi
+            chmod +x "$d/dig"
+            PATH="$d:$PATH"
+            eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+            resolve_one some.example
+        ' _ "$p" "$BATS_TEST_TMPDIR" "$case_name"
+        [ "$status" -ne 0 ] \
+            || { echo "resolve_one reported success for a $case_name lookup, so retrying it does nothing"; return 1; }
+    done
+
+    # And it still succeeds when there IS an address, or the retry would spin
+    # on every name and the boot would fail on all of them.
+    run bash -c '
+        set -u
+        d="$2/digok"; mkdir -p "$d"
+        printf "#!/bin/bash\necho 192.0.2.7\n" > "$d/dig"
+        chmod +x "$d/dig"
+        PATH="$d:$PATH"
+        eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+        resolve_one some.example
+    ' _ "$p" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ] || { echo "resolve_one failed on a good answer: $output"; return 1; }
+    [ "$output" = 192.0.2.7 ] || { echo "resolve_one did not print the address: $output"; return 1; }
 }
 
 @test "a retried check reports the status the command actually returned" {
