@@ -33,13 +33,57 @@ setup() {
     export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 }
 teardown() {
+    # An attach client this test backgrounded. `kill` only sends the signal, and
+    # the client - plus the script(1) and tmux processes under it - takes a
+    # moment to go. Removing its directories in that window is what produced
+    # "rm: cannot remove ...: Directory not empty": rm lists a directory,
+    # deletes what it saw, and the still-dying client creates something else
+    # before the rmdir. So the wait is for the process to be gone, not a sleep.
+    if [ -n "${attach_pid:-}" ]; then
+        kill "$attach_pid" 2>/dev/null || true
+        _await_gone kill -0 "$attach_pid"
+    fi
     # Only ever the private server start_tmux created (its own TMUX_TMPDIR),
     # never the operator's.
     if [ -n "${TMUX_DIR:-}" ]; then
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
+        # kill-server returns once the server has been told, and the server
+        # unlinks its socket on its own schedule.
+        _await_gone env TMUX_TMPDIR="$TMUX_DIR" tmux has-session
     fi
-    rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
+    _rm_settled "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
         ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
+}
+
+# Waits until the given command FAILS, which is how each of the things above
+# reports that it is gone. Bounded, and silent on expiry: teardown's job is to
+# clean up, and a cleanup that fails a passing test is the bug being fixed.
+_await_gone() {
+    local i
+    for i in $(seq 1 50); do
+        "$@" >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# rm -rf, retried. The waits above remove the cause; this is the backstop for
+# anything else that writes into a temp directory as it exits, and it reports
+# what is left rather than failing the test - a leaked temp directory costs
+# disk, and a red check on a passing test costs a re-run and some trust in the
+# suite.
+_rm_settled() {
+    local d i
+    for d in "$@"; do
+        [ -n "$d" ] || continue
+        for i in 1 2 3 4 5; do
+            rm -rf "$d" 2>/dev/null
+            [ -e "$d" ] || break
+            sleep 0.2
+        done
+        [ ! -e "$d" ] \
+            || echo "teardown: $d survived removal, holding: $(ls -A "$d" 2>/dev/null | tr '\n' ' ')" >&3
+    done
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
