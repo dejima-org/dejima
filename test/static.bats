@@ -3162,6 +3162,133 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     [[ "$output" != *"Not a valid domain"* ]]
 }
 
+# Several domains in one command, which is what an agent asks for when a
+# toolchain fetches from more than one host. The cap and the confirmation are
+# what make that safe to say yes to: a list is where an unwanted name rides
+# along unread, and the agent that suggested the command is what might have put
+# it there.
+#
+# Its own store, so none of these touches the operator's real approvals.
+_allow() {  # _allow <args...>; prints what the run said
+    ALLOW_HOME="${ALLOW_HOME:-$(mktemp -d "$BATS_TEST_TMPDIR/allowhome.XXXXXX")}"
+    run env HOME="$ALLOW_HOME" DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" \
+        "$REPO_ROOT/bin/dejima-allow" "$@" < /dev/null
+}
+_allowed_now() { tr '\n' ' ' < "$ALLOW_HOME/cfg/allowed-domains" 2>/dev/null; }
+
+@test "bin/dejima-allow takes several domains, and refuses more than it will be read" {
+    unset ALLOW_HOME
+    local many
+    many="$(seq -f 'd%g.example' 1 21)"
+    # shellcheck disable=SC2086
+    _allow --global $many
+    [ "$status" -ne 0 ] || { echo "21 domains were accepted"; return 1; }
+    [[ "$output" == *"at most 20 at once"* ]] || { echo "$output"; return 1; }
+    [ -z "$(_allowed_now)" ] || { echo "the refusal still wrote: $(_allowed_now)"; return 1; }
+
+    # Twenty is the boundary and reaches the confirmation, which with no
+    # terminal is a refusal rather than an assumed answer either way.
+    many="$(seq -f 'd%g.example' 1 20)"
+    # shellcheck disable=SC2086
+    _allow --global $many
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"needs a terminal to confirm on"* ]] \
+        || { echo "twenty did not reach the confirmation: $output"; return 1; }
+    [ -z "$(_allowed_now)" ] || { echo "a declined list was written: $(_allowed_now)"; return 1; }
+}
+
+@test "bin/dejima-allow validates every domain before it shows any of them" {
+    # The list the operator confirms has to be the list that gets added, so one
+    # bad entry refuses the whole command - and every bad one is named, or
+    # fixing a list of ten means running it ten times.
+    unset ALLOW_HOME
+    _allow --global good.example 'evil.com;touch /tmp/pwned' 'evil.com/../etc'
+    [ "$status" -ne 0 ]
+    # The refusal has to be the VALIDATION one. Without it the command still
+    # refuses - it has no terminal to confirm on - and the names still appear,
+    # in the list it was about to ask about. So this asserts which refusal it
+    # was, or it passes on a command that validates nothing.
+    [[ "$output" == *"Not valid domains:"* ]] \
+        || { echo "not refused for being invalid: $output"; return 1; }
+    [[ "$output" != *"About to allow"* ]] \
+        || { echo "an invalid list was offered for confirmation: $output"; return 1; }
+    [[ "$output" != *"needs a terminal"* ]] \
+        || { echo "refused for the terminal rather than the entries: $output"; return 1; }
+    [[ "$output" == *"evil.com;touch /tmp/pwned"* ]] && [[ "$output" == *"evil.com/../etc"* ]] \
+        || { echo "not every invalid entry was named: $output"; return 1; }
+    [ -z "$(_allowed_now)" ] \
+        || { echo "a list containing an invalid entry wrote anything: $(_allowed_now)"; return 1; }
+    # And the valid one beside them is not approved on its own.
+    [[ "$output" != *"Added good.example"* ]] || { echo "$output"; return 1; }
+}
+
+@test "bin/dejima-allow asks before adding several, and no is the default" {
+    # Driven on a real pty, because the confirmation is deliberately refused
+    # without one - so a pipe cannot exercise the path that matters. `|| true`
+    # on the substitution: declining exits non-zero by design, and under bats
+    # errexit that would abort the test before it read the output.
+    local out
+    for answer in '' 'n' 'no'; do
+        ALLOW_HOME="$(mktemp -d "$BATS_TEST_TMPDIR/declined.XXXXXX")"
+        out="$(printf '%s\n' "$answer" | env HOME="$ALLOW_HOME" \
+            DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" timeout 30 \
+            script -qec "$REPO_ROOT/bin/dejima-allow --global a.example b.example" /dev/null 2>&1 || true)"
+        [[ "$out" == *"Nothing was added"* ]] \
+            || { echo "answering '$answer' did not decline: $out"; return 1; }
+        [ ! -s "$ALLOW_HOME/cfg/allowed-domains" ] \
+            || { echo "answering '$answer' added: $(cat "$ALLOW_HOME/cfg/allowed-domains")"; return 1; }
+    done
+
+    # And yes adds all of them. The positive control: without it, every
+    # assertion above is equally satisfied by a command that adds nothing ever.
+    for answer in 'y' 'yes'; do
+        ALLOW_HOME="$(mktemp -d "$BATS_TEST_TMPDIR/accepted.XXXXXX")"
+        out="$(printf '%s\n' "$answer" | env HOME="$ALLOW_HOME" \
+            DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" timeout 30 \
+            script -qec "$REPO_ROOT/bin/dejima-allow --global a.example b.example" /dev/null 2>&1 || true)"
+        grep -qx a.example "$ALLOW_HOME/cfg/allowed-domains" \
+            && grep -qx b.example "$ALLOW_HOME/cfg/allowed-domains" \
+            || { echo "answering '$answer' did not add both: $out"; return 1; }
+    done
+}
+
+@test "bin/dejima-allow prints the list one per line, and only names that passed validation" {
+    # One per line because a name off the right edge of a narrow terminal is a
+    # name nobody read - which is the whole mechanism this rests on. And the
+    # pattern allows letters, digits, hyphens and dots and nothing else, so no
+    # entry reaching that printout can carry an escape sequence that rewrites
+    # the lines above it.
+    unset ALLOW_HOME
+    _allow --global first.example second.example
+    [[ "$output" == *"About to allow 2 domains:"* ]] || { echo "$output"; return 1; }
+    local listed
+    listed="$(printf '%s\n' "$output" | sed -n 's/^  \([a-z0-9.]*\.example\)$/\1/p')"
+    [ "$listed" = "first.example
+second.example" ] || { echo "not one per line: [$listed]"; return 1; }
+
+    grep -q 'a-zA-Z0-9' <<< "$(sed -n '/_bad=()/,/^fi$/p' "$REPO_ROOT/bin/dejima-allow")" \
+        || { echo "the validation no longer restricts the character set"; return 1; }
+}
+
+@test "bin/dejima-allow still takes one domain with no confirmation at all" {
+    # The behaviour this had before, unchanged: one name is one decision the
+    # operator already made by typing it, and a prompt there would be a prompt
+    # on every ordinary use.
+    unset ALLOW_HOME
+    _allow --global only.example
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"About to allow"* ]] || { echo "one domain was confirmed: $output"; return 1; }
+    [[ "$output" == *"Added only.example"* ]] || { echo "$output"; return 1; }
+    [ "$(_allowed_now)" = "only.example " ] || { echo "store: $(_allowed_now)"; return 1; }
+}
+
+@test "bin/dejima-allow collapses a repeated domain rather than asking twice" {
+    unset ALLOW_HOME
+    _allow --global dup.example DUP.EXAMPLE dup.example other.example
+    [[ "$output" == *"About to allow 2 domains:"* ]] \
+        || { echo "repeats were counted separately: $output"; return 1; }
+}
+
 @test "the dedicated SSH key mount is optional, not a hard requirement" {
     grep -qE '^\s*-\s*\$\{SANDBOX_SSH_KEY_FILE:-/dev/null\}:/root/\.ssh-sandbox-key-src:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     grep -qE '^\s*-\s*\$\{SSH_AUTH_SOCK:-/dev/null\}:/ssh-agent\s*$' "$SANDBOX_DIR/docker-compose.yml"
