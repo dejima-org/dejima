@@ -3895,6 +3895,96 @@ EOF
     rm -rf "$workspace"
 }
 
+@test "the staged ~/.claude.json carries the launching project's entry and no other" {
+    # The projects map keys per-project state by absolute path, so a verbatim
+    # copy tells a session the name of every project on the host, a sample of
+    # each one's filenames (exampleFiles) and what each has cost. Narrowed for
+    # the reason #104 narrowed the projects MOUNT: the whole map is every
+    # project's (#380).
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A worktree under the project, because a session's cwd routinely is one and
+    # Claude Code keys that path separately - and a sibling whose path merely
+    # begins with the project's, which is the comparison a bare prefix test
+    # gets wrong.
+    #
+    # The other project's path is deliberately dull. Calling it anything
+    # credential-shaped - "secret" was the first attempt - makes the staged
+    # copy trip dejima's own credential scan, so the launch refuses and this
+    # test passes on a refusal rather than on the narrowing it is named for.
+    mkdir -p "$workspace/.worktrees/feature"
+    cat > "$RW_HOME/.claude.json" <<JSON
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST",
+ "projects":{
+   "$workspace":{"exampleFiles":["mine.py"],"lastCost":1},
+   "$workspace/.worktrees/feature":{"exampleFiles":["branch.py"]},
+   "${workspace}-sibling":{"exampleFiles":["sibling.py"]},
+   "/home/someone/else/their-project":{"exampleFiles":["theirs.py"],"lastCost":99}},
+ "numStartups":7}
+JSON
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; return 1; }
+
+    # The project and anything under it.
+    [ "$(jq -r --arg p "$workspace" '.projects[$p].lastCost' "$staged")" = 1 ] \
+        || { echo "the launching project's own entry is gone"; return 1; }
+    [ "$(jq -r --arg p "$workspace/.worktrees/feature" '.projects[$p].exampleFiles[0]' "$staged")" = branch.py ] \
+        || { echo "a worktree inside the project was dropped"; return 1; }
+
+    # And nothing else, including the sibling a bare prefix test would keep.
+    [ "$(jq -r --arg p "${workspace}-sibling" '.projects | has($p)' "$staged")" = false ] \
+        || { echo "a sibling path sharing the project's prefix was kept"; return 1; }
+    [ "$(jq -r '.projects | has("/home/someone/else/their-project")' "$staged")" = false ] \
+        || { echo "another project reached the container"; return 1; }
+    [ "$(jq -r '.projects | length' "$staged")" = 2 ] \
+        || { echo "wrong number of entries: $(jq -c '.projects | keys' "$staged")"; return 1; }
+    grep -q 'theirs.py' "$staged" \
+        && { echo "another project's filenames reached the container"; return 1; }
+
+    # The rest of the file is why the copy exists, and the credential still goes.
+    [ "$(jq -r '.numStartups' "$staged")" = 7 ] || { echo "lost app state"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$staged")" = absent ] \
+        || { echo "the console API key reached the container"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}
+
+@test "a projects key that is not a map does not refuse the launch" {
+    # Narrowing a `projects` that holds a string would error, and the staging
+    # treats a jq failure as fatal - so an odd but parseable file would become
+    # a launch that will not start, over a key with nothing in it to narrow.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"projects":"not-a-map","numStartups":3}\n' > "$RW_HOME/.claude.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    local stub staged
+    stub="$(mktemp -d)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "an odd projects key refused the launch: $output"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = 3 ] || { echo "the copy lost its state"; return 1; }
+    rm -rf "$workspace" "$stub" "$staged"
+}
+
 @test "a console API key in ~/.claude.json does not reach the container" {
     # Found on a real desktop launch. A Claude Code signed in with a console
     # API token keeps the key as a top-level primaryApiKey in ~/.claude.json,

@@ -1332,9 +1332,31 @@ harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 # A file jq cannot parse is a refusal, not a fallback to cp. Falling back
 # would restore the exact leak this exists to close, at the moment least
 # likely to be noticed.
+#
+# The `projects` map is narrowed to the launching project at the same time, for
+# the reason #104 narrowed the projects MOUNT: the whole map is every project's.
+# It keys per-project state by absolute path, so a copy of all of it tells a
+# session the names of every project on the host, a sample of each one's
+# filenames (`exampleFiles`), and what each has cost (#380).
+#
+# The project's own path and anything under it, because a session's cwd is
+# routinely a worktree inside the project and Claude Code keys that separately.
+# Paths are compared as strings: both sides of this mount agree on them by
+# construction - same uid, same home, same project path - which is what makes
+# the comparison meaningful rather than a guess about layout.
 SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
 if [ -f "$HOME/.claude.json" ]; then
-    if ! jq 'del(.primaryApiKey)' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
+    # The type is checked rather than the key's presence: `projects` holding
+    # something other than an object is not a shape Claude Code writes, and
+    # narrowing it would error - turning a parseable file into a refused launch
+    # over a key with nothing in it to narrow.
+    if ! jq --arg proj "$WORKSPACE_DIR" '
+            del(.primaryApiKey)
+            | if (.projects | type) == "object" then
+                  .projects |= with_entries(
+                      select(.key == $proj or (.key | startswith($proj + "/"))))
+              else . end
+         ' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
         echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
         echo "credential it may hold before copying it into the container." >&2
         exit 1
