@@ -447,17 +447,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
         run: |
+          # POSIX sh, like every other run: block here - the runner's default
+          # shell is `sh -e`, where an array is a syntax error and the step dies
+          # before any of this runs. Two curl branches rather than one with a
+          # built-up argument list, for the same reason.
           mkdir -p /tmp/dejima-ci
-          auth=()
-          [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
           out=/tmp/dejima-ci/github-meta.json
-          rm -f "$out"
+          rm -f "$out" "$out.part"
+          fetched=0
+          if [ -n "${GH_TOKEN:-}" ]; then
+            if curl -fsS --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+                 https://api.github.com/meta -o "$out.part" 2>/dev/null; then
+              fetched=1
+            fi
+          else
+            if curl -fsS --max-time 30 \
+                 https://api.github.com/meta -o "$out.part" 2>/dev/null; then
+              fetched=1
+            fi
+          fi
           # Written only once it parses AND carries ranges, because a rate-limit
           # body is a 200 with a message and no ranges - and a cached one would
           # then fail every container in the run instead of one.
-          if curl -fsS --max-time 30 "${auth[@]}" https://api.github.com/meta                -o "$out.part" 2>/dev/null              && [ -n "$(jq -r '[.git[]?, .api[]?, .web[]?] | unique | .[]' < "$out.part" 2>/dev/null)" ]; then
+          ranges=""
+          if [ "$fetched" = 1 ]; then
+            ranges="$(jq -r '[.git[]?, .api[]?, .web[]?] | unique | .[]' < "$out.part" 2>/dev/null || true)"
+          fi
+          if [ -n "$ranges" ]; then
             mv "$out.part" "$out"
-            echo "Cached GitHub ranges for this run: $(jq -r '[.git[]?, .api[]?, .web[]?] | unique | length' < "$out") CIDRs."
+            echo "Cached GitHub ranges for this run: $(printf '%s\n' "$ranges" | wc -l) CIDRs."
           else
             rm -f "$out.part"
             echo "Could not cache the ranges, so each container will fetch its own."

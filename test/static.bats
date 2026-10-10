@@ -10853,3 +10853,50 @@ $(basename "$f"): $line"
     grep -q '\[ -t 0 \]' <<< "$block" \
         || { echo "the guard tests a descriptor other than the one tty reads: $block"; return 1; }
 }
+
+@test "every workflow run: block parses under the shell the runner gives it" {
+    # The runner's default is `sh -e`, which the step log states and nothing in
+    # the workflow overrides. A bash array in a run: block is therefore a syntax
+    # error that kills the step before any of it executes - and it reaches CI
+    # from here looking fine, because nothing local runs the workflow and a YAML
+    # parse says only that the string is a string.
+    #
+    # Swept with `sh -n` over the whole file rather than the one step that got
+    # it wrong, and against dash where it is available, since that is what
+    # Debian's /bin/sh is on these runners.
+    local sh_bin=sh
+    command -v dash >/dev/null 2>&1 && sh_bin=dash
+
+    python3 - "$REPO_ROOT/.gitea/workflows/tests.yml" "$BATS_TEST_TMPDIR" <<'PY'
+import sys, yaml, os
+wf, out = sys.argv[1], sys.argv[2]
+d = yaml.safe_load(open(wf))
+for job, spec in (d.get("jobs") or {}).items():
+    for i, step in enumerate(spec.get("steps") or []):
+        body = step.get("run")
+        if not body:
+            continue
+        # A step naming its own shell is that shell's to parse, not sh's.
+        if step.get("shell") or spec.get("defaults", {}).get("run", {}).get("shell"):
+            continue
+        path = os.path.join(out, "%s.%d.sh" % (job, i))
+        open(path, "w").write(body)
+        open(path + ".name", "w").write("%s: %s" % (job, step.get("name") or "step %d" % i))
+PY
+    local checked=0 bad=""
+    for f in "$BATS_TEST_TMPDIR"/*.sh; do
+        [ -e "$f" ] || continue
+        checked=$((checked + 1))
+        "$sh_bin" -n "$f" 2>"$f.err" \
+            || bad="$bad
+$(cat "$f.name"): $(head -1 "$f.err")"
+    done
+    [ -z "$bad" ] \
+        || { echo "these run: blocks are not valid $sh_bin, so the step dies before it runs:$bad"; return 1; }
+
+    # A loop over nothing passes, and this walks a parsed structure whose shape
+    # could change - so the count has to be a real one. Five jobs, each with at
+    # least one run: block.
+    [ "$checked" -ge 5 ] \
+        || { echo "only $checked run: blocks were parsed, so this checked almost nothing"; return 1; }
+}
