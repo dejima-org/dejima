@@ -10867,22 +10867,75 @@ $(basename "$f"): $line"
     local sh_bin=sh
     command -v dash >/dev/null 2>&1 && sh_bin=dash
 
-    python3 - "$REPO_ROOT/.gitea/workflows/tests.yml" "$BATS_TEST_TMPDIR" <<'PY'
-import sys, yaml, os
+    local found
+    found=$(python3 - "$REPO_ROOT/.gitea/workflows/tests.yml" "$BATS_TEST_TMPDIR" <<'PY'
+import os, re, sys
+
+# Scanned by indentation rather than parsed with PyYAML, which is not in the
+# test image - a check needing a module the runner lacks is one that stops
+# running without failing. The only shapes to read are the two this file uses,
+# a run: key holding a block scalar or one inline command, and the count this
+# prints is what says the scan found every one of them.
 wf, out = sys.argv[1], sys.argv[2]
-d = yaml.safe_load(open(wf))
-for job, spec in (d.get("jobs") or {}).items():
-    for i, step in enumerate(spec.get("steps") or []):
-        body = step.get("run")
-        if not body:
-            continue
-        # A step naming its own shell is that shell's to parse, not sh's.
-        if step.get("shell") or spec.get("defaults", {}).get("run", {}).get("shell"):
-            continue
-        path = os.path.join(out, "%s.%d.sh" % (job, i))
-        open(path, "w").write(body)
-        open(path + ".name", "w").write("%s: %s" % (job, step.get("name") or "step %d" % i))
+raw = open(wf).read().split("\n")
+
+if any(re.match(r"^\s+defaults:", line) for line in raw):
+    sys.exit("a job sets defaults:, so a run: block may no longer get the runner's default shell")
+
+def indent(line):
+    return len(line) - len(line.lstrip())
+
+# The first key of a list item shares the line with its dash. A copy with it
+# moved onto the dash's own column puts every key of every item at one indent,
+# and is used for finding keys only - the run: bodies are taken from the file
+# as written, where a shell line that happens to start with a dash is safe.
+keyed = [re.sub(r"^(\s*)-\s(\s*\S)", r"\1  \2", line) for line in raw]
+
+found = 0
+for n, line in enumerate(raw):
+    m = re.match(r"^(\s*)-\s", line)
+    if not m:
+        continue
+    col = len(m.group(1))
+    # Where the next item or the end of the list begins, read off the file as
+    # written: in the keyed copy a sibling item's dash no longer dedents.
+    end = next((j for j in range(n + 1, len(raw))
+                if raw[j].strip() and indent(raw[j]) <= col), len(raw))
+    keys = {}
+    for j in range(n, end):
+        k = re.match(r"^ {%d}([a-z-]+):\s*(.*)$" % (col + 2), keyed[j])
+        if k:
+            keys[k.group(1)] = (j, k.group(2))
+    if "run" not in keys:
+        continue
+    found += 1
+    # A step naming its own shell is that shell's to parse, not sh's.
+    if "shell" in keys:
+        continue
+    at, value = keys["run"]
+    if value.startswith("|"):
+        body = raw[at + 1:next((j for j in range(at + 1, end)
+                                if raw[j].strip() and indent(raw[j]) <= col + 2), end)]
+        off = indent(body[0]) if body else 0
+        text = "\n".join(line[off:] for line in body)
+    else:
+        text = value
+    path = os.path.join(out, "%03d.sh" % found)
+    open(path, "w").write(text + "\n")
+    name = keys.get("name", (0, ""))[1]
+    open(path + ".name", "w").write(
+        "%s, line %d" % (name, at + 1) if name else "line %d" % (at + 1))
+print(found)
 PY
+)
+    # A hand-rolled scan that reads a shape it was not written for finds
+    # nothing and reports no failures, so what it found is checked against a
+    # plain count of the keys in the file.
+    local declared
+    declared=$(grep -cE '^[[:space:]]*(-[[:space:]]+)?run:' "$REPO_ROOT/.gitea/workflows/tests.yml")
+    [ "$found" = "$declared" ] \
+        || { echo "the workflow declares $declared run: blocks and the scan read $found of them"; return 1; }
+
     local checked=0 bad=""
     for f in "$BATS_TEST_TMPDIR"/*.sh; do
         [ -e "$f" ] || continue
@@ -10894,9 +10947,62 @@ $(cat "$f.name"): $(head -1 "$f.err")"
     [ -z "$bad" ] \
         || { echo "these run: blocks are not valid $sh_bin, so the step dies before it runs:$bad"; return 1; }
 
-    # A loop over nothing passes, and this walks a parsed structure whose shape
-    # could change - so the count has to be a real one. Five jobs, each with at
-    # least one run: block.
+    # A loop over nothing passes, so the count has to be a real one. Five jobs,
+    # each with at least one run: block.
     [ "$checked" -ge 5 ] \
         || { echo "only $checked run: blocks were parsed, so this checked almost nothing"; return 1; }
+}
+
+@test "the resolver checks have a permitted name to use when the meta URL has no host" {
+    # The cached-ranges fixture points EGRESS_FORGE_META_URL at a file:// path
+    # (#357), and a file URL has no host - so the checks that resolve "the meta
+    # URL's host" were handed an empty string, asked the resolver to look up
+    # "", and failed every container's boot on it. The whole privileged suite
+    # went down that way.
+    #
+    # The property those checks state is about the policy: that a permitted
+    # name resolves and that its address lands in that name's own set. So the
+    # subject falls back to a permitted forge-class name, which is what the
+    # meta URL's host was an instance of.
+    local p="$SANDBOX_DIR/egress-policy"
+    _subject() {  # _subject <host> <entries-file-contents>
+        run bash -c '
+            set -uo pipefail
+            ENTRIES_FILE="$3"
+            printf "%s" "$4" > "$ENTRIES_FILE"
+            eval "$(sed -n "/^entries_of()/,/^}/p" "$1")"
+            eval "$(sed -n "/^verify_subject()/,/^}/p" "$1")"
+            verify_subject "$2"
+        ' _ "$p" "$1" "$BATS_TEST_TMPDIR/entries" "$2"
+    }
+    local forge_entries='forge name strict github.com
+forge name strict api.github.com
+open name strict registry.npmjs.org
+'
+    # A host present is used as-is - the file:// case must not change the
+    # ordinary one.
+    _subject api.github.com "$forge_entries"
+    [ "$output" = api.github.com ] || { echo "a real host was not used: $output"; return 1; }
+
+    # No host: the first permitted FORGE-class name, not an open-class one -
+    # check 4 looks the answer up in the forge class's own set.
+    _subject "" "$forge_entries"
+    [ "$output" = github.com ] \
+        || { echo "the fallback was not a forge-class name: $output"; return 1; }
+
+    # And nothing at all is empty, which check 3 turns into a refusal naming
+    # the cause rather than a lookup of "".
+    _subject "" ""
+    [ -z "$output" ] || { echo "invented a subject from nothing: $output"; return 1; }
+    grep -q 'there is no permitted forge-class name to check the resolver against' "$p" \
+        || { echo "an empty subject is not refused with a reason"; return 1; }
+
+    # check 5 asserts reachability THROUGH the policy, so a file source cannot
+    # satisfy it and must be skipped out loud rather than passing on a local
+    # read.
+    local c5
+    c5="$(sed -n '/check 5 skipped/,/esac/p' "$p")"
+    [ -n "$c5" ] || { echo "check 5 does not skip a file source"; return 1; }
+    grep -q 'file://\*' <<< "$(sed -n '/# Skipped for a file:\/\/ source/,/esac/p' "$p")" \
+        || { echo "the skip is not keyed to the file scheme"; return 1; }
 }

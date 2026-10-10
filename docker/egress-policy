@@ -1089,8 +1089,31 @@ retry_positive() {
 # Ordered so that a failure names its own cause: the positive checks come
 # first, because "a blocked destination was refused" means nothing until
 # something that should work has been shown to work.
+# Which permitted name the resolver checks are about.
+#
+# Normally the meta URL's host, which is a permitted forge-class name by
+# construction. A file:// source has no host at all - that is the suite's
+# cached-ranges fixture (#357) - and handing an empty name to check 3 asked the
+# resolver to look up "" and failed the boot on it.
+#
+# The fallback is a permitted forge-class name, because the property those
+# checks state is about the POLICY: that the resolver resolves a permitted name
+# and files its address in that name's own set. Where the ranges were read from
+# is a different question, and check 5's.
+#
+# sed rather than head: a producer whose pipe closes early takes SIGPIPE, and
+# pipefail makes that the pipeline's status - see the note on grep -q above.
+verify_subject() {
+  local host=$1
+  if [ -n "$host" ]; then
+    printf '%s' "$host"
+    return 0
+  fi
+  entries_of forge name | sed -n '1p'
+}
+
 verify() {
-  local forge_host=$1 rc answer set_name
+  local forge_host=$1 rc answer set_name subject
 
   pgrep -x dnsmasq >/dev/null || die "check 1: the resolver is not running"
   pgrep -x ulogd   >/dev/null || die "check 1: the connection logger is not running"
@@ -1104,9 +1127,13 @@ verify() {
   [ "$running_as" = "$RESOLVER_USER" ] \
     || die "check 2: the resolver is running as '${running_as:-unknown}', not $RESOLVER_USER, so the rule permitting it to reach an upstream resolver is keyed to the wrong account"
 
-  answer=$(retry_positive 3 resolve_one "$forge_host") || true
+  subject=$(verify_subject "$forge_host")
+  [ -n "$subject" ] \
+    || die "check 3: there is no permitted forge-class name to check the resolver against, and no host in $FORGE_META_URL to fall back on"
+
+  answer=$(retry_positive 3 resolve_one "$subject") || true
   [ -n "$answer" ] \
-    || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$forge_host")"
+    || die "check 3: the permitted name $subject did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$subject")"
 
   # The resolver is also what puts a permitted name's addresses into the
   # allow-list, and which set it uses is the name's class. Checking membership
@@ -1120,13 +1147,25 @@ verify() {
   # two cannot look in different sets.
   set_name=$(set_for_class forge)
   nft get element inet "$TABLE" "$set_name" "{ $answer }" >/dev/null 2>&1 \
-    || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
+    || die "check 4: $subject resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
 
-  rc=0
-  retry_positive 3 curl --silent --show-error --output /dev/null \
-    --connect-timeout 5 --max-time 20 "$FORGE_META_URL" || rc=$?
-  [ "$rc" -eq 0 ] \
-    || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
+  # Skipped for a file:// source, and said out loud. This check asserts that a
+  # permitted destination is reachable THROUGH the policy, and a local file is
+  # not one - reaching it would pass while proving nothing. That is a real
+  # reduction on the runs using the cached ranges, which is why it is a line in
+  # the log rather than a silent pass.
+  case "$FORGE_META_URL" in
+    file://*)
+      say "check 5 skipped: the ranges came from a file, so reading it again says nothing about what the policy permits"
+      ;;
+    *)
+      rc=0
+      retry_positive 3 curl --silent --show-error --output /dev/null \
+        --connect-timeout 5 --max-time 20 "$FORGE_META_URL" || rc=$?
+      [ "$rc" -eq 0 ] \
+        || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
+      ;;
+  esac
 
   # The same address, on the port the opt-in gates. With the opt-in off it must
   # be refused even though the address was reached by name, which is the whole
