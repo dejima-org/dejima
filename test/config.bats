@@ -1402,12 +1402,14 @@ EOF
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
     # forge_env_exports must not emit `GH_TOKEN=` (empty) when
-    # push_token_file is unset: `-e GH_TOKEN=` on `docker
-    # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
-    # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
-    # [github] token_file value every session is supposed to get regardless
-    # of forge. Asserted on the actual argument list handed to `docker`, not
-    # on a warning, so this catches the container-facing symptom directly.
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker compose run`
+    # overrides docker-compose.yml's own `environment: GH_TOKEN:` entry - the
+    # one carrying the independent read-only [github] token_file value every
+    # session is supposed to get regardless of forge. (That entry reads
+    # bin/dejima's SANDBOX_GH_TOKEN, which is the same value except for an
+    # isolated launch; the override is what matters here either way.)
+    # Asserted on the actual argument list handed to `docker`, not on a
+    # warning, so this catches the container-facing symptom directly.
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"

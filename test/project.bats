@@ -88,6 +88,11 @@ EOF
     chmod 600 "$LAUNCH_DIR/sandbox-key"
 }
 
+# SSH_AUTH_SOCK is emptied rather than passed through, so a test never reads
+# the agent of whoever is running the suite - an inherited one would make the
+# forwarded-agent path depend on the machine. LAUNCH_SSH_AUTH_SOCK is how the
+# one test about that path states its own precondition instead.
+#
 # ssh_key is written into whatever config file config_root() currently
 # resolves to (DEJIMA_CONFIG_DIR, which a few tests point elsewhere) rather
 # than always $CONFIG_DIR/config, and appended rather than written, so it
@@ -110,7 +115,7 @@ launch() {
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_DOCKERFILE_LOG="$LAUNCH_DIR/dockerfile-log" \
-        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        SSH_AUTH_SOCK="${LAUNCH_SSH_AUTH_SOCK-}" ALLOWED_DOMAINS= \
         "$REPO_ROOT/bin/dejima" "$@"
 }
 
@@ -1537,18 +1542,97 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     return 0
 }
 
-@test "an isolated launch still mounts the ssh key, which the docs say it does" {
-    # What the mode narrows is the forge token, not this. A dedicated key or a
-    # forwarded agent belongs to the launch rather than to the flag, so an
-    # isolated session with no forge still has an agent that can reach a host
-    # over ssh. Both docs say so, and this is what keeps that honest.
+@test "an isolated launch mounts the configured ssh key and not the forwarded agent" {
+    # Opposite answers for the two, which is the whole reason this is one
+    # test rather than a line in another: a workflow that never pushes gets
+    # no agent socket, and --isolated defaults to one of those, while a
+    # configured key is exported whatever the workflow. Both docs state the
+    # pair, and a test that checked only the key - as this one first did -
+    # cannot catch the half that was written backwards.
+    #
+    # Withholding the key as well, for any launch that never pushes, is #392.
     launch_setup
     run launch --isolated
     [ "$status" -eq 0 ]
     [ "$(launched_env SANDBOX_SSH_KEY_FILE)" = "$LAUNCH_DIR/sandbox-key" ] \
-        || { echo "the ssh key did not cross: $(launched_env SANDBOX_SSH_KEY_FILE)"
+        || { echo "the configured key did not cross: $(launched_env SANDBOX_SSH_KEY_FILE)"
              echo "- if that is deliberate, the two docs saying it does need updating"
              return 1; }
+
+    # Now the agent, which needs its own fixture for two reasons. The helper
+    # empties SSH_AUTH_SOCK so no test reads the suite runner's own agent, so
+    # a launch that never sets it could not have forwarded one whatever the
+    # code did - asserting its absence there proves nothing. And a configured
+    # key withdraws the agent too, independently of the workflow, so the key
+    # above has to go for this to be about the rule the docs name. An EMPTY
+    # key file is "not a key" by design, which is how that is arranged.
+    : > "$LAUNCH_DIR/sandbox-key"
+    # A real socket, because the launcher tests for one with -S. Binding
+    # creates the filesystem entry and leaves it there after the process
+    # exits, which is all this needs.
+    python3 -c 'import socket,sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
+    [ -S "$LAUNCH_DIR/agent.sock" ] || { echo "the fixture made no socket"; return 1; }
+
+    LAUNCH_SSH_AUTH_SOCK="$LAUNCH_DIR/agent.sock" run launch --isolated
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$(launched_env SSH_AUTH_SOCK)" ] \
+        || { echo "a workflow that pushes nothing still forwarded the agent"; return 1; }
+
+    # And the positive control. A pushing workflow needs a forge with a host
+    # to push to, so this names both - which is also the combination an
+    # operator asking for an isolated session that pushes would type.
+    printf 'ghp_not_a_real_push_token\n' > "$LAUNCH_DIR/gh-push-token"
+    chmod 600 "$LAUNCH_DIR/gh-push-token"
+    printf '[forge.github]\npush_token_file = %s\n' "$LAUNCH_DIR/gh-push-token" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    LAUNCH_SSH_AUTH_SOCK="$LAUNCH_DIR/agent.sock" \
+        run launch --isolated --forge github --workflow branch-push
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(launched_env SSH_AUTH_SOCK)" = "$LAUNCH_DIR/agent.sock" ] \
+        || { echo "naming a pushing workflow did not forward the agent"; return 1; }
+}
+
+@test "an isolated launch gets no GitHub token unless the command names a forge" {
+    # [github] token_file is not a forge setting, which is what makes it easy
+    # to miss: core fills it for every session whatever forge is selected. A
+    # read-only PAT is still read-only across the operator's private
+    # repositories, so the mode that carries no forge credential cannot carry
+    # this one either.
+    #
+    # The filter container keeps it, because that is what authenticates
+    # dejima's own fetch of GitHub's address ranges - a request about the
+    # allowlist, made where no session can reach it. So the two are separate
+    # variables now, and this asserts both halves: the session's is empty and
+    # the launcher's, which is what `-e GH_TOKEN` hands the filter, is not.
+    launch_setup
+    printf 'ghp_not_a_real_token\n' > "$LAUNCH_DIR/gh-token"
+    chmod 600 "$LAUNCH_DIR/gh-token"
+    printf '[github]\ntoken_file = %s\n' "$LAUNCH_DIR/gh-token" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "an isolated session was handed core's GitHub token"; return 1; }
+    [ -n "$(launched_env GH_TOKEN)" ] \
+        || { echo "the filter container lost the token that authenticates its ranges fetch"
+             return 1; }
+
+    # Naming a forge is the operator saying this session is meant to reach
+    # one, and nothing is narrowed from there.
+    run launch --isolated --forge gitea
+    [ "$status" -eq 0 ]
+    [ -n "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "a named forge did not restore the GitHub token"; return 1; }
+
+    # And an ordinary launch is untouched, including one whose config selects
+    # no forge - this narrows for the flag, not for every forge-less launch.
+    run launch --forge none --workflow local-only "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -n "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "an ordinary launch lost core's GitHub token"; return 1; }
 }
 
 @test "an isolated launch refuses a project path and the mount flags" {

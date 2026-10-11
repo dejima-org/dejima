@@ -335,14 +335,25 @@ holds: a Gitea token is account-wide (see
 [To your forge, the sandbox is you](#to-your-forge-the-sandbox-is-you)), so an
 ordinary session can read and write every repository its operator can.
 `--isolated` sets `forge` to `none` and `workflow` to `local-only` for that
-launch, so no token crosses and nothing tells the session to push. Naming
-either on the same command line brings it back, which is how a session that
-clones and opens a pull request is asked for.
+launch, and blanks the session's copy of `[github] token_file` - core's
+read-only GitHub credential, which crosses for every ordinary session
+whatever forge is selected, and which is read-only across the operator's
+*private* repositories rather than scoped to one. So no forge credential of
+either kind reaches an isolated session, and nothing tells it to push.
 
-**The ssh key is not narrowed.** A dedicated key or a forwarded agent is
-mounted as it is for any launch - that requirement belongs to the launch
-rather than to this flag - so what the mode removes is the forge token and the
-instruction to push, not the ability to reach a host over ssh.
+Naming a forge on the same command line brings that back: it is the operator
+saying this session is meant to reach one, and nothing is narrowed from there.
+The filter container keeps the GitHub token either way, because that is what
+authenticates dejima's own fetch of GitHub's address ranges - a request about
+the allowlist, made outside the session's reach.
+
+**The forwarded agent is not mounted; a configured key is.** A workflow that
+never pushes gets no agent socket, and `local-only` is one - so the personal
+identities in the operator's own agent stay outside the container. An
+`[identity] ssh_key` is mounted and loaded whatever the workflow, so an
+isolated session with no forge still holds a key that can reach a host over
+ssh. Withholding that for any launch whose workflow never pushes is
+[#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
 
 So: a narrower blast radius on the host and a narrower credential, not a
 stronger sandbox. The firewall, the credential boundary and the capability

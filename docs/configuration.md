@@ -1081,6 +1081,9 @@ dejima --isolated    # from anywhere - the directory you are in is not used
 | domains, dependencies, tools | the global set plus this project's | the global set only |
 | `[mounts]` lists | applied | dropped, and named at launch |
 | forge, workflow | as configured | `none` and `local-only`, unless named |
+| forge token, `[github] token_file` | both cross | neither, unless a forge is named |
+| forwarded ssh agent | mounted when the workflow pushes | not mounted |
+| `[identity] ssh_key` | mounted | mounted |
 | conversation log, epitaph | as configured | off |
 
 Your own `~/.claude` hooks, skills, commands, agents and output styles are
@@ -1126,12 +1129,28 @@ dejima --isolated --forge gitea --workflow worktree-pr   # clones, pushes, opens
 
 Order does not matter: `--forge gitea --isolated` means the same thing.
 
-**What this does not remove is the ssh key.** A dedicated key or your
-forwarded agent is mounted as it is for any launch, because that requirement
-belongs to the launch rather than to this flag. So an isolated session with no
-forge has no forge token and no instruction to push, and still has an agent
-that can reach a host over ssh. Treat it as narrowing the credential, not
-removing the capability.
+**`[github] token_file` is withheld too**, which is easy to miss because it is
+not a forge setting. That read-only PAT crosses for every ordinary session
+whatever forge is selected, and read-only across your *private* repositories
+is still account-wide reach - so an isolated launch that named no forge does
+not get it either. Naming a forge brings it back with everything else.
+
+The filter container still receives it, because that is what authenticates
+dejima's own fetch of GitHub's address ranges. That request is about the
+allowlist and is made where the session cannot reach it.
+
+**Your forwarded agent is not mounted. A configured key still is.** Those are
+opposite answers and the difference matters. A workflow that never pushes gets
+no agent socket forwarded, and `local-only` is such a workflow - so the
+personal identities in your own `ssh-agent` stay outside an isolated
+container. An `[identity] ssh_key`, though, is mounted and loaded into an
+agent of the container's own whatever the workflow, so an isolated session
+with no forge still holds a key that can reach a host over ssh.
+
+Withholding that key too, for any launch whose workflow never pushes, is
+[#392](https://gitbox.branderson.io/dejima/dejima/issues/392) - the same
+reasoning that already withdraws the agent, and a question wider than this
+flag.
 
 **It is not a stronger sandbox.** The firewall, the credential boundary and the
 capability drops are exactly what they are for every other session. What

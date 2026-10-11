@@ -334,8 +334,17 @@ done
 # The ssh key or forwarded agent is untouched, because an isolated launch is
 # not where that requirement lives - so this removes the forge token and the
 # instruction to push, not the ability to reach a host over ssh.
+#
+# Whether the operator named a forge, asked before the default below answers
+# for them: it decides the GitHub credential further down as well, and after
+# this block "is there an override" is true either way.
+DEJIMA_FORGE_NAMED=0
 if [ "$DEJIMA_ISOLATED" = 1 ]; then
-    _override_set core.forge    || _set_override core.forge none
+    if _override_set core.forge; then
+        DEJIMA_FORGE_NAMED=1
+    else
+        _set_override core.forge none
+    fi
     _override_set core.workflow || _set_override core.workflow local-only
 fi
 
@@ -2102,6 +2111,27 @@ export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS
 export GH_TOKEN="${GH_TOKEN:-}"
+# What the SESSION gets, which is not the same question as what the filter
+# container gets. GH_TOKEN above goes to the filter, where it authenticates
+# the GitHub ranges fetch - a request dejima makes about its own allowlist,
+# not something the session can reach - so that one crosses whatever the
+# session is trusted with.
+#
+# This is core's read-only GitHub credential, filled from [github] token_file
+# for every session whatever forge is selected. Read-only across an
+# operator's private repositories is still account-wide reach, so an isolated
+# launch does not get it: the mode's claim is that it carries no forge
+# credential, and that claim has to cover the one core fills in as well as
+# the one a forge declares.
+#
+# Unless the command named a forge, which is the operator saying this session
+# is meant to reach one. Then nothing here is narrowed and the selection
+# decides, exactly as for any other launch.
+SANDBOX_GH_TOKEN="$GH_TOKEN"
+if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$DEJIMA_FORGE_NAMED" = 0 ]; then
+    SANDBOX_GH_TOKEN=""
+fi
+export SANDBOX_GH_TOKEN
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # The --allow-github-push flag and a selected forge whose hosts_allowlisted_by_core
 # says these are its own push hosts (see ALLOW_CORE_PUSH_GRANT above) are the
