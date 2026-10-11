@@ -2696,6 +2696,40 @@ EOF
     [[ "$output" != *"remote access is enabled"* ]]
 }
 
+@test "an isolated launch's working directory is a volume no host path is behind" {
+    # The one thing about --isolated that a confined test cannot decide. The
+    # launcher hands compose a mount spec with no colon in it, which asks
+    # Docker for an anonymous volume at that path - and what the confined
+    # suite can check is that the spec is built, not that Docker reads it the
+    # way the design assumes.
+    #
+    # Two claims, and only the first is the guarantee. That the directory is
+    # writable by the session user and backed by no host path is what makes it
+    # a working directory at all. That `--rm` reaps the volume afterwards is
+    # tidiness: the name is random and no launch computes it, so an unreaped
+    # one is unreachable rather than shared.
+    local before after
+    before="$(docker volume ls -q | wc -l)"
+
+    run docker run --rm -v /dejima/work --entrypoint sh "$SESSION_IMAGE" -c \
+        'cd /dejima/work && touch marker && stat -c "%U %a" /dejima/work'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "node "* ]] \
+        || { echo "the working directory is not the session user's: $output"; return 1; }
+
+    # Nothing of the host is behind it: a second container at the same path
+    # gets its own empty volume rather than the first one's contents.
+    run docker run --rm -v /dejima/work --entrypoint sh "$SESSION_IMAGE" -c \
+        'ls -A /dejima/work'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ] \
+        || { echo "a second container saw the first one's files: $output"; return 1; }
+
+    after="$(docker volume ls -q | wc -l)"
+    [ "$after" -le "$before" ] \
+        || { echo "--rm left $((after - before)) anonymous volume(s) behind"; return 1; }
+}
+
 @test "the git shadow loads its policy in the image, and leaves other git commands alone" {
     # The decision lives in a file the Dockerfile copies in
     # (docker/guard-lib.sh), and every git command in a session goes through

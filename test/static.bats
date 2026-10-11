@@ -3068,6 +3068,147 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     grep -q '.worktrees/' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
+# A briefing is the one thing a session cannot check for itself, so the four
+# sentences an isolated launch makes false are worth a test each rather than a
+# count. A session that believes its transcript outlives the container leaves
+# work for a resume that cannot happen; one that believes ~/shared is shared
+# with every session against this project treats a handoff as readable by
+# people who will never see it.
+@test "the isolated briefing does not claim a mount, a memory or a resume" {
+    local iso ord
+    ord="$(lib briefing_compose gitea worktree-pr claude-code)" || { echo "$ord"; return 1; }
+    iso="$(DEJIMA_ISOLATED=1 bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$iso"; return 1; }
+
+    # Each claim is asserted absent from the isolated briefing AND present in
+    # the ordinary one. Either half alone passes on prose that was reworded
+    # out of both.
+    local claim
+    for claim in \
+        'bind-mounted read-write and is the real' \
+        'every session against this project shares it' \
+        "this session's transcript outlives the container" \
+        'The project directory is mounted whole' \
+        'The worktree MUST live under the mounted project'
+    do
+        grep -qF "$claim" <<< "$ord" \
+            || { echo "the ordinary briefing no longer says: $claim"; return 1; }
+        grep -qF "$claim" <<< "$iso" \
+            && { echo "the isolated briefing still says: $claim"; return 1; }
+    done
+
+    # And what it says instead, because dropping the sentences without
+    # replacing them leaves a session to assume the usual arrangement.
+    for claim in \
+        'Nothing of the user'"'"'s machine is mounted here' \
+        'made fresh for this session' \
+        'This session cannot be resumed' \
+        'There is no project directory'
+    do
+        grep -qF "$claim" <<< "$iso" \
+            || { echo "the isolated briefing does not say: $claim"; return 1; }
+    done
+
+    # The harness fragment is what promises the resume, and it is replaced
+    # rather than dropped - so the resume command must not survive either.
+    grep -qF 'claude --resume' <<< "$ord" \
+        || { echo "the ordinary briefing no longer carries the resume command"; return 1; }
+    grep -qF 'claude --resume' <<< "$iso" \
+        && { echo "the isolated briefing offers a resume that cannot work"; return 1; }
+    return 0
+}
+
+@test "the mode a briefing is composed for cannot be set from the environment alone" {
+    # DEJIMA_ISOLATED reaching the composer from the environment is how the
+    # test above drives it, which is exactly why bin/dejima must bind it
+    # before anything reads it: an inherited value would otherwise decide
+    # what a session is told about a launch that is not isolated at all.
+    grep -q '^DEJIMA_ISOLATED=0$' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima does not bind DEJIMA_ISOLATED before use"; return 1; }
+    # And the flag is the only thing that turns it on, which is the whole of
+    # "a CLI flag and nothing else".
+    local sets
+    sets="$(grep -c 'DEJIMA_ISOLATED=1' "$REPO_ROOT/bin/dejima")"
+    [ "$sets" = 1 ] \
+        || { echo "bin/dejima sets DEJIMA_ISOLATED=1 in $sets places, not just the flag"; return 1; }
+    grep -q -- '--isolated)          DEJIMA_ISOLATED=1; shift ;;' "$REPO_ROOT/bin/dejima" \
+        || { echo "the flag is not what sets it"; return 1; }
+}
+
+@test "the host-side features that read a transcript are not started for an isolated launch" {
+    # Three things key on a workspace that an isolated launch has no host
+    # side of: the epitaph, the conversation shipper and the audit. Each
+    # would otherwise do its work against /dejima/work - a path that is not
+    # on the host at all - and report nothing, which is the shape of a
+    # feature that looks present and is not.
+    #
+    # Asserted over the source rather than by driving a launch, because what
+    # distinguishes "ran and found nothing" from "did not run" is not
+    # observable from outside in a stubbed launch.
+    local src="$REPO_ROOT/bin/dejima" flat
+    # Continuations flattened, so a guard split across lines still reads as
+    # one condition.
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    local call
+    for call in \
+        'dejima-epitaph" save' \
+        'dejima-conversation-ship"' \
+        'dejima-audit" snapshot' \
+        'dejima-audit" compare'
+    do
+        grep -qF "$call" <<< "$flat" \
+            || { echo "bin/dejima no longer calls: $call"; return 1; }
+        # The guard is on the `if` that encloses the call, so the test looks
+        # for the two together within the same construct rather than merely
+        # both somewhere in the file.
+        awk -v call="$call" '
+            index($0, "DEJIMA_ISOLATED") { guard = NR }
+            index($0, call) { if (guard && NR - guard <= 8) found = 1 }
+            END { exit !found }
+        ' <<< "$flat" \
+            || { echo "no DEJIMA_ISOLATED guard precedes: $call"; return 1; }
+    done
+    return 0
+}
+
+@test "the isolated share root is out of every other launch's reach" {
+    # One directory per isolated session, all under one root - which is the
+    # pile the per-project share split removed, if an ordinary launch could
+    # name the root in [mounts] readonly. Guarded the same way the
+    # per-project root is.
+    grep -q 'isolated_share_root "$(config_get core share_dir)"' "$REPO_ROOT/bin/dejima" \
+        || { echo "the isolated share root is not in GUARDED_STORES"; return 1; }
+    # And a launch's own share is a directory under it, not the root, so the
+    # guard cannot be satisfied by nothing ever reaching that path.
+    grep -q 'isolated_share_make "$SANDBOX_SHARE_ROOT"' "$REPO_ROOT/bin/dejima" \
+        || { echo "nothing makes an isolated share directory"; return 1; }
+}
+
+@test "the compose file's volumes can each be replaced for one launch" {
+    local compose="$SANDBOX_DIR/docker-compose.yml"
+    # The working directory is the one entry with no usable default: an
+    # isolated launch must mount no host path there, and a compose list entry
+    # cannot be empty. So bin/dejima always supplies the whole spec, and the
+    # file fails loudly rather than mounting something unintended.
+    grep -q '\${SANDBOX_WORKSPACE_MOUNT:?' "$compose" \
+        || { echo "the workspace mount is not a single required variable"; return 1; }
+    grep -qE '^\s*-\s*\$\{WORKSPACE_DIR[:?]' "$compose" \
+        && { echo "the workspace is still mounted from WORKSPACE_DIR directly"; return 1; }
+
+    # The four volumes that outlive a container are named through variables,
+    # so a launch can be given its own. Each default is today's name, because
+    # a `docker compose` invocation by hand must behave as it did.
+    grep -q 'name: ${SANDBOX_BASH_HISTORY:-dejima-bashhistory}' "$compose" \
+        || { echo "the history volume cannot be renamed for one launch"; return 1; }
+    local v
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE; do
+        grep -q "name: \${$v:-dejima_nvim-" "$compose" \
+            || { echo "$v has no default naming today's volume"; return 1; }
+    done
+    return 0
+}
+
 @test "the worktree-pr workflow tells the agent to close issues via the PR body" {
     # The session ends at the PR and the merge happens later, without the
     # agent - so anything it defers to "after the merge" is something it

@@ -150,6 +150,38 @@ mounted_share() { sort -u "$SHARE_LOG" | grep -v '^$' | head -1; }
         || { echo "a clean share_dir warned about its own projects dir: $output"; return 1; }
 }
 
+@test "an isolated launch's share is its own, and the root is not reported as loose" {
+    write_config
+    # launch() takes a workspace, which --isolated refuses - so this one
+    # drives the launcher directly with the same stub.
+    STUB_DIR="$(mktemp -d)"
+    cat > "$STUB_DIR/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${SANDBOX_SHARE_DIR-}" >> "$SANDBOX_TEST_SHARE_LOG"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/docker"
+    SHARE_LOG="$HOST/share-log"
+    : > "$SHARE_LOG"
+    HOME="$HOST/home" PATH="$STUB_DIR:$PATH" SSH_AUTH_SOCK= \
+        SANDBOX_TEST_SHARE_LOG="$SHARE_LOG" \
+        run "$REPO_ROOT/bin/dejima" --isolated
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    case "$(mounted_share)" in
+        "$SHARE"/isolated/*) ;;
+        *) echo "mounted '$(mounted_share)', not a directory under the isolated root"
+           return 1 ;;
+    esac
+    [ -d "$(mounted_share)" ] \
+        || { echo "the launch did not create the directory it mounts"; return 1; }
+    # The root holding them is dejima's, like projects/ - so a launch must
+    # not go on telling the operator about it every time as something that
+    # was left behind by hand.
+    [[ "$output" != *"no session can see"* ]] \
+        || { echo "the isolated root was reported as left behind: $output"; return 1; }
+}
+
 @test "dejima-share list names each project and flags what is loose" {
     write_config
     share path "$WS" > /dev/null

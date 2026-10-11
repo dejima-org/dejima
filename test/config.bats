@@ -569,6 +569,23 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     [[ "$output" == *"nonesuch"* ]]
 }
 
+@test "the isolated mode has no config key, in any plausible spelling" {
+    # --isolated is a flag and nothing else, on purpose: it changes what the
+    # session IS rather than how much it may do, and a file that decided it
+    # would make the next launch's answer to "where is my work" depend on a
+    # line nobody reread. The schema is what holds that - an unknown key is
+    # fatal, so every spelling someone might reach for has to stay unknown.
+    local key
+    for key in isolated isolate ephemeral no_workspace; do
+        write_config '[core]' "$key = on"
+        run lib config_validate
+        [ "$status" -ne 0 ] \
+            || { echo "[core] $key was accepted, so the mode is settable from a file"; return 1; }
+        [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+    done
+    return 0
+}
+
 @test "an invalid value is fatal and names the key" {
     write_config '[audit]' 'keep = 0'
     run lib config_validate

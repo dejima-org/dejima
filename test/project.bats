@@ -1310,6 +1310,243 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     done
 }
 
+# --isolated: a session with nothing before it and nothing after it. The
+# claim is one sentence - nothing of the host crosses in but the operator's
+# own read-only config, and nothing survives but ~/shared - and these are the
+# parts of it that a stubbed launch can decide.
+#
+# Driven through the real launcher rather than by grepping it, because every
+# one of these is a property of what `compose run` is handed, and a grep over
+# the source passes just as well on a line that no longer takes effect.
+@test "an isolated launch mounts no host path for its working directory" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # The whole spec, because the compose file cannot build one: a source and
+    # a target would have to be two variables and neither can be empty. No
+    # colon is what asks Docker for an anonymous volume.
+    local spec; spec="$(launched_env SANDBOX_WORKSPACE_MOUNT)"
+    [ "$spec" = /dejima/work ] \
+        || { echo "the workspace mount is $spec, not a container-local path"; return 1; }
+    case "$spec" in
+        *:*) echo "the workspace mount names a host path: $spec"; return 1 ;;
+    esac
+    [ "$(launched_env WORKSPACE_DIR)" = /dejima/work ]
+
+    # And the ordinary case still mounts the project at its own path, so the
+    # assertion above cannot pass by the variable having stopped working.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_WORKSPACE_MOUNT)" = "$PROJ:$PROJ" ]
+}
+
+@test "an isolated launch takes nothing from the project it was started in" {
+    # The one in this file that is about an attack rather than about tidiness.
+    # resolve_project_store walks UPWARDS from the directory it is given, so
+    # an operator in $HOME on a machine whose dotfiles were once approved as a
+    # project would otherwise have handed an anonymous session that project's
+    # allowed domains and its dependency layer. The flag means the directory
+    # it was run from decides nothing.
+    #
+    # Two independent things in bin/dejima hold that - the working directory
+    # being container-local, and the approval store not being resolved - and
+    # this fails only when BOTH are reversed. Worth knowing when reading a
+    # mutation result: either one alone still passes, which is what defence
+    # in depth looks like from here rather than a test that misses.
+    "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.invalid >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
+    launch_setup
+
+    local slug; slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+
+    # First that the fixture works at all: an ordinary launch from in there
+    # DOES get both. Without this the assertions below pass on a project
+    # whose approvals were never recorded.
+    cd "$PROJ"
+    run launch
+    cd - >/dev/null
+    [ "$status" -eq 0 ]
+    [[ "$(launched_env ALLOWED_DOMAINS)" == *example.invalid* ]] \
+        || { echo "the fixture's project domains were never approved"; return 1; }
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ] \
+        || { echo "the fixture's project deps were never approved"; return 1; }
+
+    # And then that the isolated launch from the same directory gets neither.
+    # The log accumulates across launches in one fixture, so the build line
+    # asserted absent below would otherwise be found from the launch above.
+    : > "$LAUNCH_DIR/docker-log"
+    cd "$PROJ"
+    run launch --isolated
+    cd - >/dev/null
+    [ "$status" -eq 0 ]
+    [[ "$(launched_env ALLOWED_DOMAINS)" != *example.invalid* ]] \
+        || { echo "an isolated launch inherited the cwd's approved domains"; return 1; }
+    [ "$(launched_env SANDBOX_IMAGE)" != "localhost/dejima:$(id -un)-$slug" ] \
+        || { echo "an isolated launch inherited the cwd's dependency layer"; return 1; }
+    grep -q -- "-t localhost/dejima:$(id -un)-$slug -f" <(docker_log) \
+        && { echo "an isolated launch built the cwd's dependency layer"; return 1; }
+    return 0
+}
+
+@test "an isolated launch mounts the operator's read-only config and none of the writable state" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    local log; log="$(docker_log)"
+    # The operator's own hooks and skills: theirs, read-only, and not
+    # something an earlier session could have written.
+    grep -q -- "-v $LAUNCH_DIR/home/.claude/skills:" <<< "$log" \
+        || { echo "the operator's skills are not mounted"; return 1; }
+    # The shared read-write state every project's sessions append to (#380),
+    # and the transcripts and memory under projects/.
+    local d
+    for d in backups tasks plans sessions projects file-history; do
+        grep -q -- "-v $LAUNCH_DIR/home/.claude/$d" <<< "$log" \
+            && { echo "an isolated launch mounts ~/.claude/$d"; return 1; }
+    done
+    # Not mounted and also not CREATED: the pre-create loop exists so Docker
+    # does not make a root-owned mount source, and a directory nothing mounts
+    # needs no source.
+    for d in backups tasks plans sessions; do
+        [ ! -d "$LAUNCH_DIR/home/.claude/$d" ] \
+            || { echo "an isolated launch created ~/.claude/$d on the host"; return 1; }
+    done
+    return 0
+}
+
+@test "an isolated launch gets a fresh share directory that no other session has had" {
+    local share; share="$(mktemp -d)"
+    launch_setup
+    printf '[core]\nshare_dir = %s\n' "$share" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    local first; first="$(launched_env SANDBOX_SHARE_DIR)"
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    local second; second="$(launched_env SANDBOX_SHARE_DIR)"
+
+    [ -n "$first" ] && [ -n "$second" ] || { echo "no share directory was set"; return 1; }
+    [ "$first" != "$second" ] \
+        || { echo "two isolated launches were handed the same directory: $first"; return 1; }
+    case "$first" in
+        "$share"/isolated/*) ;;
+        *) echo "the isolated share is not under the isolated root: $first"; return 1 ;;
+    esac
+    [ -d "$first" ] && [ -d "$second" ] || { echo "the share directories were not made"; return 1; }
+    # Made, and nothing else: the one host directory an isolated session
+    # writes starts empty, which is the whole of "nothing crosses in".
+    [ -z "$(ls -A "$first")" ] || { echo "the share directory is not empty"; return 1; }
+    rm -rf "$share"
+}
+
+@test "an isolated launch names its volumes for the run and removes them" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # The shell-history volume is the sharp one: it is shared by every
+    # project even when the nvim ones are not, so under its usual name an
+    # isolated session reads what was typed in any session before it.
+    local v names=""
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY; do
+        names="$names $(launched_env "$v")"
+        [[ "$(launched_env "$v")" == dejima_isolated-* ]] \
+            || { echo "$v is not this run's own: $(launched_env "$v")"; return 1; }
+        [[ "$(launched_env "$v")" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
+            || { echo "$v is not a valid Docker volume name"; return 1; }
+    done
+    grep -q "volume rm$names" <(docker_log) \
+        || { echo "the run's volumes are not removed:$names"; cat "$LAUNCH_DIR/docker-log"; return 1; }
+
+    local before="$names"
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    names=""
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY; do
+        names="$names $(launched_env "$v")"
+    done
+    [ "$before" != "$names" ] \
+        || { echo "two isolated launches asked for the same volumes:$names"; return 1; }
+
+    # And an ordinary launch still gets the shared history volume, which is
+    # what makes a session started tomorrow see what was typed today.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_BASH_HISTORY)" ] \
+        || [ "$(launched_env SANDBOX_BASH_HISTORY)" = dejima-bashhistory ] \
+        || { echo "an ordinary launch renamed the history volume"; return 1; }
+}
+
+@test "an isolated launch refuses a project path and the mount flags" {
+    launch_setup
+    # Each refusal names what it refused. A bare nonzero status would pass on
+    # a launch that failed for an unrelated reason.
+    run launch --isolated "$PROJ"
+    [ "$status" -ne 0 ] || { echo "a project path was accepted"; return 1; }
+    [[ "$output" == *"takes no project directory"* ]] \
+        || { echo "the refusal does not say why: $output"; return 1; }
+
+    local flag
+    for flag in --ro --rw; do
+        run launch --isolated "$flag" /tmp
+        [ "$status" -ne 0 ] || { echo "$flag was accepted"; return 1; }
+        [[ "$output" == *"cannot take --ro or --rw"* ]] \
+            || { echo "the $flag refusal does not say why: $output"; return 1; }
+        [[ "$output" == *"/tmp"* ]] \
+            || { echo "the $flag refusal does not name the path: $output"; return 1; }
+    done
+
+    # Harness arguments after -- are not a project path, and refusing them
+    # would make the flag unusable with every launch that passes any.
+    run launch --isolated -- --version
+    [ "$status" -eq 0 ] \
+        || { echo "harness arguments were read as a project path: $output"; return 1; }
+}
+
+@test "an isolated launch says what it is and what it does without" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # Printed whatever [ui] banner says and with stderr redirected, unlike
+    # the banner: the share path is the only route back to what the session
+    # hands over, and the two features it does without are ones an operator
+    # would otherwise go looking for afterwards and find empty.
+    [[ "$output" == *"no project mounted, no memory, no transcript"* ]] \
+        || { echo "the launch does not say what this mode is: $output"; return 1; }
+    [[ "$output" == *"conversation log and epitaph off"* ]] \
+        || { echo "the launch does not say what is off: $output"; return 1; }
+    [[ "$output" == *"$(launched_env SANDBOX_SHARE_DIR)"* ]] \
+        || { echo "the launch does not name the share directory: $output"; return 1; }
+}
+
+@test "an isolated launch does not apply the configured mounts, and says so" {
+    local extra; extra="$(mktemp -d)"
+    launch_setup
+    printf '[mounts]\nreadonly = %s\n' "$extra" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    grep -q -- "-v $extra" <(docker_log) \
+        && { echo "an isolated launch applied a configured mount"; return 1; }
+    [[ "$output" == *"[mounts] readonly not applied"* ]] \
+        || { echo "the launch does not say the mount was dropped: $output"; return 1; }
+
+    # Dropped for an isolated launch only - the same config still mounts it
+    # for an ordinary one, so the assertion above is about the flag rather
+    # than about the list having stopped working.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -q -- "-v $extra" <(docker_log) \
+        || { echo "an ordinary launch stopped applying [mounts] readonly"; return 1; }
+    rm -rf "$extra"
+}
+
 @test "the launcher builds and runs the global layer when only global deps are approved" {
     "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     launch_setup
