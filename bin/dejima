@@ -331,9 +331,11 @@ done
 # how an operator asks for a session that clones and opens a pull request,
 # which is a real use of this mode and not something to make impossible.
 #
-# The ssh key or forwarded agent is untouched, because an isolated launch is
-# not where that requirement lives - so this removes the forge token and the
-# instruction to push, not the ability to reach a host over ssh.
+# A configured ssh key is untouched, because an isolated launch is not where
+# that requirement lives - so a session with no forge still holds a key that
+# can reach a host over ssh (#392). The forwarded agent is not in the same
+# position: the workflow this sets pushes nothing, and a workflow that never
+# pushes already gets no agent socket.
 #
 # Whether the operator named a forge, asked before the default below answers
 # for them: it decides the GitHub credential further down as well, and after
