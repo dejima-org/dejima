@@ -2728,7 +2728,10 @@ EOF
     # And nothing of the host is behind it, which is the claim the mode rests
     # on: a second volume at the same path starts empty rather than carrying
     # what the first container wrote.
-    local other="$vol-second"
+    # Purpose before the suffix, like test_container_name: teardown's filter
+    # is anchored on the suffix, so a name ending in anything else is one it
+    # cannot sweep if this is interrupted between create and remove.
+    local other="dejima-test-work2-$(basename "$BATS_RUN_TMPDIR")"
     docker volume create "$other" >/dev/null
     run docker run --rm -v "$other:/dejima/work" --entrypoint sh "$SESSION_IMAGE" -c \
         'ls -A /dejima/work'
