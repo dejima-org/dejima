@@ -3196,16 +3196,47 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     grep -qE '^\s*-\s*\$\{WORKSPACE_DIR[:?]' "$compose" \
         && { echo "the workspace is still mounted from WORKSPACE_DIR directly"; return 1; }
 
-    # The four volumes that outlive a container are named through variables,
-    # so a launch can be given its own. Each default is today's name, because
-    # a `docker compose` invocation by hand must behave as it did.
-    grep -q 'name: ${SANDBOX_BASH_HISTORY:-dejima-bashhistory}' "$compose" \
-        || { echo "the history volume cannot be renamed for one launch"; return 1; }
-    local v
-    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE; do
-        grep -q "name: \${$v:-dejima_nvim-" "$compose" \
-            || { echo "$v has no default naming today's volume"; return 1; }
-    done
+    # Every volume that outlives a container is named through a variable, so a
+    # launch can be given its own - and every default has to be the name
+    # Docker would have chosen without one, or a release silently swaps a
+    # volume for a fresh empty one and orphans what was in it.
+    #
+    # That name is `<compose project>_<key>`, so the check derives it from the
+    # file rather than listing the four. A default that merely looks right -
+    # the key alone, which is most of it - is the mistake this is here for,
+    # and it is one a list of expected strings would have been updated to
+    # match.
+    local project
+    project="$(sed -nE 's/^name:[[:space:]]*([a-z0-9_-]+)[[:space:]]*$/\1/p' "$compose")"
+    [ -n "$project" ] || { echo "the compose file sets no project name"; return 1; }
+
+    local checked=0 key default
+    while IFS=$'\t' read -r key default; do
+        checked=$((checked + 1))
+        [ "$default" = "${project}_${key}" ] \
+            || { echo "volume $key defaults to '$default', not '${project}_${key}'"
+                 echo "- so a launch that sets nothing gets a different volume"
+                 return 1; }
+    done < <(awk '
+        /^volumes:/ { in_block = 1; next }
+        in_block && /^[^[:space:]]/ { in_block = 0 }
+        in_block && /^  [a-z0-9_-]+:[[:space:]]*$/ {
+            key = $1; sub(/:$/, "", key); next
+        }
+        in_block && /^    name:/ && key != "" {
+            # name: ${VAR:-default}
+            if (match($0, /:-[^}]+\}/)) {
+                d = substr($0, RSTART + 2, RLENGTH - 3)
+                print key "\t" d
+            }
+            key = ""
+        }
+    ' "$compose")
+
+    # A loop over nothing passes. Four volumes today, and a fifth would have
+    # to be read by this rather than bypass it.
+    [ "$checked" -ge 4 ] \
+        || { echo "only $checked volume default(s) were checked"; return 1; }
     return 0
 }
 

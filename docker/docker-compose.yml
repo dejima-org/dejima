@@ -331,8 +331,14 @@ volumes:
   # Named like the three below so bin/dejima can give an `--isolated` launch
   # one of its own: this volume is shared by every project, so the default is
   # a session reading what the last one typed anywhere on the host.
+  #
+  # The default repeats the project name, which is not a typo. An entry with
+  # no `name:` gets `<compose project>_<key>`, and the project here is
+  # `dejima` while the key is `dejima-bashhistory` - so anything shorter is a
+  # DIFFERENT volume, and every ordinary launch would start from an empty
+  # history with the real one orphaned.
   dejima-bashhistory:
-    name: ${SANDBOX_BASH_HISTORY:-dejima-bashhistory}
+    name: ${SANDBOX_BASH_HISTORY:-dejima_dejima-bashhistory}
   # Named explicitly so bin/dejima can give each project its own set. These
   # persist across containers by design (a plugin install should not have to
   # happen every launch), which without the split meant one project's session
