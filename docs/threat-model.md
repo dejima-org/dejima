@@ -244,6 +244,8 @@ and no answer at all where it does not.
 So `dejima-devbox-hardener` is load-bearing rather than optional-and-nice.
 On a laptop, dejima is a hardened container and the honest description of what
 is under it is "your home directory, and dejima has nothing to say about it".
+[Using dejima on its own](#using-dejima-on-its-own) is what that leaves you
+with, and what to do about it.
 
 **Load-bearing for what, exactly**, because the field's tiering invites a
 reading that project does not accept and has never claimed. A per-workload VM
@@ -262,6 +264,80 @@ repository's behalf.
 
 **What this repository can do about that is say so**, which is the whole of
 this section. Nothing in dejima can bound its own host.
+
+## Using dejima on its own
+
+Most installs are this: dejima on a laptop or a workstation, and none of the
+sister projects. Everything above about the rows below the container is true,
+and it is about one threat, the least likely one on the list.
+
+### What holds
+
+The container row, in full. Nothing in it depends on another project.
+
+- **Disk:** the workspace, the mounts you declare, and this project's own slice
+  of harness state. Not your home directory, not `~/.ssh`, not your other
+  projects ([security.md](security.md#one-projects-session-cannot-reach-anothers)).
+- **Network:** deny-by-default egress. No port on the host is open, and a
+  permitted name that answers with a private address is refused unless it is
+  a destination you configured, so the LAN is out of reach unless you put it
+  there ([security.md](security.md#network-egress-firewall)).
+- **The model credential** stays on the host behind the credential proxy
+  ([security.md](security.md#the-model-api-credential-never-enters-the-container)).
+- **The forge:** whatever the token and key you hand the session can reach.
+- **Afterwards:** the exit-time audit reports changes to the host-side files a
+  session could use to run code later, before your next `git` in that repo
+  ([security.md](security.md#the-exit-time-audit)).
+
+Against [the ranked list](#ranked-by-what-is-actually-likely): items 1, 2 and 4
+are the container row's, and are handled the same with or without the stack.
+Item 3 depends on where your CI runs, not on your machine. Item 5 is a person
+deciding, with or without the stack. Item 6, escape, is the one the
+devbox-side projects exist for.
+
+### What does not
+
+- **An escape lands on your machine, as you.** Your home directory, your
+  network position, your credentials. Nothing here bounds that.
+- **Pushing is code execution wherever your CI runs**, if the project has CI
+  ([security.md](security.md#ci-push-access-is-code-execution-elsewhere)).
+- **Nothing watches the machine between sessions.** The audit covers the
+  surfaces it lists, for the window the session ran.
+
+### Measured caution
+
+None of these needs another project.
+
+1. **Keep the kernel and the container runtime patched.** An escape needs an
+   unpatched host or a working zero-day, and the first is the one you control.
+2. **Point repos at dejima that you would run yourself.** That is
+   [an assumption](#what-this-tool-assumes) the rest rests on.
+3. **Give the sandbox its own identity**, with tokens scoped to the
+   repositories it works on, so the forge's reach is what you granted rather
+   than all of yours ([security.md](security.md#give-the-sandbox-its-own-identity)).
+4. **Decide about CI before granting push.** Hosted CI, a runner you are
+   willing to lose, or no push at all (`[core] forge = none` with
+   `[core] workflow = local-only`). Not a self-hosted runner with your LAN
+   behind it ([ci.md](ci.md)).
+5. **Treat what a session hands you as its writing:** a command it asks you to
+   run, a domain or dependency it asks you to approve, and every file in
+   `share_dir` or a read-write mount. See
+   [what mounting it costs you](remote-access.md#what-mounting-it-costs-you)
+   before syncing those anywhere a desktop will open them.
+6. **Read the audit before your next `git` in that repo.** `[audit] strict`
+   refuses a headless launch while CRITICAL findings are unacknowledged.
+7. **Leave the credential proxy on.** `proxy = off` is the one arrangement that
+   puts the real model credential in the container.
+
+### When the rest is worth adding
+
+- **dejima-devbox-hardener**, when your machine sits on a network with things
+  you would mind an escape reaching. It enforces from outside a VM, so the
+  first step is moving dejima into one.
+- **dejima-ci-hardener, or hosted CI**, as soon as sessions push to a project
+  whose CI you run yourself.
+- **dejima-guard**, when sessions run unattended long enough that "would I
+  notice?" matters, and you have a second machine to run it from.
 
 ## Why a container, and not a microVM
 
