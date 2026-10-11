@@ -1080,6 +1080,7 @@ dejima --isolated    # from anywhere - the directory you are in is not used
 | shell history, nvim state | volumes that outlive the container | this run's own, removed with it |
 | domains, dependencies, tools | the global set plus this project's | the global set only |
 | `[mounts]` lists | applied | dropped, and named at launch |
+| forge, workflow | as configured | `none` and `local-only`, unless named |
 | conversation log, epitaph | as configured | off |
 
 Your own `~/.claude` hooks, skills, commands, agents and output styles are
@@ -1107,10 +1108,36 @@ own files. If you want either back in this mode, that is
 [#388](https://gitbox.branderson.io/dejima/dejima/issues/388) - both are your
 record rather than the agent's, and neither ever reaches a future session.
 
+**No forge, unless you name one on the same command.** `--isolated` sets
+`[core] forge` to `none` and `[core] workflow` to `local-only` for that
+launch. The forge credential is the widest thing a session gets - a Gitea
+token is account-wide, so a session holding one can read and write every
+repository you can - and carrying that by default into the mode whose purpose
+is a session you are not watching would narrow the host to nothing while
+leaving the forge at full reach.
+
+Naming either on the same line is how you ask for a session that clones and
+opens a pull request, which is a real use of this mode:
+
+```sh
+dejima --isolated                                       # no forge, pushes nothing
+dejima --isolated --forge gitea --workflow worktree-pr   # clones, pushes, opens a PR
+```
+
+Order does not matter: `--forge gitea --isolated` means the same thing.
+
+**What this does not remove is the ssh key.** A dedicated key or your
+forwarded agent is mounted as it is for any launch, because that requirement
+belongs to the launch rather than to this flag. So an isolated session with no
+forge has no forge token and no instruction to push, and still has an agent
+that can reach a host over ssh. Treat it as narrowing the credential, not
+removing the capability.
+
 **It is not a stronger sandbox.** The firewall, the credential boundary and the
 capability drops are exactly what they are for every other session. What
-changes is what the session can read of your machine and what it can leave
-behind, not what it could do with a container escape.
+changes is what the session can read of your machine, what it can leave
+behind, and what credential it carries - not what it could do with a container
+escape.
 
 ## Reading what a session left behind
 

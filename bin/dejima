@@ -50,7 +50,7 @@ Options (each overrides the config file for one launch only):
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
   --no-pause              do not wait for a keypress before the image build
-  --isolated              no project, no memory, nothing kept but ~/shared
+  --isolated              no project, no memory, no forge; keeps only ~/shared
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
@@ -146,6 +146,19 @@ _set_override() {
         [ "${entry%%=*}" = "$key" ] || kept+=("$entry")
     done
     FLAG_OVERRIDES=(${kept[@]+"${kept[@]}"} "$key=$value")
+}
+
+# Whether a flag has already set $1, for the defaults --isolated applies after
+# the loop. Flag order on the command line is arbitrary, so this is asked
+# rather than inferred from when a flag ran: `--isolated --forge <name>` and
+# `--forge <name> --isolated` have to mean the same thing.
+_override_set() {
+    local key="$1" entry
+    for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
+        [ "${entry%%=*}" = "$key" ] || continue
+        return 0
+    done
+    return 1
 }
 _need_value() {
     [ -n "${2:-}" ] && [ "${2:0:2}" != "--" ] || {
@@ -302,6 +315,29 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
+
+# An isolated launch reaches no forge and is not told to push, unless this
+# command says otherwise.
+#
+# The flag narrows, like every other one here, and the forge credential is the
+# widest thing a session gets: a forge token is commonly account-wide rather
+# than per repository, so a session holding one can read and write everything
+# the operator can. Carrying that by default into the mode whose purpose is a
+# session you are not watching is the wrong way round - the host is narrowed
+# to nothing and the forge is left at full reach.
+#
+# Applied after the loop rather than in it, so `--isolated --forge <name>` and
+# `--forge <name> --isolated` agree: naming either on the same command line is
+# how an operator asks for a session that clones and opens a pull request,
+# which is a real use of this mode and not something to make impossible.
+#
+# The ssh key or forwarded agent is untouched, because an isolated launch is
+# not where that requirement lives - so this removes the forge token and the
+# instruction to push, not the ability to reach a host over ssh.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    _override_set core.forge    || _set_override core.forge none
+    _override_set core.workflow || _set_override core.workflow local-only
+fi
 
 # Refused rather than dropped. A configured mount is a standing preference and
 # an isolated launch simply does not apply it, with a line saying so; --ro and
@@ -3282,7 +3318,17 @@ if remote_enabled; then
     # exists, so it covers the whole build, and it stops being true at exactly
     # the moment the EXIT trap below stops being able to run.
     {
-        printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        # `dejima-attach --list` shows this column as a basename, which for an
+        # isolated launch would be "work" - the name of dejima's own scratch
+        # path rather than anything about the session. Same substitution the
+        # startup banner makes, and for the same reason. What tells two
+        # concurrent isolated sessions apart is the run id beside it, which
+        # that listing already prints.
+        if [ "$DEJIMA_ISOLATED" = 1 ]; then
+            printf 'workspace=isolated\n'
+        else
+            printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        fi
         printf 'pane=%s\n' "${TMUX_PANE:-}"
         printf 'label=%s\n' "$dejima_tmux_label"
         printf 'started=%s\n' "$(date +%s)"
@@ -3399,6 +3445,9 @@ if [ "$DEJIMA_ISOLATED" = 1 ]; then
     printf '\n  %sisolated%s  no project mounted, no memory, no transcript;\n' \
         "${C_KEY:-}" "${C_RESET:-}" >&2
     printf '            conversation log and epitaph off - both read one\n' >&2
+    printf '  %sforge%s     %s   %sworkflow%s %s\n' \
+        "${C_DIM:-}" "${C_RESET:-}" "$DEJIMA_FORGE_NAME" \
+        "${C_DIM:-}" "${C_RESET:-}" "$DEJIMA_WORKFLOW_NAME" >&2
     printf '  %sshared%s    %s\n' "${C_DIM:-}" "${C_RESET:-}" "$SANDBOX_SHARE_DIR" >&2
     printf '            the only thing that outlives this session\n' >&2
 fi

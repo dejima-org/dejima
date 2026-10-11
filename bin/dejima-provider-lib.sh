@@ -2240,9 +2240,10 @@ _briefing_core_tools() {
 _briefing_core_isolated_close() {
     cat <<'BRIEFING_EOF'
 This session cannot be resumed. Its transcript is inside the container and
-goes when the container does, so anything worth keeping has to be pushed or
-left in ~/shared before you finish. Say what you did there, rather than
-assuming the user can read it back out of the session afterwards.
+goes when the container does, so anything worth keeping has to leave before
+you finish: into ~/shared, and into a pushed branch where this session has a
+forge to push to at all. Say what you left there, rather than assuming the
+user can read it back out of the session afterwards.
 BRIEFING_EOF
 }
 

@@ -1324,14 +1324,14 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
 
     # The whole spec, because the compose file cannot build one: a source and
-    # a target would have to be two variables and neither can be empty. No
-    # colon is what asks Docker for an anonymous volume.
+    # a target would have to be two variables and neither can be empty. The
+    # source here names the compose file's own volume, so nothing of the host
+    # is behind the working directory.
     local spec; spec="$(launched_env SANDBOX_WORKSPACE_MOUNT)"
     [ "$spec" = "isolated-work:/dejima/work" ] \
         || { echo "the workspace mount is $spec, not the container-local volume"; return 1; }
     [ "$(launched_env WORKSPACE_DIR)" = /dejima/work ]
 
-    # And the ordinary case still mounts the project at its own path, so the
     # Whatever the source is, it must not be a path: a source starting with /
     # is a bind mount, which is the one thing this mode cannot have here.
     case "${spec%%:*}" in
@@ -1341,6 +1341,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # That the volume it names is this run's own, and is removed afterwards,
     # belongs to the test below with the other four.
 
+    # And the ordinary case still mounts the project at its own path, so the
     # assertion above cannot pass by the variable having stopped working.
     run launch "$PROJ"
     [ "$status" -eq 0 ]
@@ -1456,7 +1457,8 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 
     # Two are sharper than the rest. The shell history is shared by every
     # project even when the nvim ones are not, so under its usual name an
-    # isolated session reads what was typed in any session before it.
+    # isolated session reads what was typed in any session before it; and the
+    # working directory is where everything the session did actually lives.
     local v names=""
     for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY SANDBOX_ISOLATED_WORK; do
         names="$names $(launched_env "$v")"
@@ -1480,11 +1482,73 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
 
     # And an ordinary launch still gets the shared history volume, which is
     # what makes a session started tomorrow see what was typed today.
+    #
+    # Asserted as "sets nothing", not as a name. What the volume is called
+    # then comes from the compose default, and whether THAT is the name Docker
+    # would have chosen on its own is a property of the compose file - checked
+    # there, in static.bats, against the project name rather than against a
+    # string repeated here. A name in this test would have been updated to
+    # match a wrong default rather than catching one.
     run launch "$PROJ"
     [ "$status" -eq 0 ]
     [ -z "$(launched_env SANDBOX_BASH_HISTORY)" ] \
-        || [ "$(launched_env SANDBOX_BASH_HISTORY)" = dejima-bashhistory ] \
-        || { echo "an ordinary launch renamed the history volume"; return 1; }
+        || { echo "an ordinary launch renamed the history volume to $(launched_env SANDBOX_BASH_HISTORY)"
+             return 1; }
+}
+
+@test "an isolated launch reaches no forge unless the same command names one" {
+    # The forge credential is the widest thing a session holds - a Gitea token
+    # is account-wide - so the mode whose purpose is a session nobody is
+    # watching does not carry one by default. It narrows, like every other
+    # flag here.
+    #
+    # Both orders, because the defaults are applied after the argument loop
+    # rather than inside it: a version that set them in the loop would pass
+    # one of these two and fail the other.
+    launch_setup
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    # With the section header: launch() appends its own [core] block after
+    # this, so a bare key here would sit outside any section and be refused.
+    printf '[core]\nforge = gitea\nworkflow = worktree-pr\n' >> "$conf"
+
+    run launch --isolated --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'core.forge=none' <<< "$output" \
+        || { echo "an isolated launch kept the configured forge"; return 1; }
+    grep -qx 'core.workflow=local-only' <<< "$output" \
+        || { echo "an isolated launch kept a workflow that pushes"; return 1; }
+
+    local args
+    for args in "--isolated --workflow worktree-pr" "--workflow worktree-pr --isolated"; do
+        # shellcheck disable=SC2086
+        run launch $args --print-config
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        grep -qx 'core.workflow=worktree-pr' <<< "$output" \
+            || { echo "'$args' did not keep the workflow the operator named"; return 1; }
+    done
+
+    # And the config file is untouched for a launch without the flag, so the
+    # assertions above are about --isolated rather than about the fixture.
+    run launch --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'core.forge=gitea' <<< "$output" \
+        || { echo "an ordinary launch lost the configured forge"; return 1; }
+    return 0
+}
+
+@test "an isolated launch still mounts the ssh key, which the docs say it does" {
+    # What the mode narrows is the forge token, not this. A dedicated key or a
+    # forwarded agent belongs to the launch rather than to the flag, so an
+    # isolated session with no forge still has an agent that can reach a host
+    # over ssh. Both docs say so, and this is what keeps that honest.
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_SSH_KEY_FILE)" = "$LAUNCH_DIR/sandbox-key" ] \
+        || { echo "the ssh key did not cross: $(launched_env SANDBOX_SSH_KEY_FILE)"
+             echo "- if that is deliberate, the two docs saying it does need updating"
+             return 1; }
 }
 
 @test "an isolated launch refuses a project path and the mount flags" {

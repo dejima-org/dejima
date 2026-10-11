@@ -328,14 +328,27 @@ can make; it is one the audit reports. See
 no mounted project to be written, no `.git` to plant a hook in, and no
 harness state directory on the host for a session to leave anything in. Its
 working directory is container-local and its `~/shared` is made fresh for that
-session alone. What remains reachable is the operator's own read-only config,
-the forge the firewall already allows, and that one directory.
+session alone.
 
-It is a narrower blast radius, not a stronger sandbox - the firewall, the
-credential boundary and the capability drops are unchanged, and a container
-escape is exactly as serious. The cost is that the conversation log, the
-epitaph and the exit-time audit are all off, because each reads host state this
-mode does not mount. See
+**It narrows the forge credential too**, which is the widest thing a session
+holds: a Gitea token is account-wide (see
+[To your forge, the sandbox is you](#to-your-forge-the-sandbox-is-you)), so an
+ordinary session can read and write every repository its operator can.
+`--isolated` sets `forge` to `none` and `workflow` to `local-only` for that
+launch, so no token crosses and nothing tells the session to push. Naming
+either on the same command line brings it back, which is how a session that
+clones and opens a pull request is asked for.
+
+**The ssh key is not narrowed.** A dedicated key or a forwarded agent is
+mounted as it is for any launch - that requirement belongs to the launch
+rather than to this flag - so what the mode removes is the forge token and the
+instruction to push, not the ability to reach a host over ssh.
+
+So: a narrower blast radius on the host and a narrower credential, not a
+stronger sandbox. The firewall, the credential boundary and the capability
+drops are unchanged, and a container escape is exactly as serious. The cost is
+that the conversation log, the epitaph and the exit-time audit are all off,
+because each reads host state this mode does not mount. See
 [Isolated sessions](configuration.md#isolated-sessions).
 
 ## The exit-time audit
