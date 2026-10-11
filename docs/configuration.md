@@ -1135,8 +1135,7 @@ Withholding that key too, for any launch whose workflow never pushes, is
 **Why each of those is the way it is**, and why this is a narrower blast
 radius rather than a stronger sandbox, is in
 [docs/security.md](security.md#a-session-with-no-project-mounted). Worth
-reading before using this for anything you would not run against your own
-checkout.
+reading before relying on this mode.
 
 ## Reading what a session left behind
 
