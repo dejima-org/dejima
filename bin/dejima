@@ -1784,7 +1784,13 @@ cleanup() {
     # only ever suppresses, so a stale export makes epitaph quieter and never
     # louder, which is what makes it safe to honour from the environment at
     # all.
-    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+    #
+    # Nothing to keep for an isolated launch: an epitaph is read out of the
+    # transcript on the host, and that mode mounts none - so this would write
+    # an empty record keyed to a working directory that will never exist
+    # again. Said at launch rather than inferred from an empty store, and the
+    # same goes for the conversation shipper further down.
+    if [ "$DEJIMA_ISOLATED" = 0 ] && [ "$(config_get_bool epitaph enabled)" = "1" ]; then
         DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
             "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     fi
@@ -1802,7 +1808,14 @@ cleanup() {
     # HOST the session could have written, and for a per-project mount that is
     # the slice rather than the root it sits in. Naming the root would claim a
     # blast radius the per-project split exists to have narrowed.
-    DEJIMA_RW_MOUNTS="$DEJIMA_RW_SOURCES" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    #
+    # Not run for an isolated launch, which has no host-side surface for the
+    # audit to be about: its subject is the workspace's own files, and there
+    # is no workspace. The one thing such a session can write is ~/shared,
+    # and this never hashed that in any mode.
+    if [ "$DEJIMA_ISOLATED" = 0 ]; then
+        DEJIMA_RW_MOUNTS="$DEJIMA_RW_SOURCES" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    fi
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
@@ -3350,8 +3363,16 @@ startup_banner() {
     # C_BADGE, the same name the pickers set the mark in. Two surfaces
     # spelling the wordmark two different colours is the drift a shared
     # palette exists to stop.
+    local name
+    # The working directory's basename would be "work" here, which names
+    # dejima's own scratch path rather than anything about the launch.
+    if [ "$DEJIMA_ISOLATED" = 1 ]; then
+        name="isolated"
+    else
+        name="$(basename -- "$WORKSPACE_DIR")"
+    fi
     printf '\n  %sdejima%s  %s%s%s' \
-        "$C_BADGE" "$C_RESET" "$C_KEY" "$(basename -- "$WORKSPACE_DIR")" "$C_RESET" >&2
+        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" >&2
     [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
     printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
         "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \
@@ -3363,6 +3384,18 @@ startup_banner() {
         "$C_DIM" "$C_RESET" "$epitaph" >&2
 }
 startup_banner
+
+# Printed whatever [ui] banner says and whether or not stderr is a terminal,
+# unlike the banner above: the share path is the only route back to anything
+# this session hands over, and the two features it does without are ones an
+# operator would otherwise go looking for afterwards and find empty.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    printf '\n  %sisolated%s  no project mounted, no memory, no transcript;\n' \
+        "${C_KEY:-}" "${C_RESET:-}" >&2
+    printf '            conversation log and epitaph off - both read one\n' >&2
+    printf '  %sshared%s    %s\n' "${C_DIM:-}" "${C_RESET:-}" "$SANDBOX_SHARE_DIR" >&2
+    printf '            the only thing that outlives this session\n' >&2
+fi
 
 printf '\n%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
@@ -3418,7 +3451,11 @@ fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
-"$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+# Paired with the compare in cleanup(), which states why an isolated launch
+# does neither.
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+fi
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
 # docker/, install.sh, test/) is mounted writable - warn, and the audit
@@ -3900,7 +3937,14 @@ compose_status=0
 # Gated here as well as inside the shipper, which checks the same two keys for
 # itself: --no-conversation and --no-log are overrides held in this process,
 # and the shipper re-reads the config rather than inheriting them.
-if [ "$(config_get_bool logging conversation)" = "1" ] &&
+#
+# And not at all for an isolated launch. The shipper tails a transcript that
+# is on the host because the harness's state directory is mounted, and that
+# mode mounts none - so what it would ship is nothing, from a file that is
+# never created. Said at launch instead, because a log that is quietly empty
+# is worse than one the operator knows they are not getting.
+if [ "$DEJIMA_ISOLATED" = 0 ] &&
+   [ "$(config_get_bool logging conversation)" = "1" ] &&
    [ -n "$(config_get logging loki_url)" ]; then
     "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
     SANDBOX_CONVERSATION_SHIP_PID=$!
