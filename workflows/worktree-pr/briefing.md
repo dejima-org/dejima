@@ -1,8 +1,4 @@
 Git workflow - do this even though nothing stops you from doing otherwise:
-- Do new work in a git worktree for the feature branch, not by switching
-  branches in place in the mounted checkout - that's the user's actual
-  working copy, and changing its branch out from under them is disruptive
-  even if you switch it back.
 <!-- core: worktree -->
 - Push that branch to the remote, then run `{{pr_command}} create` from
   the worktree. Never push directly to {{blocked_branches}}, on any remote,
