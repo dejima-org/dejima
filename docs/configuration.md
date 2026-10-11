@@ -55,6 +55,14 @@ Every tool takes `--help`, which describes its own arguments and what they do.
 That is the fastest answer to "what does this flag mean"; this page is for the
 config file behind them.
 
+**A launch flag overrides the file for that launch only, and every `--no-*`
+flag only ever narrows.** Nothing dejima accepts on the command line turns a
+setting back on. A config that says `off` is a decision somebody made in a
+file they can reread, and a flag that could undo one in passing would make the
+file's answer the weaker of the two - so the flags that exist are the ones that
+take something away. `--isolated` is the far end of that: see
+[Isolated sessions](#isolated-sessions).
+
 ### `[core]` - what this sandbox runs
 
 The three selections come first because everything below depends on them: the
@@ -1053,6 +1061,56 @@ there and are now mounted into nothing; dejima says so at every launch while
 that is true, rather than moving an operator's files on its own.
 `dejima-share adopt <project>` moves them into one project's share after
 showing what it will move and asking, and it never overwrites.
+
+## Isolated sessions
+
+`dejima --isolated` runs a session with nothing before it and nothing after it.
+No project is mounted, no memory or transcript crosses either boundary, and the
+one thing that outlives it is a `~/shared` of its own.
+
+```sh
+dejima --isolated    # from anywhere - the directory you are in is not used
+```
+
+| | ordinary launch | `--isolated` |
+|---|---|---|
+| working directory | the project, read-write at its own path | `/dejima/work`, container-local |
+| `~/shared` | this project's, shared by every session against it | made fresh, never reused |
+| memory and transcripts | `~/.claude/projects/<slug>`, mounted | none |
+| shell history, nvim state | volumes that outlive the container | this run's own, removed with it |
+| domains, dependencies, tools | the global set plus this project's | the global set only |
+| `[mounts]` lists | applied | dropped, and named at launch |
+| conversation log, epitaph | as configured | off |
+
+Your own `~/.claude` hooks, skills, commands, agents and output styles are
+still mounted read-only, as is `[mounts] nvim_config`. Those are yours, no
+session can write them, and a session without them is a session without the
+tools you built for it.
+
+**The directory you launch from decides nothing.** An approval store is found
+by walking up from the launch directory, so a home directory that was once
+approved as a project would otherwise hand an anonymous session that project's
+allowed domains and its dependency layer - which is the whole reason to be able
+to run this from a fresh terminal in `$HOME` without thinking about it.
+
+**There is no config key, in any spelling.** A mode this strong is a decision
+to make in the command, where it is visible, rather than a line in a file that
+every later launch inherits. For the same reason `--ro` and `--rw` are refused
+rather than dropped: a path typed into this command cannot be quietly ignored,
+where a `[mounts]` list written months ago can be - with a line saying which.
+
+**What it gives up.** The conversation log and the epitaph both read a
+transcript on the host, and this mode mounts none, so both are off and the
+launch says so rather than leaving you to find an empty record later. The
+exit-time audit is skipped for the same reason: its subject is the project's
+own files. If you want either back in this mode, that is
+[#388](https://gitbox.branderson.io/dejima/dejima/issues/388) - both are your
+record rather than the agent's, and neither ever reaches a future session.
+
+**It is not a stronger sandbox.** The firewall, the credential boundary and the
+capability drops are exactly what they are for every other session. What
+changes is what the session can read of your machine and what it can leave
+behind, not what it could do with a container escape.
 
 ## Reading what a session left behind
 

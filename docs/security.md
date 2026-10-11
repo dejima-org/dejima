@@ -321,6 +321,23 @@ can make; it is one the audit reports. See
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
+
+### A session with no project mounted
+
+`dejima --isolated` removes this whole class rather than bounding it: there is
+no mounted project to be written, no `.git` to plant a hook in, and no
+harness state directory on the host for a session to leave anything in. Its
+working directory is container-local and its `~/shared` is made fresh for that
+session alone. What remains reachable is the operator's own read-only config,
+the forge the firewall already allows, and that one directory.
+
+It is a narrower blast radius, not a stronger sandbox - the firewall, the
+credential boundary and the capability drops are unchanged, and a container
+escape is exactly as serious. The cost is that the conversation log, the
+epitaph and the exit-time audit are all off, because each reads host state this
+mode does not mount. See
+[Isolated sessions](configuration.md#isolated-sessions).
+
 ## The exit-time audit
 
 `bin/dejima-audit` snapshots host-persistence surfaces before each run and
