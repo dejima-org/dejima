@@ -60,7 +60,7 @@ suites_for() {
         bin/dejima-share)                    echo 'share static' ;;
         # The slug scheme keys the transcript mounts, the epitaph and audit
         # stores, and the share layout, so a change to it is not one area's.
-        bin/dejima-slug-lib.sh)              echo 'share conversation audit static' ;;
+        bin/dejima-slug-lib.sh)              echo 'share conversation audit project static' ;;
         bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo 'proxy static' ;;
         bin/dejima-credential-scan*)         echo 'config static' ;;
         bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) \

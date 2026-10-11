@@ -878,7 +878,8 @@ _guarded_stores() {
     [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
     GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
                     "$(config_get epitaph dir)" \
-                    "$(share_projects_root "$(config_get core share_dir)")")
+                    "$(share_projects_root "$(config_get core share_dir)")" \
+                    "$(isolated_share_root "$(config_get core share_dir)")")
 }
 
 # The `projects` subdirectory of every read_write_per_project root: the
@@ -919,12 +920,12 @@ _refuse_guarded_mount() {
         echo "Refusing $kind: $path" >&2
         echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
         echo "Even read-only, that hands the session every project's approvals, the" >&2
-        echo "record of what earlier sessions were caught doing, or every project's" >&2
-        echo "handoff files." >&2
+        echo "record of what earlier sessions were caught doing, or the handoff files" >&2
+        echo "of every project and every isolated session." >&2
         exit 1
     done
 }
-SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
+SANDBOX_RW_MOUNTS="$(_mounts_list read_write)"
 SANDBOX_RW_MOUNTS="$(_append_mounts "$SANDBOX_RW_MOUNTS" \
     ${EXTRA_RW_FLAGS[@]+"${EXTRA_RW_FLAGS[@]}"})"
 RW_MOUNT_PATHS=()
@@ -1348,16 +1349,33 @@ fi
 # boundary ~/.claude is already sliced per project to hold. What the container
 # sees is still ~/shared, so nothing an agent has been told changes; what it
 # cannot see any more is another project's.
+#
+# An isolated launch gets one of its own instead, under a sibling root. Still
+# a real host directory, because handing a file back to the operator is the
+# one thing that mode keeps - but never the directory any other session had,
+# so it carries nothing in and nothing it is given reaches a later session.
+# The operator is told the path below, since there is no project name to find
+# it under.
 SANDBOX_SHARE_ROOT="$(config_get core share_dir)"
-SANDBOX_SHARE_DIR="$(share_dir_for "$SANDBOX_SHARE_ROOT" "$WORKSPACE_DIR")"
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    SANDBOX_SHARE_DIR="$(isolated_share_make "$SANDBOX_SHARE_ROOT")" || {
+        echo "Could not make an isolated share directory under $SANDBOX_SHARE_ROOT" >&2
+        exit 1
+    }
+else
+    SANDBOX_SHARE_DIR="$(share_dir_for "$SANDBOX_SHARE_ROOT" "$WORKSPACE_DIR")"
+fi
 mkdir -p "$SANDBOX_SHARE_DIR"
 
 # Files an operator left in share_dir before the split are still there and are
 # no longer mounted anywhere. Said every launch while that is true, because
 # the alternative is a file that was handed to a session yesterday silently
 # not arriving today.
+# Both roots dejima writes are excluded, not just the per-project one: the
+# question this answers is "did something other than dejima put this here",
+# and an isolated session's share is dejima's.
 share_loose="$(find "$SANDBOX_SHARE_ROOT" -mindepth 1 -maxdepth 1 \
-    ! -name projects -printf '%f\n' 2>/dev/null | sort)" || true
+    ! -name projects ! -name isolated -printf '%f\n' 2>/dev/null | sort)" || true
 if [ -n "$share_loose" ]; then
     echo "Note: $SANDBOX_SHARE_ROOT holds entries no session can see any more," >&2
     echo "      because ~/shared is now this project's own subdirectory of it:" >&2
