@@ -438,11 +438,20 @@ Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
 `session_id`, `resume_command`, `writable_mounts`, `network_allowlist`,
-`no_confirm_args`, `harness_state_dir`) - an unrecognized one is a
+`no_confirm_args`, `harness_state_dir`, `workspace_posture`,
+`project_posture`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
 known until the container is actually running.
+
+`workspace_posture` and `project_posture` are what
+[`--isolated`](configuration.md#isolated-sessions) changes. The preamble's
+claims about the mount, about `~/shared` being shared with every session
+against this project, and about the transcript outliving the container are
+substituted rather than written inline, because an isolated launch makes all
+three false - and a session that believes them leaves work for a resume that
+cannot happen.
 
 ### How the briefing reaches the session
 

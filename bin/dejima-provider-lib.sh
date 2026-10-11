@@ -1661,7 +1661,7 @@ BRIEFING_FRAGMENT_MAX=16384
 # is a hard refusal (_briefing_substitute below), not a literal passthrough -
 # an unrecognized {{key}} reaching an agent's context verbatim is exactly the
 # kind of silent drift this whole function exists to prevent.
-_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist no_confirm_args harness_state_dir"
+_BRIEFING_WHITELIST="pr_command issue_command forge_name forge_ssh_host blocked_branches container_id project_dir workspace_dir session_id resume_command writable_mounts network_allowlist no_confirm_args harness_state_dir workspace_posture project_posture"
 
 _briefing_whitelisted() {
     _set_contains "$_BRIEFING_WHITELIST" "$1"
@@ -1671,14 +1671,30 @@ _briefing_whitelisted() {
 # allowlist is load-bearing for the agent too. Lives here, not in any
 # provider directory - see the module-level comment. A quoted heredoc, so
 # backticks and $ signs are literal and need no escaping.
-_briefing_core_preamble() {
-    cat <<'BRIEFING_EOF'
-You are running inside the dejima Docker container, not directly on
-the user's machine, with
-{{no_confirm_args}} active (no tool-use confirmations).
-
-What this means:
-- The workspace directory is bind-mounted read-write and is the real
+# What the session is told about where it is: which of the host it can see,
+# what it may hand back, and what survives it.
+#
+# Two variants rather than one paragraph with caveats, because the ordinary
+# one states four things an isolated launch makes false - that the workspace
+# is the real project, that ~/shared is shared with every other session
+# against it, that the harness keeps state on the host, and that the work is
+# recoverable there afterwards. A session acts on these: one that believes
+# its transcript outlives the container leaves things for a resume that
+# cannot happen.
+#
+# Continuation lines carry the two spaces the preamble's bullet list uses,
+# since this is substituted into one.
+_briefing_workspace_posture() {
+    if [ "${DEJIMA_ISOLATED:-0}" = 1 ]; then
+        printf '%s' "Nothing of the user's machine is mounted here and this session has no
+  past: no project checkout, no memory, and no transcript of an earlier
+  run. Your working directory is the container's own and goes with it, as
+  does anything you clone or write into it. ~/shared is the single
+  exception - a real host directory, made fresh for this session, which no
+  earlier session wrote to and no later one will read. Put there whatever
+  the user should still have afterwards."
+    else
+        printf '%s' "The workspace directory is bind-mounted read-write and is the real
   project. ~/shared is also a real, persistent host directory (this
   project's own, and not part of its checkout) - use it to hand the user a
   file (a screenshot, a temp script) without touching the project checkout,
@@ -1687,8 +1703,37 @@ What this means:
   as readable by all of them. Your harness keeps its own state on the host too,
   so this session's transcript outlives the container - the work is
   recoverable on the host with the command at the end of this
-  briefing.{{writable_mounts}} Everything else is disposable: installed system
-  packages, anything outside the mounted paths, and the container itself go
+  briefing."
+    fi
+}
+
+# The same split for what the session should expect to FIND. The ordinary
+# text is about a mounted checkout holding things that are not code; an
+# isolated session has no checkout to be careful with, and the useful
+# instruction is the opposite one - ask rather than look.
+_briefing_project_posture() {
+    if [ "${DEJIMA_ISOLATED:-0}" = 1 ]; then
+        printf '%s' "There is no project directory, so nothing you find in this container
+  came from the user. If a task needs a file of theirs, say what you need
+  rather than going looking for it: ~/shared is the only way they can hand
+  you one."
+    else
+        printf '%s' "The project directory is mounted whole, so it can hold things that are not
+  code: a .env, a database dump, a key someone left in the tree. Say so if
+  you find one, and do not open, copy or send it anywhere unless the task
+  actually requires it."
+    fi
+}
+
+_briefing_core_preamble() {
+    cat <<'BRIEFING_EOF'
+You are running inside the dejima Docker container, not directly on
+the user's machine, with
+{{no_confirm_args}} active (no tool-use confirmations).
+
+What this means:
+- {{workspace_posture}}{{writable_mounts}} Everything else is disposable: installed system
+  packages, anything the mounts do not cover, and the container itself go
   away when this run ends.
 - A headless browser is installed: playwright, with chromium, importable
   from any directory in either module system. If you change something with a
@@ -1726,13 +1771,10 @@ What this means:
   payment or production API acts on the world the moment it is called, with
   no diff for anyone to review afterwards. Do not ask for one of those to
   finish a task - say what you need and let the operator decide.
-- The project directory is mounted whole, so it can hold things that are not
-  code: a .env, a database dump, a key someone left in the tree. Say so if
-  you find one, and do not open, copy or send it anywhere unless the task
-  actually requires it.
+- {{project_posture}}
 - Stay within the task you were given. Since there are no permission
   prompts here, be more conservative than usual about anything destructive,
-  irreversible, or outside the project directory.
+  irreversible, or outside your working directory.
 BRIEFING_EOF
 }
 
@@ -1742,8 +1784,36 @@ BRIEFING_EOF
 # workflow can only opt into it (requires_worktree = on), never edit or omit
 # it. _briefing_resolve_worktree splices this into the workflow fragment at
 # its `<!-- core: worktree -->` marker.
-_briefing_core_worktree() {
+# Where a branch's working tree must live, and why.
+#
+# The ordinary rule rests on one fact - that the bind-mounted project
+# directory is the only path backed by host storage - and an isolated launch
+# has no such path, so every clause of it would be advice about a checkout
+# that is not there. What stays true is the question the rule answers: where
+# work can be put such that it is not thrown away.
+#
+# Both worktree workflows stated the first bullet identically in their own
+# fragments, which left the same argument in three places and only two of
+# them substitutable. It is core's now, so a workflow declaring
+# requires_worktree says where the block goes and nothing about what it says.
+_briefing_core_worktree_isolated() {
     cat <<'BRIEFING_EOF'
+- A worktree here is just a directory, and nothing in this container is the
+  user's checkout: clone what you need into your working directory and work
+  there. The rule about keeping a worktree under the mounted project does
+  not apply, because there is no mounted project, and a `git config` in
+  here reaches no repository of theirs. What leaves this container is what
+  you push and what you leave in ~/shared.
+BRIEFING_EOF
+}
+
+_briefing_core_worktree() {
+    [ "${DEJIMA_ISOLATED:-0}" = 0 ] || { _briefing_core_worktree_isolated; return 0; }
+    cat <<'BRIEFING_EOF'
+- Do new work in a git worktree for the feature branch, not by switching
+  branches in place in the mounted checkout - that's the user's actual
+  working copy, and changing its branch out from under them is disruptive
+  even if you switch it back.
 - The worktree MUST live under the mounted project directory itself, e.g.
   `git worktree add .worktrees/<branch> -b <branch>` run from the project
   root - never `../<branch>` or any other path outside it, including
@@ -1986,6 +2056,10 @@ _briefing_resolve_key() {
                 printf '%s' "GitHub read-only$hosts"
             fi
             ;;
+        # Both of these differ by whether this is an isolated launch, and the
+        # prose for each case lives with the preamble it is substituted into.
+        workspace_posture) _briefing_workspace_posture ;;
+        project_posture)   _briefing_project_posture ;;
         blocked_branches) manifest_get workflow "$workflow" blocked_branches ;;
         project_dir)      printf '%s' "${WORKSPACE_DIR:-}" ;;
         workspace_dir)    printf '%s' "${WORKSPACE_DIR:-}" ;;
@@ -2161,6 +2235,18 @@ _briefing_core_tools() {
     printf '%s' "$out"
 }
 
+# What closes an isolated briefing, in place of the harness's own sentence
+# about resuming on the host.
+_briefing_core_isolated_close() {
+    cat <<'BRIEFING_EOF'
+This session cannot be resumed. Its transcript is inside the container and
+goes when the container does, so anything worth keeping has to leave before
+you finish: into ~/shared, and into a pushed branch where this session has a
+forge to push to at all. Say what you left there, rather than assuming the
+user can read it back out of the session afterwards.
+BRIEFING_EOF
+}
+
 briefing_compose() {
     local forge="$1" workflow="$2" harness="$3"
     local caps autonomy workflow_frag harness_frag text
@@ -2221,7 +2307,19 @@ briefing_compose() {
     # business resolving.
     text+="$(_briefing_core_closing_a)"
     text+=$'\n\n'
-    text+="$harness_frag"
+    # The harness fragment is about resuming this session on the host, which
+    # for an isolated launch is the one thing it cannot do: the state that
+    # resume reads is the state this mode does not mount. Replaced rather
+    # than dropped, because a session told nothing would reasonably assume
+    # the usual arrangement and leave work for a resume that never comes.
+    #
+    # The fragment is still composed and validated above, so a harness whose
+    # own briefing is broken is refused in this mode too.
+    if [ "${DEJIMA_ISOLATED:-0}" = 1 ]; then
+        text+="$(_briefing_core_isolated_close)"
+    else
+        text+="$harness_frag"
+    fi
 
     _briefing_substitute "$text" "$forge" "$workflow" "$harness"
 }

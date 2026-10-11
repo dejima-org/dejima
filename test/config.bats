@@ -569,6 +569,23 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     [[ "$output" == *"nonesuch"* ]]
 }
 
+@test "the isolated mode has no config key, in any plausible spelling" {
+    # --isolated is a flag and nothing else, on purpose: it changes what the
+    # session IS rather than how much it may do, and a file that decided it
+    # would make the next launch's answer to "where is my work" depend on a
+    # line nobody reread. The schema is what holds that - an unknown key is
+    # fatal, so every spelling someone might reach for has to stay unknown.
+    local key
+    for key in isolated isolate ephemeral no_workspace; do
+        write_config '[core]' "$key = on"
+        run lib config_validate
+        [ "$status" -ne 0 ] \
+            || { echo "[core] $key was accepted, so the mode is settable from a file"; return 1; }
+        [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+    done
+    return 0
+}
+
 @test "an invalid value is fatal and names the key" {
     write_config '[audit]' 'keep = 0'
     run lib config_validate
@@ -1385,12 +1402,14 @@ EOF
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
     # forge_env_exports must not emit `GH_TOKEN=` (empty) when
-    # push_token_file is unset: `-e GH_TOKEN=` on `docker
-    # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
-    # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
-    # [github] token_file value every session is supposed to get regardless
-    # of forge. Asserted on the actual argument list handed to `docker`, not
-    # on a warning, so this catches the container-facing symptom directly.
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker compose run`
+    # overrides docker-compose.yml's own `environment: GH_TOKEN:` entry - the
+    # one carrying the independent read-only [github] token_file value every
+    # session is supposed to get regardless of forge. (That entry reads
+    # bin/dejima's SANDBOX_GH_TOKEN, which is the same value except for an
+    # isolated launch; the override is what matters here either way.)
+    # Asserted on the actual argument list handed to `docker`, not on a
+    # warning, so this catches the container-facing symptom directly.
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"

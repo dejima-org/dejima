@@ -321,6 +321,47 @@ can make; it is one the audit reports. See
   overlaid (they're config, not fixed paths a static mount can cover) and
   remain fully writable; the exit-time audit below reports changes to
   either, but only after the session ends - it doesn't stop them.
+
+### A session with no project mounted
+
+`dejima --isolated` removes this whole class rather than bounding it: there is
+no mounted project to be written, no `.git` to plant a hook in, and no
+harness state directory on the host for a session to leave anything in. Its
+working directory is container-local and its `~/shared` is made fresh for that
+session alone.
+
+**It narrows the forge credential too**, which is the widest thing a session
+holds: a Gitea token is account-wide (see
+[To your forge, the sandbox is you](#to-your-forge-the-sandbox-is-you)), so an
+ordinary session can read and write every repository its operator can.
+`--isolated` sets `forge` to `none` and `workflow` to `local-only` for that
+launch, and blanks the session's copy of `[github] token_file` - core's
+read-only GitHub credential, which crosses for every ordinary session
+whatever forge is selected, and which is read-only across the operator's
+*private* repositories rather than scoped to one. So no forge credential of
+either kind reaches an isolated session, and nothing tells it to push.
+
+Naming a forge on the same command line brings that back: it is the operator
+saying this session is meant to reach one, and nothing is narrowed from there.
+The filter container keeps the GitHub token either way, because that is what
+authenticates dejima's own fetch of GitHub's address ranges - a request about
+the allowlist, made outside the session's reach.
+
+**The forwarded agent is not mounted; a configured key is.** A workflow that
+never pushes gets no agent socket, and `local-only` is one - so the personal
+identities in the operator's own agent stay outside the container. An
+`[identity] ssh_key` is mounted and loaded whatever the workflow, so an
+isolated session with no forge still holds a key that can reach a host over
+ssh. Withholding that for any launch whose workflow never pushes is
+[#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
+
+So: a narrower blast radius on the host and a narrower credential, not a
+stronger sandbox. The firewall, the credential boundary and the capability
+drops are unchanged, and a container escape is exactly as serious. The cost is
+that the conversation log, the epitaph and the exit-time audit are all off,
+because each reads host state this mode does not mount. See
+[Isolated sessions](configuration.md#isolated-sessions).
+
 ## The exit-time audit
 
 `bin/dejima-audit` snapshots host-persistence surfaces before each run and

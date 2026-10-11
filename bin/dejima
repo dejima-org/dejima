@@ -50,12 +50,12 @@ Options (each overrides the config file for one launch only):
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
   --no-pause              do not wait for a keypress before the image build
+  --isolated              no project, no memory, no forge; keeps only ~/shared
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
 
-Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
-config that says off is a decision, not a default to override in passing.
+Every --no-* flag only ever narrows; a config that says off is a decision.
 
 Config lives in ~/.config/dejima/config; [core] harness must be set there.
 DEJIMA_HELP
@@ -147,6 +147,19 @@ _set_override() {
     done
     FLAG_OVERRIDES=(${kept[@]+"${kept[@]}"} "$key=$value")
 }
+
+# Whether a flag has already set $1, for the defaults --isolated applies after
+# the loop. Flag order on the command line is arbitrary, so this is asked
+# rather than inferred from when a flag ran: `--isolated --forge <name>` and
+# `--forge <name> --isolated` have to mean the same thing.
+_override_set() {
+    local key="$1" entry
+    for entry in ${FLAG_OVERRIDES[@]+"${FLAG_OVERRIDES[@]}"}; do
+        [ "${entry%%=*}" = "$key" ] || continue
+        return 0
+    done
+    return 1
+}
 _need_value() {
     [ -n "${2:-}" ] && [ "${2:0:2}" != "--" ] || {
         echo "$1 requires a value" >&2
@@ -236,9 +249,24 @@ NO_LOG=0
 # Launch-scoped, like NO_LOG: initialised here so an inherited environment
 # variable of the same name cannot decide it.
 NO_PAUSE=0
+# A session with nothing before it and nothing after it: no project mounted,
+# no memory, no transcript, and a ~/shared of its own that no other session
+# has written to or will read. What survives it is that directory and the
+# branches it pushed.
+#
+# A flag and no config key, deliberately. Every other narrowing here has a
+# [section] key behind it because a machine can sensibly prefer it always;
+# this one changes what the session IS rather than how much it may do, and a
+# file that silently decided it would make the next launch's answer to "where
+# is my work" depend on a line nobody reread.
+DEJIMA_ISOLATED=0
+# Whether the operator wrote `--`, so an isolated launch can tell a project
+# path it must refuse from harness arguments it must pass through. Both arrive
+# here as positionals once the loop breaks.
+DEJIMA_ARGS_ONLY=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --) shift; break ;;
+        --) DEJIMA_ARGS_ONLY=1; shift; break ;;
         --print-config)      PRINT_CONFIG=1; shift ;;
         --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
@@ -255,6 +283,7 @@ while [ $# -gt 0 ]; do
         # reach its prompt, and does not want that recorded as a preference
         # for the launch they run by hand tomorrow.
         --no-pause)          NO_PAUSE=1; shift ;;
+        --isolated)          DEJIMA_ISOLATED=1; shift ;;
         --no-log)            _set_override logging.loki_url ""
                              _set_override logging.conversation off
                              NO_LOG=1; shift ;;
@@ -286,6 +315,60 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
+
+# An isolated launch reaches no forge and is not told to push, unless this
+# command says otherwise.
+#
+# The flag narrows, like every other one here, and the forge credential is the
+# widest thing a session gets: a forge token is commonly account-wide rather
+# than per repository, so a session holding one can read and write everything
+# the operator can. Carrying that by default into the mode whose purpose is a
+# session you are not watching is the wrong way round - the host is narrowed
+# to nothing and the forge is left at full reach.
+#
+# Applied after the loop rather than in it, so `--isolated --forge <name>` and
+# `--forge <name> --isolated` agree: naming either on the same command line is
+# how an operator asks for a session that clones and opens a pull request,
+# which is a real use of this mode and not something to make impossible.
+#
+# A configured ssh key is untouched, because an isolated launch is not where
+# that requirement lives - so a session with no forge still holds a key that
+# can reach a host over ssh (#392). The forwarded agent is not in the same
+# position: the workflow this sets pushes nothing, and a workflow that never
+# pushes already gets no agent socket.
+#
+# Whether the operator named a forge, asked before the default below answers
+# for them: it decides the GitHub credential further down as well, and after
+# this block "is there an override" is true either way.
+DEJIMA_FORGE_NAMED=0
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    if _override_set core.forge; then
+        DEJIMA_FORGE_NAMED=1
+    else
+        _set_override core.forge none
+    fi
+    _override_set core.workflow || _set_override core.workflow local-only
+fi
+
+# Refused rather than dropped. A configured mount is a standing preference and
+# an isolated launch simply does not apply it, with a line saying so; --ro and
+# --rw are the operator typing a path in this command, and the only two honest
+# answers to "mount this, in a session that mounts nothing" are to refuse or
+# to contradict them.
+if [ "$DEJIMA_ISOLATED" = 1 ] && [ -n "$FLAG_MOUNTS" ]; then
+    echo "--isolated mounts nothing of the host, so it cannot take --ro or --rw:" >&2
+    # One per line, read rather than word-split: a path may contain a space,
+    # and the list is colon-separated precisely because it may not contain one
+    # of those.
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        printf '  %s\n' "$_m" >&2
+    done < <(printf '%s\n' "$FLAG_MOUNTS" | tr ':' '\n')
+    echo "" >&2
+    echo "Hand the session what it needs through ~/shared, which is the one" >&2
+    echo "directory an isolated session shares with you." >&2
+    exit 1
+fi
 
 # Wraps config_get so a flag wins over the file for the rest of this run.
 # Defined here rather than in the library because an override is a property
@@ -562,18 +645,35 @@ export DEJIMA_GITHUB_PUSH
 # AUDIT_DIR, BASELINE_DIR and SANDBOX_EXTRA_MOUNTS are pure config reads (or,
 # for WORKSPACE_DIR, a default-to-pwd with an existence check) - no side
 # effects a print-and-exit needs to avoid.
-WORKSPACE_DIR="${1:-$(pwd)}"
-if [ ! -d "$WORKSPACE_DIR" ]; then
-    echo "Not a directory: $WORKSPACE_DIR" >&2
-    exit 1
-fi
-shift || true
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    # Refused rather than ignored. A path here would be read as the project
+    # this session is for, and nothing afterwards would contradict that - the
+    # directory simply would not be there. The operator may be anywhere;
+    # saying so is the point of the flag.
+    if [ "$DEJIMA_ARGS_ONLY" = 0 ] && [ $# -gt 0 ]; then
+        echo "--isolated takes no project directory, and would not mount $1." >&2
+        echo "Run it from anywhere: the working directory is the container's own." >&2
+        exit 1
+    fi
+    # Container-local, and outside $HOME on purpose - a handful of host-side
+    # reads below take this path (an origin URL for the forge sentence, the
+    # self-hosting check), and a path an operator might plausibly have would
+    # have them read a real directory of theirs. Created in the image.
+    WORKSPACE_DIR=/dejima/work
+else
+    WORKSPACE_DIR="${1:-$(pwd)}"
+    if [ ! -d "$WORKSPACE_DIR" ]; then
+        echo "Not a directory: $WORKSPACE_DIR" >&2
+        exit 1
+    fi
+    shift || true
 
-if [ "${1:-}" = "--" ]; then
-    shift
-fi
+    if [ "${1:-}" = "--" ]; then
+        shift
+    fi
 
-WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+    WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+fi
 
 # Resolved here, with the workspace, rather than beside the other approval
 # reads further down: --print-briefing composes and exits well before those,
@@ -581,7 +681,29 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 # they decide. That is not hypothetical - the same ordering already caught
 # DEJIMA_RW_MOUNTS, whose sentence went missing from --print-briefing while
 # real sessions were told correctly.
-PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+#
+# Left empty for an isolated launch, and NOT resolved first and discarded:
+# resolve_project_store walks upwards from the path it is given, so a launch
+# from $HOME on a host whose dotfiles were once approved as a project would
+# find that project's store - and with it the domains it may reach and the
+# dependencies baked into its image. A directory the operator happens to be
+# standing in decides nothing here, which is most of what the flag means.
+#
+# Every project-scoped read below is already guarded on this being non-empty
+# - the corpus paragraph, the approved tools, the allowed domains, the
+# dependency layer - so one empty assignment covers all four.
+#
+# It is not the only thing covering them, and that is deliberate rather than
+# redundant. The working directory above is container-local, so even a
+# resolver call here would be asking about /dejima/work rather than about
+# wherever the operator was standing. Either of the two closes the leak on
+# its own, and they answer different questions: that one is about where the
+# session runs, this one about what it is entitled to. A test that reverses
+# both is in project.bats, because reversing either alone proves nothing.
+PROJECT_STORE=""
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+fi
 
 # Whether this project has been approved to keep its history as evidence, and
 # so gets the commit-granularity paragraph in its briefing.
@@ -645,11 +767,36 @@ unset _tools_wanted _tool
 
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
+
+# A [mounts] list as this launch should see it: every entry is a host path
+# that outlives the session, so an isolated launch gets none of them.
+#
+# Dropped rather than refused, unlike --ro and --rw. These are a standing
+# preference about ordinary work, written once and inherited by every launch;
+# refusing them would mean an operator with a [mounts] readonly line could
+# never use this flag at all. The notice below is what keeps that from being
+# silent, because a directory that is simply absent inside the container is
+# the least informative way to find out.
+_mounts_list() {
+    [ "$DEJIMA_ISOLATED" = 0 ] || return 0
+    config_get mounts "$1"
+}
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    _dropped=""
+    for _key in readonly read_write read_write_per_project; do
+        [ -n "$(config_get mounts "$_key")" ] || continue
+        _dropped="${_dropped:+$_dropped, }[mounts] $_key"
+    done
+    [ -z "$_dropped" ] \
+        || echo "Isolated: $_dropped not applied - nothing of the host is mounted." >&2
+    unset _dropped _key
+fi
+
 # Read before either guard runs, because what this list declares becomes
 # something the other two lists are refused for naming - see PP_PROJECT_ROOTS.
-SANDBOX_RW_PP_MOUNTS="$(config_get mounts read_write_per_project)"
+SANDBOX_RW_PP_MOUNTS="$(_mounts_list read_write_per_project)"
 
-SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+SANDBOX_EXTRA_MOUNTS="$(_mounts_list readonly)"
 SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
     ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
 
@@ -778,7 +925,8 @@ _guarded_stores() {
     [ ${#GUARDED_STORES[@]} -eq 0 ] || return 0
     GUARDED_STORES=("$(config_root)" "$AUDIT_DIR" "$BASELINE_DIR" \
                     "$(config_get epitaph dir)" \
-                    "$(share_projects_root "$(config_get core share_dir)")")
+                    "$(share_projects_root "$(config_get core share_dir)")" \
+                    "$(isolated_share_root "$(config_get core share_dir)")")
 }
 
 # The `projects` subdirectory of every read_write_per_project root: the
@@ -819,12 +967,12 @@ _refuse_guarded_mount() {
         echo "Refusing $kind: $path" >&2
         echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
         echo "Even read-only, that hands the session every project's approvals, the" >&2
-        echo "record of what earlier sessions were caught doing, or every project's" >&2
-        echo "handoff files." >&2
+        echo "record of what earlier sessions were caught doing, or the handoff files" >&2
+        echo "of every project and every isolated session." >&2
         exit 1
     done
 }
-SANDBOX_RW_MOUNTS="$(config_get mounts read_write)"
+SANDBOX_RW_MOUNTS="$(_mounts_list read_write)"
 SANDBOX_RW_MOUNTS="$(_append_mounts "$SANDBOX_RW_MOUNTS" \
     ${EXTRA_RW_FLAGS[@]+"${EXTRA_RW_FLAGS[@]}"})"
 RW_MOUNT_PATHS=()
@@ -1248,16 +1396,33 @@ fi
 # boundary ~/.claude is already sliced per project to hold. What the container
 # sees is still ~/shared, so nothing an agent has been told changes; what it
 # cannot see any more is another project's.
+#
+# An isolated launch gets one of its own instead, under a sibling root. Still
+# a real host directory, because handing a file back to the operator is the
+# one thing that mode keeps - but never the directory any other session had,
+# so it carries nothing in and nothing it is given reaches a later session.
+# The operator is told the path below, since there is no project name to find
+# it under.
 SANDBOX_SHARE_ROOT="$(config_get core share_dir)"
-SANDBOX_SHARE_DIR="$(share_dir_for "$SANDBOX_SHARE_ROOT" "$WORKSPACE_DIR")"
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    SANDBOX_SHARE_DIR="$(isolated_share_make "$SANDBOX_SHARE_ROOT")" || {
+        echo "Could not make an isolated share directory under $SANDBOX_SHARE_ROOT" >&2
+        exit 1
+    }
+else
+    SANDBOX_SHARE_DIR="$(share_dir_for "$SANDBOX_SHARE_ROOT" "$WORKSPACE_DIR")"
+fi
 mkdir -p "$SANDBOX_SHARE_DIR"
 
 # Files an operator left in share_dir before the split are still there and are
 # no longer mounted anywhere. Said every launch while that is true, because
 # the alternative is a file that was handed to a session yesterday silently
 # not arriving today.
+# Both roots dejima writes are excluded, not just the per-project one: the
+# question this answers is "did something other than dejima put this here",
+# and an isolated session's share is dejima's.
 share_loose="$(find "$SANDBOX_SHARE_ROOT" -mindepth 1 -maxdepth 1 \
-    ! -name projects -printf '%f\n' 2>/dev/null | sort)" || true
+    ! -name projects ! -name isolated -printf '%f\n' 2>/dev/null | sort)" || true
 if [ -n "$share_loose" ]; then
     echo "Note: $SANDBOX_SHARE_ROOT holds entries no session can see any more," >&2
     echo "      because ~/shared is now this project's own subdirectory of it:" >&2
@@ -1286,8 +1451,14 @@ unset share_loose _entry
 # Which directories those are is the harness's (harness_config_dirs); that
 # they must exist before the mount is set up is dejima's. Already loaded, up
 # where the read_write refusal needed them.
+#
+# Only the ones that will be mounted, which for an isolated launch is the
+# read-only half - see the mount loop further down, which filters the same
+# way. Creating the others would have an isolated launch leave four empty
+# directories on a host it is not supposed to write to at all.
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r _cdir _cmode _cscan <<< "$_rec"
+    [ "$DEJIMA_ISOLATED" = 0 ] || [ "$_cmode" = ro ] || continue
     mkdir -p "$_cdir"
 done
 
@@ -1409,6 +1580,9 @@ SANDBOX_FAKE_CREDENTIALS_FILE=""
 # something else on this host, which is a worse thing to get wrong than a file.
 SANDBOX_FILTER_CONTAINER=""
 SANDBOX_RUN_NETWORK=""
+# Same rule again, and `docker volume rm` is the third thing in this trap that
+# destroys something named rather than something mktemp'd.
+SANDBOX_ISOLATED_VOLUMES=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1630,6 +1804,19 @@ cleanup() {
     if [ -n "${SANDBOX_RUN_NETWORK:-}" ]; then
         docker network rm "$SANDBOX_RUN_NETWORK" >/dev/null 2>&1 || true
     fi
+    # The five volumes an isolated launch named for itself.
+    #
+    # What keeps them out of every other session is the name rather than this
+    # line: it carries this run's id and nothing else computes it, so a daemon
+    # that has gone away leaves volumes nobody can ask for. What this line is
+    # for is that they do not accumulate - one set per launch, and the
+    # working-directory volume among them holds everything the session cloned
+    # or wrote, with nothing else on the host to prune it.
+    if [ -n "${SANDBOX_ISOLATED_VOLUMES:-}" ]; then
+        # Deliberately unquoted - one name per word, all of them dejima's own.
+        # shellcheck disable=SC2086
+        docker volume rm $SANDBOX_ISOLATED_VOLUMES >/dev/null 2>&1 || true
+    fi
     exit_step "session ended - keeping what it compacted away"
     # Keep whatever the session compacted away, into a store nothing mounts.
     # `|| true` for the same reason every other line in this trap has it: a
@@ -1648,7 +1835,13 @@ cleanup() {
     # only ever suppresses, so a stale export makes epitaph quieter and never
     # louder, which is what makes it safe to honour from the environment at
     # all.
-    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+    #
+    # Nothing to keep for an isolated launch: an epitaph is read out of the
+    # transcript on the host, and that mode mounts none - so this would write
+    # an empty record keyed to a working directory that will never exist
+    # again. Said at launch rather than inferred from an empty store, and the
+    # same goes for the conversation shipper further down.
+    if [ "$DEJIMA_ISOLATED" = 0 ] && [ "$(config_get_bool epitaph enabled)" = "1" ]; then
         DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
             "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     fi
@@ -1666,7 +1859,14 @@ cleanup() {
     # HOST the session could have written, and for a per-project mount that is
     # the slice rather than the root it sits in. Naming the root would claim a
     # blast radius the per-project split exists to have narrowed.
-    DEJIMA_RW_MOUNTS="$DEJIMA_RW_SOURCES" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    #
+    # Not run for an isolated launch, which has no host-side surface for the
+    # audit to be about: its subject is the workspace's own files, and there
+    # is no workspace. The one thing such a session can write is ~/shared,
+    # and this never hashed that in any mode.
+    if [ "$DEJIMA_ISOLATED" = 0 ]; then
+        DEJIMA_RW_MOUNTS="$DEJIMA_RW_SOURCES" "$SCRIPT_DIR/dejima-audit" compare "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+    fi
     rm -f "$SANDBOX_AUDIT_STATE" || true
 }
 trap cleanup EXIT
@@ -1735,6 +1935,22 @@ done
 unset _git_field _git_value
 
 export WORKSPACE_DIR
+# The whole mount spec for the working directory, because the compose file
+# cannot build it from a source and a target: an isolated launch mounts no
+# host path there at all, and that is a spec with no colon in it rather than
+# an empty one.
+#
+# An isolated launch names the compose file's isolated-work volume, which
+# gets this run's own name below and is removed with the other four. A bare
+# target would have asked for an anonymous volume instead, which is just as
+# unreachable by another session but leaves the reaping to whatever `compose
+# run --rm` does with one - and an unreaped workspace volume holds everything
+# the session cloned, once per launch, with nothing to prune it.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    export SANDBOX_WORKSPACE_MOUNT="isolated-work:$WORKSPACE_DIR"
+else
+    export SANDBOX_WORKSPACE_MOUNT="$WORKSPACE_DIR:$WORKSPACE_DIR"
+fi
 # The image's user is built to match this uid/gid/username exactly (see
 # Dockerfile) - this is what makes $HOME-based absolute paths (dotfiles,
 # ~/.claude's plugin bookkeeping) resolve identically inside the container.
@@ -1897,6 +2113,27 @@ export SSH_AUTH_SOCK
 export SANDBOX_SSH_KEY_FILE="$SANDBOX_SSH_KEY"
 SSH_KNOWN_HOSTS="$(config_get core known_hosts)"; export SSH_KNOWN_HOSTS
 export GH_TOKEN="${GH_TOKEN:-}"
+# What the SESSION gets, which is not the same question as what the filter
+# container gets. GH_TOKEN above goes to the filter, where it authenticates
+# the GitHub ranges fetch - a request dejima makes about its own allowlist,
+# not something the session can reach - so that one crosses whatever the
+# session is trusted with.
+#
+# This is core's read-only GitHub credential, filled from [github] token_file
+# for every session whatever forge is selected. Read-only across an
+# operator's private repositories is still account-wide reach, so an isolated
+# launch does not get it: the mode's claim is that it carries no forge
+# credential, and that claim has to cover the one core fills in as well as
+# the one a forge declares.
+#
+# Unless the command named a forge, which is the operator saying this session
+# is meant to reach one. Then nothing here is narrowed and the selection
+# decides, exactly as for any other launch.
+SANDBOX_GH_TOKEN="$GH_TOKEN"
+if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$DEJIMA_FORGE_NAMED" = 0 ]; then
+    SANDBOX_GH_TOKEN=""
+fi
+export SANDBOX_GH_TOKEN
 export ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
 # The --allow-github-push flag and a selected forge whose hosts_allowlisted_by_core
 # says these are its own push hosts (see ALLOW_CORE_PUSH_GRANT above) are the
@@ -2527,6 +2764,19 @@ extra_mounts+=(-e "DEJIMA_FORGE_REPO_ENV=$DEJIMA_FORGE_REPO_ENV")
 mounted_dirs=""
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r dir mounted_mode mounted_scan <<< "$_rec"
+    # An isolated launch takes the read-only ones and none of the writable
+    # ones. The split is already in the declaration, so this filters on what
+    # the harness said rather than on a list of names kept here.
+    #
+    # The two halves answer differently. A read-only directory is the
+    # OPERATOR's - their hooks, skills and commands - and a session cannot
+    # write to it, so nothing it holds came from an earlier session and
+    # nothing this one does will reach a later one. The writable ones are
+    # shared state every project's sessions append to (#380), which is the
+    # channel this mode exists to close.
+    if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$mounted_mode" != ro ]; then
+        continue
+    fi
     emit_mount "$dir" "$mounted_mode"
     [ "$mounted_scan" = scan ] || continue
     [ -d "$dir" ] || continue
@@ -2669,7 +2919,15 @@ fi
 # harness plugin, which declares each mount through emit_mount. The guarded-
 # store refusal runs there, at the point of declaration, rather than being
 # something each plugin has to remember. See bin/dejima-harness-lib.sh.
-harness_hook harness_state_mounts "$WORKSPACE_DIR"
+#
+# Not called at all for an isolated launch, which is both halves of what that
+# mode needs here: this hook is what mounts the transcripts and the memory
+# under ~/.claude/projects, and it CREATES the directory for the workspace's
+# own slug before mounting it. Skipping the call is therefore also what stops
+# an isolated launch leaving a directory on the host.
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    harness_hook harness_state_mounts "$WORKSPACE_DIR"
+fi
 
 # statusline.sh is executed on the host by Claude Code (settings.json's
 # statusLine.command), so it is staged for entrypoint.sh to copy rather than
@@ -3092,7 +3350,17 @@ if remote_enabled; then
     # exists, so it covers the whole build, and it stops being true at exactly
     # the moment the EXIT trap below stops being able to run.
     {
-        printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        # `dejima-attach --list` shows this column as a basename, which for an
+        # isolated launch would be "work" - the name of dejima's own scratch
+        # path rather than anything about the session. Same substitution the
+        # startup banner makes, and for the same reason. What tells two
+        # concurrent isolated sessions apart is the run id beside it, which
+        # that listing already prints.
+        if [ "$DEJIMA_ISOLATED" = 1 ]; then
+            printf 'workspace=isolated\n'
+        else
+            printf 'workspace=%s\n' "$WORKSPACE_DIR"
+        fi
         printf 'pane=%s\n' "${TMUX_PANE:-}"
         printf 'label=%s\n' "$dejima_tmux_label"
         printf 'started=%s\n' "$(date +%s)"
@@ -3179,8 +3447,16 @@ startup_banner() {
     # C_BADGE, the same name the pickers set the mark in. Two surfaces
     # spelling the wordmark two different colours is the drift a shared
     # palette exists to stop.
+    local name
+    # The working directory's basename would be "work" here, which names
+    # dejima's own scratch path rather than anything about the launch.
+    if [ "$DEJIMA_ISOLATED" = 1 ]; then
+        name="isolated"
+    else
+        name="$(basename -- "$WORKSPACE_DIR")"
+    fi
     printf '\n  %sdejima%s  %s%s%s' \
-        "$C_BADGE" "$C_RESET" "$C_KEY" "$(basename -- "$WORKSPACE_DIR")" "$C_RESET" >&2
+        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" >&2
     [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
     printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
         "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \
@@ -3192,6 +3468,21 @@ startup_banner() {
         "$C_DIM" "$C_RESET" "$epitaph" >&2
 }
 startup_banner
+
+# Printed whatever [ui] banner says and whether or not stderr is a terminal,
+# unlike the banner above: the share path is the only route back to anything
+# this session hands over, and the two features it does without are ones an
+# operator would otherwise go looking for afterwards and find empty.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    printf '\n  %sisolated%s  no project mounted, no memory, no transcript;\n' \
+        "${C_KEY:-}" "${C_RESET:-}" >&2
+    printf '            conversation log and epitaph off - both read one\n' >&2
+    printf '  %sforge%s     %s   %sworkflow%s %s\n' \
+        "${C_DIM:-}" "${C_RESET:-}" "$DEJIMA_FORGE_NAME" \
+        "${C_DIM:-}" "${C_RESET:-}" "$DEJIMA_WORKFLOW_NAME" >&2
+    printf '  %sshared%s    %s\n' "${C_DIM:-}" "${C_RESET:-}" "$SANDBOX_SHARE_DIR" >&2
+    printf '            the only thing that outlives this session\n' >&2
+fi
 
 printf '\n%sdejima%s is starting, please wait...\n' "$C_KEY" "$C_RESET" >&2
 printf '%sA first run builds the container image, which takes several minutes.%s\n' \
@@ -3247,7 +3538,11 @@ fi
 
 # Snapshot host-persistence surfaces so the post-run audit can report
 # anything that changed while this session ran (advisory - see bin/dejima-audit).
-"$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+# Paired with the compare in cleanup(), which states why an isolated launch
+# does neither.
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    "$SCRIPT_DIR/dejima-audit" snapshot "$WORKSPACE_DIR" "$SANDBOX_AUDIT_STATE" || true
+fi
 
 # When the sandbox is pointed at its own repo, its TCB (bin/, hooks/,
 # docker/, install.sh, test/) is mounted writable - warn, and the audit
@@ -3399,10 +3694,34 @@ export SANDBOX_IMAGE
 #
 # The prefix is not decoration: project_slug maps a leading `/` to `-`, and
 # a Docker volume name may not start with one.
-_nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
-export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"
-export SANDBOX_NVIM_STATE="dejima_nvim-state${_nvim_volume_slug}"
-export SANDBOX_NVIM_CACHE="dejima_nvim-cache${_nvim_volume_slug}"
+#
+# Per RUN rather than per project for an isolated launch, along with the shell
+# history - which is shared by every project even when these are not, so it is
+# otherwise the one surface where an isolated session reads what was typed in
+# any session before it. Every isolated launch has the same working
+# directory, so a slug would give them all the same four volumes and put back
+# exactly the thing described above.
+#
+# The run id is what makes them unreachable: no other launch computes that
+# name, so no other session can ask for these volumes whether or not the
+# removal in cleanup() gets to run.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    export SANDBOX_NVIM_DATA="dejima_isolated-nvim-data-$DEJIMA_RUN_ID"
+    export SANDBOX_NVIM_STATE="dejima_isolated-nvim-state-$DEJIMA_RUN_ID"
+    export SANDBOX_NVIM_CACHE="dejima_isolated-nvim-cache-$DEJIMA_RUN_ID"
+    export SANDBOX_BASH_HISTORY="dejima_isolated-bashhistory-$DEJIMA_RUN_ID"
+    # The working directory, which is a volume rather than a host path here -
+    # see SANDBOX_WORKSPACE_MOUNT above. It is the one of the five that holds
+    # whatever the session actually did, so it is the one that most needs
+    # removing rather than merely being unreachable.
+    export SANDBOX_ISOLATED_WORK="dejima_isolated-work-$DEJIMA_RUN_ID"
+    SANDBOX_ISOLATED_VOLUMES="$SANDBOX_NVIM_DATA $SANDBOX_NVIM_STATE $SANDBOX_NVIM_CACHE $SANDBOX_BASH_HISTORY $SANDBOX_ISOLATED_WORK"
+else
+    _nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
+    export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"
+    export SANDBOX_NVIM_STATE="dejima_nvim-state${_nvim_volume_slug}"
+    export SANDBOX_NVIM_CACHE="dejima_nvim-cache${_nvim_volume_slug}"
+fi
 
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.
@@ -3710,7 +4029,14 @@ compose_status=0
 # Gated here as well as inside the shipper, which checks the same two keys for
 # itself: --no-conversation and --no-log are overrides held in this process,
 # and the shipper re-reads the config rather than inheriting them.
-if [ "$(config_get_bool logging conversation)" = "1" ] &&
+#
+# And not at all for an isolated launch. The shipper tails a transcript that
+# is on the host because the harness's state directory is mounted, and that
+# mode mounts none - so what it would ship is nothing, from a file that is
+# never created. Said at launch instead, because a log that is quietly empty
+# is worse than one the operator knows they are not getting.
+if [ "$DEJIMA_ISOLATED" = 0 ] &&
+   [ "$(config_get_bool logging conversation)" = "1" ] &&
    [ -n "$(config_get logging loki_url)" ]; then
     "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
     SANDBOX_CONVERSATION_SHIP_PID=$!
