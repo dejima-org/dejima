@@ -228,11 +228,12 @@ services:
       #
       # One variable holding the whole spec rather than a source and a target,
       # because `--isolated` has to mount no host path here at all and an
-      # entry in this list cannot be left empty. There it is the bare target,
-      # which Docker reads as an anonymous volume: container-local, and not
-      # reachable by any other session whether or not `--rm` reaps it.
-      # bin/dejima always sets it - ordinarily to the project directory at its
-      # own path, for the keying reason above.
+      # entry in this list cannot be left empty. There it names the
+      # isolated-work volume below, which bin/dejima gives this run's own name
+      # and removes afterwards - the same rule as the other four, rather than
+      # an anonymous volume whose reaping depends on what `compose run --rm`
+      # does with one. bin/dejima always sets it: ordinarily to the project
+      # directory at its own path, for the keying reason above.
       - ${SANDBOX_WORKSPACE_MOUNT:?set by bin/dejima - the project directory, or a container-local path for --isolated}
       # ~/.claude is enumerated, never mounted whole. A single-file bind
       # mount is pinned to the dentry at its path, so a host-side rename -
@@ -348,6 +349,11 @@ volumes:
   #
   # The defaults reproduce the previous names exactly, so a `docker compose`
   # invocation that bypasses bin/dejima behaves as it did.
+  # The working directory of an `--isolated` launch, which mounts no host
+  # path there. Referenced only when the workspace mount above names it, so
+  # an ordinary launch neither uses nor creates it.
+  isolated-work:
+    name: ${SANDBOX_ISOLATED_WORK:-dejima_isolated-work}
   nvim-data:
     name: ${SANDBOX_NVIM_DATA:-dejima_nvim-data}
   nvim-state:

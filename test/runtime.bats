@@ -476,6 +476,11 @@ teardown() {
                  --format '{{.Names}}' 2>/dev/null)
     docker images -q "localhost/dejima-test-*:$suffix" 2>/dev/null \
         | xargs -r docker rmi -f >/dev/null 2>&1 || true
+    # Volumes too, for the same reason and in the same namespace: a test that
+    # makes one removes it itself, and this is what covers the run that was
+    # interrupted between the two.
+    docker volume ls -q --filter "name=^dejima-test-.*$suffix\$" 2>/dev/null \
+        | xargs -r docker volume rm >/dev/null 2>&1 || true
 }
 
 # The capability list bin/dejima gives the filter container, read out of the
@@ -2696,38 +2701,42 @@ EOF
     [[ "$output" != *"remote access is enabled"* ]]
 }
 
-@test "an isolated launch's working directory is a volume no host path is behind" {
-    # The one thing about --isolated that a confined test cannot decide. The
-    # launcher hands compose a mount spec with no colon in it, which asks
-    # Docker for an anonymous volume at that path - and what the confined
-    # suite can check is that the spec is built, not that Docker reads it the
-    # way the design assumes.
+@test "an isolated launch's working directory is a volume the session user owns" {
+    # The one thing about --isolated that a confined test cannot decide: that
+    # the directory the launcher points a session at is usable. A volume at a
+    # path the image created is seeded from it, ownership included, and if
+    # that did not hold the session would start in a directory root owns and
+    # fail on its first write.
     #
-    # Two claims, and only the first is the guarantee. That the directory is
-    # writable by the session user and backed by no host path is what makes it
-    # a working directory at all. That `--rm` reaps the volume afterwards is
-    # tidiness: the name is random and no launch computes it, so an unreaped
-    # one is unreachable rather than shared.
-    local before after
-    before="$(docker volume ls -q | wc -l)"
+    # The volume is named for the run by bin/dejima and removed in its exit
+    # trap, both of which the confined suite checks against the launcher. So
+    # this does not re-check the reaping, and deliberately does not count the
+    # host's volumes before and after: another job on a shared runner creating
+    # one between the two reads would fail a test about something else
+    # entirely.
+    local vol="dejima-test-work-$(basename "$BATS_RUN_TMPDIR")"
+    docker volume create "$vol" >/dev/null
 
-    run docker run --rm -v /dejima/work --entrypoint sh "$SESSION_IMAGE" -c \
-        'cd /dejima/work && touch marker && stat -c "%U %a" /dejima/work'
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == "node "* ]] \
-        || { echo "the working directory is not the session user's: $output"; return 1; }
+    run docker run --rm -v "$vol:/dejima/work" --entrypoint sh "$SESSION_IMAGE" -c \
+        'cd /dejima/work && touch marker && stat -c "%U" /dejima/work'
+    if [ "$status" -ne 0 ] || [ "$output" != node ]; then
+        docker volume rm "$vol" >/dev/null 2>&1 || true
+        echo "the working directory is not writable by the session user: $output"
+        return 1
+    fi
 
-    # Nothing of the host is behind it: a second container at the same path
-    # gets its own empty volume rather than the first one's contents.
-    run docker run --rm -v /dejima/work --entrypoint sh "$SESSION_IMAGE" -c \
+    # And nothing of the host is behind it, which is the claim the mode rests
+    # on: a second volume at the same path starts empty rather than carrying
+    # what the first container wrote.
+    local other="$vol-second"
+    docker volume create "$other" >/dev/null
+    run docker run --rm -v "$other:/dejima/work" --entrypoint sh "$SESSION_IMAGE" -c \
         'ls -A /dejima/work'
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ -z "$output" ] \
-        || { echo "a second container saw the first one's files: $output"; return 1; }
-
-    after="$(docker volume ls -q | wc -l)"
-    [ "$after" -le "$before" ] \
-        || { echo "--rm left $((after - before)) anonymous volume(s) behind"; return 1; }
+    local rc="$status" out="$output"
+    docker volume rm "$vol" "$other" >/dev/null 2>&1 || true
+    [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
+    [ -z "$out" ] \
+        || { echo "a second session's working directory was not empty: $out"; return 1; }
 }
 
 @test "the git shadow loads its policy in the image, and leaves other git commands alone" {

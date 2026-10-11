@@ -1757,10 +1757,14 @@ cleanup() {
     if [ -n "${SANDBOX_RUN_NETWORK:-}" ]; then
         docker network rm "$SANDBOX_RUN_NETWORK" >/dev/null 2>&1 || true
     fi
-    # The four volumes an isolated launch named for itself. Tidiness rather
-    # than the guarantee: what keeps them out of every other session is that
-    # the name carries this run's id and nothing else computes it, so a
-    # daemon that has gone away leaves volumes nobody can ask for.
+    # The five volumes an isolated launch named for itself.
+    #
+    # What keeps them out of every other session is the name rather than this
+    # line: it carries this run's id and nothing else computes it, so a daemon
+    # that has gone away leaves volumes nobody can ask for. What this line is
+    # for is that they do not accumulate - one set per launch, and the
+    # working-directory volume among them holds everything the session cloned
+    # or wrote, with nothing else on the host to prune it.
     if [ -n "${SANDBOX_ISOLATED_VOLUMES:-}" ]; then
         # Deliberately unquoted - one name per word, all of them dejima's own.
         # shellcheck disable=SC2086
@@ -1889,12 +1893,14 @@ export WORKSPACE_DIR
 # host path there at all, and that is a spec with no colon in it rather than
 # an empty one.
 #
-# The bare target is how Docker is asked for an anonymous volume - a name
-# nothing else holds, seeded from the empty directory the image already has
-# there. Nothing of the host is behind it, which is the whole claim; whether
-# `--rm` reaps it afterwards decides only whether it is tidy.
+# An isolated launch names the compose file's isolated-work volume, which
+# gets this run's own name below and is removed with the other four. A bare
+# target would have asked for an anonymous volume instead, which is just as
+# unreachable by another session but leaves the reaping to whatever `compose
+# run --rm` does with one - and an unreaped workspace volume holds everything
+# the session cloned, once per launch, with nothing to prune it.
 if [ "$DEJIMA_ISOLATED" = 1 ]; then
-    export SANDBOX_WORKSPACE_MOUNT="$WORKSPACE_DIR"
+    export SANDBOX_WORKSPACE_MOUNT="isolated-work:$WORKSPACE_DIR"
 else
     export SANDBOX_WORKSPACE_MOUNT="$WORKSPACE_DIR:$WORKSPACE_DIR"
 fi
@@ -3623,7 +3629,12 @@ if [ "$DEJIMA_ISOLATED" = 1 ]; then
     export SANDBOX_NVIM_STATE="dejima_isolated-nvim-state-$DEJIMA_RUN_ID"
     export SANDBOX_NVIM_CACHE="dejima_isolated-nvim-cache-$DEJIMA_RUN_ID"
     export SANDBOX_BASH_HISTORY="dejima_isolated-bashhistory-$DEJIMA_RUN_ID"
-    SANDBOX_ISOLATED_VOLUMES="$SANDBOX_NVIM_DATA $SANDBOX_NVIM_STATE $SANDBOX_NVIM_CACHE $SANDBOX_BASH_HISTORY"
+    # The working directory, which is a volume rather than a host path here -
+    # see SANDBOX_WORKSPACE_MOUNT above. It is the one of the five that holds
+    # whatever the session actually did, so it is the one that most needs
+    # removing rather than merely being unreachable.
+    export SANDBOX_ISOLATED_WORK="dejima_isolated-work-$DEJIMA_RUN_ID"
+    SANDBOX_ISOLATED_VOLUMES="$SANDBOX_NVIM_DATA $SANDBOX_NVIM_STATE $SANDBOX_NVIM_CACHE $SANDBOX_BASH_HISTORY $SANDBOX_ISOLATED_WORK"
 else
     _nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
     export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"

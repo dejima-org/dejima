@@ -1327,14 +1327,20 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     # a target would have to be two variables and neither can be empty. No
     # colon is what asks Docker for an anonymous volume.
     local spec; spec="$(launched_env SANDBOX_WORKSPACE_MOUNT)"
-    [ "$spec" = /dejima/work ] \
-        || { echo "the workspace mount is $spec, not a container-local path"; return 1; }
-    case "$spec" in
-        *:*) echo "the workspace mount names a host path: $spec"; return 1 ;;
-    esac
+    [ "$spec" = "isolated-work:/dejima/work" ] \
+        || { echo "the workspace mount is $spec, not the container-local volume"; return 1; }
     [ "$(launched_env WORKSPACE_DIR)" = /dejima/work ]
 
     # And the ordinary case still mounts the project at its own path, so the
+    # Whatever the source is, it must not be a path: a source starting with /
+    # is a bind mount, which is the one thing this mode cannot have here.
+    case "${spec%%:*}" in
+        /*) echo "the workspace mount names a host path: $spec"; return 1 ;;
+    esac
+
+    # That the volume it names is this run's own, and is removed afterwards,
+    # belongs to the test below with the other four.
+
     # assertion above cannot pass by the variable having stopped working.
     run launch "$PROJ"
     [ "$status" -eq 0 ]
@@ -1448,11 +1454,11 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run launch --isolated
     [ "$status" -eq 0 ]
 
-    # The shell-history volume is the sharp one: it is shared by every
+    # Two are sharper than the rest. The shell history is shared by every
     # project even when the nvim ones are not, so under its usual name an
     # isolated session reads what was typed in any session before it.
     local v names=""
-    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY; do
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY SANDBOX_ISOLATED_WORK; do
         names="$names $(launched_env "$v")"
         [[ "$(launched_env "$v")" == dejima_isolated-* ]] \
             || { echo "$v is not this run's own: $(launched_env "$v")"; return 1; }
@@ -1466,7 +1472,7 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     run launch --isolated
     [ "$status" -eq 0 ]
     names=""
-    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY; do
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY SANDBOX_ISOLATED_WORK; do
         names="$names $(launched_env "$v")"
     done
     [ "$before" != "$names" ] \
