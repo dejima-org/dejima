@@ -34,7 +34,9 @@ than the thing inferred from silence.
   to [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener).
   Run on a laptop with no VM layer, the row below the container is the
   operator's own machine, and dejima has nothing to say about it. See
-  [Which deployment this describes](threat-model.md#which-deployment-this-describes).
+  [Which deployment this describes](threat-model.md#which-deployment-this-describes),
+  and [Using dejima on its own](threat-model.md#using-dejima-on-its-own) for
+  what still holds there and what to do about the rest.
 - **Anything finer than a session.** The unit of isolation is one container for
   one session. An MCP server, a hook, or a tool the session runs inherits the
   session's whole reach - dejima reports that a session *added* an MCP server
