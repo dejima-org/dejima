@@ -1112,51 +1112,31 @@ own files. If you want either back in this mode, that is
 record rather than the agent's, and neither ever reaches a future session.
 
 **No forge, unless you name one on the same command.** `--isolated` sets
-`[core] forge` to `none` and `[core] workflow` to `local-only` for that
-launch. The forge credential is the widest thing a session gets - a Gitea
-token is account-wide, so a session holding one can read and write every
-repository you can - and carrying that by default into the mode whose purpose
-is a session you are not watching would narrow the host to nothing while
-leaving the forge at full reach.
-
-Naming either on the same line is how you ask for a session that clones and
-opens a pull request, which is a real use of this mode:
+`[core] forge` to `none` and `[core] workflow` to `local-only` for that launch,
+and withholds `[github] token_file` with them. Naming either is how you ask for
+a session that clones and opens a pull request, which is a real use of this
+mode:
 
 ```sh
 dejima --isolated                                       # no forge, pushes nothing
 dejima --isolated --forge gitea --workflow worktree-pr   # clones, pushes, opens a PR
 ```
 
-Order does not matter: `--forge gitea --isolated` means the same thing.
+Order does not matter: `--forge gitea --isolated` means the same thing, and
+naming a forge brings the credentials back with it.
 
-**`[github] token_file` is withheld too**, which is easy to miss because it is
-not a forge setting. That read-only PAT crosses for every ordinary session
-whatever forge is selected, and read-only across your *private* repositories
-is still account-wide reach - so an isolated launch that named no forge does
-not get it either. Naming a forge brings it back with everything else.
-
-The filter container still receives it, because that is what authenticates
-dejima's own fetch of GitHub's address ranges. That request is about the
-allowlist and is made where the session cannot reach it.
-
-**Your forwarded agent is not mounted. A configured key still is.** Those are
-opposite answers and the difference matters. A workflow that never pushes gets
-no agent socket forwarded, and `local-only` is such a workflow - so the
-personal identities in your own `ssh-agent` stay outside an isolated
-container. An `[identity] ssh_key`, though, is mounted and loaded into an
-agent of the container's own whatever the workflow, so an isolated session
-with no forge still holds a key that can reach a host over ssh.
-
+The table above is the whole of what crosses. Two rows surprise people:
+`[github] token_file` is withheld even though it is not a forge setting, and
+an `[identity] ssh_key` is mounted even though the forwarded agent is not -
+so a session with no forge still holds a key that can reach a host over ssh.
 Withholding that key too, for any launch whose workflow never pushes, is
-[#392](https://gitbox.branderson.io/dejima/dejima/issues/392) - the same
-reasoning that already withdraws the agent, and a question wider than this
-flag.
+[#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
 
-**It is not a stronger sandbox.** The firewall, the credential boundary and the
-capability drops are exactly what they are for every other session. What
-changes is what the session can read of your machine, what it can leave
-behind, and what credential it carries - not what it could do with a container
-escape.
+**Why each of those is the way it is**, and why this is a narrower blast
+radius rather than a stronger sandbox, is in
+[docs/security.md](security.md#a-session-with-no-project-mounted). Worth
+reading before using this for anything you would not run against your own
+checkout.
 
 ## Reading what a session left behind
 
