@@ -230,6 +230,14 @@ RUN mkdir -p $SANDBOX_HOME/.ssh && \
   chown $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
   chmod 700 $SANDBOX_HOME/.ssh
 
+# The working directory an isolated session gets instead of a project mount.
+# Outside $SANDBOX_HOME on purpose: bin/dejima still reads this path on the
+# HOST for a few things (an origin URL, a self-hosting check), so a path the
+# operator might plausibly have - ~/work - would have those read a real
+# directory of theirs. Nothing on a host is at /dejima.
+RUN mkdir -p /dejima/work && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /dejima
+
 # Pre-create the nvim data/state/cache dirs owned by the sandbox user,
 # since they're mounted as named volumes in docker-compose.yml: Docker
 # seeds a fresh named volume from whatever already exists at the mount

@@ -225,7 +225,15 @@ services:
       # fixed /workspace) so Claude Code's project/session-history keying
       # (based on cwd) lines up with the host, letting a session started
       # here be resumed on the host with `claude --resume`.
-      - ${WORKSPACE_DIR:?set WORKSPACE_DIR to the project directory to mount}:${WORKSPACE_DIR}
+      #
+      # One variable holding the whole spec rather than a source and a target,
+      # because `--isolated` has to mount no host path here at all and an
+      # entry in this list cannot be left empty. There it is the bare target,
+      # which Docker reads as an anonymous volume: container-local, and not
+      # reachable by any other session whether or not `--rm` reaps it.
+      # bin/dejima always sets it - ordinarily to the project directory at its
+      # own path, for the keying reason above.
+      - ${SANDBOX_WORKSPACE_MOUNT:?set by bin/dejima - the project directory, or a container-local path for --isolated}
       # ~/.claude is enumerated, never mounted whole. A single-file bind
       # mount is pinned to the dentry at its path, so a host-side rename -
       # a sync daemon, or Claude Code's own atomic writes - unlinks it, the

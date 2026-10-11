@@ -50,12 +50,12 @@ Options (each overrides the config file for one launch only):
   --no-epitaph            keep nothing if this session compacts
   --no-firewall           disable the egress firewall entirely (debugging only)
   --no-pause              do not wait for a keypress before the image build
+  --isolated              no project, no memory, nothing kept but ~/shared
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
   -h, --help              this message
 
-Every --no-* flag only ever narrows. Nothing here turns a setting back on: a
-config that says off is a decision, not a default to override in passing.
+Every --no-* flag only ever narrows; a config that says off is a decision.
 
 Config lives in ~/.config/dejima/config; [core] harness must be set there.
 DEJIMA_HELP
@@ -236,9 +236,24 @@ NO_LOG=0
 # Launch-scoped, like NO_LOG: initialised here so an inherited environment
 # variable of the same name cannot decide it.
 NO_PAUSE=0
+# A session with nothing before it and nothing after it: no project mounted,
+# no memory, no transcript, and a ~/shared of its own that no other session
+# has written to or will read. What survives it is that directory and the
+# branches it pushed.
+#
+# A flag and no config key, deliberately. Every other narrowing here has a
+# [section] key behind it because a machine can sensibly prefer it always;
+# this one changes what the session IS rather than how much it may do, and a
+# file that silently decided it would make the next launch's answer to "where
+# is my work" depend on a line nobody reread.
+DEJIMA_ISOLATED=0
+# Whether the operator wrote `--`, so an isolated launch can tell a project
+# path it must refuse from harness arguments it must pass through. Both arrive
+# here as positionals once the loop breaks.
+DEJIMA_ARGS_ONLY=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --) shift; break ;;
+        --) DEJIMA_ARGS_ONLY=1; shift; break ;;
         --print-config)      PRINT_CONFIG=1; shift ;;
         --print-briefing)    PRINT_BRIEFING=1; shift ;;
         --no-firewall)       _set_override core.firewall off; shift ;;
@@ -255,6 +270,7 @@ while [ $# -gt 0 ]; do
         # reach its prompt, and does not want that recorded as a preference
         # for the launch they run by hand tomorrow.
         --no-pause)          NO_PAUSE=1; shift ;;
+        --isolated)          DEJIMA_ISOLATED=1; shift ;;
         --no-log)            _set_override logging.loki_url ""
                              _set_override logging.conversation off
                              NO_LOG=1; shift ;;
@@ -286,6 +302,26 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
+
+# Refused rather than dropped. A configured mount is a standing preference and
+# an isolated launch simply does not apply it, with a line saying so; --ro and
+# --rw are the operator typing a path in this command, and the only two honest
+# answers to "mount this, in a session that mounts nothing" are to refuse or
+# to contradict them.
+if [ "$DEJIMA_ISOLATED" = 1 ] && [ -n "$FLAG_MOUNTS" ]; then
+    echo "--isolated mounts nothing of the host, so it cannot take --ro or --rw:" >&2
+    # One per line, read rather than word-split: a path may contain a space,
+    # and the list is colon-separated precisely because it may not contain one
+    # of those.
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        printf '  %s\n' "$_m" >&2
+    done < <(printf '%s\n' "$FLAG_MOUNTS" | tr ':' '\n')
+    echo "" >&2
+    echo "Hand the session what it needs through ~/shared, which is the one" >&2
+    echo "directory an isolated session shares with you." >&2
+    exit 1
+fi
 
 # Wraps config_get so a flag wins over the file for the rest of this run.
 # Defined here rather than in the library because an override is a property
@@ -562,18 +598,35 @@ export DEJIMA_GITHUB_PUSH
 # AUDIT_DIR, BASELINE_DIR and SANDBOX_EXTRA_MOUNTS are pure config reads (or,
 # for WORKSPACE_DIR, a default-to-pwd with an existence check) - no side
 # effects a print-and-exit needs to avoid.
-WORKSPACE_DIR="${1:-$(pwd)}"
-if [ ! -d "$WORKSPACE_DIR" ]; then
-    echo "Not a directory: $WORKSPACE_DIR" >&2
-    exit 1
-fi
-shift || true
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    # Refused rather than ignored. A path here would be read as the project
+    # this session is for, and nothing afterwards would contradict that - the
+    # directory simply would not be there. The operator may be anywhere;
+    # saying so is the point of the flag.
+    if [ "$DEJIMA_ARGS_ONLY" = 0 ] && [ $# -gt 0 ]; then
+        echo "--isolated takes no project directory, and would not mount $1." >&2
+        echo "Run it from anywhere: the working directory is the container's own." >&2
+        exit 1
+    fi
+    # Container-local, and outside $HOME on purpose - a handful of host-side
+    # reads below take this path (an origin URL for the forge sentence, the
+    # self-hosting check), and a path an operator might plausibly have would
+    # have them read a real directory of theirs. Created in the image.
+    WORKSPACE_DIR=/dejima/work
+else
+    WORKSPACE_DIR="${1:-$(pwd)}"
+    if [ ! -d "$WORKSPACE_DIR" ]; then
+        echo "Not a directory: $WORKSPACE_DIR" >&2
+        exit 1
+    fi
+    shift || true
 
-if [ "${1:-}" = "--" ]; then
-    shift
-fi
+    if [ "${1:-}" = "--" ]; then
+        shift
+    fi
 
-WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+    WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
+fi
 
 # Resolved here, with the workspace, rather than beside the other approval
 # reads further down: --print-briefing composes and exits well before those,
@@ -581,7 +634,29 @@ WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd)"
 # they decide. That is not hypothetical - the same ordering already caught
 # DEJIMA_RW_MOUNTS, whose sentence went missing from --print-briefing while
 # real sessions were told correctly.
-PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+#
+# Left empty for an isolated launch, and NOT resolved first and discarded:
+# resolve_project_store walks upwards from the path it is given, so a launch
+# from $HOME on a host whose dotfiles were once approved as a project would
+# find that project's store - and with it the domains it may reach and the
+# dependencies baked into its image. A directory the operator happens to be
+# standing in decides nothing here, which is most of what the flag means.
+#
+# Every project-scoped read below is already guarded on this being non-empty
+# - the corpus paragraph, the approved tools, the allowed domains, the
+# dependency layer - so one empty assignment covers all four.
+#
+# It is not the only thing covering them, and that is deliberate rather than
+# redundant. The working directory above is container-local, so even a
+# resolver call here would be asking about /dejima/work rather than about
+# wherever the operator was standing. Either of the two closes the leak on
+# its own, and they answer different questions: that one is about where the
+# session runs, this one about what it is entitled to. A test that reverses
+# both is in project.bats, because reversing either alone proves nothing.
+PROJECT_STORE=""
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    PROJECT_STORE="$(resolve_project_store "$WORKSPACE_DIR")"
+fi
 
 # Whether this project has been approved to keep its history as evidence, and
 # so gets the commit-granularity paragraph in its briefing.
@@ -1735,6 +1810,20 @@ done
 unset _git_field _git_value
 
 export WORKSPACE_DIR
+# The whole mount spec for the working directory, because the compose file
+# cannot build it from a source and a target: an isolated launch mounts no
+# host path there at all, and that is a spec with no colon in it rather than
+# an empty one.
+#
+# The bare target is how Docker is asked for an anonymous volume - a name
+# nothing else holds, seeded from the empty directory the image already has
+# there. Nothing of the host is behind it, which is the whole claim; whether
+# `--rm` reaps it afterwards decides only whether it is tidy.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    export SANDBOX_WORKSPACE_MOUNT="$WORKSPACE_DIR"
+else
+    export SANDBOX_WORKSPACE_MOUNT="$WORKSPACE_DIR:$WORKSPACE_DIR"
+fi
 # The image's user is built to match this uid/gid/username exactly (see
 # Dockerfile) - this is what makes $HOME-based absolute paths (dotfiles,
 # ~/.claude's plugin bookkeeping) resolve identically inside the container.
