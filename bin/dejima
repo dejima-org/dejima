@@ -720,11 +720,36 @@ unset _tools_wanted _tool
 
 AUDIT_DIR="$(config_get audit dir)"
 BASELINE_DIR="$(config_get audit baselines_dir)"
+
+# A [mounts] list as this launch should see it: every entry is a host path
+# that outlives the session, so an isolated launch gets none of them.
+#
+# Dropped rather than refused, unlike --ro and --rw. These are a standing
+# preference about ordinary work, written once and inherited by every launch;
+# refusing them would mean an operator with a [mounts] readonly line could
+# never use this flag at all. The notice below is what keeps that from being
+# silent, because a directory that is simply absent inside the container is
+# the least informative way to find out.
+_mounts_list() {
+    [ "$DEJIMA_ISOLATED" = 0 ] || return 0
+    config_get mounts "$1"
+}
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    _dropped=""
+    for _key in readonly read_write read_write_per_project; do
+        [ -n "$(config_get mounts "$_key")" ] || continue
+        _dropped="${_dropped:+$_dropped, }[mounts] $_key"
+    done
+    [ -z "$_dropped" ] \
+        || echo "Isolated: $_dropped not applied - nothing of the host is mounted." >&2
+    unset _dropped _key
+fi
+
 # Read before either guard runs, because what this list declares becomes
 # something the other two lists are refused for naming - see PP_PROJECT_ROOTS.
-SANDBOX_RW_PP_MOUNTS="$(config_get mounts read_write_per_project)"
+SANDBOX_RW_PP_MOUNTS="$(_mounts_list read_write_per_project)"
 
-SANDBOX_EXTRA_MOUNTS="$(config_get mounts readonly)"
+SANDBOX_EXTRA_MOUNTS="$(_mounts_list readonly)"
 SANDBOX_EXTRA_MOUNTS="$(_append_mounts "$SANDBOX_EXTRA_MOUNTS" \
     ${EXTRA_RO_FLAGS[@]+"${EXTRA_RO_FLAGS[@]}"})"
 
@@ -1361,8 +1386,14 @@ unset share_loose _entry
 # Which directories those are is the harness's (harness_config_dirs); that
 # they must exist before the mount is set up is dejima's. Already loaded, up
 # where the read_write refusal needed them.
+#
+# Only the ones that will be mounted, which for an isolated launch is the
+# read-only half - see the mount loop further down, which filters the same
+# way. Creating the others would have an isolated launch leave four empty
+# directories on a host it is not supposed to write to at all.
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r _cdir _cmode _cscan <<< "$_rec"
+    [ "$DEJIMA_ISOLATED" = 0 ] || [ "$_cmode" = ro ] || continue
     mkdir -p "$_cdir"
 done
 
@@ -1484,6 +1515,9 @@ SANDBOX_FAKE_CREDENTIALS_FILE=""
 # something else on this host, which is a worse thing to get wrong than a file.
 SANDBOX_FILTER_CONTAINER=""
 SANDBOX_RUN_NETWORK=""
+# Same rule again, and `docker volume rm` is the third thing in this trap that
+# destroys something named rather than something mktemp'd.
+SANDBOX_ISOLATED_VOLUMES=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1704,6 +1738,15 @@ cleanup() {
     fi
     if [ -n "${SANDBOX_RUN_NETWORK:-}" ]; then
         docker network rm "$SANDBOX_RUN_NETWORK" >/dev/null 2>&1 || true
+    fi
+    # The four volumes an isolated launch named for itself. Tidiness rather
+    # than the guarantee: what keeps them out of every other session is that
+    # the name carries this run's id and nothing else computes it, so a
+    # daemon that has gone away leaves volumes nobody can ask for.
+    if [ -n "${SANDBOX_ISOLATED_VOLUMES:-}" ]; then
+        # Deliberately unquoted - one name per word, all of them dejima's own.
+        # shellcheck disable=SC2086
+        docker volume rm $SANDBOX_ISOLATED_VOLUMES >/dev/null 2>&1 || true
     fi
     exit_step "session ended - keeping what it compacted away"
     # Keep whatever the session compacted away, into a store nothing mounts.
@@ -2616,6 +2659,19 @@ extra_mounts+=(-e "DEJIMA_FORGE_REPO_ENV=$DEJIMA_FORGE_REPO_ENV")
 mounted_dirs=""
 for _rec in ${DEJIMA_CONFIG_DIRS[@]+"${DEJIMA_CONFIG_DIRS[@]}"}; do
     IFS=$'\t' read -r dir mounted_mode mounted_scan <<< "$_rec"
+    # An isolated launch takes the read-only ones and none of the writable
+    # ones. The split is already in the declaration, so this filters on what
+    # the harness said rather than on a list of names kept here.
+    #
+    # The two halves answer differently. A read-only directory is the
+    # OPERATOR's - their hooks, skills and commands - and a session cannot
+    # write to it, so nothing it holds came from an earlier session and
+    # nothing this one does will reach a later one. The writable ones are
+    # shared state every project's sessions append to (#380), which is the
+    # channel this mode exists to close.
+    if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$mounted_mode" != ro ]; then
+        continue
+    fi
     emit_mount "$dir" "$mounted_mode"
     [ "$mounted_scan" = scan ] || continue
     [ -d "$dir" ] || continue
@@ -2758,7 +2814,15 @@ fi
 # harness plugin, which declares each mount through emit_mount. The guarded-
 # store refusal runs there, at the point of declaration, rather than being
 # something each plugin has to remember. See bin/dejima-harness-lib.sh.
-harness_hook harness_state_mounts "$WORKSPACE_DIR"
+#
+# Not called at all for an isolated launch, which is both halves of what that
+# mode needs here: this hook is what mounts the transcripts and the memory
+# under ~/.claude/projects, and it CREATES the directory for the workspace's
+# own slug before mounting it. Skipping the call is therefore also what stops
+# an isolated launch leaving a directory on the host.
+if [ "$DEJIMA_ISOLATED" = 0 ]; then
+    harness_hook harness_state_mounts "$WORKSPACE_DIR"
+fi
 
 # statusline.sh is executed on the host by Claude Code (settings.json's
 # statusLine.command), so it is staged for entrypoint.sh to copy rather than
@@ -3488,10 +3552,29 @@ export SANDBOX_IMAGE
 #
 # The prefix is not decoration: project_slug maps a leading `/` to `-`, and
 # a Docker volume name may not start with one.
-_nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
-export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"
-export SANDBOX_NVIM_STATE="dejima_nvim-state${_nvim_volume_slug}"
-export SANDBOX_NVIM_CACHE="dejima_nvim-cache${_nvim_volume_slug}"
+#
+# Per RUN rather than per project for an isolated launch, along with the shell
+# history - which is shared by every project even when these are not, so it is
+# otherwise the one surface where an isolated session reads what was typed in
+# any session before it. Every isolated launch has the same working
+# directory, so a slug would give them all the same four volumes and put back
+# exactly the thing described above.
+#
+# The run id is what makes them unreachable: no other launch computes that
+# name, so no other session can ask for these volumes whether or not the
+# removal in cleanup() gets to run.
+if [ "$DEJIMA_ISOLATED" = 1 ]; then
+    export SANDBOX_NVIM_DATA="dejima_isolated-nvim-data-$DEJIMA_RUN_ID"
+    export SANDBOX_NVIM_STATE="dejima_isolated-nvim-state-$DEJIMA_RUN_ID"
+    export SANDBOX_NVIM_CACHE="dejima_isolated-nvim-cache-$DEJIMA_RUN_ID"
+    export SANDBOX_BASH_HISTORY="dejima_isolated-bashhistory-$DEJIMA_RUN_ID"
+    SANDBOX_ISOLATED_VOLUMES="$SANDBOX_NVIM_DATA $SANDBOX_NVIM_STATE $SANDBOX_NVIM_CACHE $SANDBOX_BASH_HISTORY"
+else
+    _nvim_volume_slug="$(project_slug "$WORKSPACE_DIR")"
+    export SANDBOX_NVIM_DATA="dejima_nvim-data${_nvim_volume_slug}"
+    export SANDBOX_NVIM_STATE="dejima_nvim-state${_nvim_volume_slug}"
+    export SANDBOX_NVIM_CACHE="dejima_nvim-cache${_nvim_volume_slug}"
+fi
 
 # Not exec'd (the EXIT trap cleans up the generated temp files) and not a
 # bare command under set -e (a nonzero/interrupted container run - e.g.

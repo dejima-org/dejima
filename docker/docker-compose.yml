@@ -327,7 +327,12 @@ services:
 volumes:
   # Shell history, shared by every harness - it is the container's shell that
   # writes it, not the agent.
+  #
+  # Named like the three below so bin/dejima can give an `--isolated` launch
+  # one of its own: this volume is shared by every project, so the default is
+  # a session reading what the last one typed anywhere on the host.
   dejima-bashhistory:
+    name: ${SANDBOX_BASH_HISTORY:-dejima-bashhistory}
   # Named explicitly so bin/dejima can give each project its own set. These
   # persist across containers by design (a plugin install should not have to
   # happen every launch), which without the split meant one project's session
