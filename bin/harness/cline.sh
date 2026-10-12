@@ -144,6 +144,26 @@ _cline_host_allowlisted() {
 # repointing cannot persist into the next session.
 harness_prepare_config() {
     local state model settings
+    # An isolated launch has nowhere for this to go. The model configuration
+    # below reaches the container through the state mount, and that mount is
+    # exactly what --isolated skips - so the file would be written to a host
+    # directory keyed on the container-local working directory, shared by
+    # every isolated cline launch, and then not mounted. Cline would start
+    # with no model configured and the mode's claim to leave nothing on the
+    # host would be false.
+    #
+    # Refused rather than half-done, until there is a per-run way in (#393).
+    if [ "${DEJIMA_ISOLATED:-0}" = 1 ]; then
+        echo "harness.cline: --isolated is not supported for cline yet." >&2
+        echo "" >&2
+        echo "Cline's model configuration reaches the container through the" >&2
+        echo "state directory, which this mode does not mount - so the session" >&2
+        echo "would start with no model and the file would be left on the host." >&2
+        echo "" >&2
+        echo "Use --harness claude-code for an isolated session, or drop" >&2
+        echo "--isolated for this one. See #393." >&2
+        return 1
+    fi
     state="$(_cline_state_dir "$WORKSPACE_DIR")" || {
         echo "harness.cline: state_dir is not set, so there is nowhere to keep" >&2
         echo "this project's Cline state. Set it in [harness.cline]." >&2
