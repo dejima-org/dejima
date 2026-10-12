@@ -4015,32 +4015,50 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # rather than an empty string on a shell where it was set without being
 # exported.
 #
-# EGRESS_HOST_PORTS starts there too and gains the ports of the host-resident
-# destinations THIS launch configured. The policy clamps the host's address to
-# this list ahead of every wider rule, so without these a configured
-# host-resident Loki or self-served model would be refused on the one port it
-# needs - and with the clamp in the other order, configuring either opened
-# every port on the host instead, sshd included.
+# EGRESS_HOST_PORTS starts there too and gains the port of a destination this
+# launch configured AT the host's own address. The policy clamps that address
+# to this list ahead of every wider rule, so a service dejima pointed at the
+# host needs its port here to be reachable at all.
 #
-# A port is added for a configured destination whether or not it turns out to
-# be host-resident, because deciding that means resolving a name and the
-# launcher deliberately does not. The widening that costs is bounded to a port
-# the operator pointed a service at.
+# Three conditions, and each of them is load-bearing because what this list
+# opens is a port on the HOST rather than on the destination:
+#
+#   - an explicit `:port`. A scheme default is not one: a remote Loki at
+#     https://loki.example.com has no port, and adding 443 for it opened the
+#     host's own 443 - which on a box following docs/remote-access.md is the
+#     reverse proxy in front of the web terminal, the thing this clamp exists
+#     to keep out of a session's reach.
+#   - a literal address, not a name. The launcher deliberately resolves
+#     nothing, so a name is a destination it cannot place.
+#   - that address being the one EGRESS_HOST_ADDR names. Without it there is
+#     nothing to compare against and no port is derived.
+#
+# So a host-resident service configured by name needs EGRESS_HOST_PORTS set by
+# hand. The policy's own summary line is where that shows up - `host <addr> on
+# ports none` is an operator reading why nothing can reach it.
 _egress_host_port() {  # <url>
-    # Declared separately: in one `local`, a later initialiser does not see an
-    # earlier name from the same statement - it is in scope and unset, so
-    # hostport came out empty and every URL read as its scheme's default.
-    local url scheme hostport
-    url="${1#*://}"
-    scheme="${1%%://*}"
-    hostport="${url%%/*}"
+    local rest hostport host port
+    rest="${1#*://}"
+    # Path, query and fragment, in that order: a URL may carry a query with no
+    # path at all, and `?x=1` came through as part of the port.
+    rest="${rest%%/*}"
+    rest="${rest%%\?*}"
+    rest="${rest%%#*}"
+    # Userinfo. A password beginning with a digit read as the port.
+    hostport="${rest##*@}"
     case "$hostport" in
-        *:[0-9]*) printf '%s' "${hostport##*:}"; return ;;
+        # Bracketed IPv6 with a port, then without. The unbracketed form has
+        # no port by definition - every colon in it is part of the address -
+        # which is why `[fe80::1]/` came out as `1]`.
+        \[*\]:*) host="${hostport%]:*}]"; port="${hostport##*]:}" ;;
+        \[*\])   return 0 ;;
+        *:*)      host="${hostport%:*}";  port="${hostport##*:}" ;;
+        *)        return 0 ;;
     esac
-    case "$scheme" in
-        https) printf '443' ;;
-        http)  printf '80' ;;
-    esac
+    case "$port" in ""|*[!0-9]*) return 0 ;; esac
+    [ -n "${EGRESS_HOST_ADDR:-}" ] || return 0
+    [ "$host" = "$EGRESS_HOST_ADDR" ] || return 0
+    printf '%s' "$port"
 }
 for _hp_url in "$LOKI_URL" \
     "$([ -n "$DEJIMA_BACKEND_NAME" ] \

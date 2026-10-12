@@ -11007,12 +11007,17 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
         || { echo "the host clamp now answers for a host-resident forge"; return 1; }
 }
 
-@test "the launcher gives the clamp the ports of the services it configured" {
+@test "the launcher derives a host port only where it can be sure of the host" {
     # The clamp is only right if it names the ports dejima itself pointed at
-    # the host. Without this, moving it ahead of the open class would refuse
-    # a host-resident Loki or self-served model on the one port it needs -
-    # EGRESS_HOST_PORTS has no config key and comes from the operator's
-    # environment, so nothing else would have put them there.
+    # the host - EGRESS_HOST_PORTS has no config key, so nothing else would
+    # have put them there. But what this list opens is a port on the HOST, so
+    # deriving one for a destination that is not the host opens something
+    # nobody configured: a remote loki_url with no port of its own added 443,
+    # and on a box with a reverse proxy in front of the web terminal that is
+    # the proxy this clamp exists to keep out of reach.
+    #
+    # So: an explicit port, a literal address, and that address being the one
+    # EGRESS_HOST_ADDR names. Anything else derives nothing.
     local src="$REPO_ROOT/bin/dejima" flat
     flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
     grep -qF '_egress_host_port' <<< "$flat" \
@@ -11020,20 +11025,43 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     grep -q 'EGRESS_HOST_PORTS="\${EGRESS_HOST_PORTS:+\$EGRESS_HOST_PORTS,}\$_hp_port"' <<< "$flat" \
         || { echo "the derived ports do not extend the operator's value"; return 1; }
 
-    # The derivation itself, since a wrong port is the same as none.
-    run bash -c 'eval "$(sed -n "/^_egress_host_port()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
-        for u in http://loki.example:3100 https://api.example http://h.example \
-                 http://1.2.3.4:8080/v1 https://x.example:9999/path; do
-            printf "%s\n" "$(_egress_host_port "$u")"
-        done
-        printf "empty=[%s]\n" "$(_egress_host_port "")"'
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ "$output" = "3100
-443
-80
-8080
-9999
-empty=[]" ] || { echo "the ports came out as:"; printf '%s\n' "$output"; return 1; }
+    # Driven over every shape that decides it, because a wrong answer here is
+    # either a port nobody opened or a port nobody can reach.
+    _derive() {  # _derive <EGRESS_HOST_ADDR> <url>
+        run env EGRESS_HOST_ADDR="$1" bash -c '
+            eval "$(sed -n "/^_egress_host_port()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
+            printf "[%s]" "$(_egress_host_port "$1")"' _ "$2"
+    }
+
+    # Nothing without an address to compare against, whatever the URL says.
+    _derive "" "http://192.168.1.5:3100"
+    [ "$output" = "[]" ] || { echo "derived $output with no EGRESS_HOST_ADDR"; return 1; }
+
+    # The one case it fires in.
+    _derive "192.168.1.5" "http://192.168.1.5:3100"
+    [ "$output" = "[3100]" ] || { echo "the host's own port was not derived: $output"; return 1; }
+    # Userinfo and a query do not become part of it. A password starting with
+    # a digit, and a query with no path, each read as the port.
+    _derive "192.168.1.5" "http://u:9secret@192.168.1.5:3100/x"
+    [ "$output" = "[3100]" ] || { echo "userinfo reached the port: $output"; return 1; }
+    _derive "192.168.1.5" "http://192.168.1.5:3100?x=1"
+    [ "$output" = "[3100]" ] || { echo "a query reached the port: $output"; return 1; }
+
+    # And every shape that must derive nothing.
+    local addr url
+    while read -r addr url; do
+        _derive "$addr" "$url"
+        [ "$output" = "[]" ] \
+            || { echo "derived $output from $url (host addr $addr)"; return 1; }
+    done <<CASES
+192.168.1.5 https://loki.example.com/loki/api/v1/push
+192.168.1.5 https://192.168.1.5/x
+192.168.1.5 http://192.168.1.9:3100
+192.168.1.5 http://loki.example:3100
+192.168.1.5 http://[fe80::1]/
+192.168.1.5 http://[fe80::1]:3100/
+CASES
+    return 0
 }
 
 @test "the host entry permits the ports it was given, and refuses the rest" {

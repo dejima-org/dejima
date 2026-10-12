@@ -1414,13 +1414,24 @@ matched **before** the wider class rules, so an address that is both the
 host's and an open-class entry's is still held to these ports.
 
 `EGRESS_HOST_PORTS`, set in the environment you launch from, takes TCP ports
-and low-high ranges, comma or space separated. The launcher adds the port of
-each host-resident destination it configured - a `[logging] loki_url`, a
-backend's `base_url` - so the services dejima set up reach the host without
-every other port coming with them. `EGRESS_HOST_PORTS=any` restores the
-unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the entry
-altogether. A value that is not a port stops the container rather than
-becoming a rule nobody meant.
+and low-high ranges, comma or space separated. `EGRESS_HOST_PORTS=any`
+restores the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none`
+removes the entry altogether. A value that is not a port stops the container
+rather than becoming a rule nobody meant.
+
+**A host-resident service you configured by name needs its port set here by
+hand.** The launcher adds one for you in exactly one case: the URL carries an
+explicit `:port`, its host is a literal address rather than a name, and that
+address is the one `EGRESS_HOST_ADDR` names. Outside that it adds nothing,
+because what this list opens is a port on *the host* - and a remote
+`loki_url` with no port of its own would otherwise have opened the host's 443,
+which on a box following
+[Behind another reverse proxy](remote-access.md#behind-another-reverse-proxy)
+is the proxy in front of the web terminal. The launcher resolves no names, by
+design, so a destination given by name is one it cannot place.
+
+The policy's summary line is where a missing port shows up: `host <addr> on
+ports none` is why nothing in the session can reach it.
 
 ### DNS is allowlisted too
 
