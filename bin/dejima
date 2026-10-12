@@ -3253,11 +3253,28 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         # which the EXIT trap removes.
         extra_mounts+=(-v "$SANDBOX_FAKE_CREDENTIALS_FILE:$HOME/.claude/.credentials.json")
     fi
-elif [ -f "$HOME/.claude/.credentials.json" ]; then
+elif [ -n "$DEJIMA_BACKEND_NAME" ] \
+    && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+    && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+    && [ -f "$HOME/.claude/.credentials.json" ] \
+    && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
+         = "$(readlink -m "$HOME/.claude/.credentials.json")" ]; then
     # No proxy: the session authenticates with the real credential, so it has
     # to be mounted in. Read-write because Claude Code refreshes it in place.
     # This is the documented downgrade, not an oversight - see the kill-switch
     # message above and docs/security.md.
+    #
+    # Each condition names a way this stops being that downgrade and becomes a
+    # credential handed to a session with no use for it. The branch above is
+    # the proxy engaging; everything else used to fall through to here, which
+    # meant a backend needing no credential at all - a model you serve
+    # yourself, the arrangement docs/security.md calls the one with nothing in
+    # the container to steal - mounted the real subscription login anyway. So
+    # did a backend whose own credential file is somewhere else and missing.
+    #
+    # The file is compared, not just the kind: this mount is for the case
+    # where THIS backend's credential IS this file, and the operator turned
+    # the proxy off for it.
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_CREDENTIAL_PROXY_SOCKET

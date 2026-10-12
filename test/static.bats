@@ -6234,11 +6234,26 @@ registered_commands() {
     # proxy-disabled branch.
     run grep -c 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
     [ "$output" = "1" ]
-    local mount_line branch_line
-    mount_line=$(grep -n 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    branch_line=$(grep -n 'elif \[ -f "\$HOME/\.claude/\.credentials\.json" \]; then' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    [ -n "$branch_line" ]
-    [ "$branch_line" -lt "$mount_line" ]
+    # And the branch it sits under names every condition that makes this the
+    # documented downgrade rather than a credential handed to a session with
+    # no use for it. It was `elif [ -f <that file> ]`, which fired for
+    # anything the proxy branch did not take - including a backend needing no
+    # credential at all, the arrangement docs/security.md calls the one with
+    # nothing in the container to steal.
+    local flat branch
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    branch="$(grep -E '^elif .*credentials\.json' <<< "$flat")"
+    [ -n "$branch" ] || { echo "the mount is not under an elif that tests it"; return 1; }
+    local need
+    for need in '! backend_proxy_enabled' 'DEJIMA_BACKEND_CREDENTIAL_KIND" != none' \
+                'DEJIMA_BACKEND_CREDENTIAL_FILE' '-n "$DEJIMA_BACKEND_NAME"'; do
+        grep -qF -- "$need" <<< "$branch" \
+            || { echo "the credential mount's branch does not test: $need"; return 1; }
+    done
+    # The file comparison is what makes it THIS backend's credential rather
+    # than any backend with the proxy off.
+    grep -qF -- 'readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE"' <<< "$branch" \
+        || { echo "the branch does not compare the backend's own credential file"; return 1; }
 }
 
 @test "the container gets an empty credentials file of its own" {
