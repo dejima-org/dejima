@@ -668,6 +668,26 @@ else
     fi
     shift || true
 
+    # The flag loop stops at the first positional, so anything after the path
+    # is the harness's - including `--isolated`, which was then passed
+    # through as a harness argument while the project was mounted read-write.
+    # An operator typing `dejima ~/proj --isolated` has asked for the one
+    # thing that silently did not happen, so it is refused unless `--` says
+    # the rest is deliberately not dejima's.
+    if [ "$DEJIMA_ARGS_ONLY" = 0 ]; then
+        for _arg in "$@"; do
+            [ "$_arg" = "--" ] && break
+            [ "$_arg" = "--isolated" ] || continue
+            echo "--isolated after the project directory would be passed to the" >&2
+            echo "harness, and this launch would mount $WORKSPACE_DIR read-write." >&2
+            echo "" >&2
+            echo "Put it before the path, or rather: --isolated takes no path at" >&2
+            echo "all. If the harness is meant to receive it, separate it with --." >&2
+            exit 1
+        done
+        unset _arg
+    fi
+
     if [ "${1:-}" = "--" ]; then
         shift
     fi

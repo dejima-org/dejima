@@ -1735,6 +1735,21 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
     run launch --isolated -- --version
     [ "$status" -eq 0 ] \
         || { echo "harness arguments were read as a project path: $output"; return 1; }
+
+    # And the other order, which is the one that went wrong quietly: the flag
+    # loop stops at the first positional, so `--isolated` after a path was
+    # passed to the harness while the project was mounted read-write - the
+    # operator asking for isolation got the opposite with no sign of it.
+    run launch "$PROJ" --isolated
+    [ "$status" -ne 0 ] \
+        || { echo "--isolated after the path was accepted and mounted $PROJ"; return 1; }
+    [[ "$output" == *"would be passed to the"* ]] \
+        || { echo "the refusal does not say what would have happened: $output"; return 1; }
+
+    # Still passed through when -- says it is the harness's.
+    run launch "$PROJ" -- --isolated
+    [ "$status" -eq 0 ] \
+        || { echo "-- did not hand --isolated to the harness: $output"; return 1; }
 }
 
 @test "an isolated launch says what it is and what it does without" {

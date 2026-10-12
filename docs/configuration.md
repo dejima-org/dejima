@@ -1072,6 +1072,10 @@ one thing that outlives it is a `~/shared` of its own.
 dejima --isolated    # from anywhere - the directory you are in is not used
 ```
 
+Naming a directory is **refused**, not ignored: `dejima --isolated ~/proj`
+stops rather than starting a session that looks like it is working on a
+project it cannot see. Harness arguments after `--` still pass through.
+
 | | ordinary launch | `--isolated` |
 |---|---|---|
 | working directory | the project, read-write at its own path | `/dejima/work`, container-local |
