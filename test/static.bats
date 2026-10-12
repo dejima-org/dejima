@@ -10982,6 +10982,60 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     [[ "$output" != *permit* ]]
 }
 
+@test "the host entry's clamp is matched before the rules that would widen it" {
+    # The clamp said the right thing and never saw the packets. The open
+    # class permits on every port, and the host's own address lands in it by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, `dejima-allow <gateway>` - so the permit answered
+    # first and the host was open on every port, sshd and the remote-access
+    # front door included.
+    #
+    # Asserted on the order the emitters are called in, which is what decides
+    # it: nft takes the first match.
+    local policy="$SANDBOX_DIR/egress-policy" host_at open_at forge_at
+    host_at="$(grep -n '^    emit_host_clamp host_v4' "$policy" | cut -d: -f1)"
+    open_at="$(grep -n 'ip daddr @literal_v4 goto permit' "$policy" | cut -d: -f1)"
+    forge_at="$(grep -n '^    emit_forge_clamp ip forge_v4' "$policy" | cut -d: -f1)"
+    [ -n "$host_at" ] && [ -n "$open_at" ] && [ -n "$forge_at" ] \
+        || { echo "the rule emitters could not be found"; return 1; }
+    [ "$host_at" -lt "$open_at" ] \
+        || { echo "the open class permits the host's address before the clamp sees it"
+             return 1; }
+    # And still after the forge clamp, so a host-resident forge is read as a
+    # forge rather than as the host.
+    [ "$forge_at" -lt "$host_at" ] \
+        || { echo "the host clamp now answers for a host-resident forge"; return 1; }
+}
+
+@test "the launcher gives the clamp the ports of the services it configured" {
+    # The clamp is only right if it names the ports dejima itself pointed at
+    # the host. Without this, moving it ahead of the open class would refuse
+    # a host-resident Loki or self-served model on the one port it needs -
+    # EGRESS_HOST_PORTS has no config key and comes from the operator's
+    # environment, so nothing else would have put them there.
+    local src="$REPO_ROOT/bin/dejima" flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    grep -qF '_egress_host_port' <<< "$flat" \
+        || { echo "nothing derives a host port from a configured URL"; return 1; }
+    grep -q 'EGRESS_HOST_PORTS="\${EGRESS_HOST_PORTS:+\$EGRESS_HOST_PORTS,}\$_hp_port"' <<< "$flat" \
+        || { echo "the derived ports do not extend the operator's value"; return 1; }
+
+    # The derivation itself, since a wrong port is the same as none.
+    run bash -c 'eval "$(sed -n "/^_egress_host_port()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
+        for u in http://loki.example:3100 https://api.example http://h.example \
+                 http://1.2.3.4:8080/v1 https://x.example:9999/path; do
+            printf "%s\n" "$(_egress_host_port "$u")"
+        done
+        printf "empty=[%s]\n" "$(_egress_host_port "")"'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "3100
+443
+80
+8080
+9999
+empty=[]" ] || { echo "the ports came out as:"; printf '%s\n' "$output"; return 1; }
+}
+
 @test "the host entry permits the ports it was given, and refuses the rest" {
     _host_clamp "3100"
     [ "$status" -eq 0 ]
@@ -11047,60 +11101,6 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     for f in "$SANDBOX_DIR/git-guard.sh" "$SANDBOX_DIR/forge-guard.sh" \
              "$REPO_ROOT/hooks/git-push-guard.sh" "$REPO_ROOT/hooks/merge-guard.sh" \
              "$SANDBOX_DIR/entrypoint.sh"; do
-@test "the host entry's clamp is matched before the rules that would widen it" {
-    # The clamp said the right thing and never saw the packets. The open
-    # class permits on every port, and the host's own address lands in it by
-    # several ordinary routes - a host-resident LOKI_URL, a self-served
-    # model's base_url, `dejima-allow <gateway>` - so the permit answered
-    # first and the host was open on every port, sshd and the remote-access
-    # front door included.
-    #
-    # Asserted on the order the emitters are called in, which is what decides
-    # it: nft takes the first match.
-    local policy="$SANDBOX_DIR/egress-policy" host_at open_at forge_at
-    host_at="$(grep -n '^    emit_host_clamp host_v4' "$policy" | cut -d: -f1)"
-    open_at="$(grep -n 'ip daddr @literal_v4 goto permit' "$policy" | cut -d: -f1)"
-    forge_at="$(grep -n '^    emit_forge_clamp ip forge_v4' "$policy" | cut -d: -f1)"
-    [ -n "$host_at" ] && [ -n "$open_at" ] && [ -n "$forge_at" ] \
-        || { echo "the rule emitters could not be found"; return 1; }
-    [ "$host_at" -lt "$open_at" ] \
-        || { echo "the open class permits the host's address before the clamp sees it"
-             return 1; }
-    # And still after the forge clamp, so a host-resident forge is read as a
-    # forge rather than as the host.
-    [ "$forge_at" -lt "$host_at" ] \
-        || { echo "the host clamp now answers for a host-resident forge"; return 1; }
-}
-
-@test "the launcher gives the clamp the ports of the services it configured" {
-    # The clamp is only right if it names the ports dejima itself pointed at
-    # the host. Without this, moving it ahead of the open class would refuse
-    # a host-resident Loki or self-served model on the one port it needs -
-    # EGRESS_HOST_PORTS has no config key and comes from the operator's
-    # environment, so nothing else would have put them there.
-    local src="$REPO_ROOT/bin/dejima" flat
-    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
-    grep -qF '_egress_host_port' <<< "$flat" \
-        || { echo "nothing derives a host port from a configured URL"; return 1; }
-    grep -q 'EGRESS_HOST_PORTS="\${EGRESS_HOST_PORTS:+\$EGRESS_HOST_PORTS,}\$_hp_port"' <<< "$flat" \
-        || { echo "the derived ports do not extend the operator's value"; return 1; }
-
-    # The derivation itself, since a wrong port is the same as none.
-    run bash -c 'eval "$(sed -n "/^_egress_host_port()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
-        for u in http://loki.example:3100 https://api.example http://h.example \
-                 http://1.2.3.4:8080/v1 https://x.example:9999/path; do
-            printf "%s\n" "$(_egress_host_port "$u")"
-        done
-        printf "empty=[%s]\n" "$(_egress_host_port "")"'
-    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ "$output" = "3100
-443
-80
-8080
-9999
-empty=[]" ] || { echo "the ports came out as:"; printf '%s\n' "$output"; return 1; }
-}
-
         grep -q 'DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh' "$f" \
             || { echo "$f does not source the shared policy"; return 1; }
     done
