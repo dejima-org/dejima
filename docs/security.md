@@ -1419,19 +1419,26 @@ restores the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none`
 removes the entry altogether. A value that is not a port stops the container
 rather than becoming a rule nobody meant.
 
-**A host-resident service you configured by name needs its port set here by
-hand.** The launcher adds one for you in exactly one case: the URL carries an
-explicit `:port`, its host is a literal address rather than a name, and that
-address is the one `EGRESS_HOST_ADDR` names. Outside that it adds nothing,
-because what this list opens is a port on *the host* - and a remote
-`loki_url` with no port of its own would otherwise have opened the host's 443,
-which on a box following
+**A destination you pointed at the host's own address gets its port added for
+you.** The two processes split that decision because neither knows both
+halves. The launcher knows which destinations this launch configured - a
+`[logging] loki_url`, a backend's `base_url` - and offers the ones it is sure
+of: an explicit `:port` on a literal address. The filter, which works the
+host's address out from its default route, keeps the port of each candidate
+whose address is the host's. Neither resolves a name.
+
+What that leaves out is deliberate in both directions. A scheme default is
+not an explicit port, because a remote `https://loki.example.com` has none
+and adding 443 for it would open the host's own 443 - which on a box
+following
 [Behind another reverse proxy](remote-access.md#behind-another-reverse-proxy)
-is the proxy in front of the web terminal. The launcher resolves no names, by
-design, so a destination given by name is one it cannot place.
+is the proxy in front of the web terminal. And **a host-resident service
+configured by name needs its port set here by hand**, because a name is a
+destination neither process will resolve to decide what to open.
 
 The policy's summary line is where a missing port shows up: `host <addr> on
-ports none` is why nothing in the session can reach it.
+ports none` is why nothing can reach it - the session, and the log shipper
+that runs beside it.
 
 ### DNS is allowlisted too
 

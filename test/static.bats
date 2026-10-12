@@ -11007,60 +11007,83 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
         || { echo "the host clamp now answers for a host-resident forge"; return 1; }
 }
 
-@test "the launcher derives a host port only where it can be sure of the host" {
-    # The clamp is only right if it names the ports dejima itself pointed at
-    # the host - EGRESS_HOST_PORTS has no config key, so nothing else would
-    # have put them there. But what this list opens is a port on the HOST, so
-    # deriving one for a destination that is not the host opens something
-    # nobody configured: a remote loki_url with no port of its own added 443,
-    # and on a box with a reverse proxy in front of the web terminal that is
-    # the proxy this clamp exists to keep out of reach.
+@test "the launcher offers host candidates and the filter decides which are the host" {
+    # Split across the two processes because neither knows both halves. The
+    # launcher knows which destinations this launch configured and cannot know
+    # the host's address; the filter works that out from the default route.
     #
-    # So: an explicit port, a literal address, and that address being the one
-    # EGRESS_HOST_ADDR names. Anything else derives nothing.
+    # Comparing in the launcher against EGRESS_HOST_ADDR looked equivalent and
+    # was not: that variable is the operator's override for a wrong
+    # derivation, so it is normally unset, and nothing was ever derived - a
+    # host-resident Loki at the gateway address stopped being reachable the
+    # moment the clamp went first.
     local src="$REPO_ROOT/bin/dejima" flat
     flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
-    grep -qF '_egress_host_port' <<< "$flat" \
-        || { echo "nothing derives a host port from a configured URL"; return 1; }
-    grep -q 'EGRESS_HOST_PORTS="\${EGRESS_HOST_PORTS:+\$EGRESS_HOST_PORTS,}\$_hp_port"' <<< "$flat" \
-        || { echo "the derived ports do not extend the operator's value"; return 1; }
+    grep -qF '_egress_host_candidate' <<< "$flat" \
+        || { echo "nothing offers a host candidate"; return 1; }
+    grep -qF -- '-e EGRESS_HOST_CANDIDATES' <<< "$flat" \
+        || { echo "the candidates are not passed to the filter container"; return 1; }
 
-    # Driven over every shape that decides it, because a wrong answer here is
-    # either a port nobody opened or a port nobody can reach.
-    _derive() {  # _derive <EGRESS_HOST_ADDR> <url>
-        run env EGRESS_HOST_ADDR="$1" bash -c '
-            eval "$(sed -n "/^_egress_host_port()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
-            printf "[%s]" "$(_egress_host_port "$1")"' _ "$2"
+    # The launcher's half: a literal address with an explicit port, or
+    # nothing. A wrong answer is either a port nobody opened on the host or a
+    # service nobody can reach.
+    _cand() {
+        run bash -c '
+            eval "$(sed -n "/^_egress_host_candidate()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
+            printf "[%s]" "$(_egress_host_candidate "$1")"' _ "$1"
     }
-
-    # Nothing without an address to compare against, whatever the URL says.
-    _derive "" "http://192.168.1.5:3100"
-    [ "$output" = "[]" ] || { echo "derived $output with no EGRESS_HOST_ADDR"; return 1; }
-
-    # The one case it fires in.
-    _derive "192.168.1.5" "http://192.168.1.5:3100"
-    [ "$output" = "[3100]" ] || { echo "the host's own port was not derived: $output"; return 1; }
-    # Userinfo and a query do not become part of it. A password starting with
+    _cand "http://172.17.0.1:3100"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "the gateway candidate was not offered: $output"; return 1; }
+    # Userinfo and a query do not become part of it: a password starting with
     # a digit, and a query with no path, each read as the port.
-    _derive "192.168.1.5" "http://u:9secret@192.168.1.5:3100/x"
-    [ "$output" = "[3100]" ] || { echo "userinfo reached the port: $output"; return 1; }
-    _derive "192.168.1.5" "http://192.168.1.5:3100?x=1"
-    [ "$output" = "[3100]" ] || { echo "a query reached the port: $output"; return 1; }
+    _cand "http://u:9secret@172.17.0.1:3100/v1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "userinfo reached the port: $output"; return 1; }
+    _cand "http://172.17.0.1:3100?x=1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "a query reached the port: $output"; return 1; }
 
-    # And every shape that must derive nothing.
-    local addr url
-    while read -r addr url; do
-        _derive "$addr" "$url"
-        [ "$output" = "[]" ] \
-            || { echo "derived $output from $url (host addr $addr)"; return 1; }
+    local url
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        _cand "$url"
+        [ "$output" = "[]" ] || { echo "offered $output for $url"; return 1; }
     done <<CASES
-192.168.1.5 https://loki.example.com/loki/api/v1/push
-192.168.1.5 https://192.168.1.5/x
-192.168.1.5 http://192.168.1.9:3100
-192.168.1.5 http://loki.example:3100
-192.168.1.5 http://[fe80::1]/
-192.168.1.5 http://[fe80::1]:3100/
+https://loki.example.com/loki/api/v1/push
+https://172.17.0.1/x
+http://loki.internal:3100
+http://172.17.0.1
+http://[fe80::1]/
+http://[fe80::1]:3100/
 CASES
+
+    # The filter's half: a candidate's port is kept only if its address is one
+    # the host was discovered at.
+    _fold() {  # _fold <HOST_PORTS> <HOST_CANDIDATES> <addr>...
+        local ports="$1" cands="$2"; shift 2
+        run env HOST_PORTS_IN="$ports" HOST_CANDIDATES_IN="$cands" bash -c '
+            set -Eeuo pipefail
+            HOST_PORTS=$HOST_PORTS_IN
+            HOST_CANDIDATES=$HOST_CANDIDATES_IN
+            die() { printf "FAILED: %s\n" "$*" >&2; exit 1; }
+            eval "$(sed -n "/^fold_host_candidates()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+            fold_host_candidates "$@"
+            printf "[%s]" "$HOST_PORTS"' _ "$@"
+    }
+    _fold "" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "the host's own candidate was dropped: $output"; return 1; }
+    _fold "" "172.17.0.1:3100" 192.168.9.9
+    [ "$output" = "[]" ] || { echo "a candidate that is not the host was kept: $output"; return 1; }
+    # The operator's own value is extended, not replaced, and a repeat does
+    # not double.
+    _fold "22000" "172.17.0.1:3100 10.0.0.5:8080" 172.17.0.1 10.0.0.5
+    [ "$output" = "[22000,3100,8080]" ] || { echo "the combined list came out as $output"; return 1; }
+    _fold "3100" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "a port already present was added again: $output"; return 1; }
+    # `any` is wider than anything a candidate could add.
+    _fold "any" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[any]" ] || { echo "any was narrowed to $output"; return 1; }
+    # And nothing at all when the host has no entry.
+    _fold "" "172.17.0.1:3100"
+    [ "$output" = "[]" ] || { echo "a candidate was kept with no host address: $output"; return 1; }
     return 0
 }
 

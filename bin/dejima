@@ -4015,28 +4015,27 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # rather than an empty string on a shell where it was set without being
 # exported.
 #
-# EGRESS_HOST_PORTS starts there too and gains the port of a destination this
-# launch configured AT the host's own address. The policy clamps that address
-# to this list ahead of every wider rule, so a service dejima pointed at the
-# host needs its port here to be reachable at all.
+# EGRESS_HOST_CANDIDATES is the other half of the clamp, and it is a list of
+# candidates rather than of ports because only the filter can decide.
 #
-# Three conditions, and each of them is load-bearing because what this list
-# opens is a port on the HOST rather than on the destination:
+# The clamp holds the host's own address to the ports it was told, ahead of
+# every wider rule - so a service dejima pointed at the host needs its port
+# there to be reachable at all. The launcher knows which destinations it
+# configured; it does not know the host's address, which the policy works out
+# from the default route inside the container. EGRESS_HOST_ADDR is the
+# operator's override for when that derivation is wrong, so it is normally
+# unset: comparing against it here meant nothing was ever derived on an
+# ordinary install, and a host-resident Loki at the gateway address stopped
+# being reachable the moment the clamp went first.
 #
-#   - an explicit `:port`. A scheme default is not one: a remote Loki at
-#     https://loki.example.com has no port, and adding 443 for it opened the
-#     host's own 443 - which on a box following docs/remote-access.md is the
-#     reverse proxy in front of the web terminal, the thing this clamp exists
-#     to keep out of a session's reach.
-#   - a literal address, not a name. The launcher deliberately resolves
-#     nothing, so a name is a destination it cannot place.
-#   - that address being the one EGRESS_HOST_ADDR names. Without it there is
-#     nothing to compare against and no port is derived.
+# So the launcher passes what it is sure of - a literal address with an
+# explicit port - and the policy keeps the port of each candidate whose
+# address is the host's. Nothing resolves a name on either side.
 #
-# So a host-resident service configured by name needs EGRESS_HOST_PORTS set by
-# hand. The policy's own summary line is where that shows up - `host <addr> on
-# ports none` is an operator reading why nothing can reach it.
-_egress_host_port() {  # <url>
+# A scheme default is not an explicit port: a remote https URL has none, and
+# adding 443 for it opened the host's own 443 - which on a box following
+# docs/remote-access.md is the reverse proxy in front of the web terminal.
+_egress_host_candidate() {  # <url> -> addr:port, or nothing
     local rest hostport host port
     rest="${1#*://}"
     # Path, query and fragment, in that order: a URL may carry a query with no
@@ -4056,23 +4055,29 @@ _egress_host_port() {  # <url>
         *)        return 0 ;;
     esac
     case "$port" in ""|*[!0-9]*) return 0 ;; esac
-    [ -n "${EGRESS_HOST_ADDR:-}" ] || return 0
-    [ "$host" = "$EGRESS_HOST_ADDR" ] || return 0
-    printf '%s' "$port"
+    # A literal IPv4 address and nothing else. A name is a destination the
+    # launcher cannot place, and the policy compares against an IPv4 address
+    # because the host entry is one.
+    case "$host" in
+        *[!0-9.]*|"") return 0 ;;
+    esac
+    printf '%s:%s' "$host" "$port"
 }
-for _hp_url in "$LOKI_URL" \
+EGRESS_HOST_CANDIDATES=""
+for _hc_url in "$LOKI_URL" \
     "$([ -n "$DEJIMA_BACKEND_NAME" ] \
         && config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1 \
         && config_get "backend.$DEJIMA_BACKEND_NAME" base_url)"; do
-    [ -n "$_hp_url" ] || continue
-    _hp_port="$(_egress_host_port "$_hp_url")"
-    [ -n "$_hp_port" ] || continue
-    case ",${EGRESS_HOST_PORTS:-}," in
-        *",$_hp_port,"*) continue ;;
+    [ -n "$_hc_url" ] || continue
+    _hc="$(_egress_host_candidate "$_hc_url")"
+    [ -n "$_hc" ] || continue
+    case " $EGRESS_HOST_CANDIDATES " in
+        *" $_hc "*) continue ;;
     esac
-    EGRESS_HOST_PORTS="${EGRESS_HOST_PORTS:+$EGRESS_HOST_PORTS,}$_hp_port"
+    EGRESS_HOST_CANDIDATES="${EGRESS_HOST_CANDIDATES:+$EGRESS_HOST_CANDIDATES }$_hc"
 done
-unset _hp_url _hp_port
+unset _hc_url _hc
+export EGRESS_HOST_CANDIDATES
 export EGRESS_HOST_ADDR EGRESS_HOST_PORTS
 
 filter_env=(
@@ -4091,6 +4096,7 @@ filter_env=(
     # could use.
     -e EGRESS_HOST_ADDR
     -e EGRESS_HOST_PORTS
+    -e EGRESS_HOST_CANDIDATES  # host-resident destinations this launch configured
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET

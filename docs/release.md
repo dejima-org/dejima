@@ -118,3 +118,11 @@ looks like the safety net is not one. Name the keys. A queued privileged job, a
 manual check that was skipped, a forge that has still never been launched -
 those are the things a reader of `main` is entitled to know, and the release
 PR is where they are still true and still remembered.
+
+Worth its own line too: **what an existing config stops being able to do.** A
+release that tightens a boundary can refuse an arrangement that worked, with
+nothing in the operator's config changed - and the ones that fail closed are
+the ones to name, because failing closed is quiet. An observability path is
+the worst case: a log shipper that can no longer reach its endpoint stops
+shipping and nothing else happens. Name the arrangement, what it now needs,
+and where the refusal shows up.
