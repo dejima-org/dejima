@@ -56,12 +56,17 @@ That is the fastest answer to "what does this flag mean"; this page is for the
 config file behind them.
 
 **A launch flag overrides the file for that launch only, and every `--no-*`
-flag only ever narrows.** Nothing dejima accepts on the command line turns a
-setting back on. A config that says `off` is a decision somebody made in a
-file they can reread, and a flag that could undo one in passing would make the
-file's answer the weaker of the two - so the flags that exist are the ones that
-take something away. `--isolated` is the far end of that: see
-[Isolated sessions](#isolated-sessions).
+flag only ever narrows.** None of those turns a setting back on: a config that
+says `off` is a decision somebody made in a file they can reread, and a flag
+that could undo one in passing would make the file's answer the weaker of the
+two. `--isolated` is the far end of the same idea, narrowing several at once:
+see [Isolated sessions](#isolated-sessions).
+
+The rule is about the `--no-*` family, not about every flag. `--ro`, `--rw`,
+`--include`, `--allow-github-push` and a `--forge` naming a forge the config
+did not each widen what one launch can reach, which is what they are for - and
+each is visible in the command that used it, where a config file's answer is
+not.
 
 ### `[core]` - what this sandbox runs
 
@@ -145,7 +150,7 @@ required: an identity supplies what it names and no more.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `ssh_key` | unset | the SSH key this identity pushes with |
+| `ssh_key` | unset | the SSH key this identity pushes with. An empty file counts as no key at all rather than a refusal, so pointing this at one is how a launch keeps the setting and forwards your agent instead |
 | `user_name` | unset | `user.name` for commits made in the session |
 | `user_email` | unset | `user.email` for commits made in the session |
 | `token_file` | *(the forge's own default)* | this identity's Gitea/Forgejo API token, overriding `[forge.gitea] token_file`. Read only when `[core] forge = gitea` |
@@ -305,8 +310,10 @@ there, and neither mechanism helps if the list is too long to finish reading.
 Every name is validated before any of them is shown, so what you are confirming
 is what will be added and no entry can carry an escape sequence that rewrites
 the lines above it. Confirming needs a terminal, so a script does them one at a
-time. Both write the
-approval first - that is the part that grants - and report separately on the
+time.
+
+`dejima-allow --project` and `dejima-dep add --project` both write the approval
+first - that is the part that grants - and report separately on the
 declaration, so a project you can't write to still gets you the approval.
 `--global` writes no declaration at all: there is no project to declare in.
 
@@ -1086,8 +1093,8 @@ project it cannot see. Harness arguments after `--` still pass through.
 | `[mounts]` lists | applied | dropped, and named at launch |
 | forge, workflow | as configured | `none` and `local-only`, unless named |
 | forge token, `[github] token_file` | both cross | neither, unless a forge is named |
-| forwarded ssh agent | mounted when the workflow pushes | not mounted |
-| `[identity] ssh_key` | mounted | mounted |
+| forwarded ssh agent | mounted when the workflow pushes | not mounted, unless you name a pushing workflow and have no key |
+| `[identity.<name>] ssh_key` | mounted | mounted |
 | conversation log, epitaph | as configured | off |
 
 Your own `~/.claude` hooks, skills, commands, agents and output styles are
@@ -1129,12 +1136,22 @@ dejima --isolated --forge gitea --workflow worktree-pr   # clones, pushes, opens
 Order does not matter: `--forge gitea --isolated` means the same thing, and
 naming a forge brings the credentials back with it.
 
-The table above is the whole of what crosses. Two rows surprise people:
-`[github] token_file` is withheld even though it is not a forge setting, and
-an `[identity] ssh_key` is mounted even though the forwarded agent is not -
-so a session with no forge still holds a key that can reach a host over ssh.
-Withholding that key too, for any launch whose workflow never pushes, is
+Two rows surprise people. `[github] token_file` is withheld even though it is
+not a forge setting. And an `[identity.<name>] ssh_key` is mounted even though
+the forwarded agent is not, so a session with no forge still holds a key that
+can reach a host over ssh - withholding that key too, for any launch whose
+workflow never pushes, is
 [#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
+
+The agent row has a condition worth reading twice: it is withdrawn when the
+workflow does not push **or** a usable key is configured. So the second
+command above - a pushing workflow, on a host with no `ssh_key` - does forward
+your agent into an isolated session.
+
+The table is what this mode changes, not everything that crosses. `LOKI_URL`
+still reaches the session, and the model credential follows the rules in
+[docs/security.md](security.md#the-model-api-credential-never-enters-the-container)
+whatever the mode.
 
 **Why each of those is the way it is**, and why this is a narrower blast
 radius rather than a stronger sandbox, is in

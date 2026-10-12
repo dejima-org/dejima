@@ -349,12 +349,17 @@ The filter container keeps the GitHub token either way, because that is what
 authenticates dejima's own fetch of GitHub's address ranges - a request about
 the allowlist, made outside the session's reach.
 
-**The forwarded agent is not mounted; a configured key is.** A workflow that
-never pushes gets no agent socket, and `local-only` is one - so the personal
-identities in the operator's own agent stay outside the container. An
-`[identity] ssh_key` is mounted and loaded whatever the workflow, so an
-isolated session with no forge still holds a key that can reach a host over
-ssh. Withholding that for any launch whose workflow never pushes is
+**The forwarded agent is usually not mounted; a configured key always is.**
+The agent is withdrawn when the workflow does not push **or** a usable key is
+configured, and `--isolated` defaults to a workflow that does not push - so
+the ordinary isolated launch forwards no agent. Name a pushing workflow on a
+host with no `[identity.<name>] ssh_key`, which the example above does, and it
+is forwarded like any other pushing launch. The flag does not decide this; the
+workflow and the key do.
+
+A configured key is mounted and loaded whatever the workflow, so an isolated
+session with no forge still holds a key that can reach a host over ssh.
+Withholding that for any launch whose workflow never pushes is
 [#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
 
 So: a narrower blast radius on the host and a narrower credential, not a
@@ -549,6 +554,13 @@ indexing every session it has ever run, with the project as a field inside the
 record, so there is no slice to take - dejima gives each workspace a data
 directory of its own instead. Both reach the same place: a session sees its
 own project's history and no other's.
+
+That is about the per-project state each harness keeps. It is not true of
+`~/.claude/backups`, `tasks`, `plans` and `sessions`, which are mounted
+read-write and shared by every project's sessions - what a session writes
+there, another project's session can read. See
+[#380](https://gitbox.branderson.io/dejima/dejima/issues/380), which has what
+was observed and why only the first of the four was free to fix.
 
 ### Claude Code: a slice of your own tree
 

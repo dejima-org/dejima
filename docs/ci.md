@@ -464,8 +464,8 @@ prefer credentials that cannot do anything else: a token that raises an
 anonymous API rate limit should be a fine-grained token with no permissions
 and no repository access, not a general-purpose one.
 
-**A per-run fetch, not a per-container one.** The privileged job starts
-twenty-seven container pairs, and each filter container asks the forge for its
+**A per-run fetch, not a per-container one.** The privileged job starts a
+container pair per test, and each filter container asks the forge for its
 published address ranges before it brings the policy up. Done once per
 container that is a burst, and GitHub answers a burst on `/meta` with a `403`
 from its secondary rate limit - which is not the hourly ceiling a token raises,

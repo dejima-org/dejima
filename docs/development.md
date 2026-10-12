@@ -27,7 +27,7 @@ run them.
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches. Turns the reported command into argv and asks `docker/guard-lib.sh` |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), and a command aimed at another repository - to a reported command. Named for the merge block, which is the rule it was created for |
+| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), the agent-written disclosure, and a command aimed at another repository - to a reported command |
 | `docker/guard-lib.sh` | The push and merge policy itself, read out of argv. The two hooks above and the two PATH shadows all call it, so a bypass is fixed once rather than twice |
 | `hooks/dejima-notify.sh` | Drops an empty `waiting`/`done` marker for a remote-enabled session. Registered as a `Stop` hook only; `waiting` is there for a harness that can say it without having stopped - see [docs/remote-access.md](remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
