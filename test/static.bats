@@ -3143,25 +3143,39 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # on the host at all - and report nothing, which is the shape of a
     # feature that looks present and is not.
     #
-    # Asserted over the source rather than by driving a launch, because what
-    # distinguishes "ran and found nothing" from "did not run" is not
-    # observable from outside in a stubbed launch.
-    local src="$REPO_ROOT/bin/dejima" flat
+    # Two of the three are off because the flag overrides their config key,
+    # which is what makes the banner and --print-config agree with what
+    # actually happens - they said "epitaph on" while nothing was kept. So
+    # what is asserted here differs by feature: the overrides for those two,
+    # and the mode check for the audit, which has no key to override.
+    local src="$REPO_ROOT/bin/dejima" flat key call
     # Continuations flattened, so a guard split across lines still reads as
     # one condition.
     flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
-    local call
-    for call in \
-        'dejima-epitaph" save' \
-        'dejima-conversation-ship"' \
-        'dejima-audit" snapshot' \
-        'dejima-audit" compare'
-    do
+
+    for key in epitaph.enabled logging.conversation; do
+        grep -qF "_set_override $key off" <<< "$flat" \
+            || { echo "an isolated launch does not turn $key off"; return 1; }
+    done
+    # Under the flag and nowhere else: an unconditional override would turn
+    # the feature off for every launch.
+    awk '
+        /^if \[ "\$DEJIMA_ISOLATED" = 1 \]; then/ { inblock = 1; next }
+        inblock && /^fi/ { inblock = 0 }
+        inblock && /_set_override (epitaph\.enabled|logging\.conversation) off/ { n++ }
+        END { exit !(n == 2) }
+    ' <<< "$flat" \
+        || { echo "the two overrides are not both inside the isolated block"; return 1; }
+    # And each feature still reads the key, so the override is what decides.
+    grep -qF 'config_get_bool epitaph enabled' <<< "$flat" \
+        || { echo "the epitaph no longer reads its own key"; return 1; }
+    grep -qF 'config_get_bool logging conversation' <<< "$flat" \
+        || { echo "the shipper no longer reads its own key"; return 1; }
+
+    # The audit has no config key to override, so it is gated on the mode.
+    for call in 'dejima-audit" snapshot' 'dejima-audit" compare'; do
         grep -qF "$call" <<< "$flat" \
             || { echo "bin/dejima no longer calls: $call"; return 1; }
-        # The guard is on the `if` that encloses the call, so the test looks
-        # for the two together within the same construct rather than merely
-        # both somewhere in the file.
         awk -v call="$call" '
             index($0, "DEJIMA_ISOLATED") { guard = NR }
             index($0, call) { if (guard && NR - guard <= 8) found = 1 }

@@ -337,17 +337,17 @@ done
 # position: the workflow this sets pushes nothing, and a workflow that never
 # pushes already gets no agent socket.
 #
-# Whether the operator named a forge, asked before the default below answers
-# for them: it decides the GitHub credential further down as well, and after
-# this block "is there an override" is true either way.
-DEJIMA_FORGE_NAMED=0
+# And the two things that are off because nothing would read what they
+# produce: an epitaph and a conversation log are both read out of a
+# transcript on the host, and this mode mounts none. Set as overrides rather
+# than checked at each of the four places that would otherwise ask - the
+# banner, --print-config, the shipper's start and the epitaph's save - so
+# that every one of them gives the same answer.
 if [ "$DEJIMA_ISOLATED" = 1 ]; then
-    if _override_set core.forge; then
-        DEJIMA_FORGE_NAMED=1
-    else
-        _set_override core.forge none
-    fi
+    _override_set core.forge    || _set_override core.forge none
     _override_set core.workflow || _set_override core.workflow local-only
+    _override_set epitaph.enabled      || _set_override epitaph.enabled off
+    _override_set logging.conversation || _set_override logging.conversation off
 fi
 
 # Refused rather than dropped. A configured mount is a standing preference and
@@ -1848,12 +1848,12 @@ cleanup() {
     # louder, which is what makes it safe to honour from the environment at
     # all.
     #
-    # Nothing to keep for an isolated launch: an epitaph is read out of the
-    # transcript on the host, and that mode mounts none - so this would write
-    # an empty record keyed to a working directory that will never exist
-    # again. Said at launch rather than inferred from an empty store, and the
-    # same goes for the conversation shipper further down.
-    if [ "$DEJIMA_ISOLATED" = 0 ] && [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+    # An isolated launch reaches this with the key already overridden off, up
+    # where the flag is read: an epitaph is taken from a transcript on the
+    # host and that mode mounts none, so there is nothing to keep. Decided
+    # there rather than here so that the banner and --print-config say the
+    # same thing this does.
+    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
         DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
             "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     fi
@@ -2138,11 +2138,20 @@ export GH_TOKEN="${GH_TOKEN:-}"
 # credential, and that claim has to cover the one core fills in as well as
 # the one a forge declares.
 #
-# Unless the command named a forge, which is the operator saying this session
-# is meant to reach one. Then nothing here is narrowed and the selection
-# decides, exactly as for any other launch.
+# Unless this session has a forge to reach, which is the operator saying it is
+# meant to. Then nothing here is narrowed and the selection decides, exactly
+# as for any other launch.
+#
+# Read off the RESOLVED forge's capabilities rather than off whether a --forge
+# flag was passed. `--forge` naming the no-capability forge is an operator
+# asking for no forge, and it was counted as naming one - so the launch that
+# said most clearly that it wanted no forge access was the one that got the
+# credential. Capabilities rather than the forge's name, because core may not
+# name a forge, and because "a forge that can do nothing has no use for a
+# credential" is the actual rule.
 SANDBOX_GH_TOKEN="$GH_TOKEN"
-if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$DEJIMA_FORGE_NAMED" = 0 ]; then
+if [ "$DEJIMA_ISOLATED" = 1 ] \
+    && [ -z "$(manifest_get forge "$DEJIMA_FORGE_NAME" capabilities)" ]; then
     SANDBOX_GH_TOKEN=""
 fi
 export SANDBOX_GH_TOKEN
@@ -4090,13 +4099,12 @@ compose_status=0
 # itself: --no-conversation and --no-log are overrides held in this process,
 # and the shipper re-reads the config rather than inheriting them.
 #
-# And not at all for an isolated launch. The shipper tails a transcript that
-# is on the host because the harness's state directory is mounted, and that
-# mode mounts none - so what it would ship is nothing, from a file that is
-# never created. Said at launch instead, because a log that is quietly empty
-# is worse than one the operator knows they are not getting.
-if [ "$DEJIMA_ISOLATED" = 0 ] &&
-   [ "$(config_get_bool logging conversation)" = "1" ] &&
+# An isolated launch reaches this with the key already overridden off, for
+# the reason the epitaph is: the shipper tails a transcript that is on the
+# host because the harness's state directory is mounted, and that mode mounts
+# none. One override up where the flag is read, rather than a check here that
+# the banner would then contradict.
+if [ "$(config_get_bool logging conversation)" = "1" ] &&
    [ -n "$(config_get logging loki_url)" ]; then
     "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
     SANDBOX_CONVERSATION_SHIP_PID=$!

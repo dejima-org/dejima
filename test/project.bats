@@ -1524,13 +1524,28 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     grep -qx 'core.workflow=local-only' <<< "$output" \
         || { echo "an isolated launch kept a workflow that pushes"; return 1; }
 
+    # Both halves of the name: a forge named on the command line, and a
+    # workflow, in either order relative to the flag. It only ever named a
+    # workflow before, so the forge half of what it is called went untested.
     local args
+    for args in "--isolated --forge gitea" "--forge gitea --isolated"; do
+        # shellcheck disable=SC2086
+        run launch $args --print-config
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        grep -qx 'core.forge=gitea' <<< "$output" \
+            || { echo "'$args' did not keep the forge the operator named"; return 1; }
+        # And the workflow still defaults, since only the forge was named.
+        grep -qx 'core.workflow=local-only' <<< "$output" \
+            || { echo "'$args' changed the workflow as well"; return 1; }
+    done
     for args in "--isolated --workflow worktree-pr" "--workflow worktree-pr --isolated"; do
         # shellcheck disable=SC2086
         run launch $args --print-config
         [ "$status" -eq 0 ] || { echo "$output"; return 1; }
         grep -qx 'core.workflow=worktree-pr' <<< "$output" \
             || { echo "'$args' did not keep the workflow the operator named"; return 1; }
+        grep -qx 'core.forge=none' <<< "$output" \
+            || { echo "'$args' changed the forge as well"; return 1; }
     done
 
     # And the config file is untouched for a launch without the flag, so the
@@ -1620,6 +1635,15 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
         || { echo "the filter container lost the token that authenticates its ranges fetch"
              return 1; }
 
+    # `--forge` naming the forge with no capabilities is an operator asking
+    # for no forge, and it counted as naming one - so the launch that said
+    # most clearly that it wanted no forge access was the one that got the
+    # credential.
+    run launch --isolated --forge none
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "--isolated --forge none was handed core's GitHub token"; return 1; }
+
     # Naming a forge is the operator saying this session is meant to reach
     # one, and nothing is narrowed from there.
     run launch --isolated --forge gitea
@@ -1633,6 +1657,58 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
     [ "$status" -eq 0 ]
     [ -n "$(launched_env SANDBOX_GH_TOKEN)" ] \
         || { echo "an ordinary launch lost core's GitHub token"; return 1; }
+}
+
+@test "an isolated launch says nothing is kept, and every reader agrees" {
+    # The banner worked the epitaph out from [epitaph] enabled alone and said
+    # "epitaph on" a few lines above the isolated notice saying it was off -
+    # and nothing was being kept either way, because the save was gated on
+    # the mode instead. --print-config had the same split for both keys.
+    #
+    # Both are overridden off where the flag is read now, so this asserts the
+    # thing every reader is reading rather than one reader's output.
+    launch_setup
+    printf '[epitaph]\nenabled = on\n[logging]\nconversation = on\nloki_url = http://loki.invalid:3100\n' \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'epitaph.enabled=off' <<< "$output" \
+        || { echo "--print-config says the epitaph is on for an isolated launch"; return 1; }
+    grep -qx 'logging.conversation=off' <<< "$output" \
+        || { echo "--print-config says the conversation log is on"; return 1; }
+
+    # And on, as configured, without the flag - so the two lines above are
+    # about --isolated rather than about the keys having stopped working.
+    run launch --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'epitaph.enabled=on' <<< "$output" \
+        || { echo "an ordinary launch lost its epitaph setting"; return 1; }
+    grep -qx 'logging.conversation=on' <<< "$output" \
+        || { echo "an ordinary launch lost its conversation setting"; return 1; }
+}
+
+@test "an isolated cline launch is refused rather than writing to the host" {
+    # cline's model configuration reaches the container through the state
+    # mount, which this mode skips - so it was written to a host directory
+    # keyed on the container-local working directory, shared by every
+    # isolated cline launch, and then not mounted. The session started with
+    # no model. #393 is the way in.
+    launch_setup
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = anthropic\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    # --harness rather than a config line: launch() appends its own
+    # `harness = claude-code` after whatever a test writes, and a repeated
+    # key takes the last value.
+    run launch --isolated --harness cline
+    [ "$status" -ne 0 ] || { echo "an isolated cline launch was accepted"; return 1; }
+    [[ "$output" == *"--isolated is not supported for cline"* ]] \
+        || { echo "the refusal does not say why: $output"; return 1; }
+    [ -z "$(ls -A "$state")" ] \
+        || { echo "it still wrote to the host: $(ls -A "$state")"; return 1; }
+    rm -rf "$state"
 }
 
 @test "an isolated launch refuses a project path and the mount flags" {
