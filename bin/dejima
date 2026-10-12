@@ -1515,25 +1515,37 @@ harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 # Paths are compared as strings: both sides of this mount agree on them by
 # construction - same uid, same home, same project path - which is what makes
 # the comparison meaningful rather than a guess about layout.
-SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
-if [ -f "$HOME/.claude.json" ]; then
+#
+# One function rather than one expression, because there are two call sites:
+# this one, and the re-seed further down for a backend whose credential IS
+# this file and whose proxy is off. That one differs in a single respect -
+# the credential stays - and it reached for `cp`, which put every other
+# project's entry back and did it after the credential scan had already read
+# the narrowed copy. The difference is a parameter now, so the narrowing
+# cannot be lost by taking the other path.
+_stage_claude_json() {  # <keep-credential: true|false> <destination>
+    local keep="$1" dest="$2"
+    if [ ! -f "$HOME/.claude.json" ]; then
+        echo '{}' > "$dest"
+        return 0
+    fi
     # The type is checked rather than the key's presence: `projects` holding
     # something other than an object is not a shape Claude Code writes, and
     # narrowing it would error - turning a parseable file into a refused launch
     # over a key with nothing in it to narrow.
-    if ! jq --arg proj "$WORKSPACE_DIR" '
-            del(.primaryApiKey)
+    jq --arg proj "$WORKSPACE_DIR" --argjson keep "$keep" '
+            (if $keep then . else del(.primaryApiKey) end)
             | if (.projects | type) == "object" then
                   .projects |= with_entries(
                       select(.key == $proj or (.key | startswith($proj + "/"))))
               else . end
-         ' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
-        echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
-        echo "credential it may hold before copying it into the container." >&2
-        exit 1
-    fi
-else
-    echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
+         ' "$HOME/.claude.json" > "$dest"
+}
+SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
+if ! _stage_claude_json false "$SANDBOX_CLAUDE_JSON_FILE"; then
+    echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
+    echo "credential it may hold before copying it into the container." >&2
+    exit 1
 fi
 
 SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
@@ -2566,13 +2578,20 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     #
     # Re-seeded rather than never stripped, so the safe form is what every
     # other path gets and this is one explicit step away from it.
+    #
+    # Through the same narrowing, with only the credential kept. It was a
+    # plain `cp`, which also put back the `projects` map #381 narrowed - every
+    # other project's path, filenames and costs - and did it after the
+    # credential scan had read the narrowed copy, so nothing ever looked at
+    # what came back.
     if [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
         && [ -n "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
         && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
         && [ -f "$HOME/.claude.json" ] \
         && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
              = "$(readlink -m "$HOME/.claude.json")" ]; then
-        cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+        _stage_claude_json true "$SANDBOX_CLAUDE_JSON_FILE" \
+            || { echo "$HOME/.claude.json stopped being readable as JSON." >&2; exit 1; }
         echo "[backend.$DEJIMA_BACKEND_NAME] proxy is off, so this session gets your real" >&2
         echo "$DEJIMA_BACKEND_CREDENTIAL_FIELD from $HOME/.claude.json." >&2
     fi

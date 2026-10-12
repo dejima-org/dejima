@@ -768,6 +768,17 @@ reads it host-side per request instead. Without it the proxy would
 withhold one file while dejima copied another, on every launch and whatever
 backend was selected.
 
+**The same staging narrows the `projects` map to the launching project.** That
+map keys per-project state by absolute path, so copying all of it told a
+session the name of every project on the host, a sample of each one's
+filenames, and what each had cost - from inside a container whose claim is
+that it cannot learn what you do elsewhere. The launching project's path and
+anything under it are kept, because a session's working directory is routinely
+a worktree inside it. Both halves run on the one path that stages this file,
+including the re-seed for a backend whose credential IS this file and whose
+proxy is off: that one keeps the credential and narrows the map exactly as the
+other does.
+
 **The residual the first two share is use-while-running.** A session that has
 been turned can spend your quota, ask the model anything, and read the answers
 - through the proxy, without ever holding the credential. That is inherent to
@@ -1024,8 +1035,10 @@ reasoning below is what both are built on.
   failing cleanly (confirmed against a real read-only copy of this file -
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
   Instead, `dejima` generates a throwaway copy of the file at
-  launch (seeded from the real file, same "generate a sandbox-specific
-  file on the host" pattern as the generated settings override layer)
+  launch (seeded from the real file with the credential dropped and the
+  `projects` map narrowed to this project - see "staged, not mounted" above -
+  the same "generate a sandbox-specific file on the host" pattern as the
+  generated settings override layer)
   and mounts *that* read-write in its place; the copy is discarded,
   unmodified in the real file, when the session ends. A compromised
   session can add whatever it wants to `mcpServers` (or anything else in

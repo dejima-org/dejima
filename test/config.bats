@@ -3980,6 +3980,52 @@ EOF
     rm -rf "$workspace" "$stub" "$log" "$staged"
 }
 
+@test "the proxy-off re-seed narrows the projects map too" {
+    # With the proxy off for a backend whose credential IS ~/.claude.json,
+    # the staged copy is re-seeded so the key survives - and that was a plain
+    # `cp`, which put every other project's entry back. Worse, it ran after
+    # the credential scan had read the narrowed copy, so nothing ever looked
+    # at what came back.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<JSON
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST",
+ "projects":{
+   "$workspace":{"exampleFiles":["mine.py"],"lastCost":1},
+   "/home/someone/else/their-project":{"exampleFiles":["theirs.py"]}},
+ "numStartups":7}
+JSON
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
+                 "credential_file = $RW_HOME/.claude.json" 'proxy = off'
+
+    local stub staged
+    stub="$(mktemp -d)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; return 1; }
+
+    # The credential is the point of this path, so it stays.
+    [ "$(jq -r '.primaryApiKey' "$staged")" = sk-ant-api03-REAL-KEY-FROM-THE-HOST ] \
+        || { echo "proxy = off did not pass the credential through"; return 1; }
+    # And nothing else came back with it.
+    [ "$(jq -r '.projects | length' "$staged")" = 1 ] \
+        || { echo "the re-seed restored other projects: $(jq -c '.projects|keys' "$staged")"
+             return 1; }
+    grep -q 'theirs.py' "$staged" \
+        && { echo "another project's filenames reached the container"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = 7 ] || { echo "lost app state"; return 1; }
+    rm -rf "$workspace" "$stub" "$staged"
+}
+
 @test "a projects key that is not a map does not refuse the launch" {
     # Narrowing a `projects` that holds a string would error, and the staging
     # treats a jq failure as fatal - so an odd but parseable file would become
