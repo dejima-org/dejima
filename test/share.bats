@@ -173,8 +173,12 @@ EOF
         *) echo "mounted '$(mounted_share)', not a directory under the isolated root"
            return 1 ;;
     esac
-    [ -d "$(mounted_share)" ] \
-        || { echo "the launch did not create the directory it mounts"; return 1; }
+    # Not asserted to still exist: an isolated share that was never written
+    # to is removed in the exit trap, so a stub that runs no session leaves
+    # none. That it was created and mounted is project.bats' test, which has
+    # a stub that writes into it.
+    [ ! -d "$(mounted_share)" ] \
+        || { echo "an empty isolated share was left behind"; return 1; }
     # The root holding them is dejima's, like projects/ - so a launch must
     # not go on telling the operator about it every time as something that
     # was left behind by hand.

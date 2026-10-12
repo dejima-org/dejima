@@ -1867,6 +1867,16 @@ cleanup() {
         # shellcheck disable=SC2086
         docker volume rm $SANDBOX_ISOLATED_VOLUMES >/dev/null 2>&1 || true
     fi
+    # And this session's share if it is still empty. `rmdir` rather than a
+    # test, because only an empty directory can be removed that way and the
+    # check is then the removal. It covers both a session that handed nothing
+    # back and a launch refused after the directory was made - every refusal
+    # that can happen after it, which is most of them, otherwise left one
+    # behind for an operator to find and wonder about. An ordinary project's
+    # share is not touched: that one is expected to outlive its sessions.
+    if [ "$DEJIMA_ISOLATED" = 1 ] && [ -n "${SANDBOX_SHARE_DIR:-}" ]; then
+        rmdir "$SANDBOX_SHARE_DIR" 2>/dev/null || true
+    fi
     exit_step "session ended - keeping what it compacted away"
     # Keep whatever the session compacted away, into a store nothing mounts.
     # `|| true` for the same reason every other line in this trap has it: a

@@ -61,6 +61,11 @@ launch_setup() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# Stands in for a session that handed something back, for the one test about
+# an isolated share surviving. Written where the launch says it mounted it.
+if [ -n "${LAUNCH_SHARE_MARKER:-}" ] && [ -n "${SANDBOX_SHARE_DIR:-}" ]; then
+    : > "$SANDBOX_SHARE_DIR/handed-back" 2>/dev/null || true
+fi
 # For a real `docker build` (never `docker compose ... build`, whose $1 is
 # "compose"), also log the generated Dockerfile's own content, tagged by -t -
 # argv alone can't tell whether the Dockerfile's FROM line actually points at
@@ -116,6 +121,7 @@ launch() {
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_DOCKERFILE_LOG="$LAUNCH_DIR/dockerfile-log" \
         SSH_AUTH_SOCK="${LAUNCH_SSH_AUTH_SOCK-}" ALLOWED_DOMAINS= \
+        LAUNCH_SHARE_MARKER="${LAUNCH_SHARE_MARKER:-}" \
         "$REPO_ROOT/bin/dejima" "$@"
 }
 
@@ -1448,10 +1454,21 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
         "$share"/isolated/*) ;;
         *) echo "the isolated share is not under the isolated root: $first"; return 1 ;;
     esac
-    [ -d "$first" ] && [ -d "$second" ] || { echo "the share directories were not made"; return 1; }
-    # Made, and nothing else: the one host directory an isolated session
-    # writes starts empty, which is the whole of "nothing crosses in".
-    [ -z "$(ls -A "$first")" ] || { echo "the share directory is not empty"; return 1; }
+    # Neither survives, because neither was written to: an empty isolated
+    # share is removed in the exit trap. That covers a session that handed
+    # nothing back and a launch refused after the directory was made, which
+    # is most refusals - each used to leave one for an operator to find.
+    [ ! -d "$first" ] && [ ! -d "$second" ] \
+        || { echo "an empty isolated share was left behind"; return 1; }
+    # And one that WAS written to stays, which is what the directory is for -
+    # and is also what shows the launch creates and mounts it rather than
+    # just computing a path.
+    LAUNCH_SHARE_MARKER=1 run launch --isolated
+    [ "$status" -eq 0 ]
+    local used; used="$(launched_env SANDBOX_SHARE_DIR)"
+    [ -f "$used/handed-back" ] \
+        || { echo "the share directory the launch mounted does not exist: $used"; return 1; }
+    rm -rf "$used"
     rm -rf "$share"
 }
 
