@@ -966,7 +966,7 @@ _refuse_guarded_mount() {
         _paths_overlap "$real" "$guarded_real" || continue
         echo "Refusing $kind: $path" >&2
         echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
-        echo "Even read-only, that hands the session every project's approvals, the" >&2
+        echo "Mounted at all, that hands the session every project's approvals, the" >&2
         echo "record of what earlier sessions were caught doing, or the handoff files" >&2
         echo "of every project and every isolated session." >&2
         exit 1
@@ -1298,6 +1298,24 @@ warn_if_inside_workspace "audit report store" "$AUDIT_DIR" \
 warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
     "a session can write its own acknowledgements, suppressing the" \
     "findings it would otherwise produce here from every later report."
+# The three above were the whole list, and the guarded-mount refusal further
+# down covers six. So a path dejima refuses to mount through [mounts] or --ro
+# was mounted without a word when it happened to sit inside the workspace -
+# not a judgement about which stores matter, just three that were written and
+# three that were not. A static test now holds the two lists in step.
+warn_if_inside_workspace "epitaph store" "$(config_get epitaph dir)" \
+    "it holds each earlier session's own account of what it worked out, so" \
+    "a session can read what every previous one in this project concluded" \
+    "- the cross-session channel the never-mounted store exists to close -" \
+    "and can delete them."
+warn_if_inside_workspace "share directories of every project" \
+    "$(share_projects_root "$(config_get core share_dir)")" \
+    "every project's handoff files can be read and rewritten, which is the" \
+    "pile the per-project split removed."
+warn_if_inside_workspace "share directories of every isolated session" \
+    "$(isolated_share_root "$(config_get core share_dir)")" \
+    "the one thing an isolated session leaves behind is readable here, for" \
+    "every isolated session this host has run."
 
 SANDBOX_SSH_KEY="$(config_get core ssh_key)"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then

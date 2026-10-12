@@ -1850,6 +1850,37 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
     [[ "$output" == *"approve its own domains and dependencies"* ]]
 }
 
+@test "the launcher warns about the epitaph and share stores inside the workspace too" {
+    # Three stores were warned about and six were guarded, so a path dejima
+    # refuses to mount through [mounts] or --ro was mounted without a word
+    # when it happened to sit inside the project. Each consequence differs,
+    # which is why each store says its own.
+    launch_setup
+    local conf; conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    printf '[epitaph]\ndir = %s\n[core]\nshare_dir = %s\n' \
+        "$PROJ/.epitaphs" "$PROJ/.share" >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"the epitaph store"* ]] \
+        || { echo "no warning for the epitaph store: $output"; return 1; }
+    [[ "$output" == *"what every previous one in this project concluded"* ]] \
+        || { echo "the epitaph warning does not name its own consequence"; return 1; }
+    [[ "$output" == *"share directories of every project"* ]] \
+        || { echo "no warning for the per-project share root"; return 1; }
+    [[ "$output" == *"share directories of every isolated session"* ]] \
+        || { echo "no warning for the isolated share root"; return 1; }
+
+    # And none of them for a project that contains none of these, so the
+    # three above are about the overlap rather than printed always.
+    local other; other="$(mktemp -d)"
+    run launch "$other"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"writable from inside the sandbox"* ]] \
+        || { echo "a clean project was warned about: $output"; return 1; }
+    rm -rf "$other"
+}
+
 @test "the launcher warns when the audit report or baseline store sits inside the mounted workspace" {
     launch_setup
     run launch "$PROJ"

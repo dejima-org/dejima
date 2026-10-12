@@ -3186,17 +3186,53 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     return 0
 }
 
-@test "the isolated share root is out of every other launch's reach" {
-    # One directory per isolated session, all under one root - which is the
-    # pile the per-project share split removed, if an ordinary launch could
-    # name the root in [mounts] readonly. Guarded the same way the
-    # per-project root is.
-    grep -q 'isolated_share_root "$(config_get core share_dir)"' "$REPO_ROOT/bin/dejima" \
-        || { echo "the isolated share root is not in GUARDED_STORES"; return 1; }
-    # And a launch's own share is a directory under it, not the root, so the
-    # guard cannot be satisfied by nothing ever reaching that path.
-    grep -q 'isolated_share_make "$SANDBOX_SHARE_ROOT"' "$REPO_ROOT/bin/dejima" \
-        || { echo "nothing makes an isolated share directory"; return 1; }
+@test "every store dejima refuses to mount is one it warns about inside the workspace" {
+    # Two lists that have to say the same thing. GUARDED_STORES is what a
+    # [mounts] entry or --ro/--rw is refused for naming;
+    # warn_if_inside_workspace is what an operator hears when the same path is
+    # inside the project being mounted instead. The workspace mount itself is
+    # not refused - that is a deliberate decision with its own tests - so the
+    # warning is the whole of what a session's own project gets.
+    #
+    # They drifted: three stores were warned about and six were guarded, so a
+    # path dejima would not mount through one route was mounted silently
+    # through the widest one.
+    #
+    # Checked by name in both directions rather than against a list kept here,
+    # which would need the same updating the code does.
+    local src="$REPO_ROOT/bin/dejima" flat guarded warned missing="" n
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    guarded="$(sed -n 's/^[[:space:]]*GUARDED_STORES=(\(.*\))[[:space:]]*$/\1/p' <<< "$flat" \
+        | grep . | head -1)"
+    [ -n "$guarded" ] || { echo "GUARDED_STORES could not be read"; return 1; }
+    warned="$(grep '^warn_if_inside_workspace ' <<< "$flat")"
+    n="$(grep -c '^warn_if_inside_workspace ' <<< "$flat")"
+    [ "$n" -ge 6 ] || { echo "only $n stores are warned about"; return 1; }
+
+    # Every name the guarded list resolves a store through has to appear in a
+    # warning. Names rather than whole expressions, because two of the
+    # entries nest a command substitution inside another and no single
+    # tokenising of that is worth trusting.
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$warned" \
+            || missing="$missing $name"
+    done < <(grep -oE '\$\(([a-z_]+)|\$([A-Z_]+)' <<< "$guarded" \
+        | sed 's/^\$(\?//' | sort -u)
+    [ -z "$missing" ] \
+        || { echo "guarded but never warned about:$missing"; return 1; }
+
+    # And the other direction: a warning for something the mount guard does
+    # not cover would be the two lists disagreeing the other way.
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$guarded" \
+            || missing="$missing $name"
+    done < <(sed -n 's/^warn_if_inside_workspace "[^"]*"[[:space:]]*"\?\$(\?\([A-Za-z_]*\).*/\1/p' <<< "$flat" \
+        | grep . | sort -u)
+    [ -z "$missing" ] \
+        || { echo "warned about but not guarded:$missing"; return 1; }
 }
 
 @test "the compose file's volumes can each be replaced for one launch" {
