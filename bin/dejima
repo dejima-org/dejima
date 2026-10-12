@@ -3917,10 +3917,51 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # docker-compose.yml declares for the sandbox. A static test reads the same
 # names back out of the firewall scripts, so a script that starts reading a new
 # one fails rather than silently allowlisting less than it was told to.
-# The only two names here this launcher does not derive: they come from the
-# operator's own environment and travel through untouched. Marked exported
-# anyway, so that `-e NAME` carries a value rather than an empty string on a
-# shell where they were set without being exported.
+# EGRESS_HOST_ADDR comes from the operator's own environment and travels
+# through untouched. Marked exported anyway, so that `-e NAME` carries a value
+# rather than an empty string on a shell where it was set without being
+# exported.
+#
+# EGRESS_HOST_PORTS starts there too and gains the ports of the host-resident
+# destinations THIS launch configured. The policy clamps the host's address to
+# this list ahead of every wider rule, so without these a configured
+# host-resident Loki or self-served model would be refused on the one port it
+# needs - and with the clamp in the other order, configuring either opened
+# every port on the host instead, sshd included.
+#
+# A port is added for a configured destination whether or not it turns out to
+# be host-resident, because deciding that means resolving a name and the
+# launcher deliberately does not. The widening that costs is bounded to a port
+# the operator pointed a service at.
+_egress_host_port() {  # <url>
+    # Declared separately: in one `local`, a later initialiser does not see an
+    # earlier name from the same statement - it is in scope and unset, so
+    # hostport came out empty and every URL read as its scheme's default.
+    local url scheme hostport
+    url="${1#*://}"
+    scheme="${1%%://*}"
+    hostport="${url%%/*}"
+    case "$hostport" in
+        *:[0-9]*) printf '%s' "${hostport##*:}"; return ;;
+    esac
+    case "$scheme" in
+        https) printf '443' ;;
+        http)  printf '80' ;;
+    esac
+}
+for _hp_url in "$LOKI_URL" \
+    "$([ -n "$DEJIMA_BACKEND_NAME" ] \
+        && config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1 \
+        && config_get "backend.$DEJIMA_BACKEND_NAME" base_url)"; do
+    [ -n "$_hp_url" ] || continue
+    _hp_port="$(_egress_host_port "$_hp_url")"
+    [ -n "$_hp_port" ] || continue
+    case ",${EGRESS_HOST_PORTS:-}," in
+        *",$_hp_port,"*) continue ;;
+    esac
+    EGRESS_HOST_PORTS="${EGRESS_HOST_PORTS:+$EGRESS_HOST_PORTS,}$_hp_port"
+done
+unset _hp_url _hp_port
 export EGRESS_HOST_ADDR EGRESS_HOST_PORTS
 
 filter_env=(

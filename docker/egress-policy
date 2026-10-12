@@ -771,15 +771,26 @@ EOF
 
     cat <<EOF
 
+    # The container's own host, as a single address, on the ports it was told
+    # to open and no others.
+    #
+    # Before the open class, not after it, because this is the narrower rule
+    # and the first match wins. The host's address reaches literal_v4 by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, \`dejima-allow <gateway>\` - and from there the open
+    # permit below answered for it first, on every port, including sshd and
+    # the remote-access front door. Configuring one host service opens that
+    # service, which is what docs/security.md says it does.
+EOF
+    emit_host_clamp host_v4
+
+    cat <<EOF
+
     # The open class: names the launcher permitted and addresses it supplied,
     # on any port. DNS to them is refused above along with everyone else's.
     ip daddr @oname_v4 goto permit
     ip daddr @literal_v4 goto permit
-
-    # The container's own host, as a single address, on the ports it was told
-    # to open and no others.
 EOF
-    emit_host_clamp host_v4
 
     cat <<EOF
 

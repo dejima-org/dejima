@@ -1383,12 +1383,18 @@ one.
 Nothing in a launch needs it open. A host-resident forge, a host-resident Loki
 and a self-served model endpoint are each reached through their own entry - by
 name, or as a literal address - and each lands in a set of its own with its own
-rules. Configuring one of those is how a host service becomes reachable.
+rules. Configuring one of those is how a host service becomes reachable, and
+it is that service that becomes reachable rather than the host: the clamp is
+matched **before** the wider class rules, so an address that is both the
+host's and an open-class entry's is still held to these ports.
 
-For anything else, `EGRESS_HOST_PORTS` on the filter container takes TCP ports
-and low-high ranges, comma or space separated; `EGRESS_HOST_PORTS=any` restores
-the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the
-entry altogether. A value that is not a port stops the container rather than
+`EGRESS_HOST_PORTS`, set in the environment you launch from, takes TCP ports
+and low-high ranges, comma or space separated. The launcher adds the port of
+each host-resident destination it configured - a `[logging] loki_url`, a
+backend's `base_url` - so the services dejima set up reach the host without
+every other port coming with them. `EGRESS_HOST_PORTS=any` restores the
+unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the entry
+altogether. A value that is not a port stops the container rather than
 becoming a rule nobody meant.
 
 ### DNS is allowlisted too

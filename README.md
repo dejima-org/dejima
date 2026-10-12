@@ -412,7 +412,8 @@ broken tool. IPv6 is refused outright rather than allowlisted: a sandbox has no
 IPv6 egress at all, and one table states that in the same transaction as
 everything else, so there is no moment where the family is partly filtered.
 
-The allowlist covers what the sandbox needs to function - DNS, the Docker host,
+The allowlist covers what the sandbox needs to function - DNS, the Docker host
+on the ports a host-resident service was configured on and no others,
 GitHub on port 443 for read access whichever forge is selected, whatever the
 selected forge needs, the harness's own update endpoints, and the selected
 backend's API endpoint when the credential proxy is off - plus whatever a
