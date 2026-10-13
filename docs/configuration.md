@@ -1097,6 +1097,11 @@ project it cannot see. Harness arguments after `--` still pass through.
 | `[identity.<name>] ssh_key` | mounted | mounted |
 | conversation log, epitaph | as configured | off |
 
+Every shipped harness supports it. A harness whose model configuration has to
+be a file inside its own state directory gets it from a staging directory
+that goes away with the launch, rather than from the state mount this mode
+does not have.
+
 Your own `~/.claude` hooks, skills, commands, agents and output styles are
 still mounted read-only, as is `[mounts] nvim_config`. Those are yours, no
 session can write them, and a session without them is a session without the

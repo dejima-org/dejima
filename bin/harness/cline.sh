@@ -133,38 +133,23 @@ _cline_host_allowlisted() {
 #
 # $1 is the override file core owns for harnesses that take one on the command
 # line. Cline does not - it reads a JSON file at a fixed place inside its data
-# directory - so that argument is unused here and the file is written into the
-# state directory instead, before it is mounted. Returning nonzero stops the
+# directory - so that argument is unused here. $2 is the per-run staging
+# directory, which is where this writes instead. Returning nonzero stops the
 # launch.
 #
-# Rewritten every launch on purpose. A session can edit this file (it is inside
-# a read-write mount, and Cline rewrites it itself on its own schedule anyway),
-# so it is not a control while a session is running - the firewall is what
-# bounds where a repointed endpoint could reach. What rewriting buys is that a
-# repointing cannot persist into the next session.
+# Written per run and seeded in, not written where it will live. A session can
+# edit the installed copy - Cline rewrites it on its own schedule anyway - so
+# it is not a control while a session is running; the firewall is what bounds
+# where a repointed endpoint could reach. What this buys is that a repointing
+# cannot persist into the next session, which writing into the mounted state
+# directory only approximated by rewriting the file each launch.
 harness_prepare_config() {
-    local state model settings
-    # An isolated launch has nowhere for this to go. The model configuration
-    # below reaches the container through the state mount, and that mount is
-    # exactly what --isolated skips - so the file would be written to a host
-    # directory keyed on the container-local working directory, shared by
-    # every isolated cline launch, and then not mounted. Cline would start
-    # with no model configured and the mode's claim to leave nothing on the
-    # host would be false.
-    #
-    # Refused rather than half-done, until there is a per-run way in (#393).
-    if [ "${DEJIMA_ISOLATED:-0}" = 1 ]; then
-        echo "harness.cline: --isolated is not supported for cline yet." >&2
-        echo "" >&2
-        echo "Cline's model configuration reaches the container through the" >&2
-        echo "state directory, which this mode does not mount - so the session" >&2
-        echo "would start with no model and the file would be left on the host." >&2
-        echo "" >&2
-        echo "Use --harness claude-code for an isolated session, or drop" >&2
-        echo "--isolated for this one. See #393." >&2
-        return 1
-    fi
-    state="$(_cline_state_dir "$WORKSPACE_DIR")" || {
+    local model settings
+    # Checked, not used: this function no longer writes into the state
+    # directory, but a launch with no state_dir has nowhere to keep Cline's
+    # state at all and the resume command in the briefing has no path to
+    # name. Refusing here is where an operator can still act on it.
+    _cline_state_dir "$WORKSPACE_DIR" >/dev/null || {
         echo "harness.cline: state_dir is not set, so there is nowhere to keep" >&2
         echo "this project's Cline state. Set it in [harness.cline]." >&2
         return 1
@@ -280,11 +265,34 @@ harness_prepare_config() {
         return 1
     fi
 
-    settings="$state/settings"
+    # Into the per-run staging directory core hands this hook, not into the
+    # state directory on the host. Two things follow, and the second is why
+    # --isolated works for this harness at all:
+    #
+    # The file is seeded rather than mounted, so entrypoint.sh installs a copy
+    # the session owns and nothing Cline writes to it reaches the host. That
+    # is what the comment above this function wanted - a repointing cannot
+    # persist into the next session - and writing into the mounted state
+    # directory only approximated it by rewriting the file each launch.
+    #
+    # And it no longer needs the state mount to arrive. An isolated launch
+    # mounts no host state, which used to mean this file was written to a host
+    # directory keyed on the container-local working directory and then not
+    # mounted: Cline started with no model and fell back to its own hosted
+    # endpoint, which the firewall was never asked to allow (#393).
+    _CLINE_PROVIDERS_FILE=""
+    settings="${2:-}"
+    [ -n "$settings" ] || {
+        echo "harness.cline: core passed no staging directory, so there is" >&2
+        echo "nowhere to put this launch's provider configuration." >&2
+        return 1
+    }
+    settings="$settings/cline-providers"
     mkdir -p "$settings" || return 1
-    # 0700: the placeholder is not a secret, but this directory is where a real
-    # one would land if anything ever wrote one here by mistake.
-    chmod 700 "$state" 2>/dev/null || true
+    # 0700 on the staging directory, for the reason the state directory had
+    # it: the placeholder is not a secret, but this is where a real one would
+    # land if anything ever wrote one here by mistake.
+    chmod 700 "$settings" 2>/dev/null || true
 
     # Cline DISCARDS a provider entry with no updatedAt and falls back to its
     # own hosted endpoint, silently - the run reports provider "cline" and a
@@ -344,6 +352,10 @@ harness_prepare_config() {
     fi || { rm -f "$tmp"; return 1; }
     chmod 600 "$tmp"
     mv "$tmp" "$settings/providers.json"
+    # Read by harness_seed below, which runs again after this hook for exactly
+    # this: a hook whose job is to produce a per-run file has to run before
+    # the list that mounts it.
+    _CLINE_PROVIDERS_FILE="$settings/providers.json"
 }
 
 # The per-project state this harness keeps on the host.
@@ -433,6 +445,16 @@ harness_staged_config() {
 # servers, which are commands cline executes: a session that could write the
 # host's copy would be choosing what runs there next time.
 harness_seed() {
+    # This launch's provider configuration, which harness_prepare_config
+    # wrote into the staging directory. Seeded rather than mounted so the
+    # session owns the copy it edits and nothing it writes reaches the host -
+    # and so it arrives without the state mount, which an isolated launch
+    # does not have (#393).
+    #
+    # Empty until that hook has run. Core loads this list twice for exactly
+    # that reason, and the first pass simply has nothing to emit here.
+    [ -z "${_CLINE_PROVIDERS_FILE:-}" ] \
+        || emit_seed_from "$_CLINE_PROVIDERS_FILE" ".cline/data/settings/providers.json"
     emit_seed_from "$HOME/.cline/settings.json" ".cline/settings.json"
     emit_seed_from "$HOME/.cline/cline_mcp_settings.json" ".cline/cline_mcp_settings.json"
 }

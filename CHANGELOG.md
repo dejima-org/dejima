@@ -40,6 +40,7 @@ and a checkout from before this tag reports itself that way.
   boundary, no forge credential unless the same command names a forge, and a
   `~/shared` made fresh for that session alone. For a disposable experiment,
   or anything that should not be able to read what an earlier session did.
+  Supported on every shipped harness.
   ([#390](https://gitbox.branderson.io/dejima/dejima/pulls/390),
   [docs](docs/configuration.md#isolated-sessions))
 - **`dejima-allow` takes up to twenty domains at once**, printed back one per
@@ -91,9 +92,6 @@ Read this part before updating. Both fail closed, and one fails quietly.
   LAN address - are not in it, so a service configured at the host's LAN IP is
   still permitted on every port by the open class.
   ([#401](https://gitbox.branderson.io/dejima/dejima/issues/401))
-- **`--isolated` is refused for the cline harness**, which has no way to be
-  given its model configuration without the state mount that mode skips.
-  ([#393](https://gitbox.branderson.io/dejima/dejima/issues/393))
 
 ### Fixed
 
@@ -109,6 +107,11 @@ Read this part before updating. Both fail closed, and one fails quietly.
 - A self-check retry that could not see its own failure, and test deadlines
   that now scale with how much the run asked of the machine.
   ([#379](https://gitbox.branderson.io/dejima/dejima/pulls/379))
+- A harness's per-run configuration is seeded from a staging directory that
+  goes away with the launch, rather than written onto the host where it will
+  live. For cline that is what lets `--isolated` work at all; for an ordinary
+  launch the end state is unchanged.
+  ([#393](https://gitbox.branderson.io/dejima/dejima/issues/393))
 
 ### Documentation
 

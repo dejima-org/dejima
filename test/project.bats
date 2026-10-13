@@ -1705,27 +1705,66 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
         || { echo "an ordinary launch lost its conversation setting"; return 1; }
 }
 
-@test "an isolated cline launch is refused rather than writing to the host" {
-    # cline's model configuration reaches the container through the state
-    # mount, which this mode skips - so it was written to a host directory
-    # keyed on the container-local working directory, shared by every
-    # isolated cline launch, and then not mounted. The session started with
-    # no model. #393 is the way in.
+@test "an isolated cline launch is configured, and writes nothing to the host" {
+    # Cline's model configuration reaches the container through the state
+    # mount, which this mode does not have - so it was written to a host
+    # directory keyed on the container-local working directory, shared by
+    # every isolated cline launch, and then not mounted. Cline started with no
+    # model and fell back to its own hosted endpoint, which the firewall was
+    # never asked to allow.
+    #
+    # It is seeded from the per-run staging directory now, so it arrives
+    # without a state mount and the host state directory is untouched.
     launch_setup
     local state; state="$(mktemp -d)"
-    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = anthropic\n' \
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
         "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
 
     # --harness rather than a config line: launch() appends its own
     # `harness = claude-code` after whatever a test writes, and a repeated
     # key takes the last value.
     run launch --isolated --harness cline
-    [ "$status" -ne 0 ] || { echo "an isolated cline launch was accepted"; return 1; }
-    [[ "$output" == *"--isolated is not supported for cline"* ]] \
-        || { echo "the refusal does not say why: $output"; return 1; }
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$state"; return 1; }
+
+    # The configuration arrives, as a seed rather than a mount - so the
+    # session owns the copy it edits and nothing it writes reaches the host.
+    local log; log="$(docker_log)"
+    grep -qE -- "-v [^ ]*/providers\.json:/etc/dejima-seed/\.cline/data/settings/providers\.json:ro" \
+        <<< "$log" \
+        || { echo "cline got no provider configuration"; rm -rf "$state"; return 1; }
+    # From a path that goes away with the run, not from the state directory.
+    grep -qE -- "-v $state[^ ]*:/.*providers\.json" <<< "$log" \
+        && { echo "it was mounted out of the host state directory"; rm -rf "$state"; return 1; }
+    # And the state directory itself is neither mounted nor written.
+    grep -qF -- "-v $state" <<< "$log" \
+        && { echo "an isolated launch mounted the host state directory"; rm -rf "$state"; return 1; }
     [ -z "$(ls -A "$state")" ] \
-        || { echo "it still wrote to the host: $(ls -A "$state")"; return 1; }
+        || { echo "it wrote to the host: $(ls -A "$state")"; rm -rf "$state"; return 1; }
     rm -rf "$state"
+    return 0
+}
+
+@test "an ordinary cline launch still gets its provider configuration" {
+    # The same seed, which for a launch that HAS a state mount lands inside
+    # it - so the end state is what it was before, written by the entrypoint
+    # rather than by the launcher onto the host.
+    launch_setup
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --harness cline "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$state"; return 1; }
+    local log; log="$(docker_log)"
+    grep -qE -- "-v [^ ]*/providers\.json:/etc/dejima-seed/\.cline/data/settings/providers\.json:ro" \
+        <<< "$log" \
+        || { echo "cline got no provider configuration"; rm -rf "$state"; return 1; }
+    # And this one does mount the state directory, which is what makes the
+    # seeded copy land in it.
+    grep -qF -- "-v $state" <<< "$log" \
+        || { echo "an ordinary launch did not mount the state directory"; rm -rf "$state"; return 1; }
+    rm -rf "$state"
+    return 0
 }
 
 @test "an isolated launch refuses a project path and the mount flags" {

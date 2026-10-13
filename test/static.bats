@@ -1649,7 +1649,13 @@ _cline_cfg() {
 
 # $1 is the config dir, $2 the workspace. Prints whatever the plugin said and
 # returns its status.
+#
+# The staging directory is $1/stage, because that is the second argument core
+# passes and because it is where the plugin writes this launch's provider
+# configuration now - it used to write into the state directory, which an
+# isolated launch does not mount. The tests below read it out of there.
 _cline_prepare() {
+    mkdir -p "$1/stage"
     DEJIMA_CONFIG_DIR="$1" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
         source "$2/bin/dejima-project-lib.sh"
@@ -1657,7 +1663,7 @@ _cline_prepare() {
         source "$2/bin/dejima-slug-lib.sh"
         harness_plugin_load cline
         WORKSPACE_DIR="$1"
-        harness_prepare_config /dev/null' _ "$2" "$REPO_ROOT"
+        harness_prepare_config /dev/null "$3"' _ "$2" "$REPO_ROOT" "$1/stage"
 }
 
 @test "cline refuses to launch with no model configured" {
@@ -1695,7 +1701,7 @@ _cline_prepare() {
         # workspace slug, and spelling that out here would be a second copy of
         # ws_slug that could agree with nothing.
         local written
-        written="$(find "$d/state" -name providers.json -print -quit)"
+        written="$(find "$d/stage" -name providers.json -print -quit)"
         [ -n "$written" ] || { echo "no providers.json written for $id"; return 1; }
         local wrote
         wrote="$(jq -r '.providers."openai-compatible".settings.model' "$written")"
@@ -1819,7 +1825,7 @@ _cline_prepare() {
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local f
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json was written"; return 1; }
     run jq -r '.providers.anthropic.settings.apiKey' "$f"
     [[ "$output" == *placeholder* ]] || { echo "the key is not a placeholder: $output"; return 1; }
@@ -1843,7 +1849,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json"; return 1; }
     run jq -r '.providers.anthropic.updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt: cline will discard this"; return 1; }
@@ -1859,7 +1865,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts2"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers."openai-compatible".updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt on the local branch"; return 1; }
 }
@@ -1877,13 +1883,13 @@ _cline_prepare() {
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic' 'context_window = 15000')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow' "$f"
     [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
 
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
     [ "$output" = "absent" ] || { echo "invented a context window: $output"; return 1; }
 }
@@ -10657,12 +10663,16 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
 }
 
 # The providers.json cline is actually given, for one config. Prints it as JSON.
+#
+# Out of the staging directory, not the state directory: this file is written
+# per run and seeded into the container now, which is what lets an isolated
+# launch - one with no state mount at all - be configured.
 _cline_providers_json() {
     local cfg="$1" out
     _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws" >/dev/null 2>&1 || return 1
-    out="$(ls -d "$(sed -n 's/^state_dir *= *//p' "$cfg/config")"/*/settings 2>/dev/null | head -1)"
+    out="$(find "$cfg/stage" -name providers.json -print -quit 2>/dev/null)"
     [ -n "$out" ] || return 1
-    cat "$out/providers.json"
+    cat "$out"
 }
 
 @test "cline's provider type follows the provider's api_style, not a second setting" {
