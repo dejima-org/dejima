@@ -51,6 +51,7 @@ run them.
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
+| `bin/dejima-version-lib.sh` | Which release a checkout is on, from `git describe` rather than from any file in the tree - so it cannot claim a release a checkout has been pulled past. Sourced by `bin/dejima` (`--version`, the banner) and `bin/dejima-update-check` (what the remote has that this does not). Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |

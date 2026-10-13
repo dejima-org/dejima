@@ -20,6 +20,31 @@ set -euo pipefail
 # so a mistyped invocation still fails a script. That split is the whole of
 # what #64 asked for: bare invocation keeps its terse line, --help explains.
 case "${1:-}" in
+    --version)
+        # Before the libraries are sourced and before any config is read, like
+        # --help: the moment someone asks which release they are on is often
+        # the moment something else is wrong. Its own `git describe` for the
+        # same reason, rather than the library's, which is not loaded yet.
+        _v_root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+        if ! git -C "$_v_root" rev-parse --git-dir >/dev/null 2>&1; then
+            echo "dejima unknown (not a git checkout)"
+        else
+            _v_tag="$(git -C "$_v_root" describe --tags --abbrev=0 --match '[0-9]*' 2>/dev/null)" || _v_tag=""
+            if [ -z "$_v_tag" ]; then
+                echo "dejima unreleased (no release tag in this checkout)"
+            else
+                _v_n="$(git -C "$_v_root" rev-list --count "$_v_tag..HEAD" 2>/dev/null)" || _v_n=0
+                if [ "${_v_n:-0}" -gt 0 ]; then
+                    echo "dejima $_v_tag+$_v_n ($_v_n commits past $_v_tag)"
+                else
+                    echo "dejima $_v_tag"
+                fi
+            fi
+        fi
+        echo ""
+        echo "What each release changed: $_v_root/CHANGELOG.md"
+        echo "Only the tip of main is supported - see SECURITY.md."
+        exit 0 ;;
     -h|--help)
         cat <<'DEJIMA_HELP'
 dejima - run an agent harness in a container that cannot reach your machine
@@ -53,7 +78,7 @@ Options (each overrides the config file for one launch only):
   --isolated              no project, no memory, no forge; keeps only ~/shared
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
-  -h, --help              this message
+  -h, --help              this message; --version prints this release
 
 Every --no-* flag only ever narrows; a config that says off is a decision.
 
@@ -80,6 +105,8 @@ source "$SCRIPT_DIR/dejima-color-lib.sh"
 source "$SCRIPT_DIR/dejima-slug-lib.sh"
 # shellcheck source=dejima-harness-lib.sh
 source "$SCRIPT_DIR/dejima-harness-lib.sh"
+# shellcheck source=dejima-version-lib.sh
+source "$SCRIPT_DIR/dejima-version-lib.sh"
 # fd 2: everything this script says for itself goes to stderr, so the
 # session's own stdout stays exactly what the container wrote.
 color_init 2
@@ -3548,8 +3575,13 @@ startup_banner() {
     else
         name="$(basename -- "$WORKSPACE_DIR")"
     fi
-    printf '\n  %sdejima%s  %s%s%s' \
-        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" >&2
+    # The release this checkout is on, beside the wordmark: "which version am
+    # I running" is a question an operator should not have to ask, and a
+    # launch is where they are already looking. Dim, because it is context
+    # rather than a choice this launch made.
+    printf '\n  %sdejima%s  %s%s%s  %s%s%s' \
+        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" \
+        "$C_DIM" "$(dejima_version "$REPO_ROOT")" "$C_RESET" >&2
     [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
     printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
         "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \
