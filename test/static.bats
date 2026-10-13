@@ -3192,6 +3192,74 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     return 0
 }
 
+@test "a seed staged after the mount guard is still refused over a writable mount" {
+    # The seed list is loaded twice: once with the other list loads, where the
+    # mount guard runs, and once after harness_prepare_config, because a hook
+    # whose job is to make a file has to run before the list that mounts it.
+    #
+    # The second pass could have rested on an argument - what a plugin adds
+    # there is a path dejima made this run - and that is true of the one
+    # plugin that does it today and not a property of the mechanism. So the
+    # rule is applied again, and this is the refusal being driven: nothing in
+    # the tree exercises it, because no shipped plugin derives a seed from
+    # state the hook changed.
+    # Wired in, first: the behaviour below is driven against the function, so
+    # nothing there would notice the call being deleted. It runs immediately
+    # after the second load and before anything is mounted.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    # awk rather than a two-line grep pattern: `grep -F` reads one of those
+    # as two alternatives and matches either line, so the check passed with
+    # the call deleted. What has to hold is the adjacency.
+    awk '
+        prev == "harness_seed_load" && $0 == "_refuse_rw_over_harness_host_config" { found = 1 }
+        { prev = $0 }
+        END { exit !found }
+    ' <<< "$flat" \
+        || { echo "no seed load is followed by the guard"; return 1; }
+
+    local out
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Stubbed, because what is under test is the refusal rather than how
+        # the list is assembled - which has its own tests further up.
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-rw/inside/config.json
+    [ "$status" -ne 0 ] \
+        || { echo "a writable mount over a staged seed was allowed: $output"; return 1; }
+    [[ "$output" == *"Refusing writable mount"* ]] \
+        || { echo "the refusal does not say what it refused: $output"; return 1; }
+    [[ "$output" == *"once its per-run configuration"* ]] \
+        || { echo "the refusal does not say why it is late: $output"; return 1; }
+
+    # And a path that does not overlap is left alone, so the refusal is about
+    # the overlap rather than about there being any seed at all.
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-elsewhere/config.json
+    [ "$status" -eq 0 ] && [ "$output" = ALLOWED ] \
+        || { echo "an unrelated writable mount was refused: $output"; return 1; }
+}
+
 @test "every store dejima refuses to mount is one it warns about inside the workspace" {
     # Two lists that have to say the same thing. GUARDED_STORES is what a
     # [mounts] entry or --ro/--rw is refused for naming;

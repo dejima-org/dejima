@@ -910,6 +910,34 @@ _harness_host_config() {
 }
 _harness_host_config
 
+# The read-write mounts against the harness's host paths, once more, for a
+# list rebuilt after harness_prepare_config. The pass that runs with the rest
+# of the mount validation is the guard; this one holds the same rule over
+# entries that did not exist when it ran.
+#
+# Only the read-write lists: a read-only mount over a harness's own config is
+# refused on its own path further up, and that list does not change here.
+_refuse_rw_over_harness_host_config() {
+    local rw rw_real guarded guarded_real
+    HARNESS_HOST_CONFIG=()
+    _harness_host_config
+    for rw in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
+        rw_real="$(readlink -m "$rw")"
+        for guarded in ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"}; do
+            guarded_real="$(readlink -m "$guarded")"
+            _paths_overlap "$rw_real" "$guarded_real" || continue
+            echo "Refusing writable mount: $rw" >&2
+            echo "It overlaps $guarded_real, which the selected harness reads on the" >&2
+            echo "host - so a session could rewrite what the next one runs with." >&2
+            echo "" >&2
+            echo "This path became the harness's only once its per-run configuration" >&2
+            echo "was staged, which is why it is refused here rather than with the" >&2
+            echo "other mounts." >&2
+            exit 1
+        done
+    done
+}
+
 # Read-write host mounts. Distinct from [core] share_dir, which is mounted at
 # ~/shared - a well-known handoff point the agent is told about by name -
 # while these are mounted at their own absolute path, so a path that works on
@@ -1548,12 +1576,19 @@ SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
 SANDBOX_HARNESS_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-harness-stage.XXXXXX")"
 harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" "$SANDBOX_HARNESS_STAGE_DIR" || exit 1
 # The seed list again, now that the hook above has had its chance to add to
-# it. The load up by the mount guard is what that guard runs against - a
-# guard after the mount it would refuse is not a guard - and this one is what
-# the mount assembly reads. What a plugin adds here is a path dejima made
-# this run, not one an operator could have pointed a mount at, so it is the
-# guard's absence rather than its evasion.
+# it: a hook whose job is to make a file has to run before the list that
+# mounts it. The load further up is what the mount guard ran against - a
+# guard after the mount it would refuse is not a guard - and nothing is
+# mounted yet here either, so the same rule is applied again below over
+# whatever this pass added.
+#
+# Re-checked rather than argued about. What a plugin adds here is, today, a
+# path dejima made this run and nothing an operator could have pointed a
+# mount at - but `harness_seed` runs again in full, so a plugin deriving a
+# seed from state prepare_config changed would reach the mount assembly on
+# that argument alone. The check is two loops over lists already built.
 harness_seed_load
+_refuse_rw_over_harness_host_config
 
 # ~/.claude.json mixes live app state with config (mcpServers) that cannot be
 # split at the mount level, and read-only is not an option: Claude Code does
