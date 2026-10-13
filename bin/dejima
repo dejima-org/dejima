@@ -1540,7 +1540,20 @@ done
 # sandboxing back on (#47) - and that a plugin refusing here stops the launch
 # rather than starting a session the harness would misread.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
-harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
+# And a directory for whatever else that hook has to produce per run. The
+# settings override is one file and had one path; a harness whose
+# configuration is several files, or whose configuration must not persist
+# between launches, needs somewhere to put them that goes away with the run.
+# Removed by cleanup(), like every other per-run staging path.
+SANDBOX_HARNESS_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-harness-stage.XXXXXX")"
+harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" "$SANDBOX_HARNESS_STAGE_DIR" || exit 1
+# The seed list again, now that the hook above has had its chance to add to
+# it. The load up by the mount guard is what that guard runs against - a
+# guard after the mount it would refuse is not a guard - and this one is what
+# the mount assembly reads. What a plugin adds here is a path dejima made
+# this run, not one an operator could have pointed a mount at, so it is the
+# guard's absence rather than its evasion.
+harness_seed_load
 
 # ~/.claude.json mixes live app state with config (mcpServers) that cannot be
 # split at the mount level, and read-only is not an option: Claude Code does
@@ -1660,6 +1673,7 @@ SANDBOX_RUN_NETWORK=""
 # Same rule again, and `docker volume rm` is the third thing in this trap that
 # destroys something named rather than something mktemp'd.
 SANDBOX_ISOLATED_VOLUMES=""
+SANDBOX_HARNESS_STAGE_DIR=""
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1842,7 +1856,7 @@ cleanup() {
         unset _audit_counts _audit_last _audit_cred _audit_api_last
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" || true
-    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" "${SANDBOX_HARNESS_STAGE_DIR:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # dejima-notify-watch keys its debounce stamps by run id. Removed here,
     # with the registry entry, because this is the only exit both of them are
