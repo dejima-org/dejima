@@ -148,6 +148,19 @@ the tag is the version: no file records it, and none can disagree with it. A
 checkout pulled past a release reports `2026.10.12+37`, which is the honest
 answer for a checkout on no release.
 
+**A second release on the same day gets a letter** - `2026.10.12b`, then `c`.
+Rare, and the format otherwise has no answer: the date is the whole name.
+`sort -V` orders it after the bare date, which is what the update notice
+compares with, so nothing else has to know about the shape.
+
+A letter rather than a fourth dotted number, which was the obvious choice and
+is wrong here: four dot-separated numbers starting `2026.10` read as a private
+IPv4 address, and the static test that keeps those out of the documentation
+refused the example. A version format that collides with a lint about
+addresses is one somebody will eventually argue with the lint about - and
+writing that collision down here would have tripped it too, which is why this
+paragraph describes the shape rather than showing it.
+
 What an entry is for is one question - should I update, and what will I be
 getting - so it names what an operator would notice rather than what changed.
 The pull requests carry the detail and are linked from it. A tag is a record

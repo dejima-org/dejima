@@ -21,6 +21,10 @@
 #   unreleased     a git checkout with no release tag yet
 #   unknown        no git at all, e.g. an unpacked tarball
 #
+# A second release on one day is 2026.10.12b - see docs/release.md - which
+# needs nothing here: the match below accepts it and sort -V orders it after
+# the bare date.
+#
 # Local-only git, so none of the transport configuration dejima-update-check
 # has to work around is in the path here.
 dejima_version() {  # <repo root>
