@@ -9772,7 +9772,8 @@ _emit_mount_at() {
     # And the other direction for the shared libraries, which are the entries
     # most easily forgotten because nothing puts them on PATH.
     for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
-             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh docker/install-forge-bins.sh; do
+             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh bin/dejima-version-lib.sh \
+             docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
 }
@@ -10299,7 +10300,154 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     [[ "$(_plain_output)" == *"harness claude-code"* ]] \
         && [[ "$(_plain_output)" == *"workflow local-only"* ]] \
         || { echo "the banner names no values: $output"; return 1; }
+    # The release, beside the wordmark. "which version am I running" is a
+    # question an operator should not have to go and ask, and this is where
+    # they are already looking. A checkout with no release tag says so rather
+    # than saying nothing, which would read as a banner that lost a field.
+    # Any of the three states the version library defines, because which one
+    # it is depends on the tree this suite is run from - a clone with tags, a
+    # clone without, or an unpacked tree with no .git at all. A test that
+    # accepted only one of them would be asserting something about the
+    # checkout rather than about the banner.
+    [[ "$(_plain_output)" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "the banner does not name the release: $output"; return 1; }
     rm -rf "$DEJIMA_T"
+}
+
+@test "the update notice names the release and where to read what changed" {
+    # A commit count answers "is there something newer" and nothing else. An
+    # operator deciding whether to update wants to know how far behind they
+    # are and what they would be getting, which is the whole reason for
+    # having releases at all - so the notice names both sides and the
+    # changelog, rather than leaving the file to be discovered.
+    local u="$REPO_ROOT/bin/dejima-update-check"
+    grep -q 'CHANGELOG.md' "$u" \
+        || { echo "the update notice does not name the changelog"; return 1; }
+    grep -q 'dejima_version "$REPO_ROOT"' "$u" \
+        || { echo "the notice does not say which release this checkout is on"; return 1; }
+    # Only release-shaped tags, so a tag pushed for anything else cannot
+    # become the answer to "what is the newest release".
+    grep -qF "ls-remote --tags --refs" "$u" \
+        || { echo "the remote's releases are not read from its tags"; return 1; }
+    # Through the same hardened invocation as the branch tip: the checkout's
+    # own git config must not name a command this runs, which is the whole
+    # argument at the top of that file.
+    local n
+    n="$(grep -c 'protocol.allow=never' "$u")"
+    [ "$n" = 2 ] \
+        || { echo "$n of the two remote lookups pin the allowed protocols"; return 1; }
+    # And the tags are asked for only when there is something to report, so an
+    # up-to-date checkout pays one request rather than two.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$u")"
+    grep -q 'if \[ -n "$tip" \] && \[ "$tip" != "$head_sha" \]; then' <<< "$flat" \
+        || { echo "the tag lookup is not conditional on there being news"; return 1; }
+}
+
+@test "the changelog says no release is supported, and has somewhere to write the next" {
+    # The risk a changelog introduces is the expectation that comes with it:
+    # a list of releases reads as a list of things one may be running, and
+    # SECURITY.md says the tip of main is the only supported version. So the
+    # file has to say so itself, where someone picking a version would be
+    # looking.
+    local c="$REPO_ROOT/CHANGELOG.md"
+    [ -f "$c" ] || { echo "there is no changelog"; return 1; }
+    grep -qi 'tip of .main. is the only supported' "$c" \
+        || { echo "the changelog does not say which version is supported"; return 1; }
+    grep -q 'SECURITY.md' "$c" \
+        || { echo "the changelog does not point at the binding statement"; return 1; }
+    # Deliberately no sweep for words like "backport" or "maintenance
+    # branch". The first version of this test had one, and it failed on the
+    # changelog's own sentence saying there are no backports - a pattern
+    # cannot tell a promise from its denial, and a test that matches the shape
+    # of prose rather than its claim is one that gets edited until it passes.
+    # The two assertions above are the claim; a reader is the only check on
+    # the rest.
+
+    # Somewhere for the next release's entry to go before its date is known.
+    # Without it an entry gets written under a guessed date, and the date is
+    # the version.
+    grep -q '^## Unreleased$' "$c" \
+        || { echo "the changelog has no Unreleased heading to write into"; return 1; }
+    # And at least one real release, named as a date, so the scheme is in the
+    # file rather than only in the process document.
+    grep -qE '^## [0-9]{4}\.[0-9]{2}\.[0-9]{2}$' "$c" \
+        || { echo "the changelog names no release as a date"; return 1; }
+    # The release process has to name both steps, because nothing fails when
+    # they are forgotten: the tag is the version, and the heading is the entry.
+    grep -q 'git tag' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to tag the release"; return 1; }
+    grep -q 'Unreleased' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to rename the heading"; return 1; }
+}
+
+@test "dejima --version says which release this is, and what is not supported" {
+    # Answerable without a config, like --help: the moment someone asks which
+    # release they are on is often the moment something else is wrong.
+    run env DEJIMA_CONFIG_DIR=/nonexistent "$REPO_ROOT/bin/dejima" --version
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == dejima\ * ]] \
+        || { echo "--version does not name the program: $output"; return 1; }
+    # One of the three states, for the reason the banner test gives: which it
+    # is depends on the tree this runs from, and it has to say which rather
+    # than printing nothing.
+    [[ "$output" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "--version names no release: $output"; return 1; }
+    # The two things an operator reading this needs next.
+    [[ "$output" == *CHANGELOG.md* ]] \
+        || { echo "--version does not say where the changes are: $output"; return 1; }
+    [[ "$output" == *"tip of main"* ]] \
+        || { echo "--version does not say what is supported: $output"; return 1; }
+}
+
+@test "the release a checkout is on is read from git, not from a file in the tree" {
+    # A VERSION file says what was released and goes on saying it while a
+    # checkout is pulled past that release - and the one moment the answer
+    # matters is the moment it would be wrong. So there is no such file, and
+    # the library asks git.
+    [ ! -e "$REPO_ROOT/VERSION" ] \
+        || { echo "a VERSION file is back, and it can disagree with the tags"; return 1; }
+    grep -q 'describe --tags' "$REPO_ROOT/bin/dejima-version-lib.sh" \
+        || { echo "the version library does not read the tags"; return 1; }
+
+    # Driven over every state a checkout can be in, in a throwaway repository:
+    # the answers are what --version, the banner and the update notice all
+    # print, and "unreleased" versus a date versus a date+N are three
+    # different things to tell an operator.
+    local t; t="$(mktemp -d)"
+    git -C "$t" init -q .
+    git -C "$t" config user.email t@example.invalid
+    git -C "$t" config user.name t
+    _ver() {
+        run bash -c 'source "$1"; dejima_version "$2"' _ \
+            "$REPO_ROOT/bin/dejima-version-lib.sh" "$t"
+    }
+    _ver; [ "$output" = unreleased ] \
+        || { echo "an untagged checkout reports '$output'"; rm -rf "$t"; return 1; }
+    echo one > "$t/a"; git -C "$t" add a; git -C "$t" commit -qm one
+    git -C "$t" tag 2026.10.12
+    _ver; [ "$output" = 2026.10.12 ] \
+        || { echo "on the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    echo two > "$t/b"; git -C "$t" add b; git -C "$t" commit -qm two
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "one commit past the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    # A tag that is not a release must not become the answer.
+    git -C "$t" tag some-marker
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "a non-release tag became the version: '$output'"; rm -rf "$t"; return 1; }
+    # And the release part of that, which is what two checkouts are compared on.
+    run bash -c 'source "$1"; dejima_version_release "2026.10.12+1"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh"
+    [ "$output" = 2026.10.12 ] || { echo "the release part is '$output'"; rm -rf "$t"; return 1; }
+    rm -rf "$t"
+
+    # No git at all, which is an unpacked tarball rather than a clone.
+    local plain; plain="$(mktemp -d)"
+    run bash -c 'source "$1"; dejima_version "$2"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh" "$plain"
+    [ "$output" = unknown ] || { echo "a non-checkout reports '$output'"; }
+    rmdir "$plain"
+    [ "$output" = unknown ]
 }
 
 @test "the startup banner is off when the config says so" {
