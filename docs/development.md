@@ -59,6 +59,7 @@ run them.
 | `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
 | `docs/research-review.md` | When to check dejima's reasoning against the field's, the standing questions that are the agenda, and the queue of bypasses not yet run against this implementation |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
+| `CHANGELOG.md` | What each release changed, for one question: should I update. A release is a date and the tag of that name on `main` is the only record of it - see `docs/release.md` §6 |
 
 `bin/dejima` is the entry point: it resolves the project path,
 checks for a live `ssh-agent`, reads `GITEA_TOKEN`/`GH_TOKEN` from the token
