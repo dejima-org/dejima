@@ -1744,6 +1744,42 @@ s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
     return 0
 }
 
+@test "a launch leaves no per-run staging directory behind" {
+    # The staging directory is created with mktemp -d above the trap and
+    # removed by cleanup(), and for one release it was neither: the block
+    # that initialises trap-owned names to empty runs AFTER the mktemp in
+    # straight-line order, so it threw the real path away and cleanup()
+    # removed "". Every launch on every harness left one in TMPDIR.
+    #
+    # Nothing caught it because nothing looked after exit. This does, with its
+    # own TMPDIR so it sees only what this launch made - and for both
+    # harnesses, since the one that puts a file in there is not the default.
+    launch_setup
+    local t; t="$(mktemp -d)"
+    TMPDIR="$t" run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$t"; return 1; }
+    local left; left="$(find "$t" -maxdepth 1 -name 'dejima-harness-stage.*' -print)"
+    [ -z "$left" ] \
+        || { echo "left behind: $left"; rm -rf "$t"; return 1; }
+
+    # cline is the harness that writes into it, so it is the one where a
+    # leak carries content rather than being an empty directory.
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    TMPDIR="$t" run launch --harness cline "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$t" "$state"; return 1; }
+    left="$(find "$t" -maxdepth 1 -name 'dejima-harness-stage.*' -print)"
+    [ -z "$left" ] \
+        || { echo "cline left behind: $left ($(find "$left" -type f | head -3))"
+             rm -rf "$t" "$state"; return 1; }
+    # And the other staging paths, which were never broken and are what this
+    # one should have looked like.
+    left="$(find "$t" -maxdepth 1 \( -name 'dejima-settings.*' -o -name 'dejima-claude-json.*' \) -print)"
+    [ -z "$left" ] || { echo "also left behind: $left"; rm -rf "$t" "$state"; return 1; }
+    rm -rf "$t" "$state"
+}
+
 @test "an ordinary cline launch still gets its provider configuration" {
     # The same seed, which for a launch that HAS a state mount lands inside
     # it - so the end state is what it was before, written by the entrypoint

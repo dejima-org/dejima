@@ -1673,7 +1673,12 @@ SANDBOX_RUN_NETWORK=""
 # Same rule again, and `docker volume rm` is the third thing in this trap that
 # destroys something named rather than something mktemp'd.
 SANDBOX_ISOLATED_VOLUMES=""
-SANDBOX_HARNESS_STAGE_DIR=""
+# SANDBOX_HARNESS_STAGE_DIR is deliberately absent, like SANDBOX_SETTINGS_FILE
+# and SANDBOX_CLAUDE_JSON_FILE: all three are mktemp'd further up, above the
+# trap, so there is no window for cleanup() to see an inherited value - and
+# resetting them here would run AFTER the assignment and throw the real path
+# away. That is what happened to the stage directory, which then leaked once
+# per launch while both the comment on it and the changelog said otherwise.
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
