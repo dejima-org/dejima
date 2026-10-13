@@ -78,7 +78,8 @@ Each of these refuses or withholds something a previous release allowed.
 
 ### What an existing config stops being able to do
 
-Read this part before updating. Both fail closed, and one fails quietly.
+Read this part before updating. All of these fail closed, and the first fails
+quietly.
 
 - **A host-resident Loki or self-served model configured by NAME needs
   `EGRESS_HOST_PORTS` set to its port.** The clamp is matched before the open
@@ -87,26 +88,50 @@ Read this part before updating. Both fail closed, and one fails quietly.
   model fails loudly - the session cannot reach it - but **the log shipper
   fails silently**: network logging simply stops. The policy's own summary
   line, `host <addr> on ports none`, is where that shows up.
-- **The clamp covers the bridge gateway only.** The host's other addresses -
-  its `docker0` address when the run network is a different bridge, and its
-  LAN address - are not in it, so a service configured at the host's LAN IP is
-  still permitted on every port by the open class.
+- **A configured `ssh_key` now withdraws your forwarded ssh-agent from the
+  container entirely.** Choosing a dedicated key has to mean your personal
+  identities are not in there, rather than merely not the default. If a
+  session used the key for the forge and the agent for anything else - a
+  second remote, a private submodule - the second half stops working.
+  ([#375](https://gitbox.branderson.io/dejima/dejima/pulls/375))
+- **An empty `ssh_key` file now counts as no key at all.** A pushing workflow
+  with an empty key file and no agent is refused where it used to start and
+  fail at the push.
+  ([#375](https://gitbox.branderson.io/dejima/dejima/pulls/375))
+- **Under the github forge, `gh api` is held to this repository.** A call
+  naming no endpoint under `repos/<this repo>/` is refused - `gh api user`,
+  `rate_limit`, an org endpoint - as are graphql mutations and reading a body
+  from a file (`-F x=@file`, `--input`). An agent that used `gh api` for
+  anything outside the repository will notice.
+  ([#372](https://gitbox.branderson.io/dejima/dejima/pulls/372),
+  [#373](https://gitbox.branderson.io/dejima/dejima/pulls/373))
+
+### Known limitations
+
+Not changes - things this release does not do, worth knowing before relying
+on the ones above.
+
+- **The host clamp covers the bridge gateway only.** The host's other
+  addresses - its `docker0` address when the run network is a different
+  bridge, and its LAN address - are not in it, so a service configured at the
+  host's LAN IP is still permitted on every port by the open class.
   ([#401](https://gitbox.branderson.io/dejima/dejima/issues/401))
 
 ### Fixed
 
 - The egress policy's resolver checks had no name to check when the forge
-  ranges came from the local cache, which failed every launch.
+  ranges came from a cache file rather than fetched, which is how CI supplies
+  them - so every container in a CI run failed to come up. An ordinary
+  launch, whose ranges URL always has a host, was unaffected.
   ([#386](https://gitbox.branderson.io/dejima/dejima/pulls/386))
 - GitHub's `/meta` ranges are fetched once per CI run rather than once per
   container, and a rate limit is waited out instead of failing the run.
   ([#378](https://gitbox.branderson.io/dejima/dejima/pulls/378))
-- `remote.bats` waited for what its teardown killed before removing the
-  directories, which was a recurring CI failure.
-  ([#385](https://gitbox.branderson.io/dejima/dejima/pulls/385))
-- A self-check retry that could not see its own failure, and test deadlines
-  that now scale with how much the run asked of the machine.
-  ([#379](https://gitbox.branderson.io/dejima/dejima/pulls/379))
+- Test-suite reliability: a self-check retry that could not see its own
+  failure, deadlines that scale with what a run asked of the machine, and a
+  teardown race that failed CI intermittently.
+  ([#379](https://gitbox.branderson.io/dejima/dejima/pulls/379),
+  [#385](https://gitbox.branderson.io/dejima/dejima/pulls/385))
 - A harness's per-run configuration is seeded from a staging directory that
   goes away with the launch, rather than written onto the host where it will
   live. For cline that is what lets `--isolated` work at all; for an ordinary
@@ -117,8 +142,8 @@ Read this part before updating. Both fail closed, and one fails quietly.
 
 Two review passes over the whole tree corrected documents that stated the
 opposite of the code - including what Ctrl-Z does, what the sandbox tells a
-session about a hung connection, and what dejima on its own gives you without
-a forge.
+session about a hung connection, and what dejima gives you on its own, without
+any of the sister projects around it.
 ([#370](https://gitbox.branderson.io/dejima/dejima/pulls/370),
 [#377](https://gitbox.branderson.io/dejima/dejima/pulls/377),
 [#391](https://gitbox.branderson.io/dejima/dejima/pulls/391))
