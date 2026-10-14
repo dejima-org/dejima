@@ -59,6 +59,13 @@ mirrored() {
     ! grep -rq 'github.com/dejima-org/[^)]*/src/branch/' --include='*.md' .
 }
 
+@test "transforming twice changes nothing, so a clone of the mirror passes this suite" {
+    "$MIRROR" --transform "$T/forge"
+    cp -r "$T/forge" "$T/once"
+    "$MIRROR" --transform "$T/forge"
+    diff -r -x .git "$T/once" "$T/forge"
+}
+
 @test "a README the transform no longer recognises stops the mirror" {
     sed -i 's/dejima-wordmark-darkmode.png/renamed.png/' "$T/forge/README.md"
     run "$MIRROR" --transform "$T/forge"

@@ -63,7 +63,8 @@ transform() {
         || die "README.md: the wordmark tag was not found"
 
     # The first thing a visitor to a mirror does is open a pull request.
-    perl -0pi -e '
+    # Inserted once, so a clone of the mirror still passes test/mirror.bats.
+    grep -q '^> \*\*This is a read-only mirror' "$readme" || perl -0pi -e '
         s{^---\n}{---\n\n> **This is a read-only mirror.** dejima is developed on a private forge,\n> and issues and pull requests are not accepted here. See\n> [CONTRIBUTING.md](CONTRIBUTING.md).\n}m
     ' "$readme"
     grep -q '^> \*\*This is a read-only mirror' "$readme" \
