@@ -163,17 +163,20 @@ the top, and `SECURITY.md` is where that is binding.
 
 ## 7. The GitHub mirror
 
-`mirror/github-mirror.sh` publishes `main` and the tags on it to
-[github.com/dejima-org/dejima](https://github.com/dejima-org/dejima) from the
-operator's host, hourly, so a release needs no step here. Issues, pull requests
-and Actions are off there; all of that stays on the forge.
+`mirror/github-mirror.sh` publishes `main` and the tags on it, for this
+repository and every other one in the organisation, to
+[github.com/dejima-org](https://github.com/dejima-org) from the operator's
+host, hourly, so a release needs no step here. Issues, pull requests and
+Actions are off there; all of that stays on the forge. A new repository is
+mirrored once it is added to `MIRROR_REPOS` in the script.
 
-The mirror's `main` is the forge's plus one commit that points repository links
-at GitHub, lets the README wordmark follow the reader's theme, and says at the
-top of the README that it is a mirror. A README change that breaks one of those
-rewrites stops the mirror rather than publishing the forge's version, and
-`test/mirror.bats` fails on it first.
+Each mirror's `main` is the forge's plus one commit that points repository
+links and clone URLs at GitHub, lets the README wordmark follow the reader's
+theme, and says at the top of the README that it is a mirror. A README change
+that breaks one of those rewrites stops that repository's mirror rather than
+publishing the forge's version. Here, `test/mirror.bats` fails on it first; in
+the other repositories, the hourly run fails and names it.
 
 Setup is in the header of `mirror/dejima-github-mirror.service`. Once the
-GitHub repository exists, `github-mirror.sh --settings` turns its features off,
-and `--dry-run` builds what a sync would publish without pushing it.
+GitHub repositories exist, `github-mirror.sh --settings` turns their features
+off, and `--dry-run` builds what a sync would publish without pushing it.
