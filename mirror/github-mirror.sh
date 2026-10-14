@@ -127,8 +127,9 @@ sync() {
     # Only tags on main: one on another branch would publish unreleased work.
     local ref refspecs=()
     while IFS= read -r ref; do
-        "${git[@]}" merge-base --is-ancestor "$ref" "$src" \
-            && refspecs+=("$ref:refs/tags/${ref#refs/source/tags/}")
+        if "${git[@]}" merge-base --is-ancestor "$ref" "$src"; then
+            refspecs+=("$ref:refs/tags/${ref#refs/source/tags/}")
+        fi
     done < <("${git[@]}" for-each-ref --format='%(refname)' refs/source/tags/)
     [ "${#refspecs[@]}" -gt 0 ] || return 0
     printf 'github-mirror: tag %s\n' "${refspecs[@]#*:refs/tags/}"
