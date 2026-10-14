@@ -160,3 +160,20 @@ getting - so it names what an operator would notice rather than what changed.
 The pull requests carry the detail and are linked from it. A tag is a record
 of what shipped, not a version anyone may stay on; `CHANGELOG.md` says so at
 the top, and `SECURITY.md` is where that is binding.
+
+## 7. The GitHub mirror
+
+`mirror/github-mirror.sh` publishes `main` and the tags on it to
+[github.com/dejima-org/dejima](https://github.com/dejima-org/dejima) from the
+operator's host, hourly, so a release needs no step here. Issues, pull requests
+and Actions are off there; all of that stays on the forge.
+
+The mirror's `main` is the forge's plus one commit that points repository links
+at GitHub, lets the README wordmark follow the reader's theme, and says at the
+top of the README that it is a mirror. A README change that breaks one of those
+rewrites stops the mirror rather than publishing the forge's version, and
+`test/mirror.bats` fails on it first.
+
+Setup is in the header of `mirror/dejima-github-mirror.service`. Once the
+GitHub repository exists, `github-mirror.sh --settings` turns its features off,
+and `--dry-run` builds what a sync would publish without pushing it.
