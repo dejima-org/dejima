@@ -725,6 +725,7 @@ and how to run them.
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
+| [CHANGELOG.md](CHANGELOG.md) | What each release changed, for deciding whether to update |
 | [SECURITY.md](SECURITY.md) | What dejima claims, where to report a vulnerability, and what is promised in return |
 | [ATTRIBUTION.md](ATTRIBUTION.md) | Who holds the dejima marks and what may be done with them |
 
