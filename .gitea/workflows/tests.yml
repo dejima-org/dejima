@@ -89,6 +89,7 @@ jobs:
           - providers
           - conversation
           - share
+          - mirror
     name: confined (${{ matrix.suite }})
     container:
       # Debian bookworm plus a node binary - node is what actions/checkout
