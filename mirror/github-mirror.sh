@@ -59,7 +59,8 @@ transform() {
         s{<img src="assets/dejima-wordmark-darkmode\.png" alt="dejima" height="72">}
          {<picture><source media="(prefers-color-scheme: dark)" srcset="assets/dejima-wordmark-darkmode.png"><img src="assets/dejima-wordmark-lightmode.png" alt="dejima" height="72"></picture>}
     ' "$readme"
-    grep -q '<picture>' "$readme" || die "README.md: the wordmark tag was not found"
+    grep -qF 'darkmode.png"><img src="assets/dejima-wordmark-lightmode.png"' "$readme" \
+        || die "README.md: the wordmark tag was not found"
 
     # The first thing a visitor to a mirror does is open a pull request.
     perl -0pi -e '
