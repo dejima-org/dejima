@@ -131,6 +131,7 @@ HOST_ADDR=${EGRESS_HOST_ADDR:-}
 # grant over everything the host publishes. `any` restores the unclamped rule,
 # explicitly. See the clamp below for why none is the right default.
 HOST_PORTS=${EGRESS_HOST_PORTS:-}
+HOST_CANDIDATES=${EGRESS_HOST_CANDIDATES:-}
 # Self-check probes. example.com is reserved by RFC 2606 for documentation and
 # resolves globally, which is what makes it a usable negative: if it does not
 # resolve here, the resolver is restricting names rather than simply broken.
@@ -557,6 +558,40 @@ emit_host_clamp() {
 # port or a ruleset nft refuses after the fact, which is the same reasoning as
 # classify_entry's: a destination that looks configured and is silently refused
 # is the worst of the three.
+# The ports of destinations the launcher configured AT the host's own address.
+#
+# The launcher knows which destinations this launch configured and cannot know
+# the host's address; this process works that out from the default route a few
+# lines below. So it passes candidates - a literal address with an explicit
+# port, each one it is sure of - and the decision is made here, where both
+# halves are known. Nothing resolves a name on either side: a candidate whose
+# address is not the host's is simply not the host's.
+#
+# Without this the clamp, which is matched before every wider rule, answers
+# `ports none` for a host-resident Loki or self-served model at the gateway
+# address - working before only because the open-class permit answered first.
+fold_host_candidates() {  # <host address>...
+  local cand addr port a
+  [ -n "$HOST_CANDIDATES" ] || return 0
+  # `any` is already wider than anything a candidate could add.
+  [ "$HOST_PORTS" = any ] && return 0
+  for cand in $HOST_CANDIDATES; do
+    addr=${cand%:*}
+    port=${cand##*:}
+    case "$port" in
+      ""|*[!0-9]*) die "EGRESS_HOST_CANDIDATES entry '$cand' has no TCP port" ;;
+    esac
+    for a in "$@"; do
+      [ "$addr" = "$a" ] || continue
+      case ",${HOST_PORTS},"  in
+        *",$port,"*) ;;
+        *) HOST_PORTS="${HOST_PORTS:+$HOST_PORTS,}$port" ;;
+      esac
+      break
+    done
+  done
+}
+
 validate_host_ports() {
   local p
   [ "$HOST_PORTS" = any ] && return 0
@@ -771,15 +806,26 @@ EOF
 
     cat <<EOF
 
+    # The container's own host, as a single address, on the ports it was told
+    # to open and no others.
+    #
+    # Before the open class, not after it, because this is the narrower rule
+    # and the first match wins. The host's address reaches literal_v4 by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, \`dejima-allow <gateway>\` - and from there the open
+    # permit below answered for it first, on every port, including sshd and
+    # the remote-access front door. Configuring one host service opens that
+    # service, which is what docs/security.md says it does.
+EOF
+    emit_host_clamp host_v4
+
+    cat <<EOF
+
     # The open class: names the launcher permitted and addresses it supplied,
     # on any port. DNS to them is refused above along with everyone else's.
     ip daddr @oname_v4 goto permit
     ip daddr @literal_v4 goto permit
-
-    # The container's own host, as a single address, on the ports it was told
-    # to open and no others.
 EOF
-    emit_host_clamp host_v4
 
     cat <<EOF
 
@@ -1486,8 +1532,14 @@ cmd_apply() {
   discover_upstreams
 
   local host_addrs forge_host
-  validate_host_ports
+  # Discover, then fold the launcher's candidates in, then validate the whole
+  # list: the candidates' ports become part of what the clamp permits, so they
+  # are held to the same check rather than trusted for having crossed a
+  # process boundary.
   host_addrs=$(discover_host_addr)
+  # shellcheck disable=SC2086
+  fold_host_candidates $host_addrs
+  validate_host_ports
   forge_host=$(host_of_url "$FORGE_META_URL")
 
   build_entries "$forge_host"

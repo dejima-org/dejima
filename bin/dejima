@@ -20,6 +20,28 @@ set -euo pipefail
 # so a mistyped invocation still fails a script. That split is the whole of
 # what #64 asked for: bare invocation keeps its terse line, --help explains.
 case "${1:-}" in
+    --version)
+        # Before any config is read, like --help: the moment someone asks
+        # which release they are on is often the moment something else is
+        # wrong. The version library and nothing else - it is pure functions
+        # with no config and no other library behind it, so there is one
+        # implementation of this rather than an inline copy that can drift
+        # from the one the banner and the update notice use.
+        _v_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+        # shellcheck source=dejima-version-lib.sh
+        source "$_v_dir/dejima-version-lib.sh"
+        _v_root="$(cd "$_v_dir/.." && pwd)"
+        _v="$(dejima_version "$_v_root")"
+        case "$_v" in
+            unknown)    echo "dejima unknown (not a git checkout)" ;;
+            unreleased) echo "dejima unreleased (no release tag in this checkout)" ;;
+            *+*)        echo "dejima $_v (${_v#*+} commits past ${_v%%+*})" ;;
+            *)          echo "dejima $_v" ;;
+        esac
+        echo ""
+        echo "What each release changed: $_v_root/CHANGELOG.md"
+        echo "Only the tip of main is supported - see SECURITY.md."
+        exit 0 ;;
     -h|--help)
         cat <<'DEJIMA_HELP'
 dejima - run an agent harness in a container that cannot reach your machine
@@ -53,7 +75,7 @@ Options (each overrides the config file for one launch only):
   --isolated              no project, no memory, no forge; keeps only ~/shared
   --print-config          print every key as it resolves, and exit
   --print-briefing        print the briefing the agent will get, and exit
-  -h, --help              this message
+  -h, --help              this message; --version prints this release
 
 Every --no-* flag only ever narrows; a config that says off is a decision.
 
@@ -80,6 +102,8 @@ source "$SCRIPT_DIR/dejima-color-lib.sh"
 source "$SCRIPT_DIR/dejima-slug-lib.sh"
 # shellcheck source=dejima-harness-lib.sh
 source "$SCRIPT_DIR/dejima-harness-lib.sh"
+# shellcheck source=dejima-version-lib.sh
+source "$SCRIPT_DIR/dejima-version-lib.sh"
 # fd 2: everything this script says for itself goes to stderr, so the
 # session's own stdout stays exactly what the container wrote.
 color_init 2
@@ -337,17 +361,17 @@ done
 # position: the workflow this sets pushes nothing, and a workflow that never
 # pushes already gets no agent socket.
 #
-# Whether the operator named a forge, asked before the default below answers
-# for them: it decides the GitHub credential further down as well, and after
-# this block "is there an override" is true either way.
-DEJIMA_FORGE_NAMED=0
+# And the two things that are off because nothing would read what they
+# produce: an epitaph and a conversation log are both read out of a
+# transcript on the host, and this mode mounts none. Set as overrides rather
+# than checked at each of the four places that would otherwise ask - the
+# banner, --print-config, the shipper's start and the epitaph's save - so
+# that every one of them gives the same answer.
 if [ "$DEJIMA_ISOLATED" = 1 ]; then
-    if _override_set core.forge; then
-        DEJIMA_FORGE_NAMED=1
-    else
-        _set_override core.forge none
-    fi
+    _override_set core.forge    || _set_override core.forge none
     _override_set core.workflow || _set_override core.workflow local-only
+    _override_set epitaph.enabled      || _set_override epitaph.enabled off
+    _override_set logging.conversation || _set_override logging.conversation off
 fi
 
 # Refused rather than dropped. A configured mount is a standing preference and
@@ -668,6 +692,26 @@ else
     fi
     shift || true
 
+    # The flag loop stops at the first positional, so anything after the path
+    # is the harness's - including `--isolated`, which was then passed
+    # through as a harness argument while the project was mounted read-write.
+    # An operator typing `dejima ~/proj --isolated` has asked for the one
+    # thing that silently did not happen, so it is refused unless `--` says
+    # the rest is deliberately not dejima's.
+    if [ "$DEJIMA_ARGS_ONLY" = 0 ]; then
+        for _arg in "$@"; do
+            [ "$_arg" = "--" ] && break
+            [ "$_arg" = "--isolated" ] || continue
+            echo "--isolated after the project directory would be passed to the" >&2
+            echo "harness, and this launch would mount $WORKSPACE_DIR read-write." >&2
+            echo "" >&2
+            echo "Put it before the path, or rather: --isolated takes no path at" >&2
+            echo "all. If the harness is meant to receive it, separate it with --." >&2
+            exit 1
+        done
+        unset _arg
+    fi
+
     if [ "${1:-}" = "--" ]; then
         shift
     fi
@@ -863,6 +907,34 @@ _harness_host_config() {
 }
 _harness_host_config
 
+# The read-write mounts against the harness's host paths, once more, for a
+# list rebuilt after harness_prepare_config. The pass that runs with the rest
+# of the mount validation is the guard; this one holds the same rule over
+# entries that did not exist when it ran.
+#
+# Only the read-write lists: a read-only mount over a harness's own config is
+# refused on its own path further up, and that list does not change here.
+_refuse_rw_over_harness_host_config() {
+    local rw rw_real guarded guarded_real
+    HARNESS_HOST_CONFIG=()
+    _harness_host_config
+    for rw in ${RW_MOUNT_PATHS[@]+"${RW_MOUNT_PATHS[@]}"}; do
+        rw_real="$(readlink -m "$rw")"
+        for guarded in ${HARNESS_HOST_CONFIG[@]+"${HARNESS_HOST_CONFIG[@]}"}; do
+            guarded_real="$(readlink -m "$guarded")"
+            _paths_overlap "$rw_real" "$guarded_real" || continue
+            echo "Refusing writable mount: $rw" >&2
+            echo "It overlaps $guarded_real, which the selected harness reads on the" >&2
+            echo "host - so a session could rewrite what the next one runs with." >&2
+            echo "" >&2
+            echo "This path became the harness's only once its per-run configuration" >&2
+            echo "was staged, which is why it is refused here rather than with the" >&2
+            echo "other mounts." >&2
+            exit 1
+        done
+    done
+}
+
 # Read-write host mounts. Distinct from [core] share_dir, which is mounted at
 # ~/shared - a well-known handoff point the agent is told about by name -
 # while these are mounted at their own absolute path, so a path that works on
@@ -966,7 +1038,7 @@ _refuse_guarded_mount() {
         _paths_overlap "$real" "$guarded_real" || continue
         echo "Refusing $kind: $path" >&2
         echo "It overlaps $guarded_real, which dejima needs out of a session's reach." >&2
-        echo "Even read-only, that hands the session every project's approvals, the" >&2
+        echo "Mounted at all, that hands the session every project's approvals, the" >&2
         echo "record of what earlier sessions were caught doing, or the handoff files" >&2
         echo "of every project and every isolated session." >&2
         exit 1
@@ -1298,6 +1370,24 @@ warn_if_inside_workspace "audit report store" "$AUDIT_DIR" \
 warn_if_inside_workspace "audit baseline store" "$BASELINE_DIR" \
     "a session can write its own acknowledgements, suppressing the" \
     "findings it would otherwise produce here from every later report."
+# The three above were the whole list, and the guarded-mount refusal further
+# down covers six. So a path dejima refuses to mount through [mounts] or --ro
+# was mounted without a word when it happened to sit inside the workspace -
+# not a judgement about which stores matter, just three that were written and
+# three that were not. A static test now holds the two lists in step.
+warn_if_inside_workspace "epitaph store" "$(config_get epitaph dir)" \
+    "it holds each earlier session's own account of what it worked out, so" \
+    "a session can read what every previous one in this project concluded" \
+    "- the cross-session channel the never-mounted store exists to close -" \
+    "and can delete them."
+warn_if_inside_workspace "share directories of every project" \
+    "$(share_projects_root "$(config_get core share_dir)")" \
+    "every project's handoff files can be read and rewritten, which is the" \
+    "pile the per-project split removed."
+warn_if_inside_workspace "share directories of every isolated session" \
+    "$(isolated_share_root "$(config_get core share_dir)")" \
+    "the one thing an isolated session leaves behind is readable here, for" \
+    "every isolated session this host has run."
 
 SANDBOX_SSH_KEY="$(config_get core ssh_key)"
 if [ -n "$SANDBOX_SSH_KEY" ] && [ ! -f "$SANDBOX_SSH_KEY" ]; then
@@ -1475,7 +1565,27 @@ done
 # sandboxing back on (#47) - and that a plugin refusing here stops the launch
 # rather than starting a session the harness would misread.
 SANDBOX_SETTINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-settings.XXXXXX.json")"
-harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
+# And a directory for whatever else that hook has to produce per run. The
+# settings override is one file and had one path; a harness whose
+# configuration is several files, or whose configuration must not persist
+# between launches, needs somewhere to put them that goes away with the run.
+# Removed by cleanup(), like every other per-run staging path.
+SANDBOX_HARNESS_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dejima-harness-stage.XXXXXX")"
+harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" "$SANDBOX_HARNESS_STAGE_DIR" || exit 1
+# The seed list again, now that the hook above has had its chance to add to
+# it: a hook whose job is to make a file has to run before the list that
+# mounts it. The load further up is what the mount guard ran against - a
+# guard after the mount it would refuse is not a guard - and nothing is
+# mounted yet here either, so the same rule is applied again below over
+# whatever this pass added.
+#
+# Re-checked rather than argued about. What a plugin adds here is, today, a
+# path dejima made this run and nothing an operator could have pointed a
+# mount at - but `harness_seed` runs again in full, so a plugin deriving a
+# seed from state prepare_config changed would reach the mount assembly on
+# that argument alone. The check is two loops over lists already built.
+harness_seed_load
+_refuse_rw_over_harness_host_config
 
 # ~/.claude.json mixes live app state with config (mcpServers) that cannot be
 # split at the mount level, and read-only is not an option: Claude Code does
@@ -1515,25 +1625,37 @@ harness_hook harness_prepare_config "$SANDBOX_SETTINGS_FILE" || exit 1
 # Paths are compared as strings: both sides of this mount agree on them by
 # construction - same uid, same home, same project path - which is what makes
 # the comparison meaningful rather than a guess about layout.
-SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
-if [ -f "$HOME/.claude.json" ]; then
+#
+# One function rather than one expression, because there are two call sites:
+# this one, and the re-seed further down for a backend whose credential IS
+# this file and whose proxy is off. That one differs in a single respect -
+# the credential stays - and it reached for `cp`, which put every other
+# project's entry back and did it after the credential scan had already read
+# the narrowed copy. The difference is a parameter now, so the narrowing
+# cannot be lost by taking the other path.
+_stage_claude_json() {  # <keep-credential: true|false> <destination>
+    local keep="$1" dest="$2"
+    if [ ! -f "$HOME/.claude.json" ]; then
+        echo '{}' > "$dest"
+        return 0
+    fi
     # The type is checked rather than the key's presence: `projects` holding
     # something other than an object is not a shape Claude Code writes, and
     # narrowing it would error - turning a parseable file into a refused launch
     # over a key with nothing in it to narrow.
-    if ! jq --arg proj "$WORKSPACE_DIR" '
-            del(.primaryApiKey)
+    jq --arg proj "$WORKSPACE_DIR" --argjson keep "$keep" '
+            (if $keep then . else del(.primaryApiKey) end)
             | if (.projects | type) == "object" then
                   .projects |= with_entries(
                       select(.key == $proj or (.key | startswith($proj + "/"))))
               else . end
-         ' "$HOME/.claude.json" > "$SANDBOX_CLAUDE_JSON_FILE"; then
-        echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
-        echo "credential it may hold before copying it into the container." >&2
-        exit 1
-    fi
-else
-    echo '{}' > "$SANDBOX_CLAUDE_JSON_FILE"
+         ' "$HOME/.claude.json" > "$dest"
+}
+SANDBOX_CLAUDE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/dejima-claude-json.XXXXXX.json")"
+if ! _stage_claude_json false "$SANDBOX_CLAUDE_JSON_FILE"; then
+    echo "$HOME/.claude.json is not readable as JSON, so dejima cannot strip the" >&2
+    echo "credential it may hold before copying it into the container." >&2
+    exit 1
 fi
 
 SANDBOX_AUDIT_STATE="$(mktemp "${TMPDIR:-/tmp}/dejima-audit.XXXXXX")"
@@ -1583,6 +1705,12 @@ SANDBOX_RUN_NETWORK=""
 # Same rule again, and `docker volume rm` is the third thing in this trap that
 # destroys something named rather than something mktemp'd.
 SANDBOX_ISOLATED_VOLUMES=""
+# SANDBOX_HARNESS_STAGE_DIR is deliberately absent, like SANDBOX_SETTINGS_FILE
+# and SANDBOX_CLAUDE_JSON_FILE: all three are mktemp'd further up, above the
+# trap, so there is no window for cleanup() to see an inherited value - and
+# resetting them here would run AFTER the assignment and throw the real path
+# away. That is what happened to the stage directory, which then leaked once
+# per launch while both the comment on it and the changelog said otherwise.
 SANDBOX_NVIM_LOCKFILE=""
 SANDBOX_DERIVED_DOCKERFILE=""
 SANDBOX_DERIVED_CONTEXT=""
@@ -1765,7 +1893,7 @@ cleanup() {
         unset _audit_counts _audit_last _audit_cred _audit_api_last
     fi
     rm -f "$SANDBOX_SETTINGS_FILE" "$SANDBOX_CLAUDE_JSON_FILE" "${SANDBOX_NVIM_LOCKFILE:-}" "${SANDBOX_FAKE_CREDENTIALS_FILE:-}" "${SANDBOX_DERIVED_DOCKERFILE:-}" "${SANDBOX_BRIEFING_FILE:-}" "${SANDBOX_CREDENTIAL_PROXY_LOG:-}" || true
-    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" || true
+    rm -rf "${SANDBOX_GITCONFIG_DIR:-}" "${SANDBOX_CREDENTIAL_PROXY_DIR:-}" "${SANDBOX_DERIVED_CONTEXT:-}" "${SANDBOX_HARNESS_STAGE_DIR:-}" || true
     rm -f "${DEJIMA_SESSION_FILE:-}" || true
     # dejima-notify-watch keys its debounce stamps by run id. Removed here,
     # with the registry entry, because this is the only exit both of them are
@@ -1817,6 +1945,16 @@ cleanup() {
         # shellcheck disable=SC2086
         docker volume rm $SANDBOX_ISOLATED_VOLUMES >/dev/null 2>&1 || true
     fi
+    # And this session's share if it is still empty. `rmdir` rather than a
+    # test, because only an empty directory can be removed that way and the
+    # check is then the removal. It covers both a session that handed nothing
+    # back and a launch refused after the directory was made - every refusal
+    # that can happen after it, which is most of them, otherwise left one
+    # behind for an operator to find and wonder about. An ordinary project's
+    # share is not touched: that one is expected to outlive its sessions.
+    if [ "$DEJIMA_ISOLATED" = 1 ] && [ -n "${SANDBOX_SHARE_DIR:-}" ]; then
+        rmdir "$SANDBOX_SHARE_DIR" 2>/dev/null || true
+    fi
     exit_step "session ended - keeping what it compacted away"
     # Keep whatever the session compacted away, into a store nothing mounts.
     # `|| true` for the same reason every other line in this trap has it: a
@@ -1836,12 +1974,12 @@ cleanup() {
     # louder, which is what makes it safe to honour from the environment at
     # all.
     #
-    # Nothing to keep for an isolated launch: an epitaph is read out of the
-    # transcript on the host, and that mode mounts none - so this would write
-    # an empty record keyed to a working directory that will never exist
-    # again. Said at launch rather than inferred from an empty store, and the
-    # same goes for the conversation shipper further down.
-    if [ "$DEJIMA_ISOLATED" = 0 ] && [ "$(config_get_bool epitaph enabled)" = "1" ]; then
+    # An isolated launch reaches this with the key already overridden off, up
+    # where the flag is read: an epitaph is taken from a transcript on the
+    # host and that mode mounts none, so there is nothing to keep. Decided
+    # there rather than here so that the banner and --print-config say the
+    # same thing this does.
+    if [ "$(config_get_bool epitaph enabled)" = "1" ]; then
         DEJIMA_EPITAPH_NO_SHIP="$NO_LOG" \
             "$SCRIPT_DIR/dejima-epitaph" save "$WORKSPACE_DIR" || true
     fi
@@ -2126,11 +2264,20 @@ export GH_TOKEN="${GH_TOKEN:-}"
 # credential, and that claim has to cover the one core fills in as well as
 # the one a forge declares.
 #
-# Unless the command named a forge, which is the operator saying this session
-# is meant to reach one. Then nothing here is narrowed and the selection
-# decides, exactly as for any other launch.
+# Unless this session has a forge to reach, which is the operator saying it is
+# meant to. Then nothing here is narrowed and the selection decides, exactly
+# as for any other launch.
+#
+# Read off the RESOLVED forge's capabilities rather than off whether a --forge
+# flag was passed. `--forge` naming the no-capability forge is an operator
+# asking for no forge, and it was counted as naming one - so the launch that
+# said most clearly that it wanted no forge access was the one that got the
+# credential. Capabilities rather than the forge's name, because core may not
+# name a forge, and because "a forge that can do nothing has no use for a
+# credential" is the actual rule.
 SANDBOX_GH_TOKEN="$GH_TOKEN"
-if [ "$DEJIMA_ISOLATED" = 1 ] && [ "$DEJIMA_FORGE_NAMED" = 0 ]; then
+if [ "$DEJIMA_ISOLATED" = 1 ] \
+    && [ -z "$(manifest_get forge "$DEJIMA_FORGE_NAME" capabilities)" ]; then
     SANDBOX_GH_TOKEN=""
 fi
 export SANDBOX_GH_TOKEN
@@ -2566,13 +2713,20 @@ if [ -n "$DEJIMA_BACKEND_NAME" ]; then
     #
     # Re-seeded rather than never stripped, so the safe form is what every
     # other path gets and this is one explicit step away from it.
+    #
+    # Through the same narrowing, with only the credential kept. It was a
+    # plain `cp`, which also put back the `projects` map #381 narrowed - every
+    # other project's path, filenames and costs - and did it after the
+    # credential scan had read the narrowed copy, so nothing ever looked at
+    # what came back.
     if [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
         && [ -n "$DEJIMA_BACKEND_CREDENTIAL_FIELD" ] \
         && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
         && [ -f "$HOME/.claude.json" ] \
         && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
              = "$(readlink -m "$HOME/.claude.json")" ]; then
-        cp "$HOME/.claude.json" "$SANDBOX_CLAUDE_JSON_FILE"
+        _stage_claude_json true "$SANDBOX_CLAUDE_JSON_FILE" \
+            || { echo "$HOME/.claude.json stopped being readable as JSON." >&2; exit 1; }
         echo "[backend.$DEJIMA_BACKEND_NAME] proxy is off, so this session gets your real" >&2
         echo "$DEJIMA_BACKEND_CREDENTIAL_FIELD from $HOME/.claude.json." >&2
     fi
@@ -3225,11 +3379,28 @@ if [ -n "$DEJIMA_BACKEND_NAME" ] \
         # which the EXIT trap removes.
         extra_mounts+=(-v "$SANDBOX_FAKE_CREDENTIALS_FILE:$HOME/.claude/.credentials.json")
     fi
-elif [ -f "$HOME/.claude/.credentials.json" ]; then
+elif [ -n "$DEJIMA_BACKEND_NAME" ] \
+    && [ "$DEJIMA_BACKEND_CREDENTIAL_KIND" != none ] \
+    && ! backend_proxy_enabled "$DEJIMA_BACKEND_NAME" \
+    && [ -f "$HOME/.claude/.credentials.json" ] \
+    && [ "$(readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE")" \
+         = "$(readlink -m "$HOME/.claude/.credentials.json")" ]; then
     # No proxy: the session authenticates with the real credential, so it has
     # to be mounted in. Read-write because Claude Code refreshes it in place.
     # This is the documented downgrade, not an oversight - see the kill-switch
     # message above and docs/security.md.
+    #
+    # Each condition names a way this stops being that downgrade and becomes a
+    # credential handed to a session with no use for it. The branch above is
+    # the proxy engaging; everything else used to fall through to here, which
+    # meant a backend needing no credential at all - a model you serve
+    # yourself, the arrangement docs/security.md calls the one with nothing in
+    # the container to steal - mounted the real subscription login anyway. So
+    # did a backend whose own credential file is somewhere else and missing.
+    #
+    # The file is compared, not just the kind: this mount is for the case
+    # where THIS backend's credential IS this file, and the operator turned
+    # the proxy off for it.
     extra_mounts+=(-v "$HOME/.claude/.credentials.json:$HOME/.claude/.credentials.json")
 fi
 export SANDBOX_ANTHROPIC_BASE_URL SANDBOX_ANTHROPIC_AUTH_TOKEN SANDBOX_CREDENTIAL_PROXY_SOCKET
@@ -3455,8 +3626,13 @@ startup_banner() {
     else
         name="$(basename -- "$WORKSPACE_DIR")"
     fi
-    printf '\n  %sdejima%s  %s%s%s' \
-        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" >&2
+    # The release this checkout is on, beside the wordmark: "which version am
+    # I running" is a question an operator should not have to ask, and a
+    # launch is where they are already looking. Dim, because it is context
+    # rather than a choice this launch made.
+    printf '\n  %sdejima%s  %s%s%s  %s%s%s' \
+        "$C_BADGE" "$C_RESET" "$C_KEY" "$name" "$C_RESET" \
+        "$C_DIM" "$(dejima_version "$REPO_ROOT")" "$C_RESET" >&2
     [ -z "$branch" ] || printf '  %s%s%s  %s' "$C_DIM" "$GLYPH_SEP" "$C_RESET" "$branch" >&2
     printf '\n  %sharness%s %s   %sforge%s %s   %sworkflow%s %s\n' \
         "$C_DIM" "$C_RESET" "$DEJIMA_HARNESS_NAME${model:+ ($model)}" \
@@ -3917,10 +4093,74 @@ docker network create --label "dejima.run=$DEJIMA_RUN_ID" "$SANDBOX_RUN_NETWORK"
 # docker-compose.yml declares for the sandbox. A static test reads the same
 # names back out of the firewall scripts, so a script that starts reading a new
 # one fails rather than silently allowlisting less than it was told to.
-# The only two names here this launcher does not derive: they come from the
-# operator's own environment and travel through untouched. Marked exported
-# anyway, so that `-e NAME` carries a value rather than an empty string on a
-# shell where they were set without being exported.
+# EGRESS_HOST_ADDR comes from the operator's own environment and travels
+# through untouched. Marked exported anyway, so that `-e NAME` carries a value
+# rather than an empty string on a shell where it was set without being
+# exported.
+#
+# EGRESS_HOST_CANDIDATES is the other half of the clamp, and it is a list of
+# candidates rather than of ports because only the filter can decide.
+#
+# The clamp holds the host's own address to the ports it was told, ahead of
+# every wider rule - so a service dejima pointed at the host needs its port
+# there to be reachable at all. The launcher knows which destinations it
+# configured; it does not know the host's address, which the policy works out
+# from the default route inside the container. EGRESS_HOST_ADDR is the
+# operator's override for when that derivation is wrong, so it is normally
+# unset: comparing against it here meant nothing was ever derived on an
+# ordinary install, and a host-resident Loki at the gateway address stopped
+# being reachable the moment the clamp went first.
+#
+# So the launcher passes what it is sure of - a literal address with an
+# explicit port - and the policy keeps the port of each candidate whose
+# address is the host's. Nothing resolves a name on either side.
+#
+# A scheme default is not an explicit port: a remote https URL has none, and
+# adding 443 for it opened the host's own 443 - which on a box following
+# docs/remote-access.md is the reverse proxy in front of the web terminal.
+_egress_host_candidate() {  # <url> -> addr:port, or nothing
+    local rest hostport host port
+    rest="${1#*://}"
+    # Path, query and fragment, in that order: a URL may carry a query with no
+    # path at all, and `?x=1` came through as part of the port.
+    rest="${rest%%/*}"
+    rest="${rest%%\?*}"
+    rest="${rest%%#*}"
+    # Userinfo. A password beginning with a digit read as the port.
+    hostport="${rest##*@}"
+    case "$hostport" in
+        # Bracketed IPv6 with a port, then without. The unbracketed form has
+        # no port by definition - every colon in it is part of the address -
+        # which is why `[fe80::1]/` came out as `1]`.
+        \[*\]:*) host="${hostport%]:*}]"; port="${hostport##*]:}" ;;
+        \[*\])   return 0 ;;
+        *:*)      host="${hostport%:*}";  port="${hostport##*:}" ;;
+        *)        return 0 ;;
+    esac
+    case "$port" in ""|*[!0-9]*) return 0 ;; esac
+    # A literal IPv4 address and nothing else. A name is a destination the
+    # launcher cannot place, and the policy compares against an IPv4 address
+    # because the host entry is one.
+    case "$host" in
+        *[!0-9.]*|"") return 0 ;;
+    esac
+    printf '%s:%s' "$host" "$port"
+}
+EGRESS_HOST_CANDIDATES=""
+for _hc_url in "$LOKI_URL" \
+    "$([ -n "$DEJIMA_BACKEND_NAME" ] \
+        && config_type "backend.$DEJIMA_BACKEND_NAME.base_url" >/dev/null 2>&1 \
+        && config_get "backend.$DEJIMA_BACKEND_NAME" base_url)"; do
+    [ -n "$_hc_url" ] || continue
+    _hc="$(_egress_host_candidate "$_hc_url")"
+    [ -n "$_hc" ] || continue
+    case " $EGRESS_HOST_CANDIDATES " in
+        *" $_hc "*) continue ;;
+    esac
+    EGRESS_HOST_CANDIDATES="${EGRESS_HOST_CANDIDATES:+$EGRESS_HOST_CANDIDATES }$_hc"
+done
+unset _hc_url _hc
+export EGRESS_HOST_CANDIDATES
 export EGRESS_HOST_ADDR EGRESS_HOST_PORTS
 
 filter_env=(
@@ -3939,6 +4179,7 @@ filter_env=(
     # could use.
     -e EGRESS_HOST_ADDR
     -e EGRESS_HOST_PORTS
+    -e EGRESS_HOST_CANDIDATES  # host-resident destinations this launch configured
     -e SANDBOX_HARNESS_DOMAINS
     -e SANDBOX_BACKEND_PROXIED_DOMAIN
     -e SANDBOX_CREDENTIAL_PROXY_SOCKET
@@ -4030,13 +4271,12 @@ compose_status=0
 # itself: --no-conversation and --no-log are overrides held in this process,
 # and the shipper re-reads the config rather than inheriting them.
 #
-# And not at all for an isolated launch. The shipper tails a transcript that
-# is on the host because the harness's state directory is mounted, and that
-# mode mounts none - so what it would ship is nothing, from a file that is
-# never created. Said at launch instead, because a log that is quietly empty
-# is worse than one the operator knows they are not getting.
-if [ "$DEJIMA_ISOLATED" = 0 ] &&
-   [ "$(config_get_bool logging conversation)" = "1" ] &&
+# An isolated launch reaches this with the key already overridden off, for
+# the reason the epitaph is: the shipper tails a transcript that is on the
+# host because the harness's state directory is mounted, and that mode mounts
+# none. One override up where the flag is read, rather than a check here that
+# the banner would then contradict.
+if [ "$(config_get_bool logging conversation)" = "1" ] &&
    [ -n "$(config_get logging loki_url)" ]; then
     "$SCRIPT_DIR/dejima-conversation-ship" "$WORKSPACE_DIR" &
     SANDBOX_CONVERSATION_SHIP_PID=$!

@@ -3980,6 +3980,98 @@ EOF
     rm -rf "$workspace" "$stub" "$log" "$staged"
 }
 
+@test "the proxy-off re-seed narrows the projects map too" {
+    # With the proxy off for a backend whose credential IS ~/.claude.json,
+    # the staged copy is re-seeded so the key survives - and that was a plain
+    # `cp`, which put every other project's entry back. Worse, it ran after
+    # the credential scan had read the narrowed copy, so nothing ever looked
+    # at what came back.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<JSON
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST",
+ "projects":{
+   "$workspace":{"exampleFiles":["mine.py"],"lastCost":1},
+   "/home/someone/else/their-project":{"exampleFiles":["theirs.py"]}},
+ "numStartups":7}
+JSON
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
+                 "credential_file = $RW_HOME/.claude.json" 'proxy = off'
+
+    local stub staged
+    stub="$(mktemp -d)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; return 1; }
+
+    # The credential is the point of this path, so it stays.
+    [ "$(jq -r '.primaryApiKey' "$staged")" = sk-ant-api03-REAL-KEY-FROM-THE-HOST ] \
+        || { echo "proxy = off did not pass the credential through"; return 1; }
+    # And nothing else came back with it.
+    [ "$(jq -r '.projects | length' "$staged")" = 1 ] \
+        || { echo "the re-seed restored other projects: $(jq -c '.projects|keys' "$staged")"
+             return 1; }
+    grep -q 'theirs.py' "$staged" \
+        && { echo "another project's filenames reached the container"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = 7 ] || { echo "lost app state"; return 1; }
+    rm -rf "$workspace" "$stub" "$staged"
+}
+
+@test "a backend needing no credential mounts no credential" {
+    # P1, driven rather than grepped. The mount sat under
+    # `elif [ -f ~/.claude/.credentials.json ]`, which fired for anything the
+    # proxy branch did not take - including a backend whose credential kind
+    # is none, the self-served arrangement docs/security.md calls the one with
+    # nothing in the container to steal. The real subscription login was
+    # mounted read-write into a session that had no use for it.
+    #
+    # The grep over the branch's conditions is in static.bats and would still
+    # pass on a restructuring that tested the same words differently, which is
+    # why this one reads the argv a launch actually produced.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A real-looking credential on the host, which is what there is to leak.
+    printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-REAL","refreshToken":"r","expiresAt":1}}\n' \
+        > "$RW_HOME/.claude/.credentials.json"
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    # cline rather than claude-code: a credential kind of none means a backend
+    # the harness reaches directly, and claude-code speaks no API that has
+    # one. This is the pairing the release pass reproduced it with.
+    local cline_state; cline_state="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' '[harness.cline]' \
+                 "state_dir = $cline_state" 'model = m' 'backend = self-hosted' \
+                 '[backend.self-hosted]' 'base_url = http://127.0.0.1:11434'
+
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "$RW_HOME/.claude/.credentials.json:$RW_HOME/.claude/.credentials.json" \
+        "$docker_log" \
+        && { echo "a self-served backend was handed the real credential"; return 1; }
+    rm -rf "$cline_state"
+
+    # And the arrangement the mount IS for still gets it: this backend's
+    # credential is that file, and the proxy is off for it.
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic' '[backend.anthropic]' 'proxy = off'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "$RW_HOME/.claude/.credentials.json:$RW_HOME/.claude/.credentials.json" \
+        "$docker_log" \
+        || { echo "proxy = off no longer mounts the credential it is for"; return 1; }
+    rm -rf "$workspace"
+}
+
 @test "a projects key that is not a map does not refuse the launch" {
     # Narrowing a `projects` that holds a string would error, and the staging
     # treats a jq failure as fatal - so an odd but parseable file would become

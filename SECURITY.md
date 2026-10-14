@@ -75,6 +75,10 @@ Whoever deploys this is responsible for the result.
 The tip of `main`, and nothing else. There are no maintenance branches, no
 backports and no security releases for older tags or commits.
 
+Releases are tagged by date so you can tell what you are running -
+`dejima --version` - and [CHANGELOG.md](CHANGELOG.md) says what each one
+changed. A tag is a record of what shipped, not a version anyone may stay on.
+
 ## No warranty
 
 The software is provided without warranty of any kind. See sections 15 and 16

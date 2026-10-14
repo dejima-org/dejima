@@ -518,9 +518,10 @@ itself:
   `GITEA_SSH_HOST`, `GITEA_TOKEN`).
 
 `hooks/git-push-guard.sh` reads `DEJIMA_PUSH_HOSTS` and
-`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as a
-regex-escaped literal command prefix. Two different failure directions,
-both deliberate:
+`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as
+the merge subcommand a workflow blocks, matched against the parsed argv rather
+than against the command string. Two different failure directions, both
+deliberate:
 
 - `DEJIMA_PUSH_HOSTS` fails **closed** - empty means no host is allowed, so
   every push is refused. A no-forge or non-pushing workflow becomes
@@ -528,8 +529,11 @@ both deliberate:
 - `DEJIMA_BLOCKED_BRANCHES` fails **open** - empty means no branch is
   protected, which is correct for a workflow with genuinely no branch
   policy.
-- `DEJIMA_MERGE_BLOCK` fails **open** the same way - empty makes
-  `merge-guard.sh` inert rather than conditionally installed.
+- `DEJIMA_MERGE_BLOCK` fails **open** for the merge it names - empty blocks no
+  merge, which is correct for a workflow with no merge policy. The guard
+  itself stays active either way: it also adds the agent-written disclosure
+  and holds a command to the repository the session is for, and neither of
+  those is the workflow's to turn off.
 
 ## Validation
 

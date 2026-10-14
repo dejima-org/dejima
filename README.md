@@ -250,6 +250,7 @@ Applications, scopes `write:repository` and `write:issue`) into
 ```sh
 dejima                        # sandbox the current directory
 dejima ~/repos/some-project
+dejima --isolated             # no project at all - see below
 ```
 
 Point it at a project, ask for a change, and let the session work. What happens
@@ -297,6 +298,23 @@ dejima --ro ~/other-project ~/myproject
 
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
+
+### A session with no project
+
+`dejima --isolated` is the other direction: nothing of your machine is
+mounted, no memory or transcript crosses either boundary, no forge credential
+unless the same command names a forge, and the one thing that outlives the
+session is a `~/shared` made fresh for it. Run it from anywhere - the
+directory you are in is not used, and naming one is refused rather than
+ignored, so a launch cannot look like it is working on a project it cannot
+see.
+
+It narrows what a session can read of the host and what credential it carries.
+It is not a stronger sandbox: the firewall, the credential boundary and the
+capability drops are what they are for every other session.
+
+**→ [docs/configuration.md](docs/configuration.md#isolated-sessions)** - the
+table of what differs, and what the mode gives up.
 
 **Ctrl-Z backgrounds dejima's host side**, and `fg` brings back a working
 session. It gets your terminal back rather than pausing the agent - the
@@ -412,7 +430,8 @@ broken tool. IPv6 is refused outright rather than allowlisted: a sandbox has no
 IPv6 egress at all, and one table states that in the same transaction as
 everything else, so there is no moment where the family is partly filtered.
 
-The allowlist covers what the sandbox needs to function - DNS, the Docker host,
+The allowlist covers what the sandbox needs to function - DNS, the Docker host
+on the ports a host-resident service was configured on and no others,
 GitHub on port 443 for read access whichever forge is selected, whatever the
 selected forge needs, the harness's own update endpoints, and the selected
 backend's API endpoint when the credential proxy is off - plus whatever a

@@ -1649,7 +1649,13 @@ _cline_cfg() {
 
 # $1 is the config dir, $2 the workspace. Prints whatever the plugin said and
 # returns its status.
+#
+# The staging directory is $1/stage, because that is the second argument core
+# passes and because it is where the plugin writes this launch's provider
+# configuration now - it used to write into the state directory, which an
+# isolated launch does not mount. The tests below read it out of there.
 _cline_prepare() {
+    mkdir -p "$1/stage"
     DEJIMA_CONFIG_DIR="$1" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
         source "$2/bin/dejima-project-lib.sh"
@@ -1657,7 +1663,7 @@ _cline_prepare() {
         source "$2/bin/dejima-slug-lib.sh"
         harness_plugin_load cline
         WORKSPACE_DIR="$1"
-        harness_prepare_config /dev/null' _ "$2" "$REPO_ROOT"
+        harness_prepare_config /dev/null "$3"' _ "$2" "$REPO_ROOT" "$1/stage"
 }
 
 @test "cline refuses to launch with no model configured" {
@@ -1695,7 +1701,7 @@ _cline_prepare() {
         # workspace slug, and spelling that out here would be a second copy of
         # ws_slug that could agree with nothing.
         local written
-        written="$(find "$d/state" -name providers.json -print -quit)"
+        written="$(find "$d/stage" -name providers.json -print -quit)"
         [ -n "$written" ] || { echo "no providers.json written for $id"; return 1; }
         local wrote
         wrote="$(jq -r '.providers."openai-compatible".settings.model' "$written")"
@@ -1819,7 +1825,7 @@ _cline_prepare() {
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local f
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json was written"; return 1; }
     run jq -r '.providers.anthropic.settings.apiKey' "$f"
     [[ "$output" == *placeholder* ]] || { echo "the key is not a placeholder: $output"; return 1; }
@@ -1843,7 +1849,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json"; return 1; }
     run jq -r '.providers.anthropic.updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt: cline will discard this"; return 1; }
@@ -1859,7 +1865,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts2"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers."openai-compatible".updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt on the local branch"; return 1; }
 }
@@ -1877,13 +1883,13 @@ _cline_prepare() {
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic' 'context_window = 15000')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow' "$f"
     [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
 
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
     [ "$output" = "absent" ] || { echo "invented a context window: $output"; return 1; }
 }
@@ -3143,25 +3149,39 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # on the host at all - and report nothing, which is the shape of a
     # feature that looks present and is not.
     #
-    # Asserted over the source rather than by driving a launch, because what
-    # distinguishes "ran and found nothing" from "did not run" is not
-    # observable from outside in a stubbed launch.
-    local src="$REPO_ROOT/bin/dejima" flat
+    # Two of the three are off because the flag overrides their config key,
+    # which is what makes the banner and --print-config agree with what
+    # actually happens - they said "epitaph on" while nothing was kept. So
+    # what is asserted here differs by feature: the overrides for those two,
+    # and the mode check for the audit, which has no key to override.
+    local src="$REPO_ROOT/bin/dejima" flat key call
     # Continuations flattened, so a guard split across lines still reads as
     # one condition.
     flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
-    local call
-    for call in \
-        'dejima-epitaph" save' \
-        'dejima-conversation-ship"' \
-        'dejima-audit" snapshot' \
-        'dejima-audit" compare'
-    do
+
+    for key in epitaph.enabled logging.conversation; do
+        grep -qF "_set_override $key off" <<< "$flat" \
+            || { echo "an isolated launch does not turn $key off"; return 1; }
+    done
+    # Under the flag and nowhere else: an unconditional override would turn
+    # the feature off for every launch.
+    awk '
+        /^if \[ "\$DEJIMA_ISOLATED" = 1 \]; then/ { inblock = 1; next }
+        inblock && /^fi/ { inblock = 0 }
+        inblock && /_set_override (epitaph\.enabled|logging\.conversation) off/ { n++ }
+        END { exit !(n == 2) }
+    ' <<< "$flat" \
+        || { echo "the two overrides are not both inside the isolated block"; return 1; }
+    # And each feature still reads the key, so the override is what decides.
+    grep -qF 'config_get_bool epitaph enabled' <<< "$flat" \
+        || { echo "the epitaph no longer reads its own key"; return 1; }
+    grep -qF 'config_get_bool logging conversation' <<< "$flat" \
+        || { echo "the shipper no longer reads its own key"; return 1; }
+
+    # The audit has no config key to override, so it is gated on the mode.
+    for call in 'dejima-audit" snapshot' 'dejima-audit" compare'; do
         grep -qF "$call" <<< "$flat" \
             || { echo "bin/dejima no longer calls: $call"; return 1; }
-        # The guard is on the `if` that encloses the call, so the test looks
-        # for the two together within the same construct rather than merely
-        # both somewhere in the file.
         awk -v call="$call" '
             index($0, "DEJIMA_ISOLATED") { guard = NR }
             index($0, call) { if (guard && NR - guard <= 8) found = 1 }
@@ -3172,17 +3192,121 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     return 0
 }
 
-@test "the isolated share root is out of every other launch's reach" {
-    # One directory per isolated session, all under one root - which is the
-    # pile the per-project share split removed, if an ordinary launch could
-    # name the root in [mounts] readonly. Guarded the same way the
-    # per-project root is.
-    grep -q 'isolated_share_root "$(config_get core share_dir)"' "$REPO_ROOT/bin/dejima" \
-        || { echo "the isolated share root is not in GUARDED_STORES"; return 1; }
-    # And a launch's own share is a directory under it, not the root, so the
-    # guard cannot be satisfied by nothing ever reaching that path.
-    grep -q 'isolated_share_make "$SANDBOX_SHARE_ROOT"' "$REPO_ROOT/bin/dejima" \
-        || { echo "nothing makes an isolated share directory"; return 1; }
+@test "a seed staged after the mount guard is still refused over a writable mount" {
+    # The seed list is loaded twice: once with the other list loads, where the
+    # mount guard runs, and once after harness_prepare_config, because a hook
+    # whose job is to make a file has to run before the list that mounts it.
+    #
+    # The second pass could have rested on an argument - what a plugin adds
+    # there is a path dejima made this run - and that is true of the one
+    # plugin that does it today and not a property of the mechanism. So the
+    # rule is applied again, and this is the refusal being driven: nothing in
+    # the tree exercises it, because no shipped plugin derives a seed from
+    # state the hook changed.
+    # Wired in, first: the behaviour below is driven against the function, so
+    # nothing there would notice the call being deleted. It runs immediately
+    # after the second load and before anything is mounted.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    # awk rather than a two-line grep pattern: `grep -F` reads one of those
+    # as two alternatives and matches either line, so the check passed with
+    # the call deleted. What has to hold is the adjacency.
+    awk '
+        prev == "harness_seed_load" && $0 == "_refuse_rw_over_harness_host_config" { found = 1 }
+        { prev = $0 }
+        END { exit !found }
+    ' <<< "$flat" \
+        || { echo "no seed load is followed by the guard"; return 1; }
+
+    local out
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Stubbed, because what is under test is the refusal rather than how
+        # the list is assembled - which has its own tests further up.
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-rw/inside/config.json
+    [ "$status" -ne 0 ] \
+        || { echo "a writable mount over a staged seed was allowed: $output"; return 1; }
+    [[ "$output" == *"Refusing writable mount"* ]] \
+        || { echo "the refusal does not say what it refused: $output"; return 1; }
+    [[ "$output" == *"once its per-run configuration"* ]] \
+        || { echo "the refusal does not say why it is late: $output"; return 1; }
+
+    # And a path that does not overlap is left alone, so the refusal is about
+    # the overlap rather than about there being any seed at all.
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-elsewhere/config.json
+    [ "$status" -eq 0 ] && [ "$output" = ALLOWED ] \
+        || { echo "an unrelated writable mount was refused: $output"; return 1; }
+}
+
+@test "every store dejima refuses to mount is one it warns about inside the workspace" {
+    # Two lists that have to say the same thing. GUARDED_STORES is what a
+    # [mounts] entry or --ro/--rw is refused for naming;
+    # warn_if_inside_workspace is what an operator hears when the same path is
+    # inside the project being mounted instead. The workspace mount itself is
+    # not refused - that is a deliberate decision with its own tests - so the
+    # warning is the whole of what a session's own project gets.
+    #
+    # They drifted: three stores were warned about and six were guarded, so a
+    # path dejima would not mount through one route was mounted silently
+    # through the widest one.
+    #
+    # Checked by name in both directions rather than against a list kept here,
+    # which would need the same updating the code does.
+    local src="$REPO_ROOT/bin/dejima" flat guarded warned missing="" n
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    guarded="$(sed -n 's/^[[:space:]]*GUARDED_STORES=(\(.*\))[[:space:]]*$/\1/p' <<< "$flat" \
+        | grep . | head -1)"
+    [ -n "$guarded" ] || { echo "GUARDED_STORES could not be read"; return 1; }
+    warned="$(grep '^warn_if_inside_workspace ' <<< "$flat")"
+    n="$(grep -c '^warn_if_inside_workspace ' <<< "$flat")"
+    [ "$n" -ge 6 ] || { echo "only $n stores are warned about"; return 1; }
+
+    # Every name the guarded list resolves a store through has to appear in a
+    # warning. Names rather than whole expressions, because two of the
+    # entries nest a command substitution inside another and no single
+    # tokenising of that is worth trusting.
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$warned" \
+            || missing="$missing $name"
+    done < <(grep -oE '\$\(([a-z_]+)|\$([A-Z_]+)' <<< "$guarded" \
+        | sed 's/^\$(\?//' | sort -u)
+    [ -z "$missing" ] \
+        || { echo "guarded but never warned about:$missing"; return 1; }
+
+    # And the other direction: a warning for something the mount guard does
+    # not cover would be the two lists disagreeing the other way.
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$guarded" \
+            || missing="$missing $name"
+    done < <(sed -n 's/^warn_if_inside_workspace "[^"]*"[[:space:]]*"\?\$(\?\([A-Za-z_]*\).*/\1/p' <<< "$flat" \
+        | grep . | sort -u)
+    [ -z "$missing" ] \
+        || { echo "warned about but not guarded:$missing"; return 1; }
 }
 
 @test "the compose file's volumes can each be replaced for one launch" {
@@ -6220,11 +6344,26 @@ registered_commands() {
     # proxy-disabled branch.
     run grep -c 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
     [ "$output" = "1" ]
-    local mount_line branch_line
-    mount_line=$(grep -n 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    branch_line=$(grep -n 'elif \[ -f "\$HOME/\.claude/\.credentials\.json" \]; then' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    [ -n "$branch_line" ]
-    [ "$branch_line" -lt "$mount_line" ]
+    # And the branch it sits under names every condition that makes this the
+    # documented downgrade rather than a credential handed to a session with
+    # no use for it. It was `elif [ -f <that file> ]`, which fired for
+    # anything the proxy branch did not take - including a backend needing no
+    # credential at all, the arrangement docs/security.md calls the one with
+    # nothing in the container to steal.
+    local flat branch
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    branch="$(grep -E '^elif .*credentials\.json' <<< "$flat")"
+    [ -n "$branch" ] || { echo "the mount is not under an elif that tests it"; return 1; }
+    local need
+    for need in '! backend_proxy_enabled' 'DEJIMA_BACKEND_CREDENTIAL_KIND" != none' \
+                'DEJIMA_BACKEND_CREDENTIAL_FILE' '-n "$DEJIMA_BACKEND_NAME"'; do
+        grep -qF -- "$need" <<< "$branch" \
+            || { echo "the credential mount's branch does not test: $need"; return 1; }
+    done
+    # The file comparison is what makes it THIS backend's credential rather
+    # than any backend with the proxy off.
+    grep -qF -- 'readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE"' <<< "$branch" \
+        || { echo "the branch does not compare the backend's own credential file"; return 1; }
 }
 
 @test "the container gets an empty credentials file of its own" {
@@ -9707,7 +9846,8 @@ _emit_mount_at() {
     # And the other direction for the shared libraries, which are the entries
     # most easily forgotten because nothing puts them on PATH.
     for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
-             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh docker/install-forge-bins.sh; do
+             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh bin/dejima-version-lib.sh \
+             docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
 }
@@ -10234,7 +10374,154 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     [[ "$(_plain_output)" == *"harness claude-code"* ]] \
         && [[ "$(_plain_output)" == *"workflow local-only"* ]] \
         || { echo "the banner names no values: $output"; return 1; }
+    # The release, beside the wordmark. "which version am I running" is a
+    # question an operator should not have to go and ask, and this is where
+    # they are already looking. A checkout with no release tag says so rather
+    # than saying nothing, which would read as a banner that lost a field.
+    # Any of the three states the version library defines, because which one
+    # it is depends on the tree this suite is run from - a clone with tags, a
+    # clone without, or an unpacked tree with no .git at all. A test that
+    # accepted only one of them would be asserting something about the
+    # checkout rather than about the banner.
+    [[ "$(_plain_output)" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "the banner does not name the release: $output"; return 1; }
     rm -rf "$DEJIMA_T"
+}
+
+@test "the update notice names the release and where to read what changed" {
+    # A commit count answers "is there something newer" and nothing else. An
+    # operator deciding whether to update wants to know how far behind they
+    # are and what they would be getting, which is the whole reason for
+    # having releases at all - so the notice names both sides and the
+    # changelog, rather than leaving the file to be discovered.
+    local u="$REPO_ROOT/bin/dejima-update-check"
+    grep -q 'CHANGELOG.md' "$u" \
+        || { echo "the update notice does not name the changelog"; return 1; }
+    grep -q 'dejima_version "$REPO_ROOT"' "$u" \
+        || { echo "the notice does not say which release this checkout is on"; return 1; }
+    # Only release-shaped tags, so a tag pushed for anything else cannot
+    # become the answer to "what is the newest release".
+    grep -qF "ls-remote --tags --refs" "$u" \
+        || { echo "the remote's releases are not read from its tags"; return 1; }
+    # Through the same hardened invocation as the branch tip: the checkout's
+    # own git config must not name a command this runs, which is the whole
+    # argument at the top of that file.
+    local n
+    n="$(grep -c 'protocol.allow=never' "$u")"
+    [ "$n" = 2 ] \
+        || { echo "$n of the two remote lookups pin the allowed protocols"; return 1; }
+    # And the tags are asked for only when there is something to report, so an
+    # up-to-date checkout pays one request rather than two.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$u")"
+    grep -q 'if \[ -n "$tip" \] && \[ "$tip" != "$head_sha" \]; then' <<< "$flat" \
+        || { echo "the tag lookup is not conditional on there being news"; return 1; }
+}
+
+@test "the changelog says no release is supported, and has somewhere to write the next" {
+    # The risk a changelog introduces is the expectation that comes with it:
+    # a list of releases reads as a list of things one may be running, and
+    # SECURITY.md says the tip of main is the only supported version. So the
+    # file has to say so itself, where someone picking a version would be
+    # looking.
+    local c="$REPO_ROOT/CHANGELOG.md"
+    [ -f "$c" ] || { echo "there is no changelog"; return 1; }
+    grep -qi 'tip of .main. is the only supported' "$c" \
+        || { echo "the changelog does not say which version is supported"; return 1; }
+    grep -q 'SECURITY.md' "$c" \
+        || { echo "the changelog does not point at the binding statement"; return 1; }
+    # Deliberately no sweep for words like "backport" or "maintenance
+    # branch". The first version of this test had one, and it failed on the
+    # changelog's own sentence saying there are no backports - a pattern
+    # cannot tell a promise from its denial, and a test that matches the shape
+    # of prose rather than its claim is one that gets edited until it passes.
+    # The two assertions above are the claim; a reader is the only check on
+    # the rest.
+
+    # Somewhere for the next release's entry to go before its date is known.
+    # Without it an entry gets written under a guessed date, and the date is
+    # the version.
+    grep -q '^## Unreleased$' "$c" \
+        || { echo "the changelog has no Unreleased heading to write into"; return 1; }
+    # And at least one real release, named as a date, so the scheme is in the
+    # file rather than only in the process document.
+    grep -qE '^## [0-9]{4}\.[0-9]{2}\.[0-9]{2}$' "$c" \
+        || { echo "the changelog names no release as a date"; return 1; }
+    # The release process has to name both steps, because nothing fails when
+    # they are forgotten: the tag is the version, and the heading is the entry.
+    grep -q 'git tag' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to tag the release"; return 1; }
+    grep -q 'Unreleased' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to rename the heading"; return 1; }
+}
+
+@test "dejima --version says which release this is, and what is not supported" {
+    # Answerable without a config, like --help: the moment someone asks which
+    # release they are on is often the moment something else is wrong.
+    run env DEJIMA_CONFIG_DIR=/nonexistent "$REPO_ROOT/bin/dejima" --version
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == dejima\ * ]] \
+        || { echo "--version does not name the program: $output"; return 1; }
+    # One of the three states, for the reason the banner test gives: which it
+    # is depends on the tree this runs from, and it has to say which rather
+    # than printing nothing.
+    [[ "$output" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "--version names no release: $output"; return 1; }
+    # The two things an operator reading this needs next.
+    [[ "$output" == *CHANGELOG.md* ]] \
+        || { echo "--version does not say where the changes are: $output"; return 1; }
+    [[ "$output" == *"tip of main"* ]] \
+        || { echo "--version does not say what is supported: $output"; return 1; }
+}
+
+@test "the release a checkout is on is read from git, not from a file in the tree" {
+    # A VERSION file says what was released and goes on saying it while a
+    # checkout is pulled past that release - and the one moment the answer
+    # matters is the moment it would be wrong. So there is no such file, and
+    # the library asks git.
+    [ ! -e "$REPO_ROOT/VERSION" ] \
+        || { echo "a VERSION file is back, and it can disagree with the tags"; return 1; }
+    grep -q 'describe --tags' "$REPO_ROOT/bin/dejima-version-lib.sh" \
+        || { echo "the version library does not read the tags"; return 1; }
+
+    # Driven over every state a checkout can be in, in a throwaway repository:
+    # the answers are what --version, the banner and the update notice all
+    # print, and "unreleased" versus a date versus a date+N are three
+    # different things to tell an operator.
+    local t; t="$(mktemp -d)"
+    git -C "$t" init -q .
+    git -C "$t" config user.email t@example.invalid
+    git -C "$t" config user.name t
+    _ver() {
+        run bash -c 'source "$1"; dejima_version "$2"' _ \
+            "$REPO_ROOT/bin/dejima-version-lib.sh" "$t"
+    }
+    _ver; [ "$output" = unreleased ] \
+        || { echo "an untagged checkout reports '$output'"; rm -rf "$t"; return 1; }
+    echo one > "$t/a"; git -C "$t" add a; git -C "$t" commit -qm one
+    git -C "$t" tag 2026.10.12
+    _ver; [ "$output" = 2026.10.12 ] \
+        || { echo "on the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    echo two > "$t/b"; git -C "$t" add b; git -C "$t" commit -qm two
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "one commit past the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    # A tag that is not a release must not become the answer.
+    git -C "$t" tag some-marker
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "a non-release tag became the version: '$output'"; rm -rf "$t"; return 1; }
+    # And the release part of that, which is what two checkouts are compared on.
+    run bash -c 'source "$1"; dejima_version_release "2026.10.12+1"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh"
+    [ "$output" = 2026.10.12 ] || { echo "the release part is '$output'"; rm -rf "$t"; return 1; }
+    rm -rf "$t"
+
+    # No git at all, which is an unpacked tarball rather than a clone.
+    local plain; plain="$(mktemp -d)"
+    run bash -c 'source "$1"; dejima_version "$2"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh" "$plain"
+    [ "$output" = unknown ] || { echo "a non-checkout reports '$output'"; }
+    rmdir "$plain"
+    [ "$output" = unknown ]
 }
 
 @test "the startup banner is off when the config says so" {
@@ -10444,12 +10731,16 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
 }
 
 # The providers.json cline is actually given, for one config. Prints it as JSON.
+#
+# Out of the staging directory, not the state directory: this file is written
+# per run and seeded into the container now, which is what lets an isolated
+# launch - one with no state mount at all - be configured.
 _cline_providers_json() {
     local cfg="$1" out
     _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws" >/dev/null 2>&1 || return 1
-    out="$(ls -d "$(sed -n 's/^state_dir *= *//p' "$cfg/config")"/*/settings 2>/dev/null | head -1)"
+    out="$(find "$cfg/stage" -name providers.json -print -quit 2>/dev/null)"
     [ -n "$out" ] || return 1
-    cat "$out/providers.json"
+    cat "$out"
 }
 
 @test "cline's provider type follows the provider's api_style, not a second setting" {
@@ -10915,6 +11206,111 @@ _host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
     [ "$(grep -c . <<< "$output")" -eq 1 ]
     [[ "$output" == *"ip daddr @host_v4 goto refuse"* ]]
     [[ "$output" != *permit* ]]
+}
+
+@test "the host entry's clamp is matched before the rules that would widen it" {
+    # The clamp said the right thing and never saw the packets. The open
+    # class permits on every port, and the host's own address lands in it by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, `dejima-allow <gateway>` - so the permit answered
+    # first and the host was open on every port, sshd and the remote-access
+    # front door included.
+    #
+    # Asserted on the order the emitters are called in, which is what decides
+    # it: nft takes the first match.
+    local policy="$SANDBOX_DIR/egress-policy" host_at open_at forge_at
+    host_at="$(grep -n '^    emit_host_clamp host_v4' "$policy" | cut -d: -f1)"
+    open_at="$(grep -n 'ip daddr @literal_v4 goto permit' "$policy" | cut -d: -f1)"
+    forge_at="$(grep -n '^    emit_forge_clamp ip forge_v4' "$policy" | cut -d: -f1)"
+    [ -n "$host_at" ] && [ -n "$open_at" ] && [ -n "$forge_at" ] \
+        || { echo "the rule emitters could not be found"; return 1; }
+    [ "$host_at" -lt "$open_at" ] \
+        || { echo "the open class permits the host's address before the clamp sees it"
+             return 1; }
+    # And still after the forge clamp, so a host-resident forge is read as a
+    # forge rather than as the host.
+    [ "$forge_at" -lt "$host_at" ] \
+        || { echo "the host clamp now answers for a host-resident forge"; return 1; }
+}
+
+@test "the launcher offers host candidates and the filter decides which are the host" {
+    # Split across the two processes because neither knows both halves. The
+    # launcher knows which destinations this launch configured and cannot know
+    # the host's address; the filter works that out from the default route.
+    #
+    # Comparing in the launcher against EGRESS_HOST_ADDR looked equivalent and
+    # was not: that variable is the operator's override for a wrong
+    # derivation, so it is normally unset, and nothing was ever derived - a
+    # host-resident Loki at the gateway address stopped being reachable the
+    # moment the clamp went first.
+    local src="$REPO_ROOT/bin/dejima" flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    grep -qF '_egress_host_candidate' <<< "$flat" \
+        || { echo "nothing offers a host candidate"; return 1; }
+    grep -qF -- '-e EGRESS_HOST_CANDIDATES' <<< "$flat" \
+        || { echo "the candidates are not passed to the filter container"; return 1; }
+
+    # The launcher's half: a literal address with an explicit port, or
+    # nothing. A wrong answer is either a port nobody opened on the host or a
+    # service nobody can reach.
+    _cand() {
+        run bash -c '
+            eval "$(sed -n "/^_egress_host_candidate()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
+            printf "[%s]" "$(_egress_host_candidate "$1")"' _ "$1"
+    }
+    _cand "http://172.17.0.1:3100"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "the gateway candidate was not offered: $output"; return 1; }
+    # Userinfo and a query do not become part of it: a password starting with
+    # a digit, and a query with no path, each read as the port.
+    _cand "http://u:9secret@172.17.0.1:3100/v1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "userinfo reached the port: $output"; return 1; }
+    _cand "http://172.17.0.1:3100?x=1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "a query reached the port: $output"; return 1; }
+
+    local url
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        _cand "$url"
+        [ "$output" = "[]" ] || { echo "offered $output for $url"; return 1; }
+    done <<CASES
+https://loki.example.com/loki/api/v1/push
+https://172.17.0.1/x
+http://loki.internal:3100
+http://172.17.0.1
+http://[fe80::1]/
+http://[fe80::1]:3100/
+CASES
+
+    # The filter's half: a candidate's port is kept only if its address is one
+    # the host was discovered at.
+    _fold() {  # _fold <HOST_PORTS> <HOST_CANDIDATES> <addr>...
+        local ports="$1" cands="$2"; shift 2
+        run env HOST_PORTS_IN="$ports" HOST_CANDIDATES_IN="$cands" bash -c '
+            set -Eeuo pipefail
+            HOST_PORTS=$HOST_PORTS_IN
+            HOST_CANDIDATES=$HOST_CANDIDATES_IN
+            die() { printf "FAILED: %s\n" "$*" >&2; exit 1; }
+            eval "$(sed -n "/^fold_host_candidates()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+            fold_host_candidates "$@"
+            printf "[%s]" "$HOST_PORTS"' _ "$@"
+    }
+    _fold "" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "the host's own candidate was dropped: $output"; return 1; }
+    _fold "" "172.17.0.1:3100" 192.168.9.9
+    [ "$output" = "[]" ] || { echo "a candidate that is not the host was kept: $output"; return 1; }
+    # The operator's own value is extended, not replaced, and a repeat does
+    # not double.
+    _fold "22000" "172.17.0.1:3100 10.0.0.5:8080" 172.17.0.1 10.0.0.5
+    [ "$output" = "[22000,3100,8080]" ] || { echo "the combined list came out as $output"; return 1; }
+    _fold "3100" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "a port already present was added again: $output"; return 1; }
+    # `any` is wider than anything a candidate could add.
+    _fold "any" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[any]" ] || { echo "any was narrowed to $output"; return 1; }
+    # And nothing at all when the host has no entry.
+    _fold "" "172.17.0.1:3100"
+    [ "$output" = "[]" ] || { echo "a candidate was kept with no host address: $output"; return 1; }
+    return 0
 }
 
 @test "the host entry permits the ports it was given, and refuses the rest" {

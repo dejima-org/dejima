@@ -118,3 +118,45 @@ looks like the safety net is not one. Name the keys. A queued privileged job, a
 manual check that was skipped, a forge that has still never been launched -
 those are the things a reader of `main` is entitled to know, and the release
 PR is where they are still true and still remembered.
+
+Worth its own line too: **what an existing config stops being able to do.** A
+release that tightens a boundary can refuse an arrangement that worked, with
+nothing in the operator's config changed - and the ones that fail closed are
+the ones to name, because failing closed is quiet. An observability path is
+the worst case: a log shipper that can no longer reach its endpoint stops
+shipping and nothing else happens. Name the arrangement, what it now needs,
+and where the refusal shows up.
+
+## 6. The version, and the entry in the changelog
+
+A release is a date, and the tag of that name on `main` is the only record of
+it. Two steps, both at merge time, both easy to forget because nothing fails
+without them:
+
+```sh
+git tag 2026.10.12 <the merge commit on main>
+git push origin 2026.10.12
+```
+
+and in the same pull request, rename `CHANGELOG.md`'s `## Unreleased` heading
+to that date and open a fresh empty one above it. The date is the day it
+merges, so it cannot be written before the merge is made - which is why the
+heading waits rather than being guessed.
+
+**There is nothing else to bump.** `dejima --version` reads `git describe`, so
+the tag is the version: no file records it, and none can disagree with it. A
+checkout pulled past a release reports `2026.10.12+37`, which is the honest
+answer for a checkout on no release.
+
+**A second release on the same day gets a letter** - `2026.10.12b`, then `c`.
+Rare, and the format otherwise has no answer: the date is the whole name.
+`sort -V` orders it after the bare date, which is what the update notice
+compares with, so nothing else has to know about the shape. A letter rather
+than a fourth dotted number, because four dot-separated numbers beginning
+with a year and a month read as a private IPv4 address.
+
+What an entry is for is one question - should I update, and what will I be
+getting - so it names what an operator would notice rather than what changed.
+The pull requests carry the detail and are linked from it. A tag is a record
+of what shipped, not a version anyone may stay on; `CHANGELOG.md` says so at
+the top, and `SECURITY.md` is where that is binding.

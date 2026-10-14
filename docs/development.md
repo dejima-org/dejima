@@ -27,7 +27,7 @@ run them.
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
 | `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches. Turns the reported command into argv and asks `docker/guard-lib.sh` |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), and a command aimed at another repository - to a reported command. Named for the merge block, which is the rule it was created for |
+| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), the agent-written disclosure, and a command aimed at another repository - to a reported command |
 | `docker/guard-lib.sh` | The push and merge policy itself, read out of argv. The two hooks above and the two PATH shadows all call it, so a bypass is fixed once rather than twice |
 | `hooks/dejima-notify.sh` | Drops an empty `waiting`/`done` marker for a remote-enabled session. Registered as a `Stop` hook only; `waiting` is there for a harness that can say it without having stopped - see [docs/remote-access.md](remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
@@ -51,6 +51,7 @@ run them.
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
+| `bin/dejima-version-lib.sh` | Which release a checkout is on, from `git describe` rather than from any file in the tree - so it cannot claim a release a checkout has been pulled past. Sourced by `bin/dejima` (`--version`, the banner) and `bin/dejima-update-check` (what the remote has that this does not). Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
@@ -58,6 +59,7 @@ run them.
 | `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
 | `docs/research-review.md` | When to check dejima's reasoning against the field's, the standing questions that are the agenda, and the queue of bypasses not yet run against this implementation |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
+| `CHANGELOG.md` | What each release changed, for one question: should I update. A release is a date and the tag of that name on `main` is the only record of it - see `docs/release.md` §6 |
 
 `bin/dejima` is the entry point: it resolves the project path,
 checks for a live `ssh-agent`, reads `GITEA_TOKEN`/`GH_TOKEN` from the token

@@ -349,12 +349,17 @@ The filter container keeps the GitHub token either way, because that is what
 authenticates dejima's own fetch of GitHub's address ranges - a request about
 the allowlist, made outside the session's reach.
 
-**The forwarded agent is not mounted; a configured key is.** A workflow that
-never pushes gets no agent socket, and `local-only` is one - so the personal
-identities in the operator's own agent stay outside the container. An
-`[identity] ssh_key` is mounted and loaded whatever the workflow, so an
-isolated session with no forge still holds a key that can reach a host over
-ssh. Withholding that for any launch whose workflow never pushes is
+**The forwarded agent is usually not mounted; a configured key always is.**
+The agent is withdrawn when the workflow does not push **or** a usable key is
+configured, and `--isolated` defaults to a workflow that does not push - so
+the ordinary isolated launch forwards no agent. Name a pushing workflow on a
+host with no `[identity.<name>] ssh_key`, which the example above does, and it
+is forwarded like any other pushing launch. The flag does not decide this; the
+workflow and the key do.
+
+A configured key is mounted and loaded whatever the workflow, so an isolated
+session with no forge still holds a key that can reach a host over ssh.
+Withholding that for any launch whose workflow never pushes is
 [#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
 
 So: a narrower blast radius on the host and a narrower credential, not a
@@ -549,6 +554,13 @@ indexing every session it has ever run, with the project as a field inside the
 record, so there is no slice to take - dejima gives each workspace a data
 directory of its own instead. Both reach the same place: a session sees its
 own project's history and no other's.
+
+That is about the per-project state each harness keeps. It is not true of
+`~/.claude/backups`, `tasks`, `plans` and `sessions`, which are mounted
+read-write and shared by every project's sessions - what a session writes
+there, another project's session can read. See
+[#380](https://gitbox.branderson.io/dejima/dejima/issues/380), which has what
+was observed and why only the first of the four was free to fix.
 
 ### Claude Code: a slice of your own tree
 
@@ -767,6 +779,17 @@ there as a top-level `primaryApiKey` - not in `.credentials.json`, which stays
 reads it host-side per request instead. Without it the proxy would
 withhold one file while dejima copied another, on every launch and whatever
 backend was selected.
+
+**The same staging narrows the `projects` map to the launching project.** That
+map keys per-project state by absolute path, so copying all of it told a
+session the name of every project on the host, a sample of each one's
+filenames, and what each had cost - from inside a container whose claim is
+that it cannot learn what you do elsewhere. The launching project's path and
+anything under it are kept, because a session's working directory is routinely
+a worktree inside it. Both halves run on the one path that stages this file,
+including the re-seed for a backend whose credential IS this file and whose
+proxy is off: that one keeps the credential and narrows the map exactly as the
+other does.
 
 **The residual the first two share is use-while-running.** A session that has
 been turned can spend your quota, ask the model anything, and read the answers
@@ -1024,8 +1047,10 @@ reasoning below is what both are built on.
   failing cleanly (confirmed against a real read-only copy of this file -
   upstream bug: [anthropics/claude-code#29162](https://github.com/anthropics/claude-code/issues/29162)).
   Instead, `dejima` generates a throwaway copy of the file at
-  launch (seeded from the real file, same "generate a sandbox-specific
-  file on the host" pattern as the generated settings override layer)
+  launch (seeded from the real file with the credential dropped and the
+  `projects` map narrowed to this project - see "staged, not mounted" above -
+  the same "generate a sandbox-specific file on the host" pattern as the
+  generated settings override layer)
   and mounts *that* read-write in its place; the copy is discarded,
   unmodified in the real file, when the session ends. A compromised
   session can add whatever it wants to `mcpServers` (or anything else in
@@ -1383,13 +1408,37 @@ one.
 Nothing in a launch needs it open. A host-resident forge, a host-resident Loki
 and a self-served model endpoint are each reached through their own entry - by
 name, or as a literal address - and each lands in a set of its own with its own
-rules. Configuring one of those is how a host service becomes reachable.
+rules. Configuring one of those is how a host service becomes reachable, and
+it is that service that becomes reachable rather than the host: the clamp is
+matched **before** the wider class rules, so an address that is both the
+host's and an open-class entry's is still held to these ports.
 
-For anything else, `EGRESS_HOST_PORTS` on the filter container takes TCP ports
-and low-high ranges, comma or space separated; `EGRESS_HOST_PORTS=any` restores
-the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none` removes the
-entry altogether. A value that is not a port stops the container rather than
-becoming a rule nobody meant.
+`EGRESS_HOST_PORTS`, set in the environment you launch from, takes TCP ports
+and low-high ranges, comma or space separated. `EGRESS_HOST_PORTS=any`
+restores the unclamped behaviour explicitly, and `EGRESS_HOST_ADDR=none`
+removes the entry altogether. A value that is not a port stops the container
+rather than becoming a rule nobody meant.
+
+**A destination you pointed at the host's own address gets its port added for
+you.** The two processes split that decision because neither knows both
+halves. The launcher knows which destinations this launch configured - a
+`[logging] loki_url`, a backend's `base_url` - and offers the ones it is sure
+of: an explicit `:port` on a literal address. The filter, which works the
+host's address out from its default route, keeps the port of each candidate
+whose address is the host's. Neither resolves a name.
+
+What that leaves out is deliberate in both directions. A scheme default is
+not an explicit port, because a remote `https://loki.example.com` has none
+and adding 443 for it would open the host's own 443 - which on a box
+following
+[Behind another reverse proxy](remote-access.md#behind-another-reverse-proxy)
+is the proxy in front of the web terminal. And **a host-resident service
+configured by name needs its port set here by hand**, because a name is a
+destination neither process will resolve to decide what to open.
+
+The policy's summary line is where a missing port shows up: `host <addr> on
+ports none` is why nothing can reach it - the session, and the log shipper
+that runs beside it.
 
 ### DNS is allowlisted too
 

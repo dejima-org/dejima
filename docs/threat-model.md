@@ -278,10 +278,11 @@ The container row, in full. Nothing in it depends on another project.
 - **Disk:** the workspace, the mounts you declare, and this project's own slice
   of harness state. Not your home directory, not `~/.ssh`, not your other
   projects ([security.md](security.md#one-projects-session-cannot-reach-anothers)).
-- **Network:** deny-by-default egress. No port on the host is open, and a
-  permitted name that answers with a private address is refused unless it is
-  a destination you configured, so the LAN is out of reach unless you put it
-  there ([security.md](security.md#network-egress-firewall)).
+- **Network:** deny-by-default egress. No port on the host is open unless you
+  named one, and a permitted name that answers with a private address is
+  refused unless it is a destination you configured, so the LAN is out of
+  reach unless you put it there
+  ([security.md](security.md#network-egress-firewall)).
 - **The model credential** stays on the host behind the credential proxy
   ([security.md](security.md#the-model-api-credential-never-enters-the-container)).
 - **The forge:** whatever the token and key you hand the session can reach.
