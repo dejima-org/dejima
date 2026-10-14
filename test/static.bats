@@ -5524,8 +5524,15 @@ comment forge-cli issue comment"
     # Blocked in the sandbox, including path-qualified - /usr/local/bin is
     # where the image puts it, so a bare-name-only pattern would miss the
     # form an agent reaching past PATH would type.
+    #
+    # Including behind a prefix word. An absolute path to the real CLI steps
+    # over the PATH shadow, so if the hook only read the segment's first word
+    # that combination would have no layer looking at it.
     local cmd
-    for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24'; do
+    for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24' \
+               'env /usr/local/lib/dejima/forge/gitea-pr merge 24' \
+               'nohup /usr/local/lib/dejima/forge/gitea-pr merge 24' \
+               'timeout 5 /usr/local/lib/dejima/forge/gitea-pr merge 24'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
         run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 2 ]

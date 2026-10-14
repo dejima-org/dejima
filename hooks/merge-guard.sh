@@ -47,15 +47,23 @@ forge_commands="$(dejima_forge_commands | sort -u)"
 # shadow at a fixed path, which is what an agent reaching past a shadowed PATH
 # would type. It is also what the shadow itself compares, since that reads its
 # own basename.
+#
+# Every word of the segment, not only the first: a forge CLI named by absolute
+# path behind a prefix word - `env`, `nohup`, `xargs`, a `timeout` - reaches
+# the real binary without passing the PATH shadow, so a first-word check would
+# leave that combination with no layer looking at it. The cost is that a forge
+# command quoted inside some other command's argument is blocked too, which is
+# the direction to be wrong in for a guard that fails fast.
 while IFS= read -r segment; do
     read -ra tokens <<< "$segment"
-    [ "${#tokens[@]}" -gt 0 ] || continue
-    self="$(basename -- "${tokens[0]}")"
-    grep -qxF -- "$self" <<< "$forge_commands" || continue
-    if ! dejima_forge_verdict "$self" "${tokens[@]:1}"; then
-        echo "Blocked by merge-guard.sh: $DEJIMA_GUARD_REASON" >&2
-        exit 2
-    fi
+    for i in "${!tokens[@]}"; do
+        self="$(basename -- "${tokens[$i]}")"
+        grep -qxF -- "$self" <<< "$forge_commands" || continue
+        if ! dejima_forge_verdict "$self" "${tokens[@]:$((i + 1))}"; then
+            echo "Blocked by merge-guard.sh: $DEJIMA_GUARD_REASON" >&2
+            exit 2
+        fi
+    done
 done < <(dejima_guard_segments "$command")
 
 exit 0
