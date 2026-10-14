@@ -1,5 +1,5 @@
 [Unit]
-Description=Mirror dejima's main and release tags to GitHub, hourly
+Description=Mirror the dejima repositories' main and release tags to GitHub, hourly
 
 [Timer]
 OnCalendar=hourly

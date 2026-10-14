@@ -6,15 +6,17 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now dejima-github-mirror.timer
 #
-# ~/.config/dejima/github-mirror.env sets MIRROR_SOURCE, the forge's clone
-# URL, and whatever else mirror/github-mirror.sh documents. A deploy key for
-# the GitHub repository belongs behind an ssh Host alias named in
-# MIRROR_TARGET, so it is not also offered to the forge:
+# ~/.config/dejima/github-mirror.env sets MIRROR_SOURCE, the forge
+# organisation each repository name is appended to, and whatever else
+# mirror/github-mirror.sh documents. The GitHub key belongs behind an ssh Host
+# alias named in MIRROR_TARGET, so it is not also offered to the forge. A
+# deploy key covers one repository, so this one is an account's key with push
+# access to every repository in the organisation:
 #
-#   MIRROR_SOURCE=git@forge.example.com:dejima/dejima.git
-#   MIRROR_TARGET=git@github-mirror:dejima-org/dejima.git
+#   MIRROR_SOURCE=git@forge.example.com:dejima
+#   MIRROR_TARGET=git@github-mirror:dejima-org
 [Unit]
-Description=Mirror dejima's main and release tags to GitHub
+Description=Mirror the dejima repositories' main and release tags to GitHub
 
 [Service]
 Type=oneshot
