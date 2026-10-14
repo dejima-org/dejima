@@ -5035,8 +5035,11 @@ _repo_guard_shim() {
                       DEJIMA_FORGE_REPO=own/thing
                       DEJIMA_FORGE_REPO_PATHS="api:repos")
     local form
+    # The last one carries a brace, which is only an exemption for {owner} and
+    # {repo}: another repository's path is still that path with a placeholder
+    # in the query string.
     for form in "repos/other/thing/issues" "/repos/other/thing/issues" \
-                "repos/other/thing"; do
+                "repos/other/thing" "repos/other/thing/issues?per_page={n}"; do
         run env "${env_common[@]}" "$d/gh" api "$form"
         assert_forge_refused "Blocked by dejima" "gh api $form" || return 1
     done
@@ -5046,7 +5049,12 @@ _repo_guard_shim() {
     # reached every endpoint the token did, with a write among them (#365).
     # Under the declared subcommand the question is inverted: a target this can
     # read has to be present.
-    for form in "user/repos" "/orgs/someone/repos" "-X POST /user/repos" "rate_limit"; do
+    # The brace exemption below is for {owner}/{repo} in an endpoint. A brace
+    # anywhere else - a field value, a --template - says nothing about which
+    # repository the call reaches, so it must not stand in for a target.
+    for form in "user/repos" "/orgs/someone/repos" "-X POST /user/repos" "rate_limit" \
+                "user/repos -f x={y}" "-X POST /orgs/someone/repos -f name={x}" \
+                "user --template {{.login}}"; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" api $form
         assert_forge_refused "names no endpoint under" "gh api $form" || return 1

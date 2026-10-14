@@ -526,11 +526,17 @@ _dejima_forge_path_verdict() {
             # endpoint, so the flags go.
             case "$arg" in -*) continue ;; esac
             [ "$arg" = graphql ] && { scopable=1; continue; }
+            path="${arg#/}"
             # gh substitutes {owner} and {repo} from the checkout, so a path
             # carrying them names this repository by construction and comparing
-            # the literal braces would refuse it.
-            case "$arg" in *'{'*) scopable=1; continue ;; esac
-            path="${arg#/}"
+            # the literal braces would refuse it. Those two tokens only, and
+            # only in an endpoint under the segment: any other brace says
+            # nothing about which repository the call reaches, and a value
+            # carrying one - `-f name={x}`, `--template '{{.login}}'` - would
+            # otherwise be enough to assert the whole command is scoped.
+            case "$path" in
+                "$segment"/*'{owner}'*|"$segment"/*'{repo}'*) scopable=1; continue ;;
+            esac
             case "$path" in "$segment"/*/*) ;; *) continue ;; esac
             path="${path#"$segment"/}"
             owner="${path%%/*}"
