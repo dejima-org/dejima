@@ -1441,6 +1441,20 @@ if [ "$DEJIMA_WORKFLOW_PUSH" = "on" ] && [ "$have_forwarded_agent" = 0 ] && [ "$
     exit 1
 fi
 
+# The same empty file with an agent running is not fatal, and is the case a
+# dedicated key is chosen to avoid: no key is loaded, so SSH_AUTH_SOCK is not
+# blanked below, so the operator's own agent is mounted and signs for the whole
+# unattended session. Said out loud, because every other signal an operator has
+# - the key is configured, the launch starts, pushes work - agrees with the
+# arrangement they asked for.
+if [ -n "$SANDBOX_SSH_KEY" ] && [ "$have_usable_key" = 0 ] \
+   && [ "$have_forwarded_agent" = 1 ] && [ "$DEJIMA_WORKFLOW_PUSH" = "on" ]; then
+    echo "Warning: [core] ssh_key names an empty file, so there is no key to load:" \
+         "$SANDBOX_SSH_KEY" >&2
+    echo "Your forwarded ssh-agent stays mounted and will sign for this session," \
+         "which is what configuring a dedicated key is meant to prevent." >&2
+fi
+
 # A valid forwarded socket with zero identities loaded forwards fine (the
 # container sees a live, working agent) but is useless for git-over-ssh -
 # warn now rather than have that surface confusingly deep into a session as

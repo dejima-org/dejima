@@ -1962,6 +1962,27 @@ _real_agent() {
         || { echo "the launch reached docker with no credential at all"; return 1; }
 }
 
+@test "an empty ssh_key file with an agent running says the agent is still signing" {
+    # The configuration nothing else would tell an operator about: the key is
+    # configured, the launch starts, and pushes work - because the personal
+    # agent is doing them, which is what a dedicated key is chosen to avoid.
+    # No key is loaded, so the withdrawal above does not fire.
+    local key
+    _real_agent
+    key="$(mktemp)"; chmod 600 "$key"
+
+    _agent_launch "$key"
+    kill "$AGENT_PID" 2>/dev/null || true
+    rm -f "$key"
+    [[ "$AGENT_OUT" == *"names an empty file"* ]] \
+        || { echo "an empty key went unmentioned:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    [[ "$AGENT_OUT" == *"will sign for this session"* ]] \
+        || { echo "the consequence went unnamed:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    # And it is not a false alarm: the agent really does reach compose here.
+    [ "$(sort -u "$AGENT_LOG")" = "SSH_AUTH_SOCK=[$AGENT_SOCK]" ] \
+        || { echo "the warning does not match what reached compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
 # The positive control for the test above: with no key configured the
 # forwarded agent really is the only way to push, and an empty one is worth
 # saying so before it fails deep into a session.
