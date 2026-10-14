@@ -6,7 +6,7 @@ What each release changed, newest first, for one question: **should I update,
 and what will I be getting.** `dejima --version` says which release the
 checkout you are running is on.
 
-A release is a date - `2026.10.12` - and the git tag of that name on `main` is
+A release is a date - `2026.10.13` - and the git tag of that name on `main` is
 where it lives. A date rather than a version number because the useful fact
 about a release is how old it is, and because `MAJOR.MINOR` would be a promise
 about compatibility and patch lines that this project does not make.
@@ -26,12 +26,12 @@ Nothing yet. The release pull request that merges `development` into `main`
 replaces this heading with the date it merges, and tags `main` with the same
 date.
 
-## 2026.10.12
+## 2026.10.13
 
 The first release with a version number. Everything before it is `unreleased`,
 and a checkout from before this tag reports itself that way.
 
-119 commits, PRs #360-#391 and #399.
+144 commits, PRs #360 to #399.
 
 ### New
 
