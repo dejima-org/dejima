@@ -122,10 +122,11 @@ mirrored() {
 }
 
 @test "clone URLs in code move too, and a repo with no wordmark gets the notice under its title" {
-    local B="$T/forge/dejima-badge"
+    # Assembled, so the mirror's copy of this file is not itself rewritten.
+    local B="$T/forge/dejima-badge" forge="https://gitbox.branderson.io"
     git init -q -b main "$B"
-    printf '# Developed in dejima\n\nSee [dejima](https://gitbox.branderson.io/dejima/dejima).\n\n## Use\n\n    curl -fLO https://gitbox.branderson.io/dejima/dejima-badge/raw/branch/main/dejima-badge.svg\n' > "$B/README.md"
-    printf '#!/bin/sh\nURL=${URL:-https://gitbox.branderson.io/dejima/dejima.git}\n' > "$B/clone"
+    printf '# Developed in dejima\n\nSee [dejima](%s/dejima/dejima).\n\n## Use\n\n    curl -fLO %s/dejima/dejima-badge/raw/branch/main/dejima-badge.svg\n' "$forge" "$forge" > "$B/README.md"
+    printf '#!/bin/sh\nURL=${URL:-%s/dejima/dejima.git}\n' "$forge" > "$B/clone"
     git -C "$B" add -A
     "$MIRROR" --transform "$B"
     [ "$(sed -n 3p "$B/README.md")" = '> **This is a read-only mirror.** dejima is developed on a private forge,' ]
@@ -138,4 +139,13 @@ mirrored() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"dejima: main is "* ]]
     [[ "$output" == *"failed: missing"* ]]
+}
+
+@test "a repository with no forge links still gets its notice" {
+    local B="$T/forge/plain"
+    git init -q -b main "$B"
+    printf '# Plain\n\nNothing to rewrite.\n' > "$B/README.md"
+    git -C "$B" add -A
+    "$MIRROR" --transform "$B"
+    grep -q '^> \*\*This is a read-only mirror' "$B/README.md"
 }
