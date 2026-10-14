@@ -127,8 +127,8 @@ operator can set, resolved the same way as any other config key
 | `capabilities` | `?list:identifier` | (empty) | What this forge can do - `pr`, `issues`, etc. A workflow's own `requires` is checked against this set at launch; a workflow asking for a capability this forge lacks is refused. |
 | `pr_command` | `?command` | (empty) | The PR-management command name the forge's briefing prose and `env_export`/`merge_block` refer to. |
 | `issue_command` | `?command` | (empty) | The issue-management command name, same idea. |
-| `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a command string, for the harnesses that can. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
-| `repo_flags` | `?list:flag` | (empty) | The option names this forge's CLI accepts for naming a repository other than the one the session was launched against - `--repo -R` for `gh`. `docker/forge-guard.sh` refuses a value that is not that repository, in every spelling of the flag itself: `--repo x`, `--repo=x`, `-R x`, `-Rx`, and the letter inside a short-flag cluster (`-wR x`, `-wRx`). Fast-fail, not a boundary, for the same reason `merge_block` is not one: the session holds the token. Leave it empty for a CLI that resolves the repo itself and refuses another host, as the gitea ones do - a forge is not required to be aimable. |
+| `merge_block` | `?command` | (empty) | The command prefix refused inside the sandbox - only when the workflow's `block_merge = on`. Enforced by `docker/forge-guard.sh`, which shadows the named CLI on PATH and compares argv, so it holds for a harness that cannot intercept a tool call; `hooks/merge-guard.sh` applies the same rule to a reported command for the harnesses that can, through the same library, so the two cannot disagree. Matched as a run of consecutive non-flag arguments, so a flag before the subcommand does not slip past it. |
+| `repo_flags` | `?list:flag` | (empty) | The option names this forge's CLI accepts for naming a repository other than the one the session was launched against - `--repo -R` for `gh`. `docker/forge-guard.sh` refuses a value that is not that repository, in every spelling of the flag itself: `--repo x`, `--repo=x`, `-R x`, `-Rx`, and the letter inside a short-flag cluster (`-wR x`, `-wRx`). Fast-fail, not a boundary, for the same reason `merge_block` is not one: the session holds the token. Leave it empty for a CLI that resolves the repo itself and refuses another host, as the gitea ones do - a forge is not required to be aimable. **Enforced only for a CLI that also appears in `merge_block` or `disclose`:** those two are what name the commands the shadow is linked over and the hook checks against, so a forge declaring this and neither of them would get the rule applied to nothing. |
 | `identity_keys` | `?list:identifier` | (empty) | Which of this forge's own `keys` name an **account** rather than the forge itself - the credential paths, which differ per session, where an API URL does not. One declaration, two rules: a key named here is one an `[identity.<name>]` section may set, and one a project may not declare in its own `.dejima/`. Core keeps no list of its own, so a forge whose credential is spelled differently needs no change here. The identity inherits the type from this forge's `keys` entry, not a second copy of it. |
 | `repo_env` | `?identifier` | (empty) | The environment variable this forge's CLI reads for the same thing - `GH_REPO`. Declared separately because it takes no argument and would otherwise be the way around every flag above. |
 | `repo_paths` | `?list:repopath` | (empty) | A repository this forge's CLI names in a path rather than in a flag, as `<subcommand>:<first segment>` - `api:repos` for `gh api repos/<owner>/<name>/...`. Scoped to a subcommand on purpose: comparing every positional argument that contains two slashes would refuse an issue title that happens to look like one, and a false refusal costs an honest agent a working command. Paths carrying `gh`'s own `{owner}`/`{repo}` placeholders are left alone, since those resolve to this repository by construction. |
@@ -234,10 +234,11 @@ A workflow's `briefing.md` is plain Markdown plus two marker forms that
 | `api_domains` | `?list:hostname` | (empty) | Hostnames this harness's own machinery must reach - its update host, its telemetry endpoint. They join the built-in part of the permitted set rather than the operator's, and are not exempted from the check that refuses an answer pointing inside a private network - a harness's endpoints are public names, and exempting a public name is what turns one influenced answer into egress to an internal host. |
 | `api_styles` | `?list:identifier` | (empty) | Which backend `api_style`s this harness has a client for. `claude-code` speaks `anthropic`; `cline` speaks both, which is what makes it the backend-agnostic one. Empty means unchecked. |
 | `guards` | `?list:identifier` | (empty) | Which of dejima's guard rails this harness can host: `bash-deny`, `push-guard`, `merge-guard`, `notify`. A name outside that set is refused rather than treated as an unknown guard, since a typo would otherwise turn a guard off silently. The ones a harness does not declare are named at launch - see "What a harness must be able to do" in [development.md](development.md). |
+| `assumed_backend` | `?provider:backend` | (empty) | Which backend this harness talked to before `[harness.<name>] backend` existed. Read only when that key is unset, and it writes into the operator's config rather than being consulted at launch - the one key here that does. |
 | `briefing_args` | `?args` | (empty) | The flag that carries the briefing to a harness taking it on the command line - for Claude Code, `--append-system-prompt`. `dejima-harness-wrapper` reads the rendered briefing and passes it as a single value, so every invocation carries it and not only the entrypoint's. Set, the session-start hook stops carrying the briefing and reduces to the session id, which is the one thing that does not exist until the harness starts. |
 | `briefing_path` | `?homepath` | (empty) | Where this harness reads its briefing from, relative to `$HOME`, for a harness that has no session-start hook to be handed it through. Set, `entrypoint.sh` renders the briefing into that path root-owned and read-only before the session starts, and refuses to start it at all if that fails. Empty for a harness that takes the briefing on the command line (`briefing_args`, which is how Claude Code gets it) or that can be handed it through a session-start hook. |
-| `no_confirm_args` | `?template` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
-| `settings_args` | `?template` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
+| `no_confirm_args` | `?args` | (empty) | The flags that make the harness run without confirming each tool call. Required in practice: dejima refuses to launch a harness that names none, because unattended operation is the premise the container is built on (R1 in [development.md](development.md)). |
+| `settings_args` | `?args` | (empty) | How this harness is told to read dejima's own settings layer, mounted at `/etc/dejima-settings.json`. Empty for a harness that takes its overrides some other way. |
 | `keys` | `?list:keyspec` | (empty) | This harness's own `[harness.<name>]` config schema - same grammar as a forge's `keys`. |
 | `resume_command` | `?template` | (empty) | Prose template (may use `{{session_id}}`) shown at the end of the briefing for resuming this exact session on the host. Substitution is not recursive and the `template` type has no `=`, so a resume command that needs a second placeholder or an environment variable goes in the harness's briefing fragment instead, where both resolve. |
 | `transcript_update` | `enum:append\|rewrite` | `append` | How this harness's transcript files change, which decides how they can be read incrementally. `append` means the file only grows, one record per line, so the conversation shipper reads forward from a byte offset and consumes only whole lines. `rewrite` means the file is replaced wholesale, where an offset would land in the middle of a document - it is re-read when it changes and the records already shipped are skipped by count. Declared rather than sniffed, because append semantics against a rewritten file ship garbage. |
@@ -437,11 +438,20 @@ Every `{{placeholder}}` in the assembled text must be on a fixed whitelist
 (`pr_command`, `issue_command`, `forge_name`, `forge_ssh_host`,
 `blocked_branches`, `container_id`, `project_dir`, `workspace_dir`,
 `session_id`, `resume_command`, `writable_mounts`, `network_allowlist`,
-`no_confirm_args`, `harness_state_dir`) - an unrecognized one is a
+`no_confirm_args`, `harness_state_dir`, `workspace_posture`,
+`project_posture`) - an unrecognized one is a
 hard refusal, not a literal pass-through. `{{session_id}}` and
 `{{container_id}}` are deliberately left as `@@SESSION_ID@@`/
 `@@CONTAINER_ID@@` markers instead of being resolved here, since neither is
 known until the container is actually running.
+
+`workspace_posture` and `project_posture` are what
+[`--isolated`](configuration.md#isolated-sessions) changes. The preamble's
+claims about the mount, about `~/shared` being shared with every session
+against this project, and about the transcript outliving the container are
+substituted rather than written inline, because an isolated launch makes all
+three false - and a session that believes them leaves work for a resume that
+cannot happen.
 
 ### How the briefing reaches the session
 
@@ -508,9 +518,10 @@ itself:
   `GITEA_SSH_HOST`, `GITEA_TOKEN`).
 
 `hooks/git-push-guard.sh` reads `DEJIMA_PUSH_HOSTS` and
-`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as a
-regex-escaped literal command prefix. Two different failure directions,
-both deliberate:
+`DEJIMA_BLOCKED_BRANCHES`; `hooks/merge-guard.sh` reads `DEJIMA_MERGE_BLOCK` as
+the merge subcommand a workflow blocks, matched against the parsed argv rather
+than against the command string. Two different failure directions, both
+deliberate:
 
 - `DEJIMA_PUSH_HOSTS` fails **closed** - empty means no host is allowed, so
   every push is refused. A no-forge or non-pushing workflow becomes
@@ -518,8 +529,11 @@ both deliberate:
 - `DEJIMA_BLOCKED_BRANCHES` fails **open** - empty means no branch is
   protected, which is correct for a workflow with genuinely no branch
   policy.
-- `DEJIMA_MERGE_BLOCK` fails **open** the same way - empty makes
-  `merge-guard.sh` inert rather than conditionally installed.
+- `DEJIMA_MERGE_BLOCK` fails **open** for the merge it names - empty blocks no
+  merge, which is correct for a workflow with no merge policy. The guard
+  itself stays active either way: it also adds the agent-written disclosure
+  and holds a command to the repository the session is for, and neither of
+  those is the workflow's to turn off.
 
 ## Validation
 
@@ -675,8 +689,13 @@ knowing about because they are what a second forge costs:
   as such, and a count of what was hidden. Everything else `gitea-pr` does has
   a `gh` subcommand already.
 - **`gh` can be aimed past the sandboxed repository, and is stopped.** The
-  gitea CLIs refuse an origin that is not on the configured host, so they can
-  only act on the repo the sandbox was launched against. `gh` takes `--repo`
+  gitea CLIs resolve the repository from `origin` and refuse an origin that is
+  not on the configured host, so there is no flag or variable to compare and
+  nothing for this guard to declare. That is a narrower confinement than it
+  sounds: `origin` lives in `.git/config`, inside the read-write project mount,
+  and the gitea token is account-wide - so a session that rewrites `origin` to
+  another repository **on the same host** reaches it. What bounds that is the
+  token's scope, as it is for `gh`. `gh` takes `--repo`
   on nearly every subcommand, reads `GH_REPO`, and names repositories in `gh
   api` paths, so this forge declares all three (`repo_flags`, `repo_env`,
   `repo_paths`) and `docker/forge-guard.sh` refuses a value that is not the

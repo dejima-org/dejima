@@ -33,13 +33,57 @@ setup() {
     export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 }
 teardown() {
+    # An attach client this test backgrounded. `kill` only sends the signal, and
+    # the client - plus the script(1) and tmux processes under it - takes a
+    # moment to go. Removing its directories in that window is what produced
+    # "rm: cannot remove ...: Directory not empty": rm lists a directory,
+    # deletes what it saw, and the still-dying client creates something else
+    # before the rmdir. So the wait is for the process to be gone, not a sleep.
+    if [ -n "${attach_pid:-}" ]; then
+        kill "$attach_pid" 2>/dev/null || true
+        _await_gone kill -0 "$attach_pid"
+    fi
     # Only ever the private server start_tmux created (its own TMUX_TMPDIR),
     # never the operator's.
     if [ -n "${TMUX_DIR:-}" ]; then
         TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
+        # kill-server returns once the server has been told, and the server
+        # unlinks its socket on its own schedule.
+        _await_gone env TMUX_TMPDIR="$TMUX_DIR" tmux has-session
     fi
-    rm -rf "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
+    _rm_settled "$CONFIG_DIR" "$RUNTIME_DIR" ${STUB_DIR:+"$STUB_DIR"} ${LAUNCH_DIR:+"$LAUNCH_DIR"} \
         ${TMUX_DIR:+"$TMUX_DIR"} ${FAKE_HOME:+"$FAKE_HOME"}
+}
+
+# Waits until the given command FAILS, which is how each of the things above
+# reports that it is gone. Bounded, and silent on expiry: teardown's job is to
+# clean up, and a cleanup that fails a passing test is the bug being fixed.
+_await_gone() {
+    local i
+    for i in $(seq 1 50); do
+        "$@" >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# rm -rf, retried. The waits above remove the cause; this is the backstop for
+# anything else that writes into a temp directory as it exits, and it reports
+# what is left rather than failing the test - a leaked temp directory costs
+# disk, and a red check on a passing test costs a re-run and some trust in the
+# suite.
+_rm_settled() {
+    local d i
+    for d in "$@"; do
+        [ -n "$d" ] || continue
+        for i in 1 2 3 4 5; do
+            rm -rf "$d" 2>/dev/null
+            [ -e "$d" ] || break
+            sleep 0.2
+        done
+        [ ! -e "$d" ] \
+            || echo "teardown: $d survived removal, holding: $(ls -A "$d" 2>/dev/null | tr '\n' ' ')" >&3
+    done
 }
 
 lib() { bash -c 'source "$1"; shift; "$@"' _ "$LIB" "$@"; }
@@ -163,7 +207,7 @@ done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
-    : > "$LAUNCH_DIR/sandbox-key"
+    printf "not-a-real-key\n" > "$LAUNCH_DIR/sandbox-key"
     chmod 600 "$LAUNCH_DIR/sandbox-key"
     PROJ="$(mktemp -d)"
 }
@@ -2003,15 +2047,16 @@ EOF
 }
 ttyd_log() { cat "$STUB_DIR/ttyd-argv" 2>/dev/null; }
 
-# Reports no listener, whatever the host is actually running. Opt-in, and
-# deliberately not part of stub_ttyd: the port-in-use refusal has its own test
-# below, which binds a real socket and needs the real ss to see it.
+# Reports no listener, whatever the host is actually running. Called beside
+# stub_ttyd by every ttyd test but one, and deliberately not folded into it:
+# the port-in-use refusal binds a real socket and needs the real ss to see it.
 #
 # For every OTHER ttyd test the port being free is a precondition, not the
 # subject - and one that was being inherited from the machine rather than
 # stated. The default-port case asserts against 7681, which is exactly the
 # port a real dejima-ttyd front door holds, so it failed on any host running
 # the feature: the machine a developer is most likely to run this suite on.
+# The rest name 12345, which is free on most machines and on none reliably.
 # Same shape as #56 - a test reading its environment instead of setting it.
 stub_ss_no_listeners() {
     STUB_DIR="${STUB_DIR:-$(mktemp -d)}"
@@ -2087,6 +2132,8 @@ unit_exec_start() {
 @test "dejima-ttyd refuses to start when something else already holds its port" {
     command -v ss >/dev/null 2>&1 || skip "ss is not available"
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
+    # The one ttyd test with no stub_ss_no_listeners beside stub_ttyd: ss
+    # seeing the socket bound below is the subject here, not a precondition.
     stub_ttyd
 
     # The distro's ttyd package ships an enabled service that binds every
@@ -2143,6 +2190,7 @@ PY
 @test "dejima-ttyd refuses to start when remote access is unconfigured, before ttyd is reached" {
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not configured"* ]]
@@ -2254,6 +2302,7 @@ PY
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 99999'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     # Named, so this cannot pass because ttyd was missing or the config was.
@@ -2270,6 +2319,7 @@ PY
     # currently happens to agree with it.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
@@ -2299,6 +2349,7 @@ PY
     local bad
     for bad in 0 7 73 999 abc 1e2 -20; do
         stub_ttyd
+        stub_ss_no_listeners
         : > "$STUB_DIR/ttyd-argv"
         write_remote_config 'ttyd_port = 12345' "ttyd_font_size = $bad"
         run "$REPO_ROOT/bin/dejima-ttyd"
@@ -2319,6 +2370,7 @@ PY
     # moment either default moves.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     assert_ttyd_argv 12345
@@ -2347,6 +2399,7 @@ PY
     # a host-wide "off" written here would be a different thing from silence.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     run grep -c 'buttonColors' "$STUB_DIR/ttyd-argv"
@@ -2378,6 +2431,7 @@ PY
     # would be wrong for whichever half of the clients it did not match.
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     run grep -c 'focusOnTap' "$STUB_DIR/ttyd-argv"
@@ -2413,6 +2467,7 @@ PY
     local bad
     for bad in b M-b C-ab C- ctrl-a 2 'C-\' ; do
         stub_ttyd
+        stub_ss_no_listeners
         : > "$STUB_DIR/ttyd-argv"
         write_remote_config 'ttyd_port = 12345' "ttyd_tmux_prefix = $bad"
         run "$REPO_ROOT/bin/dejima-ttyd"
@@ -2442,6 +2497,7 @@ PY
        "$REPO_ROOT/bin/dejima-provider-lib.sh" "$fake/bin/"
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$fake/bin/dejima-ttyd"
     [ "$status" -ne 0 ]
     [[ "$output" == *"$fake/web/index.html"* ]]
@@ -2459,7 +2515,7 @@ PY
     local web="$REPO_ROOT/web"
     [ -f "$web/index.html" ]
     [ -f "$web/sources.sha256" ]
-    run bash -c "cd '$web' && sha256sum src/* package-lock.json | LC_ALL=C sort -k2"
+    run bash -c "cd '$web' && sha256sum build.mjs src/* package-lock.json | LC_ALL=C sort -k2"
     [ "$status" -eq 0 ]
     [ "$output" = "$(cat "$web/sources.sha256")" ] || {
         echo "web/sources.sha256 is stale. Rebuild it:" >&2
@@ -2497,10 +2553,26 @@ PY
     # restricts outbound traffic to an allowlist, so a CDN reference would not
     # resolve even from a browser outside it if the operator is on the same
     # restricted network.
+    #
+    # A `data:` URI is exempt and only that: it carries its bytes in the
+    # attribute, so it fetches nothing and neither reason above applies to it.
+    # The favicon is one. Matched per attribute rather than per line, so a data
+    # URI on a line cannot carry a real reference past this beside it.
     local page="$REPO_ROOT/web/index.html"
     [ -f "$page" ]
-    run grep -nEi '<(script|link|img|iframe)[^>]+(src|href)=' "$page"
+    run bash -c "grep -oEi '<(script|link|img|iframe)[^>]+(src|href)=\"[^\"]*\"' '$page' \
+                 | grep -vEi '(src|href)=\"data:'"
     [ "$status" -ne 0 ] || { echo "the page references an external asset: $output" >&2; false; }
+
+    # And the exemption is not a hole: anything that is not a data URI still
+    # fails, checked against a copy rather than trusted.
+    local probe="$BATS_TEST_TMPDIR/probe.html"
+    sed 's|<link rel="icon"|<link rel="stylesheet" href="https://cdn.example.com/x.css"><link rel="icon"|' \
+        "$page" > "$probe"
+    run bash -c "grep -oEi '<(script|link|img|iframe)[^>]+(src|href)=\"[^\"]*\"' '$probe' \
+                 | grep -vEi '(src|href)=\"data:'"
+    [ "$status" -eq 0 ] \
+        || { echo "the check no longer catches a real external reference" >&2; false; }
 }
 
 @test "the terminal page's own unit tests pass" {
@@ -2525,6 +2597,7 @@ PY
     [ -x "$REPO_ROOT/bin/dejima-ttyd" ]
     write_remote_config 'ttyd_port = 12345'
     stub_ttyd
+    stub_ss_no_listeners
     run "$REPO_ROOT/bin/dejima-ttyd"
     [ "$status" -eq 0 ]
     # Executed, not grepped: the flag has to reach ttyd's argv.
@@ -2928,6 +3001,7 @@ nginx_blocks() {
     printf '[remote-access]\nenabled = on\nbase_url = https://d.example\nttyd_port = 12345\n' \
         > "$FAKE_HOME/.config/dejima/config"
     stub_ttyd
+    stub_ss_no_listeners
 
     local exec_start
     exec_start="$(unit_exec_start dejima-ttyd.service "$FAKE_HOME")"

@@ -464,6 +464,16 @@ prefer credentials that cannot do anything else: a token that raises an
 anonymous API rate limit should be a fine-grained token with no permissions
 and no repository access, not a general-purpose one.
 
+**A per-run fetch, not a per-container one.** The privileged job starts a
+container pair per test, and each filter container asks the forge for its
+published address ranges before it brings the policy up. Done once per
+container that is a burst, and GitHub answers a burst on `/meta` with a `403`
+from its secondary rate limit - which is not the hourly ceiling a token raises,
+so a valid credential does not prevent it (#357). The job fetches once into the
+directory it already shares with those containers, and the suite points every
+filter at the result; a container falls back to fetching for itself when the
+file is absent, which is what happens outside CI.
+
 **The cache server.** `act_runner` enables it by default, and it binds on the
 runner host specifically so that job containers can reach it. That is an
 inbound service exposed to untrusted code. Turn it off where it is not
@@ -523,7 +533,11 @@ can still add a workflow of its own.
   daemon, the answer is a host you are willing to lose, not a smaller grant.
 - **Before Gitea 1.27, the job token stays permissive.** Branch protection
   bounds where it can write; it does not take the token away.
-- **None of this is checked by anything.** The rest of dejima's security
-  properties have tests behind them. A runner's configuration lives on a
-  machine this repository has no access to, so it is on you to re-check it
-  after upgrades and rebuilds.
+- **Only part of this is checked, and only from inside a job.**
+  `test/ci-runner.bats` runs on both tiers and asserts what a job can see from
+  where it stands: which tier it landed on, that the confined one has no docker
+  socket and the privileged one does, and that the egress rules are in front of
+  the confined job. Everything outside a job - the runner's own configuration
+  file, its labels, what else shares the machine - lives somewhere this
+  repository has no access to, so it is on you to re-check that after upgrades
+  and rebuilds.

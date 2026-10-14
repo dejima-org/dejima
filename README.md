@@ -151,6 +151,9 @@ what each one buys, what goes wrong without it, and where each one's boundary
 ends. None of them is required to run dejima; what they change is what the
 layer below the container costs, and whether anyone finds out.
 
+**→ [Using dejima on its own](docs/threat-model.md#using-dejima-on-its-own)** -
+what holds without them, what does not, and what to do about it.
+
 **→ [Why a container, and not a microVM?](docs/threat-model.md#why-a-container-and-not-a-microvm)** -
 the most common question about this design, and why the effort went into the
 layers below the container rather than into a harder one.
@@ -160,8 +163,8 @@ layers below the container rather than into a harder one.
 This repo only holds the tooling; no project lives here. Point it at a project
 on disk and that project is bind-mounted into the container at runtime.
 
-**Prerequisites:** Docker with the `docker compose` v2 plugin, and `python3`
-(stdlib only, no packages) for the host-side credential proxy.
+**Prerequisites:** Docker with the `docker compose` v2 plugin, `jq`, and
+`python3` (stdlib only, no packages) for the host-side credential proxy.
 
 Only the first block below is required. The rest are independent, so take the
 ones you want.
@@ -184,7 +187,9 @@ ones you want.
    config.
 3. **Put `~/.local/bin` on your `PATH`** if it isn't already.
 4. **Set `[core] harness`.** It has no default and a launch is refused without
-   it, which is what stops a later release changing your selection for you.
+   it, which is what stops a later release changing your selection for you. The
+   starter config states `claude-code`, because a file with no default to fall
+   back on has to name a choice; change that line for Cline.
 
 That is enough to run `dejima`, and no push credential is needed to get this
 far. Everything else runs at its default, which means `[core] forge = none` and
@@ -245,6 +250,7 @@ Applications, scopes `write:repository` and `write:issue`) into
 ```sh
 dejima                        # sandbox the current directory
 dejima ~/repos/some-project
+dejima --isolated             # no project at all - see below
 ```
 
 Point it at a project, ask for a change, and let the session work. What happens
@@ -293,9 +299,27 @@ dejima --ro ~/other-project ~/myproject
 **→ [docs/configuration.md](docs/configuration.md#one-off-mounts-for-a-single-launch)** -
 both forms, and which host paths a mount is refused over and why.
 
-**Ctrl-Z backgrounds all of dejima**, and `fg` brings back a working session.
-It makes no progress while suspended, though, so for one that should keep
-working while you are away, run dejima inside tmux and use
+### A session with no project
+
+`dejima --isolated` is the other direction: nothing of your machine is
+mounted, no memory or transcript crosses either boundary, no forge credential
+unless the same command names a forge, and the one thing that outlives the
+session is a `~/shared` made fresh for it. Run it from anywhere - the
+directory you are in is not used, and naming one is refused rather than
+ignored, so a launch cannot look like it is working on a project it cannot
+see.
+
+It narrows what a session can read of the host and what credential it carries.
+It is not a stronger sandbox: the firewall, the credential boundary and the
+capability drops are what they are for every other session.
+
+**→ [docs/configuration.md](docs/configuration.md#isolated-sessions)** - the
+table of what differs, and what the mode gives up.
+
+**Ctrl-Z backgrounds dejima's host side**, and `fg` brings back a working
+session. It gets your terminal back rather than pausing the agent - the
+container keeps running - so for a session you want to leave working and pick
+up elsewhere, run dejima inside tmux and use
 [`dejima-attach`](docs/remote-access.md).
 → [why that takes doing](docs/configuration.md#suspending-a-session)
 
@@ -406,7 +430,8 @@ broken tool. IPv6 is refused outright rather than allowlisted: a sandbox has no
 IPv6 egress at all, and one table states that in the same transaction as
 everything else, so there is no moment where the family is partly filtered.
 
-The allowlist covers what the sandbox needs to function - DNS, the Docker host,
+The allowlist covers what the sandbox needs to function - DNS, the Docker host
+on the ports a host-resident service was configured on and no others,
 GitHub on port 443 for read access whichever forge is selected, whatever the
 selected forge needs, the harness's own update endpoints, and the selected
 backend's API endpoint when the credential proxy is off - plus whatever a
@@ -503,7 +528,7 @@ at a fixed host path.
 
 `.dejima.md` at a project's root is that project's agent-instruction file, the
 harness-agnostic equivalent of `CLAUDE.md`, loaded into the session's context
-with no authority over the sandbox itself. A `SessionStart` hook also briefs the
+with no authority over the sandbox itself. dejima also briefs the
 session on where it is running and on the instructions belonging to whichever
 workflow you selected, so a session under `local-only` is told something
 different from one under `worktree-pr`.
@@ -562,9 +587,8 @@ After the container exits it diffs them and tells you what changed.
 
 It is **advisory, not a block**, firing after the session has ended, so a
 finding is something to clean up before your next `git` command or session in
-that repo. Its diff is time-windowed: a finding says a path changed while the
-session was running, not that the session changed it. Findings are a time
-window, not a verdict on who caused them.
+that repo. Its findings are a time window, not a verdict on who caused them:
+one says a path changed while the session was running.
 
 `dejima-audit show` indexes what is waiting and `dejima-audit ack` walks it, one
 finding at a time. `[audit] strict` refuses a headless launch while CRITICAL
@@ -701,6 +725,7 @@ and how to run them.
 | [ci.md](docs/ci.md) | What push access grants on your CI host, and how to bound it |
 | [remote-access.md](docs/remote-access.md) | Picking and verifying a bind address, and the SSH and web front doors |
 | [development.md](docs/development.md) | The file map, the test suites, running them |
+| [CHANGELOG.md](CHANGELOG.md) | What each release changed, for deciding whether to update |
 | [SECURITY.md](SECURITY.md) | What dejima claims, where to report a vulnerability, and what is promised in return |
 | [ATTRIBUTION.md](ATTRIBUTION.md) | Who holds the dejima marks and what may be done with them |
 

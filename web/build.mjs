@@ -10,7 +10,7 @@
 //
 // Usage: npm ci && node build.mjs
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,8 +41,15 @@ const CLIENT_SOURCES = [
 // needed, since the first alone passes on a commit that rebuilds the manifest
 // and leaves the page behind.
 const MANIFEST_SOURCES = [
+  // The builder itself. Without it, editing this file - the escaping, the fill
+  // order, which sources get inlined - produces a different page with a
+  // byte-identical manifest and stamp, so the staleness check passes on a page
+  // nobody rebuilt. web/README.md defends committing the artifact precisely so
+  // nobody has to run the build, which is what makes that check load-bearing.
+  'build.mjs',
   'package-lock.json',
   'src/config.js',
+  'src/favicon.png',
   'src/gestures.js',
   'src/keyboard.js',
   'src/keys.js',
@@ -58,7 +65,18 @@ const MANIFEST_SOURCES = [
   'src/viewport.js'
 ];
 
+// The order above is hand-written because it is load-bearing, so the list
+// cannot be a glob. A src/*.js omitted from it is still hashed into the
+// manifest and still fails no test - it is simply never inlined, and the page
+// is missing a module. Reading the directory catches that at build time.
+const uninlined = readdirSync(join(here, 'src'))
+  .filter((f) => f.endsWith('.js') && !CLIENT_SOURCES.includes(`src/${f}`));
+if (uninlined.length) {
+  throw new Error(`src/*.js not in CLIENT_SOURCES, so never inlined: ${uninlined.join(', ')}`);
+}
+
 const read = (relative) => readFileSync(join(here, relative), 'utf8');
+const readBytes = (relative) => readFileSync(join(here, relative));
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
 // A literal </script> inside an inlined script would end the element early.
@@ -82,8 +100,9 @@ html = fill(html, 'PAGE_CSS', read('src/page.css'));
 html = fill(html, 'XTERM_JS', escapeForScript(read('node_modules/@xterm/xterm/lib/xterm.js')));
 html = fill(html, 'ADDON_FIT_JS', escapeForScript(read('node_modules/@xterm/addon-fit/lib/addon-fit.js')));
 html = fill(html, 'CLIENT_JS', escapeForScript(client));
+html = fill(html, 'FAVICON_B64', readBytes('src/favicon.png').toString('base64'));
 
-const manifest = MANIFEST_SOURCES.map((file) => `${sha256(read(file))}  ${file}\n`).join('');
+const manifest = MANIFEST_SOURCES.map((file) => `${sha256(readBytes(file))}  ${file}\n`).join('');
 html = html.replace(
   '<!--BUILD_STAMP-->',
   () =>

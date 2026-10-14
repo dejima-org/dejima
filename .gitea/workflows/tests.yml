@@ -101,20 +101,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -147,7 +140,11 @@ jobs:
       - name: Install test dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates
+          # iproute2 for `ss`: the one test asserting dejima-ttyd refuses to
+          # start when something already holds its port skips without it, and a
+          # permanent skip on the check guarding a reverse-proxy port takeover
+          # is the same as not having it.
+          apt-get install -y --no-install-recommends bats jq python3 tmux ca-certificates iproute2
       # The code under test, named explicitly - see the header. Without `ref`
       # this checks out the base branch and the suite passes without ever
       # seeing the change.
@@ -174,7 +171,11 @@ jobs:
       # otherwise refuses --jobs outright when GNU parallel is absent.
       - run: |
           chown -R node:node .
-          su node -c "TERM=xterm-256color bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
+          # DEJIMA_TEST_CONCURRENCY is what this job asks the machine for, which
+          # the fixtures that wait on a bounded deadline multiply their bounds
+          # by - see test/fixtures/loadscale.py. One suite per job here, so it
+          # is the --jobs value and nothing more.
+          su node -c "TERM=xterm-256color DEJIMA_TEST_CONCURRENCY=$(nproc) bats --jobs $(nproc) --no-parallelize-across-files test/${{ matrix.suite }}.bats"
 
   shellcheck:
     # Its own job rather than a matrix entry: it installs a different package,
@@ -257,20 +258,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -442,6 +436,58 @@ jobs:
           fi
           echo "GitHub ranges lookup is authenticated - ceiling is $limit requests/hour."
 
+      # One fetch for the whole run, into the directory the job already shares
+      # with the containers it starts. test/runtime.bats starts twenty-seven
+      # container pairs and each filter fetched the ranges for itself, which is
+      # roughly twenty-seven requests in five minutes - comfortably inside the
+      # 5000/hour a token allows, and exactly the burst GitHub's SECONDARY limit
+      # answers with a 403 (#357). One request cannot be a burst.
+      #
+      # Best-effort: a failure here leaves no file, and runtime.bats falls back
+      # to each container fetching for itself. That is the behaviour this
+      # replaces, so the worst case is the status quo rather than a red job -
+      # and the step says which of the two the run is getting.
+      - name: Fetch the GitHub ranges once for the whole run
+        env:
+          GH_TOKEN: ${{ secrets.GH_META_TOKEN }}
+        run: |
+          # POSIX sh, like every other run: block here - the runner's default
+          # shell is `sh -e`, where an array is a syntax error and the step dies
+          # before any of this runs. Two curl branches rather than one with a
+          # built-up argument list, for the same reason.
+          mkdir -p /tmp/dejima-ci
+          out=/tmp/dejima-ci/github-meta.json
+          rm -f "$out" "$out.part"
+          fetched=0
+          if [ -n "${GH_TOKEN:-}" ]; then
+            if curl -fsS --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+                 https://api.github.com/meta -o "$out.part" 2>/dev/null; then
+              fetched=1
+            fi
+          else
+            if curl -fsS --max-time 30 \
+                 https://api.github.com/meta -o "$out.part" 2>/dev/null; then
+              fetched=1
+            fi
+          fi
+          # Written only once it parses AND carries ranges, because a rate-limit
+          # body is a 200 with a message and no ranges - and a cached one would
+          # then fail every container in the run instead of one.
+          ranges=""
+          if [ "$fetched" = 1 ]; then
+            ranges="$(jq -r '[.git[]?, .api[]?, .web[]?] | unique | .[]' < "$out.part" 2>/dev/null || true)"
+          fi
+          if [ -n "$ranges" ]; then
+            mv "$out.part" "$out"
+            echo "Cached GitHub ranges for this run: $(printf '%s\n' "$ranges" | wc -l) CIDRs."
+          else
+            rm -f "$out.part"
+            echo "Could not cache the ranges, so each container will fetch its own."
+            echo "That is the pre-#357 behaviour, not a new failure - but it is what"
+            echo "trips the secondary limit, so a 403 in a container boot below is"
+            echo "explained by this line."
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -542,20 +588,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -613,20 +652,13 @@ jobs:
       # allowlist, not the package - and ci-runner.bats, which would say so
       # precisely, cannot run yet because installing it is what just failed.
       #
-      # Uses only what the image already has: getent is libc, and the
-      # resolver's address is in resolv.conf.
-      # Before apt, because apt's failure for this says "Unable to locate
-      # package bats" and nothing about why. On a runner behind the egress
-      # allowlist a name that does not resolve is the resolver or the
-      # allowlist, not the package - and ci-runner.bats, which would say so
-      # precisely, cannot run yet because installing it is what just failed.
-      #
       # Retried rather than decided on one attempt: a resolver can be a moment
       # behind a container's start, and apt itself retries, so failing a whole
       # job on a single lookup would be stricter than the step it is
       # protecting. Six attempts over ~15s, then a diagnosis.
       #
-      # Uses only what the image already has: getent is libc.
+      # Uses only what the image already has: getent is libc, and the
+      # resolver's address is in resolv.conf.
       - name: Check the job network can resolve before installing anything
         run: |
           for attempt in 1 2 3 4 5 6; do

@@ -37,48 +37,81 @@ PRIVILEGED=" runtime ci-runner "
 # is a path nobody has decided about, and guessing "none" there is how a change
 # ships having been checked by nothing.
 suites_for() {
+    # Every suite that READS the path, not the one that owns it. static.bats
+    # asserts invariants over the whole tree and config.bats sources most of
+    # the libraries, so both appear far more often than a by-area reading
+    # suggests - and leaving them out is what made the --changed lane report an
+    # edit as green from a selection that never loaded the file.
+    #
+    # The map is checked against the suites mechanically; see the test named
+    # for it in static.bats. Over-selecting costs a suite run, under-selecting
+    # costs a missed regression, so a rule here errs wide.
     case "$1" in
         # Read by nearly every other suite, so a change to one is the whole set.
         bin/dejima|bin/dejima-config-lib.sh) echo ALL ;;
 
-        bin/dejima-audit)                    echo audit ;;
-        bin/dejima-update-check)             echo config ;;
-        bin/dejima-epitaph)                  echo config ;;
+        bin/dejima-audit)                    echo 'audit config proxy remote static' ;;
+        bin/dejima-update-check)             echo 'config project remote static' ;;
+        bin/dejima-epitaph)                  echo 'config static' ;;
         bin/dejima-tty-suspend)              echo static ;;
-        bin/dejima-color-lib.sh)             echo 'remote project' ;;
-        bin/dejima-tui-lib.sh)               echo 'remote project' ;;
-        bin/dejima-conversation-ship)        echo conversation ;;
-        bin/dejima-share)                    echo share ;;
+        bin/dejima-color-lib.sh)             echo 'remote project config static' ;;
+        bin/dejima-tui-lib.sh)               echo 'remote project static' ;;
+        bin/dejima-conversation-ship)        echo 'conversation static' ;;
+        bin/dejima-share)                    echo 'share static' ;;
         # The slug scheme keys the transcript mounts, the epitaph and audit
         # stores, and the share layout, so a change to it is not one area's.
-        bin/dejima-slug-lib.sh)              echo 'share conversation audit static' ;;
-        bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo proxy ;;
-        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) echo project ;;
-        # static.bats asserts on dejima-allow's class wiring as well.
-        bin/dejima-allow)                    echo 'project static' ;;
-        bin/dejima-attach|bin/dejima-ttyd|bin/dejima-notify-watch) echo remote ;;
-        web/*|systemd/*)                     echo remote ;;
-        bin/dejima-provider-lib.sh|bin/dejima-harness-lib.sh) echo providers ;;
-        bin/harness/*)                       echo providers ;;
-        forges/*|workflows/*|harnesses/*|tools/*) echo providers ;;
-        install.sh)                          echo config ;;
+        bin/dejima-slug-lib.sh)              echo 'share conversation audit project static' ;;
+        bin/dejima-credential-proxy|docker/credential-proxy-forwarder.js) echo 'proxy static' ;;
+        bin/dejima-credential-scan*)         echo 'config static' ;;
+        bin/dejima-project-lib.sh|bin/dejima-project|bin/dejima-dep) \
+            echo 'project config launch providers remote static' ;;
+        bin/dejima-allow)                    echo 'project static config' ;;
+        bin/dejima-attach)                   echo 'remote config project static' ;;
+        bin/dejima-ttyd|bin/dejima-notify-watch) echo 'remote config static' ;;
+        web/*|systemd/*)                     echo 'remote static' ;;
+        bin/dejima-provider-lib.sh)          echo 'providers config remote share static' ;;
+        bin/dejima-harness-lib.sh)           echo 'providers config remote static' ;;
+        bin/harness/*)                       echo 'providers remote static' ;;
+        # A manifest is read by more than the suite that owns the schema: the
+        # audit reads a workflow's briefing, conversation.bats sed-injects a
+        # harness.conf, and config.bats copies the whole set in.
+        forges/*|workflows/*|harnesses/*|tools/*) \
+            echo 'providers static audit config conversation' ;;
+        install.sh)                          echo 'config audit providers remote static' ;;
 
         # static.bats asserts on files it does not own, so a shipped doc or a
         # docker/ file needs it as well as whatever else the change touched -
         # which for docker/ is most things, since the entrypoint and compose
         # file are read by nearly every suite that builds a launch.
         docker/*)                            echo ALL ;;
-        hooks/*)                             echo 'static config providers project' ;;
-        docs/*|README.md|*.md)               echo static ;;
+        hooks/*)                             echo 'static config providers project remote' ;;
         .gitea/*|.shellcheckrc)              echo static ;;
         .dejima/*)                           echo 'static config project providers' ;;
 
-        test/*.bats) local n="${1##*/}"; echo "${n%.bats}" ;;
+        # A suite file is read by static.bats as well as run by bats: it
+        # asserts invariants over the text of the others, so an edit to one
+        # that only selected itself was reported green by a lane that never
+        # loaded the assertions about it.
+        test/*.bats) local n="${1##*/}"; echo "${n%.bats} static" ;;
         # Fixtures are executed by the suites that consume them, not merely
         # read: fake-anthropic.py is the upstream in proxy.bats (and in
-        # runtime.bats, which no confined selection can carry).
-        test/fixtures/*)                     echo 'proxy static' ;;
+        # runtime.bats, which no confined selection can carry), and
+        # answer-prompt.py drives config.bats' prompts.
+        test/fixtures/*)                     echo 'proxy static config' ;;
         test/*)                              echo static ;;
+
+        # Last of the specific rules, not before them: a .md under test/ or
+        # .dejima/ belongs to whatever reads that directory, and this pattern
+        # would otherwise answer for it. The docs themselves are asserted
+        # against by more than static.bats - the README's axis lists, the
+        # provider tables, the nginx example and the remote-access page each
+        # have a suite checking the code agrees with them.
+        #
+        # So a doc-only edit runs more than static alone. That is the cost of
+        # the lane answering for what reads a file, and it is the safe
+        # direction: narrowing this back would report a doc change as green
+        # from suites that assert against it.
+        docs/*|README.md|*.md)               echo 'static config providers remote' ;;
 
         *) echo ALL ;;
     esac
@@ -214,6 +247,15 @@ fi
 bats_flags=()
 [ "$jobs" -gt 1 ] && bats_flags=(--jobs "$jobs" --no-parallelize-across-files)
 
+# What this run asks the machine for, for the fixtures that wait on a bounded
+# deadline. They multiply their bounds by how oversubscribed that makes it
+# rather than carrying a number picked to survive the gate, which is a number
+# that is then far too generous anywhere else (#295, test/fixtures/loadscale.py).
+#
+# Exported rather than passed, because it has to reach a python fixture several
+# processes below bats.
+export DEJIMA_TEST_CONCURRENCY=$(( ${#selected[@]} * jobs ))
+
 {
     if [ "$lane" = changed ]; then
         printf 'lane: CHANGED - %d of %d confined suites, from %d changed path(s)\n' \
@@ -252,14 +294,21 @@ wait
 # suite that fails to run at all - a syntax error, or duplicate test names,
 # which bats refuses outright - exits nonzero having run nothing, and reporting
 # that as "0 failures" is how a green board comes to mean nothing.
+#
+# Skips are counted and shown separately because bats emits one as `ok N ...
+# # skip`, so a test that decided not to run is indistinguishable from one that
+# passed. Several here skip on host state - an empty /opt/dejima, a missing
+# tool - so the column is the only thing that says how much of the suite the
+# number above actually covers.
 failed=0
-printf '%-16s %6s %8s\n' suite ran failed
+printf '%-16s %6s %8s %8s\n' suite ran skipped failed
 for s in "${selected[@]}"; do
-    ran="$(grep -cE '^(ok|not ok)' "$out/$s")"
+    emitted="$(grep -cE '^(ok|not ok)' "$out/$s")"
+    n_skipped="$(grep -cE '^ok [0-9]+ .* # skip' "$out/$s")"
     bad="$(grep -cE '^not ok' "$out/$s")"
     status="$(cat "$out/$s.status" 2>/dev/null || echo 1)"
-    printf '%-16s %6s %8s' "$s" "$ran" "$bad"
-    if [ "$ran" -eq 0 ]; then
+    printf '%-16s %6s %8s %8s' "$s" "$(( emitted - n_skipped ))" "$n_skipped" "$bad"
+    if [ "$emitted" -eq 0 ]; then
         printf '   <- ran nothing\n'
         failed=1
     elif [ "$bad" -gt 0 ] || [ "$status" -ne 0 ]; then
@@ -270,14 +319,18 @@ for s in "${selected[@]}"; do
     fi
 done
 
+for s in "${selected[@]}"; do
+    grep -hE '^ok [0-9]+ .* # skip' "$out/$s" | sed -E "s/^ok [0-9]+ /    $s: /"
+done | { grep . && echo "    (skipped, so the counts above do not cover them)"; } || true
+
 if [ "$failed" -ne 0 ]; then
     echo
     for s in "${selected[@]}"; do
-        ran="$(grep -cE '^(ok|not ok)' "$out/$s")"
+        emitted="$(grep -cE '^(ok|not ok)' "$out/$s")"
         bad="$(grep -cE '^not ok' "$out/$s")"
-        { [ "$bad" -gt 0 ] || [ "$ran" -eq 0 ]; } || continue
+        { [ "$bad" -gt 0 ] || [ "$emitted" -eq 0 ]; } || continue
         echo "--- $s"
-        if [ "$ran" -eq 0 ]; then
+        if [ "$emitted" -eq 0 ]; then
             head -20 "$out/$s"
         else
             grep -E '^not ok' -A 20 "$out/$s"

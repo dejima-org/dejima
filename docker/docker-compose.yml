@@ -157,7 +157,13 @@ services:
       # no write scopes). Used by `gh` and, via `gh auth setup-git`, by git
       # itself for github.com over HTTPS - see the firewall/Dockerfile for
       # why that's the only path GitHub is reachable through at all.
-      GH_TOKEN: ${GH_TOKEN:-}
+      #
+      # bin/dejima's SANDBOX_ prefixed copy rather than GH_TOKEN itself,
+      # because the filter container needs that one for the authenticated
+      # ranges fetch whatever the session is trusted with, and an isolated
+      # launch is trusted with less. Empty is an ordinary state here: it is
+      # what a host that configured no such token has always had.
+      GH_TOKEN: ${SANDBOX_GH_TOKEN-}
       # Points git at the gitconfig copy mounted below instead of the
       # default ~/.gitconfig - see that mount's comment for why it can't
       # just live at ~/.gitconfig directly.
@@ -225,7 +231,16 @@ services:
       # fixed /workspace) so Claude Code's project/session-history keying
       # (based on cwd) lines up with the host, letting a session started
       # here be resumed on the host with `claude --resume`.
-      - ${WORKSPACE_DIR:?set WORKSPACE_DIR to the project directory to mount}:${WORKSPACE_DIR}
+      #
+      # One variable holding the whole spec rather than a source and a target,
+      # because `--isolated` has to mount no host path here at all and an
+      # entry in this list cannot be left empty. There it names the
+      # isolated-work volume below, which bin/dejima gives this run's own name
+      # and removes afterwards - the same rule as the other four, rather than
+      # an anonymous volume whose reaping depends on what `compose run --rm`
+      # does with one. bin/dejima always sets it: ordinarily to the project
+      # directory at its own path, for the keying reason above.
+      - ${SANDBOX_WORKSPACE_MOUNT:?set by bin/dejima - the project directory, or a container-local path for --isolated}
       # ~/.claude is enumerated, never mounted whole. A single-file bind
       # mount is pinned to the dentry at its path, so a host-side rename -
       # a sync daemon, or Claude Code's own atomic writes - unlinks it, the
@@ -289,7 +304,10 @@ services:
       - nvim-state:${HOME}/.local/state/nvim
       - nvim-cache:${HOME}/.cache/nvim
       # Required only if SANDBOX_SSH_KEY isn't set - bin/dejima
-      # itself enforces that at least one of the two is present.
+      # itself enforces that at least one of the two is present, and blanks
+      # SSH_AUTH_SOCK when the key is the one chosen, so this mounts nothing
+      # then. A forwarded agent left here signs with the operator's personal
+      # identities for anything in the container that names this path.
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
       - ${SSH_KNOWN_HOSTS:-/dev/null}:${HOME}/.ssh/known_hosts:ro
       # Dedicated, purpose-built key for headless git push - see README
@@ -316,7 +334,18 @@ services:
 volumes:
   # Shell history, shared by every harness - it is the container's shell that
   # writes it, not the agent.
+  #
+  # Named like the three below so bin/dejima can give an `--isolated` launch
+  # one of its own: this volume is shared by every project, so the default is
+  # a session reading what the last one typed anywhere on the host.
+  #
+  # The default repeats the project name, which is not a typo. An entry with
+  # no `name:` gets `<compose project>_<key>`, and the project here is
+  # `dejima` while the key is `dejima-bashhistory` - so anything shorter is a
+  # DIFFERENT volume, and every ordinary launch would start from an empty
+  # history with the real one orphaned.
   dejima-bashhistory:
+    name: ${SANDBOX_BASH_HISTORY:-dejima_dejima-bashhistory}
   # Named explicitly so bin/dejima can give each project its own set. These
   # persist across containers by design (a plugin install should not have to
   # happen every launch), which without the split meant one project's session
@@ -326,6 +355,11 @@ volumes:
   #
   # The defaults reproduce the previous names exactly, so a `docker compose`
   # invocation that bypasses bin/dejima behaves as it did.
+  # The working directory of an `--isolated` launch, which mounts no host
+  # path there. Referenced only when the workspace mount above names it, so
+  # an ordinary launch neither uses nor creates it.
+  isolated-work:
+    name: ${SANDBOX_ISOLATED_WORK:-dejima_isolated-work}
   nvim-data:
     name: ${SANDBOX_NVIM_DATA:-dejima_nvim-data}
   nvim-state:

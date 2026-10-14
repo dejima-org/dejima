@@ -3,21 +3,22 @@
 # one subcommand a workflow blocks is refused, a command aimed at another
 # repository is refused, and a body the session authored says so.
 #
-# The first rule is the one hooks/merge-guard.sh applies - a merge is the
-# operator's decision, so the sandbox opens a PR and stops - moved off the
-# harness's hook protocol and onto the command. It works for a harness that
-# cannot intercept a tool call, and it compares argv rather than
-# regex-matching a command string, so quoting, spacing and pipelines stop
-# mattering.
+# The first two are docker/guard-lib.sh, which hooks/merge-guard.sh applies to
+# the same command from the other side. Here they sit on the command itself: it
+# works for a harness that cannot intercept a tool call, and it compares argv
+# rather than regex-matching a command string, so quoting, spacing and
+# pipelines stop mattering.
 #
-# The second is here for the same reason it is not in the forge CLIs: dejima
-# writes two of them and not the third, so a disclosure living in the tools is
-# one that depends on which forge an operator picked. This is the one place
-# every forge passes through.
+# The third is this layer's alone, because a hook is handed a command string
+# and cannot rewrite the body an argument points at. It is here rather than in
+# the forge CLIs for the same reason the repository rule is: dejima writes two
+# of them and not the third, so a disclosure living in the tools is one that
+# depends on which forge an operator picked. This is the one place every forge
+# passes through.
 #
-# Fast-fail, not a boundary, exactly as the hook was: what actually decides
-# whether a merge is possible is the scope of the token the forge issued. This
-# stops an eager agent doing it by accident.
+# Fast-fail, not a boundary: what actually decides whether a merge is possible
+# is the scope of the token the forge issued. This stops an eager agent doing
+# it by accident.
 #
 #   DEJIMA_MERGE_BLOCK   the full command prefix to refuse, e.g. "gitea-pr
 #                        merge". Its first word is the command this shadows;
@@ -51,180 +52,12 @@ if [ -z "${DEJIMA:-}" ] ||
     exec "$real" "$@"
 fi
 
-# The words of a command prefix, minus the CLI name, appear as a run of
-# consecutive non-flag arguments. Flags are dropped first, so `gitea-pr
-# --verbose merge 7` is still a merge.
-#
-# Anywhere in that run rather than at the start of it, because a flag's value
-# is indistinguishable from a subcommand here: in `gh --repo o/r pr merge 7`
-# the first non-flag argument is `o/r`, and requiring the match to begin there
-# let the most ordinary way to name a PR from outside its checkout walk
-# straight past the block. Knowing which flags take a value would mean knowing
-# each CLI, which is the coupling this guard exists to avoid.
-#
-# The cost is a command that happens to pass the words as consecutive values -
-# `--title pr --body merge` - matching. For the merge block that is a loud
-# refusal against a merge going through unnoticed; for a disclosure it is a
-# line of text on something an agent did write anyway. Both are the direction
-# to be wrong in.
-plain=()
-for arg in "$@"; do
-    case "$arg" in -*) continue ;; esac
-    plain+=("$arg")
-done
+# shellcheck source=guard-lib.sh
+source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
 
-# argv_has <word>... - true when those words appear consecutively in `plain`.
-argv_has() {
-    local want=("$@") n="${#plain[@]}" m="$#" i=0 k
-    [ "$m" -gt 0 ] || return 1
-    while [ "$((i + m))" -le "$n" ]; do
-        k=0
-        while [ "$k" -lt "$m" ] && [ "${plain[$((i + k))]}" = "${want[$k]}" ]; do
-            k=$((k + 1))
-        done
-        [ "$k" -lt "$m" ] || return 0
-        i=$((i + 1))
-    done
-    return 1
-}
-
-# --- the merge block --------------------------------------------------------
-
-if [ -n "${DEJIMA_MERGE_BLOCK:-}" ]; then
-    read -ra blocked <<< "$DEJIMA_MERGE_BLOCK"
-    # The first word names the command; only the rest is a subcommand sequence
-    # to compare against argv. A block naming a different command than the one
-    # being run is not this invocation's business.
-    if [ "${#blocked[@]}" -ge 1 ] && [ "${blocked[0]}" = "$self" ]; then
-        if [ "${#blocked[@]}" -eq 1 ]; then
-            # The whole command is blocked, not one of its subcommands.
-            echo "Blocked by dejima's forge guard: '$self' is not available in the sandbox." >&2
-            exit 1
-        fi
-        if argv_has "${blocked[@]:1}"; then
-            echo "Blocked by dejima's forge guard: merging is a human decision in the sandbox - open a PR/MR, then the operator merges. Report its URL and stop." >&2
-            exit 1
-        fi
-    fi
-fi
-
-# --- the repository the session was launched against ------------------------
-#
-# A forge whose CLI can be aimed elsewhere declares how (repo_flags,
-# repo_env). The gitea CLIs declare neither, because they resolve the repo
-# from origin and refuse another host; `gh` declares both, so on that path the
-# most ordinary way to name a PR from outside its checkout is also the way to
-# file an issue on a repository the session has nothing to do with (#187).
-#
-# Fast-fail, not a boundary, for the same reason the merge block is not one:
-# the session holds the token and could call the API directly. What bounds
-# this is the scope of push_token_file.
-#
-# Refused rather than skipped when the launch resolved no repository at all: a
-# workspace with no origin has nothing for --repo to legitimately name, and
-# "cannot confirm" is not a reason to let it through.
-if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ] || [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ] ||
-   [ -n "${DEJIMA_FORGE_REPO_PATHS:-}" ]; then
-    refuse_repo() {
-        echo "Blocked by dejima's forge guard: this session was launched against ${DEJIMA_FORGE_REPO:-no repository}, and $1 names '$2'. Act on the repository the sandbox mounts." >&2
-        exit 1
-    }
-    # Case-insensitively: forges treat an owner and a repository name as
-    # case-preserving but not case-sensitive, and a refusal over capitalisation
-    # would be a false one.
-    same_repo() {
-        [ -n "${DEJIMA_FORGE_REPO:-}" ] && [ "${1,,}" = "${DEJIMA_FORGE_REPO,,}" ]
-    }
-    if [ -n "${DEJIMA_FORGE_REPO_ENV:-}" ]; then
-        env_value="${!DEJIMA_FORGE_REPO_ENV:-}"
-        if [ -n "$env_value" ] && ! same_repo "$env_value"; then
-            refuse_repo "$DEJIMA_FORGE_REPO_ENV" "$env_value"
-        fi
-    fi
-    if [ -n "${DEJIMA_FORGE_REPO_FLAGS:-}" ]; then
-        read -ra repo_flags <<< "$DEJIMA_FORGE_REPO_FLAGS"
-        args_left=("$@")
-        while [ "${#args_left[@]}" -gt 0 ]; do
-            arg="${args_left[0]}"
-            args_left=("${args_left[@]:1}")
-            for flag in "${repo_flags[@]}"; do
-                value=""
-                case "$arg" in
-                    "$flag")
-                        # The value is the next argument, and its absence is
-                        # the CLI's error to report rather than this one's.
-                        [ "${#args_left[@]}" -gt 0 ] || continue
-                        value="${args_left[0]}"
-                        ;;
-                    "$flag"=*) value="${arg#*=}" ;;
-                    *)
-                        # One-dash flags only; a two-dash flag carries its
-                        # value with `=` or as the next argument, both above.
-                        case "$flag" in
-                            -?) ;;
-                            *) continue ;;
-                        esac
-                        # Short flags cluster, so the letter can sit anywhere
-                        # in one: `-Rowner/name`, `-wR owner/name` and
-                        # `-wRowner/name` all name a repository and none of
-                        # them is `-R` as its own argument (#243). Split at the
-                        # letter the way getopt does - what follows it in the
-                        # same argument is the value, and nothing following it
-                        # means the next argument is.
-                        letter="${flag#-}"
-                        # A cluster, not a value that happens to start with a
-                        # dash: one dash, then the letter somewhere in a run of
-                        # letters. Without the second check, `--search foo-R/x`
-                        # style arguments would be mined for flag letters.
-                        case "$arg" in -[!-]*) ;; *) continue ;; esac
-                        rest="${arg#-}"
-                        case "$rest" in *"$letter"*) ;; *) continue ;; esac
-                        case "${rest%%"$letter"*}" in *[!A-Za-z]*) continue ;; esac
-                        value="${rest#*"$letter"}"
-                        if [ -z "$value" ]; then
-                            [ "${#args_left[@]}" -gt 0 ] || continue
-                            value="${args_left[0]}"
-                        fi
-                        ;;
-                esac
-                [ -n "$value" ] || continue
-                same_repo "$value" || refuse_repo "$flag" "$value"
-            done
-        done
-    fi
-
-    # A repository named in a path rather than in a flag - `gh api
-    # repos/<owner>/<name>/issues` reaches any repository the token does,
-    # without a --repo anywhere in it (#243).
-    #
-    # Only when the declared subcommand is argv's first word. The alternative
-    # is inspecting every positional that contains two slashes, which would
-    # refuse `gh issue create --title repos/a/b` - and a false refusal costs an
-    # honest agent a working command, which is the wrong way for a fast-fail to
-    # be wrong.
-    if [ -n "${DEJIMA_FORGE_REPO_PATHS:-}" ] && [ "$#" -gt 0 ]; then
-        read -ra repo_paths <<< "$DEJIMA_FORGE_REPO_PATHS"
-        for spec in "${repo_paths[@]}"; do
-            [ "$1" = "${spec%%:*}" ] || continue
-            segment="${spec#*:}"
-            for arg in "$@"; do
-                case "$arg" in -*) continue ;; esac
-                # gh substitutes {owner} and {repo} from the checkout, so a
-                # path carrying them names this repository by construction and
-                # comparing the literal braces would refuse it.
-                case "$arg" in *'{'*) continue ;; esac
-                path="${arg#/}"
-                case "$path" in "$segment"/*/*) ;; *) continue ;; esac
-                path="${path#"$segment"/}"
-                owner="${path%%/*}"
-                path="${path#*/}"
-                name="${path%%/*}"
-                [ -n "$owner" ] && [ -n "$name" ] || continue
-                same_repo "$owner/$name" \
-                    || refuse_repo "the path '$arg'" "$owner/$name"
-            done
-        done
-    fi
+if ! dejima_forge_verdict "$self" "$@"; then
+    echo "Blocked by dejima's forge guard: $DEJIMA_GUARD_REASON" >&2
+    exit 1
 fi
 
 # --- the authorship disclosure ---------------------------------------------
@@ -242,13 +75,18 @@ marker_for() {
     esac
 }
 
+# The non-flag arguments the records below are compared against. Set here
+# rather than relied on from the verdict above, so this section says what it
+# depends on.
+dejima_forge_plain "$@"
+
 kind=""
 while read -r record_kind record_rest; do
     [ -n "$record_kind" ] || continue
     read -ra words <<< "$record_rest"
     [ "${#words[@]}" -ge 1 ] || continue
     [ "${words[0]}" = "$self" ] || continue
-    if argv_has "${words[@]:1}"; then
+    if dejima_argv_has "${words[@]:1}"; then
         kind="$record_kind"
         break
     fi

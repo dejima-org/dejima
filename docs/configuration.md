@@ -55,6 +55,19 @@ Every tool takes `--help`, which describes its own arguments and what they do.
 That is the fastest answer to "what does this flag mean"; this page is for the
 config file behind them.
 
+**A launch flag overrides the file for that launch only, and every `--no-*`
+flag only ever narrows.** None of those turns a setting back on: a config that
+says `off` is a decision somebody made in a file they can reread, and a flag
+that could undo one in passing would make the file's answer the weaker of the
+two. `--isolated` is the far end of the same idea, narrowing several at once:
+see [Isolated sessions](#isolated-sessions).
+
+The rule is about the `--no-*` family, not about every flag. `--ro`, `--rw`,
+`--include`, `--allow-github-push` and a `--forge` naming a forge the config
+did not each widen what one launch can reach, which is what they are for - and
+each is visible in the command that used it, where a config file's answer is
+not.
+
 ### `[core]` - what this sandbox runs
 
 The three selections come first because everything below depends on them: the
@@ -137,7 +150,7 @@ required: an identity supplies what it names and no more.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `ssh_key` | unset | the SSH key this identity pushes with |
+| `ssh_key` | unset | the SSH key this identity pushes with. An empty file counts as no key at all rather than a refusal, so pointing this at one is how a launch keeps the setting and forwards your agent instead |
 | `user_name` | unset | `user.name` for commits made in the session |
 | `user_email` | unset | `user.email` for commits made in the session |
 | `token_file` | *(the forge's own default)* | this identity's Gitea/Forgejo API token, overriding `[forge.gitea] token_file`. Read only when `[core] forge = gitea` |
@@ -157,7 +170,7 @@ you selected, the second is push access when GitHub *is* your forge.
 | `[forge.gitea] api` | **required** for `forge = gitea` | `https://<gitea host>/api/v1` |
 | `[forge.gitea] token_file` | `~/.config/gitea/token` | path to the Gitea/Forgejo API token (the file, not the token itself) |
 | `[forge.github] push_token_file` | unset | path to a **write-capable** PAT, used only when `[core] forge = github`: deliberately separate from `[github] token_file`; see "GitHub push" in [docs/security.md](security.md) |
-| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh`. Read whichever forge is selected, and it should stay read-only |
+| `[github] token_file` | `~/.config/gh/sandbox-token` | path to a read-only PAT for private GitHub repos / `gh`, and it should stay read-only. Read for every session EXCEPT when `[core] forge = github` and `push_token_file` is set: both fill `GH_TOKEN`, the forge's wins, and the launch says so. Which token can push is the half that matters |
 
 ### `[mounts]` - extra host paths
 
@@ -277,6 +290,7 @@ dejima-project status ~/myproject     # declared vs approved vs missing
 dejima-project approve ~/myproject    # review and approve the declared set
 dejima-allow --project ~/myproject crates.io
 dejima-allow --global crates.io       # applies to every project
+dejima-allow --container <id> dl.example.com files.example.org  # several
 dejima-dep add --project ~/myproject cargo:cargo-nextest
 dejima-dep add --global cargo:cargo-nextest
 ```
@@ -284,8 +298,22 @@ dejima-dep add --global cargo:cargo-nextest
 Two of those tools also write the declaration, so an approval you make by
 hand does not stay invisible to everyone else on the project:
 `dejima-allow --project` appends to `.dejima/allowed-domains`, and
-`dejima-dep add --project` appends to `.dejima/dependencies`. Both write the
-approval first - that is the part that grants - and report separately on the
+`dejima-dep add --project` appends to `.dejima/dependencies`.
+
+`dejima-allow` takes up to twenty domains at once, which is what a toolchain
+fetching from several hosts actually needs. One goes through as a single
+decision you already made by typing it; more than one is printed back to you
+one per line and confirmed before anything is added, defaulting to no. The cap
+and the confirmation are the same point: a list is where an unwanted name rides
+along unread, the agent that suggested the command is what might have put it
+there, and neither mechanism helps if the list is too long to finish reading.
+Every name is validated before any of them is shown, so what you are confirming
+is what will be added and no entry can carry an escape sequence that rewrites
+the lines above it. Confirming needs a terminal, so a script does them one at a
+time.
+
+`dejima-allow --project` and `dejima-dep add --project` both write the approval
+first - that is the part that grants - and report separately on the
 declaration, so a project you can't write to still gets you the approval.
 `--global` writes no declaration at all: there is no project to declare in.
 
@@ -804,8 +832,15 @@ ssh_key = ~/.ssh/dejima_ed25519
 `entrypoint.sh` loads it into a container-local `ssh-agent` at startup and
 deletes the plaintext copy immediately after - the sandbox user itself never
 has a path to the raw key, only the agent socket (see
-[security notes](security.md) for the full mount rationale). Setting it means
-a live forwarded agent is no longer required at all.
+[security notes](security.md) for the full mount rationale).
+
+Setting it means a forwarded agent is not merely unnecessary but **not
+mounted**: your own `SSH_AUTH_SOCK` is not passed to the container at all, so
+nothing in a session can sign with your personal identities by naming the
+socket directly. That is the point of choosing a dedicated key, and it is worth
+knowing before you choose one - a session that also needed the forwarded agent
+for something else (a second remote, a private submodule over ssh) no longer
+has it. Leave this unset to keep the agent.
 
 ## Using a different editor/application
 
@@ -955,11 +990,18 @@ dejima takes that one character back for the host while a session runs
 (`bin/dejima-tty-suspend`). Ctrl-C and Ctrl-\ are deliberately left alone and
 still reach the session, which is how a harness expects to be interrupted.
 
-Suspending is not detaching. A suspended session is stopped, so it makes no
-progress until you resume it, and it belongs to the terminal you started it
-from. For a session that keeps working while you are away, or that you want to
-pick up from somewhere else, run dejima inside tmux and use
-[`dejima-attach`](remote-access.md).
+Suspending is not pausing, and the difference is worth knowing before you reach
+for it. What stops is the host side: `dejima` itself, the container run, the
+credential proxy and the conversation shipper, which share one process group so
+the kernel stops and continues them together. The container is not in that
+group. It keeps running under the container runtime, with its mounts, its
+firewall grants and its forge token, and keeps making requests while the
+terminal looks stopped - see
+[what dejima does not sandbox](security.md#what-dejima-does-not-sandbox).
+
+Suspending is not detaching either: the job belongs to the terminal you started
+it from. For a session you want to pick up from somewhere else, run dejima
+inside tmux and use [`dejima-attach`](remote-access.md).
 
 ## Shared scratch space
 
@@ -1026,6 +1068,100 @@ there and are now mounted into nothing; dejima says so at every launch while
 that is true, rather than moving an operator's files on its own.
 `dejima-share adopt <project>` moves them into one project's share after
 showing what it will move and asking, and it never overwrites.
+
+## Isolated sessions
+
+`dejima --isolated` runs a session with nothing before it and nothing after it.
+No project is mounted, no memory or transcript crosses either boundary, and the
+one thing that outlives it is a `~/shared` of its own.
+
+```sh
+dejima --isolated    # from anywhere - the directory you are in is not used
+```
+
+Naming a directory is **refused**, not ignored: `dejima --isolated ~/proj`
+stops rather than starting a session that looks like it is working on a
+project it cannot see. Harness arguments after `--` still pass through.
+
+| | ordinary launch | `--isolated` |
+|---|---|---|
+| working directory | the project, read-write at its own path | `/dejima/work`, container-local |
+| `~/shared` | this project's, shared by every session against it | made fresh, never reused |
+| memory and transcripts | `~/.claude/projects/<slug>`, mounted | none |
+| shell history, nvim state | volumes that outlive the container | this run's own, removed with it |
+| domains, dependencies, tools | the global set plus this project's | the global set only |
+| `[mounts]` lists | applied | dropped, and named at launch |
+| forge, workflow | as configured | `none` and `local-only`, unless named |
+| forge token, `[github] token_file` | both cross | neither, unless a forge is named |
+| forwarded ssh agent | mounted when the workflow pushes | not mounted, unless you name a pushing workflow and have no key |
+| `[identity.<name>] ssh_key` | mounted | mounted |
+| conversation log, epitaph | as configured | off |
+
+Every shipped harness supports it. A harness whose model configuration has to
+be a file inside its own state directory gets it from a staging directory
+that goes away with the launch, rather than from the state mount this mode
+does not have.
+
+Your own `~/.claude` hooks, skills, commands, agents and output styles are
+still mounted read-only, as is `[mounts] nvim_config`. Those are yours, no
+session can write them, and a session without them is a session without the
+tools you built for it.
+
+**The directory you launch from decides nothing.** An approval store is found
+by walking up from the launch directory, so a home directory that was once
+approved as a project would otherwise hand an anonymous session that project's
+allowed domains and its dependency layer - which is the whole reason to be able
+to run this from a fresh terminal in `$HOME` without thinking about it.
+
+**There is no config key, in any spelling.** A mode this strong is a decision
+to make in the command, where it is visible, rather than a line in a file that
+every later launch inherits. For the same reason `--ro` and `--rw` are refused
+rather than dropped: a path typed into this command cannot be quietly ignored,
+where a `[mounts]` list written months ago can be - with a line saying which.
+
+**What it gives up.** The conversation log and the epitaph both read a
+transcript on the host, and this mode mounts none, so both are off and the
+launch says so rather than leaving you to find an empty record later. The
+exit-time audit is skipped for the same reason: its subject is the project's
+own files. If you want either back in this mode, that is
+[#388](https://gitbox.branderson.io/dejima/dejima/issues/388) - both are your
+record rather than the agent's, and neither ever reaches a future session.
+
+**No forge, unless you name one on the same command.** `--isolated` sets
+`[core] forge` to `none` and `[core] workflow` to `local-only` for that launch,
+and withholds `[github] token_file` with them. Naming either is how you ask for
+a session that clones and opens a pull request, which is a real use of this
+mode:
+
+```sh
+dejima --isolated                                       # no forge, pushes nothing
+dejima --isolated --forge gitea --workflow worktree-pr   # clones, pushes, opens a PR
+```
+
+Order does not matter: `--forge gitea --isolated` means the same thing, and
+naming a forge brings the credentials back with it.
+
+Two rows surprise people. `[github] token_file` is withheld even though it is
+not a forge setting. And an `[identity.<name>] ssh_key` is mounted even though
+the forwarded agent is not, so a session with no forge still holds a key that
+can reach a host over ssh - withholding that key too, for any launch whose
+workflow never pushes, is
+[#392](https://gitbox.branderson.io/dejima/dejima/issues/392).
+
+The agent row has a condition worth reading twice: it is withdrawn when the
+workflow does not push **or** a usable key is configured. So the second
+command above - a pushing workflow, on a host with no `ssh_key` - does forward
+your agent into an isolated session.
+
+The table is what this mode changes, not everything that crosses. `LOKI_URL`
+still reaches the session, and the model credential follows the rules in
+[docs/security.md](security.md#the-model-api-credential-never-enters-the-container)
+whatever the mode.
+
+**Why each of those is the way it is**, and why this is a narrower blast
+radius rather than a stronger sandbox, is in
+[docs/security.md](security.md#a-session-with-no-project-mounted). Worth
+reading before relying on this mode.
 
 ## Reading what a session left behind
 
@@ -1148,22 +1284,33 @@ without the reason it is normally off (see
 [docs/security.md](security.md#github-push-blocked-by-default-optional-opt-in)),
 so the reason is supplied where it will be read.
 
-`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks
-any `git push` whose resolved remote isn't the Gitea host, and any push to
-`main`/`master` even there. Like the other hooks, this is a fast-fail guard
-against an overeager agent, not a hard security boundary - a session has full
-shell access and could in principle edit `.git/config` to route around it.
+`git-push-guard.sh` (`PreToolUse`/`Bash`, also `DEJIMA`-gated) blocks any `git
+push` whose resolved remote is not one of the configured forge's hosts, and any
+push straight to a branch the workflow protects. Neither list is named here:
+both are resolved host-side from the selected forge and workflow, so this is
+the same rule whichever forge is in use. Like the other hooks, this is a
+fast-fail guard against an overeager agent, not a hard security boundary - a
+session has full shell access and could in principle edit `.git/config` to
+route around it.
 GitHub push is blocked by default too (see
 [GitHub push](security.md#github-push-blocked-by-default-optional-opt-in) in
 docs/security.md) unless `--allow-github-push` is given. For a real guarantee
 against pushes to main/master, use branch protection on the remote itself.
 
-`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) blocks
-`gitea-pr merge` inside the sandbox. It's the API-side counterpart to the rule
-above: a merge puts a branch on `main` without ever performing a push, so
-`git-push-guard.sh` never sees it. A hook is handed a command rather than a
-conversation, so it can't tell an instructed merge from an unprompted one -
-which is why it's scoped to the sandbox rather than applied everywhere. On the
+Both this hook and the PATH shadow beside it read the decision out of
+`docker/guard-lib.sh`, which is the only copy of the rules. A push that the
+library cannot read is refused rather than passed through: an unresolvable
+remote, `--mirror`, and `--git-dir` or `--work-tree`, each of which names a
+repository other than the one the remote would be resolved in.
+
+`merge-guard.sh` (`PreToolUse`/`Bash`, `DEJIMA`-gated) applies the configured
+forge's policy inside the sandbox: the blocked merge command, and a command
+aimed at a repository the session was not launched against. It's the API-side
+counterpart to the rule above: a merge puts a branch on `main` without ever
+performing a push, so `git-push-guard.sh` never sees it. A hook is handed a
+command rather than a conversation, so it can't tell an instructed merge from
+an unprompted one - which is why it's scoped to the sandbox rather than
+applied everywhere. On the
 host it does nothing, and you can still ask an agent to merge. The same
 fast-fail caveat applies with more force than usual here: the session has the
 Gitea token in its environment and could call the merge endpoint with `curl`

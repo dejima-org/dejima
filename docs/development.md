@@ -25,9 +25,10 @@ run them.
 | `docker/docker-compose.yml` | Wires up mounts/env; invoked via `bin/dejima`, not directly |
 | `hooks/sandbox-context.sh` | `SessionStart` hook: injects sandbox context/workflow reminders, and any `.dejima.md` the project ships |
 | `.dejima.md` | Project-level agent instructions, harness-agnostic: `CLAUDE.md`'s role under a neutral name. dejima loads a project's into the session context; this one is dejima's own |
-| `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches |
+| `hooks/git-push-guard.sh` | `PreToolUse` hook: blocks pushes outside the allowed host(s)/branches. Turns the reported command into argv and asks `docker/guard-lib.sh` |
 | `hooks/deny-dangerous-bash.sh` | `PreToolUse` hook: blocks obviously destructive Bash commands |
-| `hooks/merge-guard.sh` | `PreToolUse` hook: blocks the configured forge's merge command (`DEJIMA_MERGE_BLOCK`) in the sandbox: merging is a human decision |
+| `hooks/merge-guard.sh` | `PreToolUse` hook: applies the forge policy - the blocked merge command (`DEJIMA_MERGE_BLOCK`), the agent-written disclosure, and a command aimed at another repository - to a reported command |
+| `docker/guard-lib.sh` | The push and merge policy itself, read out of argv. The two hooks above and the two PATH shadows all call it, so a bypass is fixed once rather than twice |
 | `hooks/dejima-notify.sh` | Drops an empty `waiting`/`done` marker for a remote-enabled session. Registered as a `Stop` hook only; `waiting` is there for a harness that can say it without having stopped - see [docs/remote-access.md](remote-access.md) |
 | `bin/dejima-attach` | Lists live sessions and attaches to one; the shared core behind both remote front doors |
 | `bin/dejima-audit` | Advisory exit-time diff of host-persistence surfaces (git config, `.claude/`, etc.). `dejima-audit show` / `dejima-audit ack` default to the enclosing repo |
@@ -49,8 +50,8 @@ run them.
 | `bin/dejima-epitaph` | Host-side: keeps the summary a session leaves when its context is compacted away, in a store nothing mounts. `save` runs from `bin/dejima`'s exit trap; `list`/`search`/`show` are the operator's, and only ever read |
 | `bin/dejima-harness-lib.sh` | Loads the selected harness's plugin and provides the `emit_*` functions it declares through; the guarded-store refusal runs in `emit_mount`. Not on PATH |
 | `bin/harness/<name>.sh` | One per supported harness: what dejima does for that harness that no manifest value could state. Trusted computing base, sourced by `bin/dejima` |
-| `bin/dejima-color-lib.sh` | The colour and terminal-detection helpers the CLIs share. Not on PATH |
 | `bin/dejima-slug-lib.sh` | The `~/.claude/projects` slug scheme and which slugs belong to a workspace; sourced by `bin/dejima` (what to mount) and `bin/dejima-epitaph` (whose transcripts to keep), so the two cannot disagree. Not on PATH |
+| `bin/dejima-version-lib.sh` | Which release a checkout is on, from `git describe` rather than from any file in the tree - so it cannot claim a release a checkout has been pulled past. Sourced by `bin/dejima` (`--version`, the banner) and `bin/dejima-update-check` (what the remote has that this does not). Not on PATH |
 | `bin/dejima-ttyd` | Launches `ttyd` on loopback in front of `dejima-attach` |
 | `systemd/*.service` | User units for `dejima-ttyd` and `dejima-notify-watch`; ship disabled, installed by hand |
 | `docs/providers.md` | The manifest contract for the forge/workflow/harness axes, key by key, with the shipped manifests as worked examples |
@@ -58,6 +59,7 @@ run them.
 | `docs/threat-model.md` | What is assumed hostile, and where each layer's compromise stops. Carries the blast-radius table `docs/security.md` also shows; a static test keeps the two identical |
 | `docs/research-review.md` | When to check dejima's reasoning against the field's, the standing questions that are the agenda, and the queue of bypasses not yet run against this implementation |
 | `docs/nginx-dejima.conf.example` | Reverse-proxy template for the web front door; deliberately not loadable as written |
+| `CHANGELOG.md` | What each release changed, for one question: should I update. A release is a date and the tag of that name on `main` is the only record of it - see `docs/release.md` §6 |
 
 `bin/dejima` is the entry point: it resolves the project path,
 checks for a live `ssh-agent`, reads `GITEA_TOKEN`/`GH_TOKEN` from the token
@@ -106,27 +108,29 @@ notification path carries no sandbox-controlled byte, and that no marker
 name outside `waiting`/`done` is ever acted on. `audit.bats` covers
 `bin/dejima-audit`'s own diffing.
 
-`config.bats`, `providers.bats` and `proxy.bats` round out the suites that
-need no Docker either: `config.bats` covers `~/.config/dejima/config`
-parsing and `install.sh`'s legacy-variable warnings (stubbing `docker` itself,
-since the fast CI job's container deliberately has no daemon), `providers.bats`
-covers the forge/workflow/harness manifest contract documented in
-[docs/providers.md](providers.md), and `proxy.bats` covers the credential
-proxy's own request handling. `conversation.bats` runs
-`bin/dejima-conversation-ship` against a real transcript and a real HTTP
-endpoint standing in for Loki, and asserts on what arrives: that a session's
-lines ship, that a torn line waits until it is whole, that a sibling project
-whose directory name merely extends this one is not swept up with it, and
-that neither the in-memory batch nor the unread tail is lost to the kill that
-ends a session.
+`config.bats`, `providers.bats`, `proxy.bats`, `launch.bats` and `share.bats`
+round out the suites that need no Docker either: `config.bats` covers
+`~/.config/dejima/config` parsing and `install.sh`'s legacy-variable warnings
+(stubbing `docker` itself, since the fast CI job's container deliberately has
+no daemon), `providers.bats` covers the forge/workflow/harness manifest
+contract documented in [docs/providers.md](providers.md), `proxy.bats` covers
+the credential proxy's own request handling, `launch.bats` the command line a
+launch builds, and `share.bats` the shared scratch directory's own layout.
+`conversation.bats` runs `bin/dejima-conversation-ship` against a real
+transcript and a real HTTP endpoint standing in for Loki, and asserts on what
+arrives: that a session's lines ship, that a torn line waits until it is whole,
+that a sibling project whose directory name merely extends this one is not
+swept up with it, and that neither the in-memory batch nor the unread tail is
+lost to the kill that ends a session.
 
 One assertion is worth calling out because it can only run for real on a
-Docker host: `runtime.bats` proves that a service bound to the host's
-loopback is unreachable from inside a container while one bound to the
-bridge gateway *is* reachable. The second half is a positive control - it is
-what stops the first from passing in an environment where the container
-reaches nothing at all. That pair is the ttyd front door's whole containment
-argument, so run it before trusting a front door you just set up.
+Docker host: `runtime.bats` proves that a service on the host is unreachable
+from inside a container - bound to loopback, and bound to the bridge gateway
+on a port the policy was not told to open. A second container, given that one
+port, reaches it; that is the positive control, and it is what stops the
+others from passing in an environment where the container reaches nothing at
+all. That set is the ttyd front door's whole containment argument, so run it
+before trusting a front door you just set up.
 
 Every mutation in `runtime.bats` (firewall rules, address-set entries) happens
 inside the test container's own network namespace, same as any other
@@ -178,10 +182,12 @@ subset has.
 
 `runtime.bats` is the only suite that needs a Docker daemon: it is the one
 that builds the image and boots real containers to assert against.
-Everything else, `audit.bats`, `ci-runner.bats`, `config.bats`,
-`conversation.bats`, `project.bats`, `providers.bats`, `proxy.bats`,
-`remote.bats` and `static.bats`, runs anywhere a shell does, including inside
-a dejima sandbox itself, which has no Docker daemon by design.
+`ci-runner.bats` needs something rarer - a real CI runner of either tier - and
+skips itself anywhere else. Everything in between runs anywhere a shell does,
+including inside a dejima sandbox itself, which has no Docker daemon by design.
+`test/run-confined.sh` discovers that set rather than naming it, so a suite
+added under `test/` is in the lane the day it lands - which is also why no list
+of them is kept here.
 
 `.gitea/workflows/tests.yml` also runs `shellcheck` over every shell script in
 the repo, as its own job. `test/shellcheck.sh` holds the file list, discovered
@@ -199,9 +205,10 @@ obscurely partway through; the file says why each is needed.
 ## Adding a new harness
 
 `[core] harness` picks a directory under `harnesses/`, and that harness's
-manifest declares eleven keys (see [providers.md](providers.md)). The
-inventory below is everything dejima does that is shaped by *which* harness is
-selected: which parts are the manifest's, which are the plugin's, and
+manifest declares what dejima needs to know about it - every key is in
+[providers.md](providers.md). The inventory below is everything dejima does
+that is shaped by *which* harness is selected: which parts are the manifest's,
+which are the plugin's, and
 which are still written against Claude Code by name. Taken from a pass over
 the tree, so each row names the file rather than describing a sketch - and a
 row that says "in the plugin" is one a second harness supplies rather than one
@@ -245,12 +252,14 @@ R2 was a hard gate until the guards stopped needing it. Two of the three it
 hosted - the push guard and the merge guard - are now PATH shadows over `git`
 and the forge CLI (`docker/git-guard.sh`, `docker/forge-guard.sh`), which hold
 whatever the harness can or cannot intercept, and read argv rather than
-regex-matching a reconstructed command string. That left one guard depending
-on interception, and it is the one this repository already describes as "a
-fast-fail guard against an overeager agent doing something obviously
-destructive, not a boundary against one that's actively trying to get around
-them" (docs/security.md). A gate that costs a harness its support should be
-guarding more than that.
+regex-matching a reconstructed command string. The hooks beside them read argv
+too: they split the reported command into words and ask the same library
+(`docker/guard-lib.sh`), so the overlap cannot become a disagreement. That
+left one guard depending on interception, and it is the one this repository
+already describes as "a fast-fail guard against an overeager agent doing
+something obviously destructive, not a boundary against one that's actively
+trying to get around them" (docs/security.md). A gate that costs a harness its
+support should be guarding more than that.
 
 Declaring one absent is a real decision with a visible cost, not a
 formality. It is there so a harness can be supported honestly at a smaller

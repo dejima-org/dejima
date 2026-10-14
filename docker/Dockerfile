@@ -230,6 +230,14 @@ RUN mkdir -p $SANDBOX_HOME/.ssh && \
   chown $SANDBOX_USER:$SANDBOX_USER $SANDBOX_HOME/.ssh && \
   chmod 700 $SANDBOX_HOME/.ssh
 
+# The working directory an isolated session gets instead of a project mount.
+# Outside $SANDBOX_HOME on purpose: bin/dejima still reads this path on the
+# HOST for a few things (an origin URL, a self-hosting check), so a path the
+# operator might plausibly have - ~/work - would have those read a real
+# directory of theirs. Nothing on a host is at /dejima.
+RUN mkdir -p /dejima/work && \
+  chown -R $SANDBOX_USER:$SANDBOX_USER /dejima
+
 # Pre-create the nvim data/state/cache dirs owned by the sandbox user,
 # since they're mounted as named volumes in docker-compose.yml: Docker
 # seeds a fresh named volume from whatever already exists at the mount
@@ -324,6 +332,9 @@ COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper
 # nothing until something puts them on PATH.
 COPY docker/git-guard.sh /usr/local/lib/dejima/git-guard.sh
 COPY docker/forge-guard.sh /usr/local/lib/dejima/forge-guard.sh
+# The policy both of those apply, and that the two hooks beside them apply to
+# the same command from the other side. One copy, so a bypass is fixed once.
+COPY docker/guard-lib.sh /usr/local/lib/dejima/guard-lib.sh
 # The briefing renderer, which every harness needs and no harness owns. Baked
 # in rather than reached through the ~/.claude/hooks mount, because that mount
 # is Claude Code's configuration: sandbox-context.sh calls this, and so does

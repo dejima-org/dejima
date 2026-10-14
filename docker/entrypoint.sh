@@ -44,7 +44,10 @@ fi
 # involved), leaving the tty root-owned. nvim's clipboard fallback needs to
 # write to it directly as the sandbox user, so fix the ownership up here,
 # before dropping privileges.
-if [ -t 1 ]; then
+# Both halves read stdin, because that is what `tty` reports on. Testing stdout
+# instead meant a container with one attached and the other not produced an
+# empty path and a chown that silently did nothing.
+if [ -t 0 ]; then
     chown "$SANDBOX_USER" "$(tty)" 2>/dev/null || true
 fi
 
@@ -70,6 +73,9 @@ fi
 # Mounted at /root (not under $SANDBOX_HOME) so only this root-run block
 # can ever read it - copied out, loaded into the agent, and the copy
 # deleted, all before dropping to the sandbox user below.
+# The forwarded agent is not mounted when this key is configured (bin/dejima
+# blanks SSH_AUTH_SOCK), so this is the only agent in the container rather than
+# the preferred one of two.
 SANDBOX_SSH_KEY_SRC="/root/.ssh-sandbox-key-src"
 if [ -s "$SANDBOX_SSH_KEY_SRC" ]; then
     install -o "$SANDBOX_USER" -g "$SANDBOX_USER" -m 600 "$SANDBOX_SSH_KEY_SRC" "$SANDBOX_HOME/.ssh/sandbox-key"
@@ -90,31 +96,25 @@ fi
 # Linked here rather than COPYed into place at build time because both depend
 # on values that are only known per launch: which hosts this forge may be
 # pushed to, and which subcommand this workflow blocks.
-if [ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" ]; then
-    # /usr/local/bin precedes /usr/bin, so this shadows git without moving it
-    # and the guard execs /usr/bin/git directly.
-    ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
-fi
-
-# Every CLI the shadow has something to do about: the one whose merge a
-# workflow blocks, and every one that writes a body the session authored. More
-# than one, because a forge can have a CLI per artifact rather than one with
-# subcommands, and because a forge with nothing blocked can still have
-# something to disclose.
+# The git shadow is installed unconditionally, because DEJIMA_PUSH_HOSTS fails
+# CLOSED: empty means no host may be pushed to, which is how a no-forge or
+# non-pushing workflow becomes enforced rather than described. Gating the
+# shadow on a non-empty value would leave it absent in exactly that case - and
+# local-only, the shipped default, is exactly that case.
 #
-# The first word of each record names the CLI. The real one is already behind
-# the symlink this replaces (see install-forge-bins.sh), so the guard has a
-# fixed path to exec.
-_shadow_clis() {
-    [ -z "${DEJIMA_MERGE_BLOCK:-}" ] || printf '%s\n' "${DEJIMA_MERGE_BLOCK%% *}"
-    # "<kind> <cli> <subcommand>...", so the CLI is the second word.
-    [ -z "${DEJIMA_DISCLOSE:-}" ] || printf '%s\n' "$DEJIMA_DISCLOSE" |
-        while read -r _ _cli _; do
-            [ -z "$_cli" ] || printf '%s\n' "$_cli"
-        done
-}
+# /usr/local/bin precedes /usr/bin, so this shadows git without moving it and
+# the guard execs /usr/bin/git directly.
+ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git
 
-_shadow_cli_list="$(_shadow_clis | sort -u)"
+# Every CLI the shadow has something to do about. Derived by the same function
+# hooks/merge-guard.sh uses to decide whether a command is one of these, so the
+# set the shadow is linked over and the set the hook checks against cannot
+# disagree. The real CLI is already behind the symlink this replaces (see
+# install-forge-bins.sh), so the guard has a fixed path to exec.
+# shellcheck source=guard-lib.sh
+source "${DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh}"
+
+_shadow_cli_list="$(dejima_forge_commands | sort -u)"
 if [ -n "$_shadow_cli_list" ]; then
     while read -r _cli; do
         [ -n "$_cli" ] || continue
@@ -315,7 +315,11 @@ if [ -n "${SANDBOX_HARNESS_BRIEFING_ARGS:-}" ] || [ -n "${SANDBOX_HARNESS_BRIEFI
     mkdir -p /etc/dejima
     # Written and renamed, so a harness starting while this is written reads
     # either the whole briefing or no file at all.
-    if ! /usr/local/lib/dejima/dejima-briefing-render.sh "" "$PWD" \
+    # As the sandbox user, not as root. It reads the project's own .dejima.md
+    # and asks the package managers what is installed, with its cwd inside the
+    # workspace the session can write - and the file it produces is written by
+    # the redirect out here, which root still owns.
+    if ! gosu "$SANDBOX_USER" /usr/local/lib/dejima/dejima-briefing-render.sh "" "$PWD" \
             > "$DEJIMA_BRIEFING_RENDERED.part"; then
         rm -f "$DEJIMA_BRIEFING_RENDERED.part"
         echo "entrypoint: could not render the session briefing. Refusing to" >&2

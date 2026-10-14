@@ -40,6 +40,27 @@ share_projects_root() { projects_root "$1"; }
 # The host directory mounted at ~/shared for a launch against $2.
 share_dir_for() { project_dir_for "$1" "$2"; }
 
+# Where an isolated launch's ~/shared lives: a sibling of the per-project
+# root, holding one directory per SESSION rather than one per project.
+#
+# A sibling rather than a slug inside it because an isolated session has no
+# project to be keyed by, and the one thing this layout must never do is hand
+# a second session the directory a first one used. A name is not enough to
+# promise that, which is why the directory below is made rather than
+# computed.
+isolated_share_root() { printf '%s/isolated' "${1%/}"; }
+
+# Makes this session's share directory under that root and prints its path.
+# Creating is the point: `mktemp -d` is what makes "no other session has this
+# directory" true for two launches in the same second, where a name built from
+# a timestamp would silently hand both of them one directory.
+isolated_share_make() {
+    local root
+    root="$(isolated_share_root "$1")"
+    mkdir -p "$root" || return 1
+    mktemp -d "$root/$(date -u +%Y%m%d-%H%M%S)-XXXXXX"
+}
+
 # The slugs belonging to $1: its own, plus one per live git worktree nested
 # underneath it. One per line, sorted, no duplicates.
 #

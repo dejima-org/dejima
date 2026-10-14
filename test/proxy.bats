@@ -292,17 +292,18 @@ teardown() {
 
 @test "forwarder bridges TCP to the proxy's unix socket" {
     start_proxy
-    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_PROXY_PORT=18399 \
+    local fport; fport="$(free_port)"
+    SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_PROXY_PORT="$fport" \
         SANDBOX_CREDENTIAL_TRANSPORT=loopback \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js" &
     FWD_PID=$!
     ok=""
     for _ in $(seq 1 50); do
-        if curl -s -o /dev/null http://127.0.0.1:18399/echo; then ok=1; break; fi
+        if curl -s -o /dev/null http://127.0.0.1:$fport/echo; then ok=1; break; fi
         sleep 0.1
     done
     [ -n "$ok" ]
-    run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:18399/v1/messages
+    run curl -s -H "Authorization: Bearer $PLACEHOLDER" -d '{}' http://127.0.0.1:$fport/v1/messages
     kill "$FWD_PID" 2>/dev/null || true
     [ "$(jq -r '.headers.authorization' <<<"$output")" = "Bearer real-access-token" ]
 }
@@ -353,6 +354,20 @@ PYEOF
     [[ "$output" != *"501"* ]]
 }
 
+# The forwarder is given a port rather than asking for one, so these tests
+# have to name a number. Asking the kernel for a free one and handing that over
+# leaves a window where something else could take it; naming a constant leaves
+# the test failing on any machine already using it, which is the precondition
+# these tests were reading from the environment instead of stating. The window
+# is the smaller of the two, and the suites run on a developer's machine.
+free_port() {
+    python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
 # The forwarder is the container-side half of the chain. In tls mode it
 # terminates TLS for api.anthropic.com on loopback so Claude Code needs no
 # ANTHROPIC_BASE_URL at all, then pipes raw bytes into the same unix socket
@@ -382,13 +397,14 @@ make_cert() {
 @test "forwarder tls mode: https to api.anthropic.com reaches the proxy, which injects the real token" {
     make_cert
     start_proxy
-    start_forwarder tls 18443
+    local fport; fport="$(free_port)"
+    start_forwarder tls "$fport"
     # --resolve is what stands in for the container's /etc/hosts entry: the
     # name must really be api.anthropic.com for certificate verification to
     # be a meaningful check, not a hostname the test picked to be easy.
     run curl -s --cacert "$TD/cert.pem" \
-        --resolve "api.anthropic.com:18443:127.0.0.1" \
-        -X POST "https://api.anthropic.com:18443/v1/messages" -d '{}'
+        --resolve "api.anthropic.com:$fport:127.0.0.1" \
+        -X POST "https://api.anthropic.com:$fport/v1/messages" -d '{}'
     kill "$FWD_PID" 2>/dev/null || true
     [ "$status" -eq 0 ]
     [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
@@ -403,8 +419,9 @@ make_cert() {
     # no HTTP awareness to catch it.
     make_cert
     start_proxy
-    start_forwarder tls 18444
-    run openssl s_client -connect 127.0.0.1:18444 -alpn h2,http/1.1 \
+    local fport; fport="$(free_port)"
+    start_forwarder tls "$fport"
+    run openssl s_client -connect "127.0.0.1:$fport" -alpn h2,http/1.1 \
         -servername api.anthropic.com -CAfile "$TD/cert.pem" </dev/null
     kill "$FWD_PID" 2>/dev/null || true
     [[ "$output" == *"ALPN protocol: http/1.1"* ]]
@@ -412,8 +429,9 @@ make_cert() {
 
 @test "forwarder loopback mode serves plaintext http on the port it is given" {
     start_proxy
-    start_forwarder loopback 18445
-    run curl -s -X POST "http://127.0.0.1:18445/v1/messages" -d '{}'
+    local fport; fport="$(free_port)"
+    start_forwarder loopback "$fport"
+    run curl -s -X POST "http://127.0.0.1:$fport/v1/messages" -d '{}'
     kill "$FWD_PID" 2>/dev/null || true
     [ "$status" -eq 0 ]
     [[ "$output" == *'"authorization": "Bearer real-access-token"'* ]]
@@ -437,7 +455,7 @@ make_cert() {
     # today, so a fall-through lands on an unused port if that ever changes.
     run env -u SANDBOX_CREDENTIAL_TLS_CERT -u SANDBOX_CREDENTIAL_TLS_KEY \
         SANDBOX_CREDENTIAL_PROXY_SOCKET="$SOCK" SANDBOX_CREDENTIAL_TRANSPORT=tls \
-        SANDBOX_CREDENTIAL_PROXY_PORT=18398 \
+        SANDBOX_CREDENTIAL_PROXY_PORT="$(free_port)" \
         node "$REPO_ROOT/docker/credential-proxy-forwarder.js"
     [ "$status" -ne 0 ]
     [[ "$output" == *"SANDBOX_CREDENTIAL_TLS_CERT"* ]]
@@ -951,4 +969,60 @@ run_exit_audit() {  # <proxy log>
         || { echo "the real failure went unreported: $output"; return 1; }
     [[ "$output" == *"answered 503 today"* ]] \
         || { echo "the detail line is not shown: $output"; return 1; }
+}
+
+@test "a negative Content-Length is refused rather than read to EOF" {
+    # The cap exists because this runs on the host as the operator's own user.
+    # int() accepts a negative, a negative passes a `> MAX` test, and a buffered
+    # reader takes read(-1) as "to EOF" - so `Content-Length: -1` read an
+    # unbounded body into host RAM past the cap. A non-numeric value raised out
+    # past the types handle_error knows and put a traceback on the terminal.
+    start_proxy
+
+    run curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" \
+        -H "Authorization: Bearer $PLACEHOLDER" -H 'Content-Length: -1' \
+        -X POST --data 'x' http://x/v1/messages
+    [ "$output" = 413 ] \
+        || { echo "a negative Content-Length was not refused: $output"; return 1; }
+
+    # A value that is not a number is left alone: it still raises, because the
+    # test above for narrow error suppression uses exactly that fault to prove
+    # the suppression is specific to a client going away. This fix is about the
+    # value that passes the cap and then reads to EOF, not about input tidiness.
+
+    # The log says what arrived, which is what tells a hostile negative length
+    # apart from a genuinely oversized upload.
+    grep -q 'Content-Length of -1' "$TD/stderr" \
+        || { echo "the refusal log does not name the offending length:"; cat "$TD/stderr"; return 1; }
+
+    # And an ordinary request still works, so the check did not close the door.
+    run pcurl -o /dev/null -w '%{http_code}' -X POST --data '{}' http://x/v1/messages
+    [ "$output" = 200 ] || { echo "a normal request was refused: $output"; return 1; }
+}
+
+@test "a negative chunk size is refused too, not only Content-Length" {
+    # The two paths share one helper today. A refactor that inlines the chunked
+    # branch - int(readline().split(b";")[0], 16) - puts the unbounded read back
+    # with nothing failing, so the chunked shape is asserted in its own right.
+    start_proxy
+    python3 - "$SOCK" <<'PYEOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: proxy\r\n"
+          b"Authorization: Bearer placeholder\r\n"
+          b"Transfer-Encoding: chunked\r\n\r\n-1\r\n")
+s.settimeout(5)
+try:
+    got = s.recv(200)
+except Exception:
+    got = b"<no answer>"
+print(got.split(b"\r\n")[0].decode("latin-1"))
+s.close()
+PYEOF
+    run cat "$TD/stderr"
+    [[ "$output" == *"chunk size of -1"* ]] \
+        || { echo "a negative chunk size was not refused as one: $output"; return 1; }
+    [[ "$output" != *"Traceback"* ]] \
+        || { echo "it raised instead of being refused: $output"; return 1; }
 }

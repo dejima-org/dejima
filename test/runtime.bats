@@ -476,6 +476,11 @@ teardown() {
                  --format '{{.Names}}' 2>/dev/null)
     docker images -q "localhost/dejima-test-*:$suffix" 2>/dev/null \
         | xargs -r docker rmi -f >/dev/null 2>&1 || true
+    # Volumes too, for the same reason and in the same namespace: a test that
+    # makes one removes it itself, and this is what covers the run that was
+    # interrupted between the two.
+    docker volume ls -q --filter "name=^dejima-test-.*$suffix\$" 2>/dev/null \
+        | xargs -r docker volume rm >/dev/null 2>&1 || true
 }
 
 # The capability list bin/dejima gives the filter container, read out of the
@@ -518,17 +523,39 @@ start_pair() {  # <purpose|""> <image> [docker run args...]
         filter="$(test_container_name "$purpose-filter")"
     fi
 
+    # The run's cached GitHub ranges, when the job fetched them. Each filter
+    # fetched its own, which is twenty-seven requests in about five minutes
+    # across this suite - inside the hourly ceiling a token buys, and exactly
+    # the burst GitHub's secondary limit answers with a 403 (#357).
+    #
+    # Read-only, and only ever this one file. egress-policy refuses a file://
+    # source unless SANDBOX_TEST_MODE is set, which start_pair's callers supply
+    # and no launch does.
+    #
+    # Absent when the job could not fetch, or when the suite is run by hand
+    # outside CI: every container then fetches for itself, which is the
+    # behaviour this replaces rather than a failure.
+    local -a meta=()
+    if [ -r /tmp/dejima-ci/github-meta.json ]; then
+        meta=(-v /tmp/dejima-ci/github-meta.json:/run/forge-meta-cache.json:ro
+              -e EGRESS_FORGE_META_URL=file:///run/forge-meta-cache.json
+              -e SANDBOX_TEST_MODE=1)
+    fi
+
     local -a fcaps=() scaps=()
     while IFS= read -r cap; do fcaps+=(--cap-add="$cap"); done < <(launcher_filter_cap_add)
     while IFS= read -r cap; do scaps+=(--cap-add="$cap"); done < <(compose_cap_add)
     [ "${#fcaps[@]}" -gt 0 ] || { echo "no --cap-add found in bin/dejima's filter run" >&2; return 1; }
     [ "${#scaps[@]}" -gt 0 ] || { echo "no cap_add found in docker-compose.yml" >&2; return 1; }
 
+    # The cache goes to the FILTER only: it is the half that fetches the ranges,
+    # and the session container has no business holding a path that names them.
     docker run -d --init --name "$filter" \
         --cap-drop=ALL "${fcaps[@]}" \
         --security-opt=no-new-privileges:true \
         --sysctl net.ipv4.ip_unprivileged_port_start=0 \
         --network "$(network_name)" \
+        ${meta[@]+"${meta[@]}"} \
         "$@" \
         --entrypoint /usr/local/bin/filter-entrypoint.sh \
         "$image" >/dev/null
@@ -1457,11 +1484,37 @@ session_pid() {  # [container], defaulting to the file-wide one
     # running session, and it is the operator's to run from the host. From
     # inside the session it must do nothing - it is the same binary in the same
     # image, and only the container it runs in differs.
+    # What the policy would have CHANGED is re-read after each refusal, not
+    # just the exit status checked: an amendment that landed and then failed on
+    # something later would exit non-zero with the destination permitted, which
+    # is the outcome this test is named for and the one a status cannot see.
+    #
+    # The entries file and the resolver configuration, because a permit for a
+    # NAME writes both - the address sets only ever hold addresses, so grepping
+    # those for a hostname is a check that cannot fail.
+    local before_entries before_conf after_entries after_conf
+    before_entries="$(dexec_filter cat /run/egress-policy/entries)"
+    before_conf="$(dexec_filter cat /run/egress-policy/resolver.conf)"
+    [ -n "$before_entries" ] && [ -n "$before_conf" ] \
+        || { echo "could not read the policy's own record of what is permitted"; return 1; }
+
     run dexec_node /usr/local/sbin/egress-policy permit evil.example.com
     [ "$status" -ne 0 ]
     run docker exec -u root "$(container_name)" /usr/local/sbin/egress-policy permit evil.example.com
     [ "$status" -ne 0 ] \
         || { echo "root in the session container amended the permitted set"; return 1; }
+
+    after_entries="$(dexec_filter cat /run/egress-policy/entries)"
+    after_conf="$(dexec_filter cat /run/egress-policy/resolver.conf)"
+    [ "$after_entries" = "$before_entries" ] \
+        || { echo "the entries file changed despite both refusals"; return 1; }
+    [ "$after_conf" = "$before_conf" ] \
+        || { echo "the resolver configuration changed despite both refusals"; return 1; }
+    # Named directly as well, so this does not rest on two snapshots matching:
+    # an entry already present before the test would make them match anyway.
+    grep -q evil.example <<< "$after_entries$after_conf" \
+        && { echo "evil.example.com reached the policy's record of what is permitted"; return 1; }
+    return 0
 }
 
 @test "node has no working sudo" {
@@ -1823,18 +1876,22 @@ session_pid() {  # [container], defaulting to the file-wide one
     # verdict rides on which NFLOG group the rule named, so the two groups
     # swapped would log every refusal as "allowed" - and a check that only
     # asked for the field would stay green while it did.
-    local gw
-    gw="$(dexec sh -c "ip route | grep default | cut -d' ' -f3")"
-    [ -n "$gw" ] || { echo "no default route in the session container"; return 1; }
+    # The permitted half needs a destination nothing has to answer on: the allow
+    # record is written when the first packet is accepted, not when a service
+    # replies, and a test that waited for a reply would be testing the network.
+    # A documentation address permitted as a literal is exactly that - in
+    # @literal_v4, on any port, routed nowhere. Added live rather than declared
+    # at launch so the file-wide pair keeps the permitted set a real one has.
+    local allowed=198.51.100.1
+    run dexec_filter /usr/local/sbin/egress-policy permit "$allowed"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
     dexec curl -s -o /dev/null --connect-timeout 5 --max-time 8 https://192.0.2.1/ 2>/dev/null || true
-    # The bridge gateway is in @host_v4, so this attempt is permitted at the
-    # filter whether or not the host answers on the port - the allow record is
-    # written when the first packet is accepted, not when a service replies.
-    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$gw:9/" 2>/dev/null || true
+    dexec curl -s -o /dev/null --connect-timeout 3 --max-time 5 "http://$allowed:9/" 2>/dev/null || true
     local found="" i
     for i in 1 2 3 4 5 6; do
         if dexec_filter grep -q '192.0.2.1' /var/log/egress-policy/connections.ndjson 2>/dev/null \
-            && dexec_filter grep -F "$gw" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
+            && dexec_filter grep -F "$allowed" /var/log/egress-policy/connections.ndjson 2>/dev/null | grep -q '"allowed"'; then
             found=yes; break
         fi
         sleep 0.5
@@ -2289,49 +2346,69 @@ s.serve_forever()' "$bind_addr" > "$port_file" 2>/dev/null &
     timeout 5 bash -c "cat < /dev/null > /dev/tcp/$bind_addr/$HOST_LISTENER_PORT"
 }
 
-@test "a host service bound to loopback is unreachable from inside the container, one bound to the bridge gateway is reachable" {
+@test "the host is unreachable on every port by default, and on exactly the ports EGRESS_HOST_PORTS names" {
     # The regression test for the escape path bin/dejima-ttyd's
-    # --interface 127.0.0.1 exists to close. The egress policy deliberately
-    # ACCEPTs OUTPUT to the Docker bridge gateway, and a tmux client attached
-    # through ttyd is a host shell - the prefix key opens a window outside the
-    # container - so a ttyd the sandbox could reach would be a full escape.
-    # Prove the containment property holds rather than trusting the flag.
-    local container host_ip loopback_port gateway_port
+    # --interface 127.0.0.1 exists to close, now one layer stronger. The host
+    # entry used to be accepted on every port, so a ttyd bound to 0.0.0.0 - and
+    # a tmux client attached through ttyd is a host shell, the prefix key opens
+    # a window outside the container - was reachable from the session. It now
+    # opens only the ports it was told to (#363).
+    local container host_ip loopback_port named_port other_port
+    local test_container="$(test_container_name hostports)"
     container="$(container_name)"
 
-    # Derived exactly as the egress policy derives the host address, so this is the one
-    # host address the container's OUTPUT chain accepts at all.
+    # Derived exactly as the egress policy derives the host address, so this is
+    # the one host address the container's OUTPUT chain names at all.
     host_ip="$(docker exec "$container" sh -c "ip route | grep default | cut -d' ' -f3")"
     [ -n "$host_ip" ]
 
     start_host_listener 127.0.0.1
     loopback_port="$HOST_LISTENER_PORT"
     start_host_listener "$host_ip"
-    gateway_port="$HOST_LISTENER_PORT"
+    named_port="$HOST_LISTENER_PORT"
+    start_host_listener "$host_ip"
+    other_port="$HOST_LISTENER_PORT"
 
     # Setup check, from the host's own vantage point: the loopback listener's
     # port must answer on 127.0.0.1 only. bind(0) on two different addresses
     # can legally return the same port number, and if it had, the container
-    # probe below would be hitting the gateway listener and failing for a
-    # reason that has nothing to do with containment.
+    # probes below would be hitting a gateway listener and failing for a reason
+    # that has nothing to do with containment.
     run timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
     [ "$status" -ne 0 ]
 
-    # Positive control, and the reason the negative one means anything: same
-    # container, same docker exec, same timeout/bash /dev/tcp probe, same
-    # gateway address - only the port differs. Without it a `status -ne 0` is
-    # equally satisfied by docker exec failing (125), bash or timeout missing
-    # from the image (127), or a container that can reach nothing at all, none
-    # of which say anything about loopback.
-    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$gateway_port"
+    # The default, on the file-wide pair, which sets no EGRESS_HOST_PORTS: a
+    # real listener on the gateway address, and the session cannot reach it.
+    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$named_port"
+    [ "$status" -ne 0 ]
+
+    # A pair told to open that one port, and nothing else about it changed.
+    start_pair hostports "$SESSION_IMAGE" \
+        -e SANDBOX_TEST_MODE=1 \
+        -e EGRESS_HOST_PORTS="$named_port"
+
+    # Positive control, and the reason the negatives mean anything: without it
+    # a `status -ne 0` is equally satisfied by docker exec failing (125), bash
+    # or timeout missing from the image (127), or a container that can reach
+    # nothing at all, none of which say anything about the clamp.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$named_port"
     [ "$status" -eq 0 ]
 
-    # Deliberately not asserting the exact status. 1 (the host RSTs, since
-    # nothing is bound on the gateway address at this port) is what it should
-    # be, but a host that DROPs on its own docker bridge instead yields 124
-    # from timeout, and that is still containment.
-    run docker exec "$container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    # The clamp itself: same container, same address, same kind of listener,
+    # only the port differs from the one above.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$other_port"
     [ "$status" -ne 0 ]
+
+    # And the original containment property, which the clamp does not replace:
+    # a host service bound to loopback is not on the gateway address at all.
+    #
+    # Deliberately not asserting the exact status on any of the negatives. 1
+    # (the host RSTs) is what a refusal should look like, but a drop yields 124
+    # from timeout, and that is still containment.
+    run docker exec "$test_container" timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host_ip/$loopback_port"
+    [ "$status" -ne 0 ]
+
+    docker rm -f "$test_container" >/dev/null 2>&1 || true
 }
 
 
@@ -2622,4 +2699,69 @@ EOF
     run settled_logs "$container"
     [[ "$output" != *"dejima-notify"* ]]
     [[ "$output" != *"remote access is enabled"* ]]
+}
+
+@test "an isolated launch's working directory is a volume the session user owns" {
+    # The one thing about --isolated that a confined test cannot decide: that
+    # the directory the launcher points a session at is usable. A volume at a
+    # path the image created is seeded from it, ownership included, and if
+    # that did not hold the session would start in a directory root owns and
+    # fail on its first write.
+    #
+    # The volume is named for the run by bin/dejima and removed in its exit
+    # trap, both of which the confined suite checks against the launcher. So
+    # this does not re-check the reaping, and deliberately does not count the
+    # host's volumes before and after: another job on a shared runner creating
+    # one between the two reads would fail a test about something else
+    # entirely.
+    local vol="dejima-test-work-$(basename "$BATS_RUN_TMPDIR")"
+    docker volume create "$vol" >/dev/null
+
+    run docker run --rm -v "$vol:/dejima/work" --entrypoint sh "$SESSION_IMAGE" -c \
+        'cd /dejima/work && touch marker && stat -c "%U" /dejima/work'
+    if [ "$status" -ne 0 ] || [ "$output" != node ]; then
+        docker volume rm "$vol" >/dev/null 2>&1 || true
+        echo "the working directory is not writable by the session user: $output"
+        return 1
+    fi
+
+    # And nothing of the host is behind it, which is the claim the mode rests
+    # on: a second volume at the same path starts empty rather than carrying
+    # what the first container wrote.
+    # Purpose before the suffix, like test_container_name: teardown's filter
+    # is anchored on the suffix, so a name ending in anything else is one it
+    # cannot sweep if this is interrupted between create and remove.
+    local other="dejima-test-work2-$(basename "$BATS_RUN_TMPDIR")"
+    docker volume create "$other" >/dev/null
+    run docker run --rm -v "$other:/dejima/work" --entrypoint sh "$SESSION_IMAGE" -c \
+        'ls -A /dejima/work'
+    local rc="$status" out="$output"
+    docker volume rm "$vol" "$other" >/dev/null 2>&1 || true
+    [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
+    [ -z "$out" ] \
+        || { echo "a second session's working directory was not empty: $out"; return 1; }
+}
+
+@test "the git shadow loads its policy in the image, and leaves other git commands alone" {
+    # The decision lives in a file the Dockerfile copies in
+    # (docker/guard-lib.sh), and every git command in a session goes through
+    # the shadow that sources it - so a COPY line that stopped matching the
+    # path would break git outright, in every session, and nothing in the
+    # confined suites would notice: they point the guards at the checkout.
+    #
+    # The file-wide pair sets no DEJIMA_PUSH_HOSTS, which fails closed, so any
+    # push is refused. Which refusal does not matter; that the guard is the one
+    # speaking does.
+    run dexec bash -c 'cd /tmp && git init -q -b feature r && cd r && git push origin feature'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Blocked by dejima's git guard"* ]] \
+        || { echo "the shadow did not reach its policy: $output"; return 1; }
+    [[ "$output" != *"No such file"* ]] \
+        || { echo "the shadow could not load the policy file: $output"; return 1; }
+
+    # And the pass-through path: everything that is not a push has to reach
+    # real git, or the shadow is a broken git rather than a guarded one.
+    run dexec git --version
+    [ "$status" -eq 0 ]
+    [[ "$output" == git\ version* ]] || { echo "$output"; return 1; }
 }

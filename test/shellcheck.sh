@@ -40,10 +40,16 @@ list_scripts() {
         # keeping the permitted set's classes from drifting between the
         # container that enforces them and the host command that adds to them.
         #
-        # Matched by directory rather than by name, because a list is a thing
-        # to forget to add to. Everything under docker/ is in the trusted
-        # computing base; the -s bash below tells shellcheck what these are.
-        case "$f" in bin/harness/*.sh|docker/*.sh) printf '%s\n' "$f"; continue ;; esac
+        # Matched by pattern rather than by name, because a list is a thing to
+        # forget to add to - and this one was forgotten anyway: bin/*-lib.sh
+        # went unchecked, which is dejima-harness-lib.sh, the code deciding
+        # which host paths may be mounted where. Everything under docker/ is in
+        # the trusted computing base; the -s bash below tells shellcheck what
+        # these are.
+        case "$f" in
+            bin/harness/*.sh|docker/*.sh|bin/*-lib.sh)
+                printf '%s\n' "$f"; continue ;;
+        esac
         head -1 "$f" | grep -qE '^#!.*(bash|sh)' && printf '%s\n' "$f"
     done
 }

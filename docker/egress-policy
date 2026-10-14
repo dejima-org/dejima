@@ -126,6 +126,12 @@ INTERNAL_OK=${EGRESS_INTERNAL_OK:-}
 INTERNAL_OK_HINT=${EGRESS_INTERNAL_OK_HINT:-EGRESS_INTERNAL_OK}
 FORGE_SSH=${EGRESS_FORGE_SSH:-0}
 HOST_ADDR=${EGRESS_HOST_ADDR:-}
+# Which TCP ports the host entry opens. Empty - the default - opens none, so
+# the address is a known destination that is refused rather than an implicit
+# grant over everything the host publishes. `any` restores the unclamped rule,
+# explicitly. See the clamp below for why none is the right default.
+HOST_PORTS=${EGRESS_HOST_PORTS:-}
+HOST_CANDIDATES=${EGRESS_HOST_CANDIDATES:-}
 # Self-check probes. example.com is reserved by RFC 2606 for documentation and
 # resolves globally, which is what makes it a usable negative: if it does not
 # resolve here, the resolver is restricting names rather than simply broken.
@@ -138,6 +144,9 @@ PROBE_AAAA_NAME=${EGRESS_PROBE_AAAA_NAME:-registry.npmjs.org}
 PROBE_ADDR4=${EGRESS_PROBE_ADDR4:-192.0.2.1}
 FETCH_ATTEMPTS=${EGRESS_FETCH_ATTEMPTS:-5}
 FETCH_TIMEOUT=${EGRESS_FETCH_TIMEOUT:-20}
+# The ceiling on one wait between attempts, so a Retry-After nobody expected
+# cannot turn a boot into an indefinite hang.
+FETCH_MAX_BACKOFF=${EGRESS_FETCH_MAX_BACKOFF:-60}
 
 say() { printf '[egress-policy] %s\n' "$*" >&2; }
 die() { printf '[egress-policy] FAILED: %s\n' "$*" >&2; exit 1; }
@@ -357,8 +366,20 @@ host_of_url() {
 # through the policy. The session container has not been started at this point -
 # the launcher waits for the readiness file - so the window is not one the agent
 # can be in.
+# The seconds the endpoint asked us to wait, if it asked. Header names are
+# case-insensitive, and the value is either a count of seconds or an HTTP date
+# - only the numeric form is honoured, because a date needs parsing to compare
+# against a clock and a wrong answer there is a sleep nobody chose.
+retry_after_from() {
+  local v
+  v=$(tr -d '\r' < "$1" 2>/dev/null \
+      | awk -F': *' 'tolower($1) == "retry-after" { print $2; exit }') || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$v"
+}
+
 fetch_forge_ranges() {
-  local out=$1 attempt rc http err
+  local out=$1 attempt rc http err retry wait limited
   # Authenticated when the launcher supplied a token. The endpoint this
   # defaults to is rate-limited per source address, unauthenticated, across
   # everything on the host - so a host that starts sandboxes in a loop exhausts
@@ -367,15 +388,38 @@ fetch_forge_ranges() {
   # the launcher's to choose.
   local -a auth=()
   [ -n "$FORGE_META_AUTH" ] && auth=(-H "$FORGE_META_AUTH")
+
+  # A file:// source is a test fixture and nothing else. test/runtime.bats
+  # starts twenty-seven container pairs in one run, each of which fetched the
+  # ranges for itself - which is what trips the endpoint's secondary limit
+  # (#357) - so the suite fetches once and points every pair at the result.
+  #
+  # Refused outside a test container, because the ranges decide which addresses
+  # the forge class reaches: a launch that could name its own source could name
+  # its own ranges. SANDBOX_TEST_MODE is set by that suite and by nothing in
+  # bin/dejima, so there is no launch this is reachable from.
+  case "$FORGE_META_URL" in
+    file://*)
+      [ "${SANDBOX_TEST_MODE:-0}" = 1 ] \
+        || die "EGRESS_FORGE_META_URL names a file:// source, which is a test fixture only. The forge's address ranges decide what the forge class reaches, so they are not read from the filesystem in a real launch."
+      ;;
+  esac
+
   for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
     rc=0
+    : > "$out.hdr"
     http=$(curl --silent --show-error --location \
                 --max-time "$FETCH_TIMEOUT" \
                 --write-out '%{http_code}' \
+                --dump-header "$out.hdr" \
                 --output "$out.part" \
                 ${auth[@]+"${auth[@]}"} \
                 "$FORGE_META_URL" 2>"$out.err") || rc=$?
-    if [ "$rc" -eq 0 ] && [ "$http" = 200 ]; then
+    # curl reports no status for a scheme that has none, so what counts as a
+    # good transfer is the scheme's own answer rather than 200 always.
+    local want_http=200
+    case "$FORGE_META_URL" in file://*) want_http=000 ;; esac
+    if [ "$rc" -eq 0 ] && [ "$http" = "$want_http" ]; then
       # Whether the body carries ranges is part of whether the fetch worked,
       # so it is decided here rather than after the loop. A rate limit is the
       # reason: it answers with a message and no ranges, sometimes over a 200,
@@ -407,12 +451,39 @@ fetch_forge_ranges() {
       # reason at all - which is the diagnostic this whole path exists to give.
       err=$(jq -re '.message' < "$out.part" 2>/dev/null || true)
       [ -n "$err" ] || err="response carried no ranges"
-      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: $err"
+      say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: http $http, $err"
     else
-      err=$(tr '\n' ' ' < "$out.err")
+      # The body first, because an HTTP failure from this endpoint carries one
+      # and curl's stderr does not: "API rate limit exceeded" names the cause,
+      # where "curl exit 0, http 403" names only the symptom. curl's own
+      # message is what is left when there was no response to carry a body.
+      err=$(jq -re '.message' < "$out.part" 2>/dev/null || true)
+      [ -n "$err" ] || err=$(tr '\n' ' ' < "$out.err")
       say "attempt $attempt/$FETCH_ATTEMPTS to fetch $FORGE_META_URL failed: curl exit $rc, http ${http:-none}${err:+, }$err"
     fi
-    [ "$attempt" -lt "$FETCH_ATTEMPTS" ] && sleep $((attempt * 2))
+
+    # A rate limit is the one failure here that clears by waiting, and the only
+    # one worth waiting long for. GitHub reports a secondary limit as 403 with
+    # a Retry-After, and a primary one as 403 or 429 - but it will also answer
+    # 200 with a message and no ranges, so the body counts as evidence too.
+    limited=0
+    case "$http" in 403|429) limited=1 ;; esac
+    case "${err,,}" in *"rate limit"*|*"abuse"*|*"too many requests"*) limited=1 ;; esac
+
+    # attempt*2 spends twenty seconds over five tries, and a secondary limit is
+    # measured in tens of seconds - so the whole sequence could sit inside one
+    # window and exhaust itself without ever reaching the other side (#357).
+    wait=$((attempt * 2))
+    [ "$limited" -eq 1 ] && wait=$((attempt * 15))
+    # What the endpoint asked for beats what this guessed, which is the only
+    # number here that is not an estimate.
+    retry=$(retry_after_from "$out.hdr") && wait=$retry
+    [ "$wait" -le "$FETCH_MAX_BACKOFF" ] || wait=$FETCH_MAX_BACKOFF
+    if [ "$attempt" -lt "$FETCH_ATTEMPTS" ]; then
+      say "waiting ${wait}s before attempt $((attempt + 1))${retry:+ (Retry-After: ${retry}s)}"
+      sleep "$wait"
+    fi
+    retry=""
   done
   die "could not fetch the forge address ranges after $FETCH_ATTEMPTS attempts; the reason for each is above. The sandbox cannot start without them - the policy would refuse every forge range, so git, gh and the API would all fail once inside."
 }
@@ -447,6 +518,90 @@ emit_forge_clamp() {
     printf '    %s daddr @%s tcp dport 22 goto permit\n' "$family" "$set"
   fi
   printf '    %s daddr @%s goto refuse\n' "$family" "$set"
+}
+
+# The host entry is the one destination nobody declared: it is the gateway of
+# the default route, derived rather than configured. Docker publishes container
+# ports on that address, so permitting it on every port reached the host's sshd,
+# anything bound to 0.0.0.0, and every published port of every other container
+# on the machine - including the remote-access front door dejima itself ships,
+# which is a host shell behind a tmux prefix key (#363).
+#
+# Nothing in a launch needs it. A host-resident forge, Loki or self-served model
+# is reached through its own entry, by name or as a literal address, and either
+# way lands in a set of its own. So the default here is no ports at all, and the
+# address stays a named destination that is refused rather than one that falls
+# through to the end of the chain - the counter says the host was reached for,
+# which an operator debugging a clamp needs to see.
+#
+# TCP only: nothing here has ever permitted UDP to the host, and DNS to it is
+# refused above with everyone else's.
+emit_host_clamp() {
+  local set=$1 p list=""
+  if [ "$HOST_PORTS" = any ]; then
+    printf '    ip daddr @%s goto permit\n' "$set"
+    return
+  fi
+  # Rebuilt element by element rather than by substituting the separators: the
+  # value may be comma-separated, space-separated or both, and a substitution
+  # turns ", " into an empty element that nft rejects.
+  for p in ${HOST_PORTS//,/ }; do
+    list="${list:+$list, }$p"
+  done
+  if [ -n "$list" ]; then
+    printf '    ip daddr @%s tcp dport { %s } goto permit\n' "$set" "$list"
+  fi
+  printf '    ip daddr @%s goto refuse\n' "$set"
+}
+
+# A typo stops the container rather than becoming a rule that permits the wrong
+# port or a ruleset nft refuses after the fact, which is the same reasoning as
+# classify_entry's: a destination that looks configured and is silently refused
+# is the worst of the three.
+# The ports of destinations the launcher configured AT the host's own address.
+#
+# The launcher knows which destinations this launch configured and cannot know
+# the host's address; this process works that out from the default route a few
+# lines below. So it passes candidates - a literal address with an explicit
+# port, each one it is sure of - and the decision is made here, where both
+# halves are known. Nothing resolves a name on either side: a candidate whose
+# address is not the host's is simply not the host's.
+#
+# Without this the clamp, which is matched before every wider rule, answers
+# `ports none` for a host-resident Loki or self-served model at the gateway
+# address - working before only because the open-class permit answered first.
+fold_host_candidates() {  # <host address>...
+  local cand addr port a
+  [ -n "$HOST_CANDIDATES" ] || return 0
+  # `any` is already wider than anything a candidate could add.
+  [ "$HOST_PORTS" = any ] && return 0
+  for cand in $HOST_CANDIDATES; do
+    addr=${cand%:*}
+    port=${cand##*:}
+    case "$port" in
+      ""|*[!0-9]*) die "EGRESS_HOST_CANDIDATES entry '$cand' has no TCP port" ;;
+    esac
+    for a in "$@"; do
+      [ "$addr" = "$a" ] || continue
+      case ",${HOST_PORTS},"  in
+        *",$port,"*) ;;
+        *) HOST_PORTS="${HOST_PORTS:+$HOST_PORTS,}$port" ;;
+      esac
+      break
+    done
+  done
+}
+
+validate_host_ports() {
+  local p
+  [ "$HOST_PORTS" = any ] && return 0
+  for p in ${HOST_PORTS//,/ }; do
+    [[ $p =~ ^[0-9]+(-[0-9]+)?$ ]] \
+      || die "EGRESS_HOST_PORTS entry '$p' is not a TCP port or a low-high range (or the whole value 'any')"
+    local lo=${p%%-*} hi=${p##*-}
+    { [ "$lo" -ge 1 ] && [ "$hi" -le 65535 ] && [ "$lo" -le "$hi" ]; } \
+      || die "EGRESS_HOST_PORTS entry '$p' is not within 1-65535, low first"
+  done
 }
 
 # Rules are generated into one file and loaded with `nft -f`, which is a single
@@ -651,13 +806,28 @@ EOF
 
     cat <<EOF
 
+    # The container's own host, as a single address, on the ports it was told
+    # to open and no others.
+    #
+    # Before the open class, not after it, because this is the narrower rule
+    # and the first match wins. The host's address reaches literal_v4 by
+    # several ordinary routes - a host-resident LOKI_URL, a self-served
+    # model's base_url, \`dejima-allow <gateway>\` - and from there the open
+    # permit below answered for it first, on every port, including sshd and
+    # the remote-access front door. Configuring one host service opens that
+    # service, which is what docs/security.md says it does.
+EOF
+    emit_host_clamp host_v4
+
+    cat <<EOF
+
     # The open class: names the launcher permitted and addresses it supplied,
     # on any port. DNS to them is refused above along with everyone else's.
     ip daddr @oname_v4 goto permit
     ip daddr @literal_v4 goto permit
+EOF
 
-    # The container's own host, as a single address.
-    ip daddr @host_v4 goto permit
+    cat <<EOF
 
     # Anything else: logged, then refused. The chain policy is drop as a
     # backstop, but nothing should ever reach it.
@@ -771,9 +941,21 @@ EOF
   fi
 }
 
+# The forge credential, removed from a daemon's environment at the point it
+# starts rather than somewhere upstream of it. All three of these parse content
+# the session's own traffic decides, and all three are reachable by more than
+# one call path: `dejima-allow` runs `egress-policy permit` through `docker
+# exec`, which gets the filter container's configured environment, and both
+# permit_name and rollback_entries restart the resolver. An unset earlier in
+# one path says nothing about the others; this says it where it has to hold.
+#
+# `env -u` rather than an unset, so the scrub is visible on the line that
+# starts the daemon and cannot be separated from it by an edit elsewhere.
+readonly NO_CREDENTIAL=(env -u GH_TOKEN -u EGRESS_FORGE_META_AUTH)
+
 start_resolver() {
   stop_daemon "$RESOLVER_PID" dnsmasq
-  dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
+  "${NO_CREDENTIAL[@]}" dnsmasq -C "$RESOLVER_CONF" || die "the resolver did not start"
   wait_for_daemon dnsmasq
 
   # Waiting for the process is not waiting for the resolver. dnsmasq
@@ -862,7 +1044,7 @@ start_connection_log() {
   stop_daemon "$ULOGD_PID" ulogd
   id -u "$LOGGER_USER" >/dev/null 2>&1 \
     || die "the image did not create the $LOGGER_USER account, which the connection logger drops to"
-  ulogd -d -u "$LOGGER_USER" -c "$ULOGD_CONF" -p "$ULOGD_PID" \
+  "${NO_CREDENTIAL[@]}" ulogd -d -u "$LOGGER_USER" -c "$ULOGD_CONF" -p "$ULOGD_PID" \
     || die "the connection logger did not start"
   wait_for_daemon ulogd
 }
@@ -885,7 +1067,7 @@ start_lookup_log() {
   # resolver's log - and that is the last thing in this container that should
   # be running with privilege. It opens two files and then only reads and
   # writes them, so the drop costs it nothing.
-  nohup gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
+  nohup "${NO_CREDENTIAL[@]}" gosu "$LOGGER_USER" "$LOOKUP_LOGGER" --source "$RESOLVER_LOG" --output "$LOOKUP_LOG" \
     >/dev/null 2>>"$LOGDIR/lookup-log.err" &
   echo $! > "$LOOKUP_PID"
   sleep 0.3
@@ -953,8 +1135,31 @@ retry_positive() {
 # Ordered so that a failure names its own cause: the positive checks come
 # first, because "a blocked destination was refused" means nothing until
 # something that should work has been shown to work.
+# Which permitted name the resolver checks are about.
+#
+# Normally the meta URL's host, which is a permitted forge-class name by
+# construction. A file:// source has no host at all - that is the suite's
+# cached-ranges fixture (#357) - and handing an empty name to check 3 asked the
+# resolver to look up "" and failed the boot on it.
+#
+# The fallback is a permitted forge-class name, because the property those
+# checks state is about the POLICY: that the resolver resolves a permitted name
+# and files its address in that name's own set. Where the ranges were read from
+# is a different question, and check 5's.
+#
+# sed rather than head: a producer whose pipe closes early takes SIGPIPE, and
+# pipefail makes that the pipeline's status - see the note on grep -q above.
+verify_subject() {
+  local host=$1
+  if [ -n "$host" ]; then
+    printf '%s' "$host"
+    return 0
+  fi
+  entries_of forge name | sed -n '1p'
+}
+
 verify() {
-  local forge_host=$1 rc answer set_name
+  local forge_host=$1 rc answer set_name subject
 
   pgrep -x dnsmasq >/dev/null || die "check 1: the resolver is not running"
   pgrep -x ulogd   >/dev/null || die "check 1: the connection logger is not running"
@@ -968,9 +1173,13 @@ verify() {
   [ "$running_as" = "$RESOLVER_USER" ] \
     || die "check 2: the resolver is running as '${running_as:-unknown}', not $RESOLVER_USER, so the rule permitting it to reach an upstream resolver is keyed to the wrong account"
 
-  answer=$(retry_positive 3 resolve_one "$forge_host") || true
+  subject=$(verify_subject "$forge_host")
+  [ -n "$subject" ] \
+    || die "check 3: there is no permitted forge-class name to check the resolver against, and no host in $FORGE_META_URL to fall back on"
+
+  answer=$(retry_positive 3 resolve_one "$subject") || true
   [ -n "$answer" ] \
-    || die "check 3: the permitted name $forge_host did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$forge_host")"
+    || die "check 3: the permitted name $subject did not resolve through the local resolver - name resolution is broken, not restricted.$(why_no_answer "$subject")"
 
   # The resolver is also what puts a permitted name's addresses into the
   # allow-list, and which set it uses is the name's class. Checking membership
@@ -984,13 +1193,25 @@ verify() {
   # two cannot look in different sets.
   set_name=$(set_for_class forge)
   nft get element inet "$TABLE" "$set_name" "{ $answer }" >/dev/null 2>&1 \
-    || die "check 4: $forge_host resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
+    || die "check 4: $subject resolved to $answer but the resolver did not add it to $set_name - permitted names would resolve and then be refused"
 
-  rc=0
-  retry_positive 3 curl --silent --show-error --output /dev/null \
-    --connect-timeout 5 --max-time 20 "$FORGE_META_URL" || rc=$?
-  [ "$rc" -eq 0 ] \
-    || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
+  # Skipped for a file:// source, and said out loud. This check asserts that a
+  # permitted destination is reachable THROUGH the policy, and a local file is
+  # not one - reaching it would pass while proving nothing. That is a real
+  # reduction on the runs using the cached ranges, which is why it is a line in
+  # the log rather than a silent pass.
+  case "$FORGE_META_URL" in
+    file://*)
+      say "check 5 skipped: the ranges came from a file, so reading it again says nothing about what the policy permits"
+      ;;
+    *)
+      rc=0
+      retry_positive 3 curl --silent --show-error --output /dev/null \
+        --connect-timeout 5 --max-time 20 "$FORGE_META_URL" || rc=$?
+      [ "$rc" -eq 0 ] \
+        || die "check 5: the permitted destination $FORGE_META_URL is not reachable through the policy (curl exit $rc)"
+      ;;
+  esac
 
   # The same address, on the port the opt-in gates. With the opt-in off it must
   # be refused even though the address was reached by name, which is the whole
@@ -1243,7 +1464,12 @@ resolve_one() {
   local answers line
   # A only: the resolver is configured to answer no AAAA at all, so asking for
   # one spends a query to be told nothing.
-  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 0
+  # Non-zero when dig itself failed, not zero: that is a lookup which did not
+  # come back - a resolver a moment behind the container is exactly it - and so
+  # the one case the positive checks' retry exists to absorb. Returning 0 there
+  # reported success with no address, which retry_positive takes as an answer
+  # and the caller then dies on (#345).
+  answers=$(dig +short +time=3 +tries=2 @127.0.0.1 "$1" A 2>/dev/null) || return 1
   while IFS= read -r line; do
     [[ "$line" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || continue
     printf '%s\n' "$line"
@@ -1306,7 +1532,14 @@ cmd_apply() {
   discover_upstreams
 
   local host_addrs forge_host
+  # Discover, then fold the launcher's candidates in, then validate the whole
+  # list: the candidates' ports become part of what the clamp permits, so they
+  # are held to the same check rather than trusted for having crossed a
+  # process boundary.
   host_addrs=$(discover_host_addr)
+  # shellcheck disable=SC2086
+  fold_host_candidates $host_addrs
+  validate_host_ports
   forge_host=$(host_of_url "$FORGE_META_URL")
 
   build_entries "$forge_host"
@@ -1320,6 +1553,11 @@ cmd_apply() {
 
   local meta="$RUNDIR/forge-meta.json"
   fetch_forge_ranges "$meta"
+  # The one request that needed the credential has been made, so it stops here
+  # for the rest of this process too. Each daemon start scrubs its own
+  # environment as well (NO_CREDENTIAL), because `permit` reaches them without
+  # ever coming through here.
+  unset FORGE_META_AUTH EGRESS_FORGE_META_AUTH
 
   local ranges forge4
   ranges=$(jq -r "$FORGE_META_FILTER" < "$meta" | grep -v '^null$' | grep -v '^$') \
@@ -1339,7 +1577,7 @@ cmd_apply() {
   resolver_uid=$(id -u "$RESOLVER_USER")
 
   apply_ruleset "$forge4" "$host_addrs" "$resolver_uid"
-  say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs), forge ssh=$FORGE_SSH"
+  say "policy applied: $(printf '%s\n' "$ranges" | wc -l) forge ranges, host $(printf '%s ' $host_addrs) on ports ${HOST_PORTS:-none}, forge ssh=$FORGE_SSH"
 
   write_log_config
   start_connection_log
@@ -1426,13 +1664,26 @@ rollback_entries() {
 # An address needs no resolution and no restart: it goes straight into the sets
 # its class uses. Both sets are interval sets, so a prefix works as well as a
 # single address.
+# A forge-class address belongs in both sets, and the adds are not one
+# transaction: if the second fails, the first has to come back out. Otherwise
+# the address the forge class says is HTTPS-only is left in literal_v4, which
+# permits every port, while the entries file rolls back - so nothing reports a
+# grant that is live for the rest of the session.
+#
+# Deleting it is unconditional, which can take back an element that was in that
+# set from somewhere else. That direction is safe: the refusal already rolled
+# the record back, so a narrower live set agrees with what `entries` says.
 permit_address() {
   local class=$1 value=$2
   nft add element inet "$TABLE" literal_v4 "{ $value }" \
     || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the allow-list"; }
   if [ "$class" = forge ]; then
-    nft add element inet "$TABLE" forge_v4 "{ $value }" \
-      || { mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"; die "could not add $value to the forge class"; }
+    nft add element inet "$TABLE" forge_v4 "{ $value }" || {
+      nft delete element inet "$TABLE" literal_v4 "{ $value }" 2>/dev/null \
+        || say "WARNING: $value is still in the any-port allow-list and could not be removed; restart the session"
+      mv "$ENTRIES_FILE.prev" "$ENTRIES_FILE"
+      die "could not add $value to the forge class"
+    }
   fi
   say "$value permitted ($class class, direct)"
 }

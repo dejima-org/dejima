@@ -569,6 +569,23 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
     [[ "$output" == *"nonesuch"* ]]
 }
 
+@test "the isolated mode has no config key, in any plausible spelling" {
+    # --isolated is a flag and nothing else, on purpose: it changes what the
+    # session IS rather than how much it may do, and a file that decided it
+    # would make the next launch's answer to "where is my work" depend on a
+    # line nobody reread. The schema is what holds that - an unknown key is
+    # fatal, so every spelling someone might reach for has to stay unknown.
+    local key
+    for key in isolated isolate ephemeral no_workspace; do
+        write_config '[core]' "$key = on"
+        run lib config_validate
+        [ "$status" -ne 0 ] \
+            || { echo "[core] $key was accepted, so the mode is settable from a file"; return 1; }
+        [[ "$output" == *"unknown key"* ]] || { echo "$output"; return 1; }
+    done
+    return 0
+}
+
 @test "an invalid value is fatal and names the key" {
     write_config '[audit]' 'keep = 0'
     run lib config_validate
@@ -791,7 +808,7 @@ write_defaults() { printf '%s\n' "$@" > "$CONFIG_DIR/defaults.conf"; }
 
 _identity_fixture() {
     ID_DIR="$(mktemp -d)"
-    : > "$ID_DIR/default-key"; : > "$ID_DIR/work-key"; : > "$ID_DIR/oss-key"
+    printf "k\n" | tee "$ID_DIR/default-key" "$ID_DIR/work-key" > "$ID_DIR/oss-key"
     : > "$ID_DIR/default-token"; : > "$ID_DIR/work-token"
     write_config '[core]' 'forge = gitea' "ssh_key = $ID_DIR/default-key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
@@ -1009,7 +1026,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     # forge = none, workflow = local-only: provider_validate_selection runs
     # ahead of this check, and the default gitea/worktree-pr pair is refused
@@ -1285,7 +1302,7 @@ _identity_fixture() {
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only'
     workspace="$(mktemp -d)"
@@ -1315,7 +1332,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://api.example/v1' \
@@ -1385,12 +1402,14 @@ EOF
 
 @test "the github forge with no push_token_file leaves the read-only GH_TOKEN alone at launch" {
     # forge_env_exports must not emit `GH_TOKEN=` (empty) when
-    # push_token_file is unset: `-e GH_TOKEN=` on `docker
-    # compose run` overrides docker-compose.yml's own `environment: GH_TOKEN:
-    # ${GH_TOKEN:-}` entry - the one carrying the independent read-only
-    # [github] token_file value every session is supposed to get regardless
-    # of forge. Asserted on the actual argument list handed to `docker`, not
-    # on a warning, so this catches the container-facing symptom directly.
+    # push_token_file is unset: `-e GH_TOKEN=` on `docker compose run`
+    # overrides docker-compose.yml's own `environment: GH_TOKEN:` entry - the
+    # one carrying the independent read-only [github] token_file value every
+    # session is supposed to get regardless of forge. (That entry reads
+    # bin/dejima's SANDBOX_GH_TOKEN, which is the same value except for an
+    # isolated launch; the override is what matters here either way.)
+    # Asserted on the actual argument list handed to `docker`, not on a
+    # warning, so this catches the container-facing symptom directly.
     FAKE_HOME="$(mktemp -d)"
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
@@ -1449,7 +1468,7 @@ EOF
     # dedicated key file is the headless form of that, and keeps this test
     # independent of whether the host running it has an agent.
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = github' 'workflow = worktree-pr' \
         "ssh_key = $key" \
@@ -1506,7 +1525,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     local key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' 'forge = gitea' 'workflow = branch-push' \
         "ssh_key = $key" \
@@ -1530,7 +1549,7 @@ EOF
     mkdir -p "$FAKE_HOME/.claude"
     echo '{}' > "$FAKE_HOME/.claude/settings.json"
     key="$FAKE_HOME/sandbox-key"
-    : > "$key"
+    printf "not-a-real-key\n" > "$key"
     chmod 600 "$key"
     write_config '[core]' "ssh_key = $key" 'forge = none' 'workflow = local-only' \
         '[logging]' 'loki_url = https://loki.example.invalid'
@@ -1707,7 +1726,7 @@ _rw_setup() {
     mkdir -p "$RW_HOME/.claude"
     echo '{}' > "$RW_HOME/.claude/settings.json"
     RW_KEY="$RW_HOME/sandbox-key"
-    : > "$RW_KEY"
+    printf "not-a-real-key\n" > "$RW_KEY"
     chmod 600 "$RW_KEY"
 }
 
@@ -1829,6 +1848,139 @@ _kill_agent() { [ -n "${RW_AGENT_PID:-}" ] && kill "$RW_AGENT_PID" 2>/dev/null; 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *"no identities loaded"* ]] || { echo "$output"; return 1; }
     rm -rf "$workspace"
+}
+
+# A launch that really reaches `docker compose`, with a pushing workflow, so the
+# rule that blanks the agent socket for a workflow that never pushes is not the
+# one doing the work. Its own fixture rather than _rw_setup's: this needs a
+# forge configured, and stdin closed because a full launch opens /dev/tty,
+# which under bats is not the terminal it expects.
+#
+# The stub records its own environment rather than its arguments, because the
+# volume line resolves ${SSH_AUTH_SOCK:-/dev/null} inside docker-compose - so
+# the environment handed to it IS whether the agent is mounted. Into a file,
+# because the launch prints plenty of its own and the assertion is about one
+# value.
+#
+# Leaves AGENT_LOG and AGENT_OUT for the caller to read on failure.
+_agent_launch() {  # <ssh_key or "">
+    local key="$1" h c s w
+    # The suite exports DEJIMA_CONFIG_DIR, which is where a launch under it
+    # reads its config from - a config written under $HOME would not be found.
+    h="$(mktemp -d)"; c="$CONFIG_DIR"
+    printf 'tok\n' > "$c/token"
+    {
+        printf '[core]\nharness = claude-code\nfirewall = on\nupdate_check = off\n'
+        printf 'forge = gitea\nworkflow = worktree-pr\n'
+        printf '[harness.claude-code]\nbackend = anthropic\n'
+        printf '[forge.gitea]\nssh_host = git.example\napi = https://api.example\n'
+        # The forge credential moves under the identity when there is one: an
+        # identity that leaves one behind is a session acting under whichever
+        # account owns it, which the launch refuses outright.
+        if [ -n "$key" ]; then
+            printf '[identity.default]\nssh_key = %s\ntoken_file = %s/token\n' "$key" "$c"
+        else
+            printf 'token_file = %s/token\n' "$c"
+        fi
+    } > "$c/config"
+    AGENT_LOG="$(mktemp)"
+    s="$(mktemp -d)"
+    cat > "$s/docker" <<'STUB'
+#!/bin/sh
+printf 'SSH_AUTH_SOCK=[%s]\n' "${SSH_AUTH_SOCK-unset}" >> "$AGENT_SOCK_LOG"
+exit 0
+STUB
+    chmod +x "$s/docker"
+    w="$(mktemp -d)"; git -C "$w" init -q
+    # `|| true` because a launch here ends however the stubbed session ended,
+    # and this is not a test about its exit status.
+    AGENT_OUT="$(HOME="$h" PATH="$s:$PATH" SSH_AUTH_SOCK="$AGENT_SOCK" \
+        AGENT_SOCK_LOG="$AGENT_LOG" \
+        bash "$REPO_ROOT/bin/dejima" "$w" </dev/null 2>&1 || true)"
+    rm -rf "$h" "$s" "$w"
+}
+
+# A real agent, because bin/dejima tests the socket with `[ -S ]` and refuses a
+# path that is not one.
+_real_agent() {
+    eval "$(ssh-agent -s)" >/dev/null
+    AGENT_SOCK="$SSH_AUTH_SOCK"
+    AGENT_PID="$SSH_AGENT_PID"
+}
+
+@test "a configured ssh_key means the operator's agent is not in the container at all" {
+    # entrypoint.sh loads that key into an agent of its own and points
+    # SSH_AUTH_SOCK at it, so the forwarded one was already unused - but it
+    # stayed mounted at the path docker-compose.yml names, where
+    # `SSH_AUTH_SOCK=/ssh-agent ssh ...` signs with the operator's personal
+    # identities. Choosing a dedicated key has to mean the personal agent is
+    # not in the container, not that it is merely not the default.
+    local key
+    _real_agent
+    key="$(mktemp)"; printf 'not-a-real-key\n' > "$key"; chmod 600 "$key"
+
+    _agent_launch "$key"
+    kill "$AGENT_PID" 2>/dev/null || true
+    rm -f "$key"
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "SSH_AUTH_SOCK=[]" ] \
+        || { echo "the forwarded agent still reached compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "without a configured ssh_key the forwarded agent still reaches the container" {
+    # The positive control for the test above, and the reason it means
+    # anything: without it, a launch that simply never set the variable would
+    # satisfy that assertion too.
+    _real_agent
+
+    _agent_launch ""
+    local want="SSH_AUTH_SOCK=[$AGENT_SOCK]"
+    kill "$AGENT_PID" 2>/dev/null || true
+    [ -s "$AGENT_LOG" ] \
+        || { echo "the launch never reached docker:"; echo "$AGENT_OUT" | tail -15; return 1; }
+    [ "$(sort -u "$AGENT_LOG")" = "$want" ] \
+        || { echo "the forwarded agent did not reach compose:"; sort -u "$AGENT_LOG"; return 1; }
+}
+
+@test "an empty ssh_key file is not a key, and a pushing launch says so" {
+    # It passes the is-a-file check and loads nothing in the container, so it
+    # cannot be what stops the forwarded agent being mounted. Treated as no key
+    # at all: harmless for a workflow that never pushes - which is what most of
+    # this suite's fixtures are, with an empty file standing in for a path -
+    # and named for one that does.
+    # A pushing workflow with an empty key and no agent: the one case where it
+    # costs anything, and the message names the file rather than only saying no
+    # key is set. The with-an-agent direction is its own test above.
+    AGENT_SOCK=""
+    local key; key="$(mktemp)"; chmod 600 "$key"
+    _agent_launch "$key"
+    rm -f "$key"
+    [[ "$AGENT_OUT" == *"names an empty file"* ]] \
+        || { echo "an empty key went unmentioned:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    [ ! -s "$AGENT_LOG" ] \
+        || { echo "the launch reached docker with no credential at all"; return 1; }
+}
+
+@test "an empty ssh_key file with an agent running says the agent is still signing" {
+    # The configuration nothing else would tell an operator about: the key is
+    # configured, the launch starts, and pushes work - because the personal
+    # agent is doing them, which is what a dedicated key is chosen to avoid.
+    # No key is loaded, so the withdrawal above does not fire.
+    local key
+    _real_agent
+    key="$(mktemp)"; chmod 600 "$key"
+
+    _agent_launch "$key"
+    kill "$AGENT_PID" 2>/dev/null || true
+    rm -f "$key"
+    [[ "$AGENT_OUT" == *"names an empty file"* ]] \
+        || { echo "an empty key went unmentioned:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    [[ "$AGENT_OUT" == *"will sign for this session"* ]] \
+        || { echo "the consequence went unnamed:"; echo "$AGENT_OUT" | tail -12; return 1; }
+    # And it is not a false alarm: the agent really does reach compose here.
+    [ "$(sort -u "$AGENT_LOG")" = "SSH_AUTH_SOCK=[$AGENT_SOCK]" ] \
+        || { echo "the warning does not match what reached compose:"; sort -u "$AGENT_LOG"; return 1; }
 }
 
 # The positive control for the test above: with no key configured the
@@ -3469,7 +3621,7 @@ EOF
     # The unnamed default gets a name, which is what lets it carry a git name
     # and a forge credential beside the key rather than those coming from
     # three different places.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/tok"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/default-key" > "$ID_DIR/tok"
     write_config '[core]' 'forge = gitea' \
         '[forge.gitea]' 'ssh_host = git.example' 'api = https://git.example/api/v1' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
@@ -3484,7 +3636,7 @@ EOF
 @test "[core] ssh_key alongside [identity.default] is refused, not ranked" {
     # Two spellings of one thing. Which key a session pushed with is not
     # something to work out from precedence rules.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/new-key"
+    ID_DIR="$(mktemp -d)"; printf "k\n" | tee "$ID_DIR/old-key" > "$ID_DIR/new-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         '[identity.default]' "ssh_key = $ID_DIR/new-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3497,7 +3649,7 @@ EOF
 @test "[core] ssh_key on its own still works, and says what replaced it" {
     # Deprecated, not removed: it is how every config written before
     # identities existed says this.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key"
     run "$REPO_ROOT/bin/dejima" --print-config
     [ "$status" -eq 0 ] || { echo "a pre-identity config stopped working: $output"; return 1; }
@@ -3508,7 +3660,7 @@ EOF
 }
 
 @test "a named identity still beats [identity.default]" {
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/default-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/default-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/default-key" \
         '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
@@ -3523,7 +3675,7 @@ EOF
     # from the refusal - adding [identity.default] would stop it starting.
     # Finding that out on the launch that breaks is worse than being told now,
     # so the warning is about the config rather than about this launch.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/old-key"; : > "$ID_DIR/bot-key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/old-key"; printf "not-a-real-key\n" > "$ID_DIR/bot-key"
     write_config '[core]' 'forge = none' "ssh_key = $ID_DIR/old-key" \
         'identity = bot' '[identity.bot]' "ssh_key = $ID_DIR/bot-key"
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3544,7 +3696,7 @@ EOF
     # The other half of a deprecation warning: it has to stop. One that fires
     # after the migration is one an operator learns to ignore, which is how
     # the next warning gets missed too.
-    ID_DIR="$(mktemp -d)"; : > "$ID_DIR/key"
+    ID_DIR="$(mktemp -d)"; printf "not-a-real-key\n" > "$ID_DIR/key"
     write_config '[core]' 'forge = none' \
         '[identity.default]' "ssh_key = $ID_DIR/key" 'user_name = dejima agent'
     run "$REPO_ROOT/bin/dejima" --print-config
@@ -3781,6 +3933,188 @@ EOF
     grep -q -- "$RW_HOME/.claude/.credentials.json:" "$docker_log" \
         && { echo "the real credential was mounted anyway"; return 1; }
     rm -rf "$workspace"
+}
+
+@test "the staged ~/.claude.json carries the launching project's entry and no other" {
+    # The projects map keys per-project state by absolute path, so a verbatim
+    # copy tells a session the name of every project on the host, a sample of
+    # each one's filenames (exampleFiles) and what each has cost. Narrowed for
+    # the reason #104 narrowed the projects MOUNT: the whole map is every
+    # project's (#380).
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A worktree under the project, because a session's cwd routinely is one and
+    # Claude Code keys that path separately - and a sibling whose path merely
+    # begins with the project's, which is the comparison a bare prefix test
+    # gets wrong.
+    #
+    # The other project's path is deliberately dull. Calling it anything
+    # credential-shaped - "secret" was the first attempt - makes the staged
+    # copy trip dejima's own credential scan, so the launch refuses and this
+    # test passes on a refusal rather than on the narrowing it is named for.
+    mkdir -p "$workspace/.worktrees/feature"
+    cat > "$RW_HOME/.claude.json" <<JSON
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST",
+ "projects":{
+   "$workspace":{"exampleFiles":["mine.py"],"lastCost":1},
+   "$workspace/.worktrees/feature":{"exampleFiles":["branch.py"]},
+   "${workspace}-sibling":{"exampleFiles":["sibling.py"]},
+   "/home/someone/else/their-project":{"exampleFiles":["theirs.py"],"lastCost":99}},
+ "numStartups":7}
+JSON
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+
+    local stub log staged
+    stub="$(mktemp -d)"; log="$(mktemp)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; return 1; }
+
+    # The project and anything under it.
+    [ "$(jq -r --arg p "$workspace" '.projects[$p].lastCost' "$staged")" = 1 ] \
+        || { echo "the launching project's own entry is gone"; return 1; }
+    [ "$(jq -r --arg p "$workspace/.worktrees/feature" '.projects[$p].exampleFiles[0]' "$staged")" = branch.py ] \
+        || { echo "a worktree inside the project was dropped"; return 1; }
+
+    # And nothing else, including the sibling a bare prefix test would keep.
+    [ "$(jq -r --arg p "${workspace}-sibling" '.projects | has($p)' "$staged")" = false ] \
+        || { echo "a sibling path sharing the project's prefix was kept"; return 1; }
+    [ "$(jq -r '.projects | has("/home/someone/else/their-project")' "$staged")" = false ] \
+        || { echo "another project reached the container"; return 1; }
+    [ "$(jq -r '.projects | length' "$staged")" = 2 ] \
+        || { echo "wrong number of entries: $(jq -c '.projects | keys' "$staged")"; return 1; }
+    grep -q 'theirs.py' "$staged" \
+        && { echo "another project's filenames reached the container"; return 1; }
+
+    # The rest of the file is why the copy exists, and the credential still goes.
+    [ "$(jq -r '.numStartups' "$staged")" = 7 ] || { echo "lost app state"; return 1; }
+    [ "$(jq -r '.primaryApiKey // "absent"' "$staged")" = absent ] \
+        || { echo "the console API key reached the container"; return 1; }
+    rm -rf "$workspace" "$stub" "$log" "$staged"
+}
+
+@test "the proxy-off re-seed narrows the projects map too" {
+    # With the proxy off for a backend whose credential IS ~/.claude.json,
+    # the staged copy is re-seeded so the key survives - and that was a plain
+    # `cp`, which put every other project's entry back. Worse, it ran after
+    # the credential scan had read the narrowed copy, so nothing ever looked
+    # at what came back.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    cat > "$RW_HOME/.claude.json" <<JSON
+{"primaryApiKey":"sk-ant-api03-REAL-KEY-FROM-THE-HOST",
+ "projects":{
+   "$workspace":{"exampleFiles":["mine.py"],"lastCost":1},
+   "/home/someone/else/their-project":{"exampleFiles":["theirs.py"]}},
+ "numStartups":7}
+JSON
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic-api-key' '[backend.anthropic-api-key]' \
+                 "credential_file = $RW_HOME/.claude.json" 'proxy = off'
+
+    local stub staged
+    stub="$(mktemp -d)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -s "$staged" ] || { echo "no staged ~/.claude.json was mounted"; return 1; }
+
+    # The credential is the point of this path, so it stays.
+    [ "$(jq -r '.primaryApiKey' "$staged")" = sk-ant-api03-REAL-KEY-FROM-THE-HOST ] \
+        || { echo "proxy = off did not pass the credential through"; return 1; }
+    # And nothing else came back with it.
+    [ "$(jq -r '.projects | length' "$staged")" = 1 ] \
+        || { echo "the re-seed restored other projects: $(jq -c '.projects|keys' "$staged")"
+             return 1; }
+    grep -q 'theirs.py' "$staged" \
+        && { echo "another project's filenames reached the container"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = 7 ] || { echo "lost app state"; return 1; }
+    rm -rf "$workspace" "$stub" "$staged"
+}
+
+@test "a backend needing no credential mounts no credential" {
+    # P1, driven rather than grepped. The mount sat under
+    # `elif [ -f ~/.claude/.credentials.json ]`, which fired for anything the
+    # proxy branch did not take - including a backend whose credential kind
+    # is none, the self-served arrangement docs/security.md calls the one with
+    # nothing in the container to steal. The real subscription login was
+    # mounted read-write into a session that had no use for it.
+    #
+    # The grep over the branch's conditions is in static.bats and would still
+    # pass on a restructuring that tested the same words differently, which is
+    # why this one reads the argv a launch actually produced.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    # A real-looking credential on the host, which is what there is to leak.
+    printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-REAL","refreshToken":"r","expiresAt":1}}\n' \
+        > "$RW_HOME/.claude/.credentials.json"
+    chmod 600 "$RW_HOME/.claude/.credentials.json"
+    # cline rather than claude-code: a credential kind of none means a backend
+    # the harness reaches directly, and claude-code speaks no API that has
+    # one. This is the pairing the release pass reproduced it with.
+    local cline_state; cline_state="$(mktemp -d)"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = cline' '[harness.cline]' \
+                 "state_dir = $cline_state" 'model = m' 'backend = self-hosted' \
+                 '[backend.self-hosted]' 'base_url = http://127.0.0.1:11434'
+
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "$RW_HOME/.claude/.credentials.json:$RW_HOME/.claude/.credentials.json" \
+        "$docker_log" \
+        && { echo "a self-served backend was handed the real credential"; return 1; }
+    rm -rf "$cline_state"
+
+    # And the arrangement the mount IS for still gets it: this backend's
+    # credential is that file, and the proxy is off for it.
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' \
+                 'backend = anthropic' '[backend.anthropic]' 'proxy = off'
+    _rw_launch "$workspace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "$RW_HOME/.claude/.credentials.json:$RW_HOME/.claude/.credentials.json" \
+        "$docker_log" \
+        || { echo "proxy = off no longer mounts the credential it is for"; return 1; }
+    rm -rf "$workspace"
+}
+
+@test "a projects key that is not a map does not refuse the launch" {
+    # Narrowing a `projects` that holds a string would error, and the staging
+    # treats a jq failure as fatal - so an odd but parseable file would become
+    # a launch that will not start, over a key with nothing in it to narrow.
+    _rw_setup
+    workspace="$(mktemp -d)"
+    printf '{"projects":"not-a-map","numStartups":3}\n' > "$RW_HOME/.claude.json"
+    write_config '[core]' "ssh_key = $RW_KEY" 'forge = none' 'workflow = local-only' \
+                 'harness = claude-code' '[harness.claude-code]' 'backend = anthropic'
+    local stub staged
+    stub="$(mktemp -d)"; staged="$(mktemp)"
+    cat > "$stub/docker" <<EOF
+#!/bin/sh
+[ -n "\$SANDBOX_CLAUDE_JSON_FILE" ] && cp "\$SANDBOX_CLAUDE_JSON_FILE" "$staged" 2>/dev/null
+exit 0
+EOF
+    chmod +x "$stub/docker"
+    HOME="$RW_HOME" PATH="$stub:$PATH" SSH_AUTH_SOCK= \
+        run "$REPO_ROOT/bin/dejima" "$workspace"
+    [ "$status" -eq 0 ] || { echo "an odd projects key refused the launch: $output"; return 1; }
+    [ "$(jq -r '.numStartups' "$staged")" = 3 ] || { echo "the copy lost its state"; return 1; }
+    rm -rf "$workspace" "$stub" "$staged"
 }
 
 @test "a console API key in ~/.claude.json does not reach the container" {
@@ -4107,6 +4441,46 @@ _scan_staged_has_token() {
         || { echo "a one-launch answer was recorded"; \
              cat "$CONFIG_DIR/credential-scan.decisions"; return 1; }
     rm -rf "$workspace" "$SCAN_STUB" "$SCAN_STAGED"
+}
+
+@test "a scrub finds the value again whatever the key is spelled like" {
+    # Deleting by document order made each later index stale: the second secret
+    # survived and an innocent value went instead. The staged file is mounted
+    # into the container, so the operator answers "keep it out" and it goes in.
+    #
+    # Driven against the program's own functions rather than a reimplementation
+    # of the ordering, which is the thing under test.
+    local scan="$REPO_ROOT/bin/dejima-credential-scan"
+    run python3 - "$scan" <<'PYEOF'
+import json, sys
+mod = {}
+exec(compile(open(sys.argv[1]).read(), "scan", "exec"), mod)
+doc = {"mcpServers": {"x": {"args": ["sk-SECRET-ONE-aaaaaaaaaaaaaaaaaaaa",
+                                     "sk-SECRET-TWO-bbbbbbbbbbbbbbbbbbbb",
+                                     "--harmless-flag"]}}}
+def scrub(doc, want):
+    pairs = list(mod["walk_json"](json.loads(json.dumps(doc))))
+    drop = [parts for p, v, parts in pairs if p in want]
+    out = json.loads(json.dumps(doc))
+    mod["delete_json_components"](out, drop)
+    return out
+
+print(json.dumps(scrub(doc, {"mcpServers.x.args[0]",
+                             "mcpServers.x.args[1]"})["mcpServers"]["x"]["args"]))
+# A key that spells an index, and a key carrying a dot: both used to be
+# re-parsed as traversals, deleting a bystander or raising out of the scrub.
+print(json.dumps(scrub({"x[0]": "sk-SECRET-key", "x": ["innocent"]}, {"x[0]"})))
+print(json.dumps(scrub({"a.b": "sk-SECRET-dotted"}, {"a.b"})))
+PYEOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *SECRET* ]] \
+        || { echo "a secret survived the scrub: $output"; return 1; }
+    [[ "$output" == *harmless-flag* ]] \
+        || { echo "the scrub removed a value that was not a secret: $output"; return 1; }
+    # No line raised: a KeyError here aborts the scrub and bin/dejima then
+    # copies the file in unscrubbed.
+    [ "${#lines[@]}" -eq 3 ] \
+        || { echo "the scrub did not complete for every shape: $output"; return 1; }
 }
 
 @test "a standing scrub written by hand is honoured, and holds no value" {

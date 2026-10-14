@@ -61,6 +61,11 @@ launch_setup() {
     cat > "$LAUNCH_DIR/docker" <<'EOF'
 #!/bin/bash
 echo "$*" >> "${SANDBOX_TEST_DOCKER_LOG:-/dev/null}"
+# Stands in for a session that handed something back, for the one test about
+# an isolated share surviving. Written where the launch says it mounted it.
+if [ -n "${LAUNCH_SHARE_MARKER:-}" ] && [ -n "${SANDBOX_SHARE_DIR:-}" ]; then
+    : > "$SANDBOX_SHARE_DIR/handed-back" 2>/dev/null || true
+fi
 # For a real `docker build` (never `docker compose ... build`, whose $1 is
 # "compose"), also log the generated Dockerfile's own content, tagged by -t -
 # argv alone can't tell whether the Dockerfile's FROM line actually points at
@@ -84,10 +89,15 @@ done
 exit 0
 EOF
     chmod +x "$LAUNCH_DIR/docker"
-    : > "$LAUNCH_DIR/sandbox-key"
+    printf "not-a-real-key\n" > "$LAUNCH_DIR/sandbox-key"
     chmod 600 "$LAUNCH_DIR/sandbox-key"
 }
 
+# SSH_AUTH_SOCK is emptied rather than passed through, so a test never reads
+# the agent of whoever is running the suite - an inherited one would make the
+# forwarded-agent path depend on the machine. LAUNCH_SSH_AUTH_SOCK is how the
+# one test about that path states its own precondition instead.
+#
 # ssh_key is written into whatever config file config_root() currently
 # resolves to (DEJIMA_CONFIG_DIR, which a few tests point elsewhere) rather
 # than always $CONFIG_DIR/config, and appended rather than written, so it
@@ -110,7 +120,8 @@ launch() {
         SANDBOX_TEST_RUN_ENV="$LAUNCH_ENV" \
         SANDBOX_TEST_DOCKER_LOG="$LAUNCH_DIR/docker-log" \
         SANDBOX_TEST_DOCKERFILE_LOG="$LAUNCH_DIR/dockerfile-log" \
-        SSH_AUTH_SOCK= ALLOWED_DOMAINS= \
+        SSH_AUTH_SOCK="${LAUNCH_SSH_AUTH_SOCK-}" ALLOWED_DOMAINS= \
+        LAUNCH_SHARE_MARKER="${LAUNCH_SHARE_MARKER:-}" \
         "$REPO_ROOT/bin/dejima" "$@"
 }
 
@@ -1310,6 +1321,569 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     done
 }
 
+# --isolated: a session with nothing before it and nothing after it. The
+# claim is one sentence - nothing of the host crosses in but the operator's
+# own read-only config, and nothing survives but ~/shared - and these are the
+# parts of it that a stubbed launch can decide.
+#
+# Driven through the real launcher rather than by grepping it, because every
+# one of these is a property of what `compose run` is handed, and a grep over
+# the source passes just as well on a line that no longer takes effect.
+@test "an isolated launch mounts no host path for its working directory" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # The whole spec, because the compose file cannot build one: a source and
+    # a target would have to be two variables and neither can be empty. The
+    # source here names the compose file's own volume, so nothing of the host
+    # is behind the working directory.
+    local spec; spec="$(launched_env SANDBOX_WORKSPACE_MOUNT)"
+    [ "$spec" = "isolated-work:/dejima/work" ] \
+        || { echo "the workspace mount is $spec, not the container-local volume"; return 1; }
+    [ "$(launched_env WORKSPACE_DIR)" = /dejima/work ]
+
+    # Whatever the source is, it must not be a path: a source starting with /
+    # is a bind mount, which is the one thing this mode cannot have here.
+    case "${spec%%:*}" in
+        /*) echo "the workspace mount names a host path: $spec"; return 1 ;;
+    esac
+
+    # That the volume it names is this run's own, and is removed afterwards,
+    # belongs to the test below with the other four.
+
+    # And the ordinary case still mounts the project at its own path, so the
+    # assertion above cannot pass by the variable having stopped working.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_WORKSPACE_MOUNT)" = "$PROJ:$PROJ" ]
+}
+
+@test "an isolated launch takes nothing from the project it was started in" {
+    # The one in this file that is about an attack rather than about tidiness.
+    # resolve_project_store walks UPWARDS from the directory it is given, so
+    # an operator in $HOME on a machine whose dotfiles were once approved as a
+    # project would otherwise have handed an anonymous session that project's
+    # allowed domains and its dependency layer. The flag means the directory
+    # it was run from decides nothing.
+    #
+    # Two independent things in bin/dejima hold that - the working directory
+    # being container-local, and the approval store not being resolved - and
+    # this fails only when BOTH are reversed. Worth knowing when reading a
+    # mutation result: either one alone still passes, which is what defence
+    # in depth looks like from here rather than a test that misses.
+    "$REPO_ROOT/bin/dejima-allow" --project "$PROJ" example.invalid >/dev/null
+    "$REPO_ROOT/bin/dejima-dep" add --project "$PROJ" apt:libpq-dev >/dev/null
+    launch_setup
+
+    local slug; slug="$(bash -c 'source "$1"; project_slug "$2"' _ "$LIB" "$PROJ")"
+
+    # First that the fixture works at all: an ordinary launch from in there
+    # DOES get both. Without this the assertions below pass on a project
+    # whose approvals were never recorded.
+    cd "$PROJ"
+    run launch
+    cd - >/dev/null
+    [ "$status" -eq 0 ]
+    [[ "$(launched_env ALLOWED_DOMAINS)" == *example.invalid* ]] \
+        || { echo "the fixture's project domains were never approved"; return 1; }
+    [ "$(launched_env SANDBOX_IMAGE)" = "localhost/dejima:$(id -un)-$slug" ] \
+        || { echo "the fixture's project deps were never approved"; return 1; }
+
+    # And then that the isolated launch from the same directory gets neither.
+    # The log accumulates across launches in one fixture, so the build line
+    # asserted absent below would otherwise be found from the launch above.
+    : > "$LAUNCH_DIR/docker-log"
+    cd "$PROJ"
+    run launch --isolated
+    cd - >/dev/null
+    [ "$status" -eq 0 ]
+    [[ "$(launched_env ALLOWED_DOMAINS)" != *example.invalid* ]] \
+        || { echo "an isolated launch inherited the cwd's approved domains"; return 1; }
+    [ "$(launched_env SANDBOX_IMAGE)" != "localhost/dejima:$(id -un)-$slug" ] \
+        || { echo "an isolated launch inherited the cwd's dependency layer"; return 1; }
+    grep -q -- "-t localhost/dejima:$(id -un)-$slug -f" <(docker_log) \
+        && { echo "an isolated launch built the cwd's dependency layer"; return 1; }
+    return 0
+}
+
+@test "an isolated launch mounts the operator's read-only config and none of the writable state" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    local log; log="$(docker_log)"
+    # The operator's own hooks and skills: theirs, read-only, and not
+    # something an earlier session could have written.
+    grep -q -- "-v $LAUNCH_DIR/home/.claude/skills:" <<< "$log" \
+        || { echo "the operator's skills are not mounted"; return 1; }
+    # The shared read-write state every project's sessions append to (#380),
+    # and the transcripts and memory under projects/.
+    local d
+    for d in backups tasks plans sessions projects file-history; do
+        grep -q -- "-v $LAUNCH_DIR/home/.claude/$d" <<< "$log" \
+            && { echo "an isolated launch mounts ~/.claude/$d"; return 1; }
+    done
+    # Not mounted and also not CREATED: the pre-create loop exists so Docker
+    # does not make a root-owned mount source, and a directory nothing mounts
+    # needs no source.
+    for d in backups tasks plans sessions; do
+        [ ! -d "$LAUNCH_DIR/home/.claude/$d" ] \
+            || { echo "an isolated launch created ~/.claude/$d on the host"; return 1; }
+    done
+    return 0
+}
+
+@test "an isolated launch gets a fresh share directory that no other session has had" {
+    local share; share="$(mktemp -d)"
+    launch_setup
+    printf '[core]\nshare_dir = %s\n' "$share" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    local first; first="$(launched_env SANDBOX_SHARE_DIR)"
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    local second; second="$(launched_env SANDBOX_SHARE_DIR)"
+
+    [ -n "$first" ] && [ -n "$second" ] || { echo "no share directory was set"; return 1; }
+    [ "$first" != "$second" ] \
+        || { echo "two isolated launches were handed the same directory: $first"; return 1; }
+    case "$first" in
+        "$share"/isolated/*) ;;
+        *) echo "the isolated share is not under the isolated root: $first"; return 1 ;;
+    esac
+    # Neither survives, because neither was written to: an empty isolated
+    # share is removed in the exit trap. That covers a session that handed
+    # nothing back and a launch refused after the directory was made, which
+    # is most refusals - each used to leave one for an operator to find.
+    [ ! -d "$first" ] && [ ! -d "$second" ] \
+        || { echo "an empty isolated share was left behind"; return 1; }
+    # And one that WAS written to stays, which is what the directory is for -
+    # and is also what shows the launch creates and mounts it rather than
+    # just computing a path.
+    LAUNCH_SHARE_MARKER=1 run launch --isolated
+    [ "$status" -eq 0 ]
+    local used; used="$(launched_env SANDBOX_SHARE_DIR)"
+    [ -f "$used/handed-back" ] \
+        || { echo "the share directory the launch mounted does not exist: $used"; return 1; }
+    rm -rf "$used"
+    rm -rf "$share"
+}
+
+@test "an isolated launch names its volumes for the run and removes them" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # Two are sharper than the rest. The shell history is shared by every
+    # project even when the nvim ones are not, so under its usual name an
+    # isolated session reads what was typed in any session before it; and the
+    # working directory is where everything the session did actually lives.
+    local v names=""
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY SANDBOX_ISOLATED_WORK; do
+        names="$names $(launched_env "$v")"
+        [[ "$(launched_env "$v")" == dejima_isolated-* ]] \
+            || { echo "$v is not this run's own: $(launched_env "$v")"; return 1; }
+        [[ "$(launched_env "$v")" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
+            || { echo "$v is not a valid Docker volume name"; return 1; }
+    done
+    grep -q "volume rm$names" <(docker_log) \
+        || { echo "the run's volumes are not removed:$names"; cat "$LAUNCH_DIR/docker-log"; return 1; }
+
+    local before="$names"
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    names=""
+    for v in SANDBOX_NVIM_DATA SANDBOX_NVIM_STATE SANDBOX_NVIM_CACHE SANDBOX_BASH_HISTORY SANDBOX_ISOLATED_WORK; do
+        names="$names $(launched_env "$v")"
+    done
+    [ "$before" != "$names" ] \
+        || { echo "two isolated launches asked for the same volumes:$names"; return 1; }
+
+    # And an ordinary launch still gets the shared history volume, which is
+    # what makes a session started tomorrow see what was typed today.
+    #
+    # Asserted as "sets nothing", not as a name. What the volume is called
+    # then comes from the compose default, and whether THAT is the name Docker
+    # would have chosen on its own is a property of the compose file - checked
+    # there, in static.bats, against the project name rather than against a
+    # string repeated here. A name in this test would have been updated to
+    # match a wrong default rather than catching one.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_BASH_HISTORY)" ] \
+        || { echo "an ordinary launch renamed the history volume to $(launched_env SANDBOX_BASH_HISTORY)"
+             return 1; }
+}
+
+@test "an isolated launch reaches no forge unless the same command names one" {
+    # The forge credential is the widest thing a session holds - a Gitea token
+    # is account-wide - so the mode whose purpose is a session nobody is
+    # watching does not carry one by default. It narrows, like every other
+    # flag here.
+    #
+    # Both orders, because the defaults are applied after the argument loop
+    # rather than inside it: a version that set them in the loop would pass
+    # one of these two and fail the other.
+    launch_setup
+    local conf
+    conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    # With the section header: launch() appends its own [core] block after
+    # this, so a bare key here would sit outside any section and be refused.
+    printf '[core]\nforge = gitea\nworkflow = worktree-pr\n' >> "$conf"
+
+    run launch --isolated --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'core.forge=none' <<< "$output" \
+        || { echo "an isolated launch kept the configured forge"; return 1; }
+    grep -qx 'core.workflow=local-only' <<< "$output" \
+        || { echo "an isolated launch kept a workflow that pushes"; return 1; }
+
+    # Both halves of the name: a forge named on the command line, and a
+    # workflow, in either order relative to the flag. It only ever named a
+    # workflow before, so the forge half of what it is called went untested.
+    local args
+    for args in "--isolated --forge gitea" "--forge gitea --isolated"; do
+        # shellcheck disable=SC2086
+        run launch $args --print-config
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        grep -qx 'core.forge=gitea' <<< "$output" \
+            || { echo "'$args' did not keep the forge the operator named"; return 1; }
+        # And the workflow still defaults, since only the forge was named.
+        grep -qx 'core.workflow=local-only' <<< "$output" \
+            || { echo "'$args' changed the workflow as well"; return 1; }
+    done
+    for args in "--isolated --workflow worktree-pr" "--workflow worktree-pr --isolated"; do
+        # shellcheck disable=SC2086
+        run launch $args --print-config
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        grep -qx 'core.workflow=worktree-pr' <<< "$output" \
+            || { echo "'$args' did not keep the workflow the operator named"; return 1; }
+        grep -qx 'core.forge=none' <<< "$output" \
+            || { echo "'$args' changed the forge as well"; return 1; }
+    done
+
+    # And the config file is untouched for a launch without the flag, so the
+    # assertions above are about --isolated rather than about the fixture.
+    run launch --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'core.forge=gitea' <<< "$output" \
+        || { echo "an ordinary launch lost the configured forge"; return 1; }
+    return 0
+}
+
+@test "an isolated launch mounts the configured ssh key and not the forwarded agent" {
+    # Opposite answers for the two, which is the whole reason this is one
+    # test rather than a line in another: a workflow that never pushes gets
+    # no agent socket, and --isolated defaults to one of those, while a
+    # configured key is exported whatever the workflow. Both docs state the
+    # pair, and a test that checked only the key - as this one first did -
+    # cannot catch the half that was written backwards.
+    #
+    # Withholding the key as well, for any launch that never pushes, is #392.
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    [ "$(launched_env SANDBOX_SSH_KEY_FILE)" = "$LAUNCH_DIR/sandbox-key" ] \
+        || { echo "the configured key did not cross: $(launched_env SANDBOX_SSH_KEY_FILE)"
+             echo "- if that is deliberate, the two docs saying it does need updating"
+             return 1; }
+
+    # Now the agent, which needs its own fixture for two reasons. The helper
+    # empties SSH_AUTH_SOCK so no test reads the suite runner's own agent, so
+    # a launch that never sets it could not have forwarded one whatever the
+    # code did - asserting its absence there proves nothing. And a configured
+    # key withdraws the agent too, independently of the workflow, so the key
+    # above has to go for this to be about the rule the docs name. An EMPTY
+    # key file is "not a key" by design, which is how that is arranged.
+    : > "$LAUNCH_DIR/sandbox-key"
+    # A real socket, because the launcher tests for one with -S. Binding
+    # creates the filesystem entry and leaves it there after the process
+    # exits, which is all this needs.
+    python3 -c 'import socket,sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' "$LAUNCH_DIR/agent.sock"
+    [ -S "$LAUNCH_DIR/agent.sock" ] || { echo "the fixture made no socket"; return 1; }
+
+    LAUNCH_SSH_AUTH_SOCK="$LAUNCH_DIR/agent.sock" run launch --isolated
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$(launched_env SSH_AUTH_SOCK)" ] \
+        || { echo "a workflow that pushes nothing still forwarded the agent"; return 1; }
+
+    # And the positive control. A pushing workflow needs a forge with a host
+    # to push to, so this names both - which is also the combination an
+    # operator asking for an isolated session that pushes would type.
+    printf 'ghp_not_a_real_push_token\n' > "$LAUNCH_DIR/gh-push-token"
+    chmod 600 "$LAUNCH_DIR/gh-push-token"
+    printf '[forge.github]\npush_token_file = %s\n' "$LAUNCH_DIR/gh-push-token" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    LAUNCH_SSH_AUTH_SOCK="$LAUNCH_DIR/agent.sock" \
+        run launch --isolated --forge github --workflow branch-push
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(launched_env SSH_AUTH_SOCK)" = "$LAUNCH_DIR/agent.sock" ] \
+        || { echo "naming a pushing workflow did not forward the agent"; return 1; }
+}
+
+@test "an isolated launch gets no GitHub token unless the command names a forge" {
+    # [github] token_file is not a forge setting, which is what makes it easy
+    # to miss: core fills it for every session whatever forge is selected. A
+    # read-only PAT is still read-only across the operator's private
+    # repositories, so the mode that carries no forge credential cannot carry
+    # this one either.
+    #
+    # The filter container keeps it, because that is what authenticates
+    # dejima's own fetch of GitHub's address ranges - a request about the
+    # allowlist, made where no session can reach it. So the two are separate
+    # variables now, and this asserts both halves: the session's is empty and
+    # the launcher's, which is what `-e GH_TOKEN` hands the filter, is not.
+    launch_setup
+    printf 'ghp_not_a_real_token\n' > "$LAUNCH_DIR/gh-token"
+    chmod 600 "$LAUNCH_DIR/gh-token"
+    printf '[github]\ntoken_file = %s\n' "$LAUNCH_DIR/gh-token" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "an isolated session was handed core's GitHub token"; return 1; }
+    [ -n "$(launched_env GH_TOKEN)" ] \
+        || { echo "the filter container lost the token that authenticates its ranges fetch"
+             return 1; }
+
+    # `--forge` naming the forge with no capabilities is an operator asking
+    # for no forge, and it counted as naming one - so the launch that said
+    # most clearly that it wanted no forge access was the one that got the
+    # credential.
+    run launch --isolated --forge none
+    [ "$status" -eq 0 ]
+    [ -z "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "--isolated --forge none was handed core's GitHub token"; return 1; }
+
+    # Naming a forge is the operator saying this session is meant to reach
+    # one, and nothing is narrowed from there.
+    run launch --isolated --forge gitea
+    [ "$status" -eq 0 ]
+    [ -n "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "a named forge did not restore the GitHub token"; return 1; }
+
+    # And an ordinary launch is untouched, including one whose config selects
+    # no forge - this narrows for the flag, not for every forge-less launch.
+    run launch --forge none --workflow local-only "$PROJ"
+    [ "$status" -eq 0 ]
+    [ -n "$(launched_env SANDBOX_GH_TOKEN)" ] \
+        || { echo "an ordinary launch lost core's GitHub token"; return 1; }
+}
+
+@test "an isolated launch says nothing is kept, and every reader agrees" {
+    # The banner worked the epitaph out from [epitaph] enabled alone and said
+    # "epitaph on" a few lines above the isolated notice saying it was off -
+    # and nothing was being kept either way, because the save was gated on
+    # the mode instead. --print-config had the same split for both keys.
+    #
+    # Both are overridden off where the flag is read now, so this asserts the
+    # thing every reader is reading rather than one reader's output.
+    launch_setup
+    printf '[epitaph]\nenabled = on\n[logging]\nconversation = on\nloki_url = http://loki.invalid:3100\n' \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'epitaph.enabled=off' <<< "$output" \
+        || { echo "--print-config says the epitaph is on for an isolated launch"; return 1; }
+    grep -qx 'logging.conversation=off' <<< "$output" \
+        || { echo "--print-config says the conversation log is on"; return 1; }
+
+    # And on, as configured, without the flag - so the two lines above are
+    # about --isolated rather than about the keys having stopped working.
+    run launch --print-config
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'epitaph.enabled=on' <<< "$output" \
+        || { echo "an ordinary launch lost its epitaph setting"; return 1; }
+    grep -qx 'logging.conversation=on' <<< "$output" \
+        || { echo "an ordinary launch lost its conversation setting"; return 1; }
+}
+
+@test "an isolated cline launch is configured, and writes nothing to the host" {
+    # Cline's model configuration reaches the container through the state
+    # mount, which this mode does not have - so it was written to a host
+    # directory keyed on the container-local working directory, shared by
+    # every isolated cline launch, and then not mounted. Cline started with no
+    # model and fell back to its own hosted endpoint, which the firewall was
+    # never asked to allow.
+    #
+    # It is seeded from the per-run staging directory now, so it arrives
+    # without a state mount and the host state directory is untouched.
+    launch_setup
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    # --harness rather than a config line: launch() appends its own
+    # `harness = claude-code` after whatever a test writes, and a repeated
+    # key takes the last value.
+    run launch --isolated --harness cline
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$state"; return 1; }
+
+    # The configuration arrives, as a seed rather than a mount - so the
+    # session owns the copy it edits and nothing it writes reaches the host.
+    local log; log="$(docker_log)"
+    grep -qE -- "-v [^ ]*/providers\.json:/etc/dejima-seed/\.cline/data/settings/providers\.json:ro" \
+        <<< "$log" \
+        || { echo "cline got no provider configuration"; rm -rf "$state"; return 1; }
+    # From a path that goes away with the run, not from the state directory.
+    grep -qE -- "-v $state[^ ]*:/.*providers\.json" <<< "$log" \
+        && { echo "it was mounted out of the host state directory"; rm -rf "$state"; return 1; }
+    # And the state directory itself is neither mounted nor written.
+    grep -qF -- "-v $state" <<< "$log" \
+        && { echo "an isolated launch mounted the host state directory"; rm -rf "$state"; return 1; }
+    [ -z "$(ls -A "$state")" ] \
+        || { echo "it wrote to the host: $(ls -A "$state")"; rm -rf "$state"; return 1; }
+    rm -rf "$state"
+    return 0
+}
+
+@test "a launch leaves no per-run staging directory behind" {
+    # The staging directory is created with mktemp -d above the trap and
+    # removed by cleanup(), and for one release it was neither: the block
+    # that initialises trap-owned names to empty runs AFTER the mktemp in
+    # straight-line order, so it threw the real path away and cleanup()
+    # removed "". Every launch on every harness left one in TMPDIR.
+    #
+    # Nothing caught it because nothing looked after exit. This does, with its
+    # own TMPDIR so it sees only what this launch made - and for both
+    # harnesses, since the one that puts a file in there is not the default.
+    launch_setup
+    local t; t="$(mktemp -d)"
+    TMPDIR="$t" run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$t"; return 1; }
+    local left; left="$(find "$t" -maxdepth 1 -name 'dejima-harness-stage.*' -print)"
+    [ -z "$left" ] \
+        || { echo "left behind: $left"; rm -rf "$t"; return 1; }
+
+    # cline is the harness that writes into it, so it is the one where a
+    # leak carries content rather than being an empty directory.
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    TMPDIR="$t" run launch --harness cline "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$t" "$state"; return 1; }
+    left="$(find "$t" -maxdepth 1 -name 'dejima-harness-stage.*' -print)"
+    [ -z "$left" ] \
+        || { echo "cline left behind: $left ($(find "$left" -type f | head -3))"
+             rm -rf "$t" "$state"; return 1; }
+    # And the other staging paths, which were never broken and are what this
+    # one should have looked like.
+    left="$(find "$t" -maxdepth 1 \( -name 'dejima-settings.*' -o -name 'dejima-claude-json.*' \) -print)"
+    [ -z "$left" ] || { echo "also left behind: $left"; rm -rf "$t" "$state"; return 1; }
+    rm -rf "$t" "$state"
+}
+
+@test "an ordinary cline launch still gets its provider configuration" {
+    # The same seed, which for a launch that HAS a state mount lands inside
+    # it - so the end state is what it was before, written by the entrypoint
+    # rather than by the launcher onto the host.
+    launch_setup
+    local state; state="$(mktemp -d)"
+    printf '[harness.cline]\nstate_dir = %s\nmodel = m\nbackend = self-hosted\n[backend.self-hosted]\nbase_url = http://127.0.0.1:11434\n' \
+        "$state" >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --harness cline "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$state"; return 1; }
+    local log; log="$(docker_log)"
+    grep -qE -- "-v [^ ]*/providers\.json:/etc/dejima-seed/\.cline/data/settings/providers\.json:ro" \
+        <<< "$log" \
+        || { echo "cline got no provider configuration"; rm -rf "$state"; return 1; }
+    # And this one does mount the state directory, which is what makes the
+    # seeded copy land in it.
+    grep -qF -- "-v $state" <<< "$log" \
+        || { echo "an ordinary launch did not mount the state directory"; rm -rf "$state"; return 1; }
+    rm -rf "$state"
+    return 0
+}
+
+@test "an isolated launch refuses a project path and the mount flags" {
+    launch_setup
+    # Each refusal names what it refused. A bare nonzero status would pass on
+    # a launch that failed for an unrelated reason.
+    run launch --isolated "$PROJ"
+    [ "$status" -ne 0 ] || { echo "a project path was accepted"; return 1; }
+    [[ "$output" == *"takes no project directory"* ]] \
+        || { echo "the refusal does not say why: $output"; return 1; }
+
+    local flag
+    for flag in --ro --rw; do
+        run launch --isolated "$flag" /tmp
+        [ "$status" -ne 0 ] || { echo "$flag was accepted"; return 1; }
+        [[ "$output" == *"cannot take --ro or --rw"* ]] \
+            || { echo "the $flag refusal does not say why: $output"; return 1; }
+        [[ "$output" == *"/tmp"* ]] \
+            || { echo "the $flag refusal does not name the path: $output"; return 1; }
+    done
+
+    # Harness arguments after -- are not a project path, and refusing them
+    # would make the flag unusable with every launch that passes any.
+    run launch --isolated -- --version
+    [ "$status" -eq 0 ] \
+        || { echo "harness arguments were read as a project path: $output"; return 1; }
+
+    # And the other order, which is the one that went wrong quietly: the flag
+    # loop stops at the first positional, so `--isolated` after a path was
+    # passed to the harness while the project was mounted read-write - the
+    # operator asking for isolation got the opposite with no sign of it.
+    run launch "$PROJ" --isolated
+    [ "$status" -ne 0 ] \
+        || { echo "--isolated after the path was accepted and mounted $PROJ"; return 1; }
+    [[ "$output" == *"would be passed to the"* ]] \
+        || { echo "the refusal does not say what would have happened: $output"; return 1; }
+
+    # Still passed through when -- says it is the harness's.
+    run launch "$PROJ" -- --isolated
+    [ "$status" -eq 0 ] \
+        || { echo "-- did not hand --isolated to the harness: $output"; return 1; }
+}
+
+@test "an isolated launch says what it is and what it does without" {
+    launch_setup
+    run launch --isolated
+    [ "$status" -eq 0 ]
+
+    # Printed whatever [ui] banner says and with stderr redirected, unlike
+    # the banner: the share path is the only route back to what the session
+    # hands over, and the two features it does without are ones an operator
+    # would otherwise go looking for afterwards and find empty.
+    [[ "$output" == *"no project mounted, no memory, no transcript"* ]] \
+        || { echo "the launch does not say what this mode is: $output"; return 1; }
+    [[ "$output" == *"conversation log and epitaph off"* ]] \
+        || { echo "the launch does not say what is off: $output"; return 1; }
+    [[ "$output" == *"$(launched_env SANDBOX_SHARE_DIR)"* ]] \
+        || { echo "the launch does not name the share directory: $output"; return 1; }
+}
+
+@test "an isolated launch does not apply the configured mounts, and says so" {
+    local extra; extra="$(mktemp -d)"
+    launch_setup
+    printf '[mounts]\nreadonly = %s\n' "$extra" \
+        >> "$(bash -c 'source "$1"; config_path' _ "$LIB")"
+
+    run launch --isolated
+    [ "$status" -eq 0 ]
+    grep -q -- "-v $extra" <(docker_log) \
+        && { echo "an isolated launch applied a configured mount"; return 1; }
+    [[ "$output" == *"[mounts] readonly not applied"* ]] \
+        || { echo "the launch does not say the mount was dropped: $output"; return 1; }
+
+    # Dropped for an isolated launch only - the same config still mounts it
+    # for an ordinary one, so the assertion above is about the flag rather
+    # than about the list having stopped working.
+    run launch "$PROJ"
+    [ "$status" -eq 0 ]
+    grep -q -- "-v $extra" <(docker_log) \
+        || { echo "an ordinary launch stopped applying [mounts] readonly"; return 1; }
+    rm -rf "$extra"
+}
+
 @test "the launcher builds and runs the global layer when only global deps are approved" {
     "$REPO_ROOT/bin/dejima-dep" add --global apt:libpq-dev >/dev/null
     launch_setup
@@ -1381,6 +1955,37 @@ ENTRYPOINT [\"/usr/local/bin/entrypoint.sh\"]" ]]
     [ "$status" -eq 0 ]
     [[ "$output" == *"the approval store"* ]]
     [[ "$output" == *"approve its own domains and dependencies"* ]]
+}
+
+@test "the launcher warns about the epitaph and share stores inside the workspace too" {
+    # Three stores were warned about and six were guarded, so a path dejima
+    # refuses to mount through [mounts] or --ro was mounted without a word
+    # when it happened to sit inside the project. Each consequence differs,
+    # which is why each store says its own.
+    launch_setup
+    local conf; conf="$(bash -c 'source "$1"; config_path' _ "$LIB")"
+    printf '[epitaph]\ndir = %s\n[core]\nshare_dir = %s\n' \
+        "$PROJ/.epitaphs" "$PROJ/.share" >> "$conf"
+
+    run launch "$PROJ"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"the epitaph store"* ]] \
+        || { echo "no warning for the epitaph store: $output"; return 1; }
+    [[ "$output" == *"what every previous one in this project concluded"* ]] \
+        || { echo "the epitaph warning does not name its own consequence"; return 1; }
+    [[ "$output" == *"share directories of every project"* ]] \
+        || { echo "no warning for the per-project share root"; return 1; }
+    [[ "$output" == *"share directories of every isolated session"* ]] \
+        || { echo "no warning for the isolated share root"; return 1; }
+
+    # And none of them for a project that contains none of these, so the
+    # three above are about the overlap rather than printed always.
+    local other; other="$(mktemp -d)"
+    run launch "$other"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"writable from inside the sandbox"* ]] \
+        || { echo "a clean project was warned about: $output"; return 1; }
+    rm -rf "$other"
 }
 
 @test "the launcher warns when the audit report or baseline store sits inside the mounted workspace" {

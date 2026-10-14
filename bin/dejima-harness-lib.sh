@@ -308,10 +308,10 @@ emit_host_exec() {
             echo "Harness plugin emitted a host-exec leaf or label containing a tab or newline" >&2
             exit 1 ;;
     esac
-    [ -n "$leaf" ] && [ -n "$label" ] || {
+    if [ -z "$leaf" ] || [ -z "$label" ]; then
         echo "Harness plugin emitted a host-exec surface with no leaf or label" >&2
         exit 1
-    }
+    fi
     DEJIMA_HOST_EXEC+=("$ns"$'\t'"$leaf"$'\t'"$path"$'\t'"$label")
 }
 
@@ -495,6 +495,14 @@ _emit_seed_record() {
     DEJIMA_SEED+=("$rel"$'\t'"$src")
 }
 
+# Called twice by core, and the second call is not a mistake. The first is
+# early, with the other two list loads, because the mount guard has to see
+# every host path a plugin names before anything is mounted. The second is
+# after harness_prepare_config, whose job is to PRODUCE per-run files - a
+# hook that makes a file has to run before the list that mounts it.
+#
+# So this resets rather than appends: the second call rebuilds the list, and a
+# plugin that emits the same entries twice gets them once.
 harness_seed_load() {
     DEJIMA_SEED=()
     harness_hook harness_seed

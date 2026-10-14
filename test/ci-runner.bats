@@ -77,16 +77,10 @@ PY
     [ -e /var/run/docker.sock ]
 }
 
-@test "the two runners are not the same runner" {
-    # Whatever else is true, exactly one of them gets the daemon. If both jobs
-    # report the same answer here, the labels are not routing to two different
-    # runners and the tiering exists only on paper.
-    if [ "$DEJIMA_CI_TIER" = confined ]; then
-        [ ! -e /var/run/docker.sock ]
-    else
-        [ -e /var/run/docker.sock ]
-    fi
-}
+# The two directions above are each one job's answer: the confined runner must
+# not have the docker socket and the privileged one must. That the two jobs land
+# on DIFFERENT runners does not follow from either, and a suite cannot see it -
+# it runs in one job. Comparing the two jobs' results is the workflow's to do.
 
 # --- egress, for the tier the rules actually apply to ------------------------
 #

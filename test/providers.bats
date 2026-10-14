@@ -215,6 +215,33 @@ assert_remedy_forges_exist() {
     [ "$status" -ne 0 ]
 }
 
+@test "the briefing tells an agent how a refusal differs from a hang" {
+    # The policy rejects rather than drops, for the reason its own chain
+    # comment gives: silently dropping makes every blocked destination look
+    # like a hang. The briefing described both as failing to connect, which
+    # throws that signal away - and two agents in one day reported a host
+    # firewall on the far side as dejima blocking a domain, because from
+    # inside a sandbox the two are indistinguishable except by timing.
+    local lib="$REPO_ROOT/bin/dejima-provider-lib.sh"
+    grep -q 'refused at once rather than' "$lib" \
+        || { echo "the briefing no longer says a refusal is immediate"; return 1; }
+    grep -q 'HANGS is not this allowlist' "$lib" \
+        || { echo "the briefing no longer tells an agent what a hang means"; return 1; }
+
+    # And the property it describes is still true of the policy, so the advice
+    # cannot outlive the behaviour it rests on.
+    local chain
+    chain=$(sed -n '/^  chain refuse {/,/^  }/p' "$REPO_ROOT/docker/egress-policy")
+    [ -n "$chain" ] || { echo "no refuse chain in the policy"; return 1; }
+    grep -q 'reject with tcp reset' <<< "$chain" \
+        || { echo "the policy no longer rejects TCP, so a block would hang"; return 1; }
+    grep -q 'reject with icmpx' <<< "$chain" \
+        || { echo "the policy no longer rejects non-TCP"; return 1; }
+    grep -qE '(^|[^a-z])drop([^a-z]|$)' <<< "$chain" \
+        && { echo "the refuse chain drops as well as rejects: $chain"; return 1; }
+    true
+}
+
 @test "gitea's CLIs moved out of bin/ and into its forge" {
     [ ! -e "$REPO_ROOT/bin/gitea-pr" ]
     [ ! -e "$REPO_ROOT/bin/gitea-issue" ]

@@ -52,11 +52,16 @@ running.
 
 ## The bind address is the one thing to get right
 
-`docker/egress-policy` deliberately permits traffic to the session's
-default-route address - the Docker bridge gateway, which is your host. That is
-the one host address a sandbox can reach at all. Combine it with the fact above
-(a tmux client is a host shell) and the consequence is direct: **a front door
-the sandbox can reach is a compromised session's own escape hatch.**
+The session's default-route address - the Docker bridge gateway - is your
+host, and it is the one host address a sandbox can route to at all. Combine
+that with the fact above (a tmux client is a host shell) and the consequence
+is direct: **a front door the sandbox can reach is a compromised session's own
+escape hatch.**
+
+`docker/egress-policy` opens no port on that address unless told to, so a
+front door bound to it is refused by the packet filter as well. Do not spend
+that: the clamp is the second layer, and binding the proxy correctly is the
+first.
 
 So:
 
@@ -900,10 +905,11 @@ invisibly, and on the same `XDG_RUNTIME_DIR` as the gotcha above.
 
 **The marker directory is a write channel into your runtime tmpfs**, and
 nothing bounds it. `/run/user/<uid>` is RAM-backed and sized at a fraction of
-physical memory, so a session filling `/run/dejima-notify` degrades your
-whole login session - D-Bus, the systemd user manager - not just dejima. A
-session can already fill the workspace mount, so this is an increment rather
-than a new exposure, but a RAM-backed filesystem fails harder and sooner.
+physical memory, so a session filling `${XDG_RUNTIME_DIR}/dejima/notify`
+degrades your whole login session - D-Bus, the systemd user manager - not just
+dejima. A session can already fill the workspace mount, so this is an increment
+rather than a new exposure, but a RAM-backed filesystem fails harder and
+sooner.
 There is deliberately no quota here; `rm -rf` on that run's marker directory (or
 logging out, which discards the tmpfs) is the recovery.
 
@@ -1013,7 +1019,7 @@ name, the session's age, its state, and the container id.
 The picker is coloured (gruvbox) when stdout is a terminal that says it can
 show it; `NO_COLOR=1` or a `dumb` `$TERM` turns that off, along with the
 box-drawing glyphs. `--list` is never coloured, terminal or not - the picker
-parses those rows itself and the README calls them scriptable.
+parses those rows itself and `dejima-attach --help` calls them scriptable.
 
 Three states, from a registry `dejima` writes on launch and removes on
 exit:

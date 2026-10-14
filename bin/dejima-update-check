@@ -58,6 +58,8 @@ esac
 source "$(dirname "$(readlink -f "$0")")/dejima-provider-lib.sh"
 # shellcheck source=dejima-color-lib.sh
 source "$(dirname "$(readlink -f "$0")")/dejima-color-lib.sh"
+# shellcheck source=dejima-version-lib.sh
+source "$(dirname "$(readlink -f "$0")")/dejima-version-lib.sh"
 
 REPO_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 
@@ -110,6 +112,25 @@ _remote_tip() {
     printf '%s' "${out%%$'\t'*}"
 }
 
+# The remote's newest release tag, or nothing. Same hardened invocation as
+# _remote_tip and for the same reasons; `--tags` with a pattern so a tag that
+# is not a release cannot become the answer.
+#
+# Newest by sort order, which for a date is newest in time - the whole reason
+# a release is a date rather than a number somebody increments.
+_remote_release() {
+    local url="$1" out timeout=()
+    command -v timeout >/dev/null 2>&1 && timeout=(timeout 5)
+    out="$(env -u GIT_DIR -u GIT_WORK_TREE "${timeout[@]}" \
+        git -C / \
+            -c protocol.allow=never \
+            -c protocol.https.allow=always \
+            -c protocol.ssh.allow=always \
+            -c protocol.file.allow=always \
+            ls-remote --tags --refs "$url" '[0-9]*' 2>/dev/null)" || return 1
+    printf '%s' "$(printf '%s\n' "$out" | sed -n 's#.*refs/tags/##p' | sort -V | tail -1)"
+}
+
 # stderr dropped rather than shown: a config this cannot read is one bin/dejima
 # has already refused to start on, and a version check is not the place anyone
 # should first hear about it.
@@ -138,11 +159,15 @@ _usable_url "$url" || exit 0
 
 cache="$(_cache_file)"
 tip=""
+remote_release=""
 if [ -f "$cache" ]; then
-    read -r c_branch c_tip < "$cache" 2>/dev/null || true
+    # Three fields now; a cache written before the third existed reads as an
+    # unknown release, which is the same answer a failed lookup gives.
+    read -r c_branch c_tip c_release < "$cache" 2>/dev/null || true
     c_age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
     if [ "${c_branch:-}" = "$upstream" ] && [ "$c_age" -lt "$CHECK_INTERVAL" ]; then
         tip="${c_tip:-}"
+        case "${c_release:-}" in ""|"-") remote_release="" ;; *) remote_release="$c_release" ;; esac
         cached=1
     fi
 fi
@@ -151,8 +176,14 @@ if [ -z "${cached:-}" ]; then
     # A failed lookup is recorded, not just skipped. Without that, a checkout
     # with no route to its remote pays the timeout on every single launch.
     tip="$(_remote_tip "$url" "$upstream")" || tip=""
+    # Only when there is something to report: a checkout that is up to date
+    # exits below without printing, and asking for the tags as well would be
+    # a second request per launch for an answer nobody reads.
+    if [ -n "$tip" ] && [ "$tip" != "$head_sha" ]; then
+        remote_release="$(_remote_release "$url")" || remote_release=""
+    fi
     mkdir -p "$(dirname "$cache")" 2>/dev/null \
-        && printf '%s %s\n' "$upstream" "${tip:--}" > "$cache" 2>/dev/null
+        && printf '%s %s %s\n' "$upstream" "${tip:--}" "${remote_release:--}" > "$cache" 2>/dev/null
 fi
 
 # "-" is a recorded failure; empty is a branch the remote does not have.
@@ -191,6 +222,22 @@ if [ -n "$count" ] && [ "$count" != "0" ]; then
 else
     printf '  %sdejima: %s/%s has commits this checkout does not.%s\n' \
         "$C_WARN" "$_remote_shown" "$_branch_shown" "$C_RESET" >&2
+fi
+# Which release, when the remote has tags to say so. A commit count answers
+# "is there something newer" and nothing else; a release answers "how far
+# behind am I, and what would I be getting" - which is the question, and the
+# reason the changelog is named right here rather than left to be found.
+#
+# Both sides printed even when they name the same release: a checkout on
+# 2026.10.12 whose remote is also on 2026.10.12 is behind by commits not yet
+# released, and saying that is more honest than naming one version.
+if [ -n "$remote_release" ]; then
+    _local_release="$(dejima_version "$REPO_ROOT")"
+    printf '    %s is on %s%s%s; this checkout is on %s%s%s.\n' \
+        "$_remote_shown" "$C_KEY" "$(sanitize "$remote_release")" "$C_RESET" \
+        "$C_KEY" "$_local_release" "$C_RESET" >&2
+    printf '    What each release changed: %s%s/CHANGELOG.md%s\n' \
+        "$C_KEY" "$REPO_ROOT" "$C_RESET" >&2
 fi
 # install.sh is safe to re-run, and a release can change what it links on PATH,
 # so pulling is only half the update. Both paths absolute because the operator
