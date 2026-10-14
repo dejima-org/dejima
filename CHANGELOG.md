@@ -68,6 +68,11 @@ Each of these refuses or withholds something a previous release allowed.
   credential and the proxy is off for it.** A backend needing no credential at
   all - a model you serve yourself - was handed the real subscription login.
   ([#399](https://gitbox.branderson.io/dejima/dejima/pulls/399))
+- **git's `--config-env` no longer walks past the push guard.** It sets a
+  pushurl the way `-c` does, and in its separated spelling the guard read its
+  value as the subcommand - so a push checked against neither the host
+  allowlist nor the blocked branch.
+  ([#399](https://gitbox.branderson.io/dejima/dejima/pulls/399))
 - **The push and merge guards are one policy, read out of argv**, closing
   several spellings that walked past them.
   ([#372](https://gitbox.branderson.io/dejima/dejima/pulls/372),
@@ -96,7 +101,9 @@ quietly.
   ([#375](https://gitbox.branderson.io/dejima/dejima/pulls/375))
 - **An empty `ssh_key` file now counts as no key at all.** A pushing workflow
   with an empty key file and no agent is refused where it used to start and
-  fail at the push.
+  fail at the push. With an agent running it starts, and now says that the
+  forwarded agent is still signing - which is what configuring a key is meant
+  to prevent.
   ([#375](https://gitbox.branderson.io/dejima/dejima/pulls/375))
 - **Under the github forge, `gh api` is held to this repository.** A call
   naming no endpoint under `repos/<this repo>/` is refused - `gh api user`,
@@ -116,6 +123,10 @@ on the ones above.
   bridge, and its LAN address - are not in it, so a service configured at the
   host's LAN IP is still permitted on every port by the open class.
   ([#401](https://gitbox.branderson.io/dejima/dejima/issues/401))
+- **The merge block reads subcommands, not API endpoints.** `gh api -X PUT
+  repos/<owner>/<name>/pulls/<n>/merge` names this repository, so the scoping
+  check passes and nothing else sees a merge in it.
+  ([#402](https://gitbox.branderson.io/dejima/dejima/issues/402))
 
 ### Fixed
 
