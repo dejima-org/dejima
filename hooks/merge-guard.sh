@@ -48,15 +48,22 @@ forge_commands="$(dejima_forge_commands | sort -u)"
 # would type. It is also what the shadow itself compares, since that reads its
 # own basename.
 #
-# Every word of the segment, not only the first: a forge CLI named by absolute
-# path behind a prefix word - `env`, `nohup`, `xargs`, a `timeout` - reaches
-# the real binary without passing the PATH shadow, so a first-word check would
-# leave that combination with no layer looking at it. The cost is that a forge
-# command quoted inside some other command's argument is blocked too, which is
-# the direction to be wrong in for a guard that fails fast.
+# A later word counts only when it names a path, which is what divides the two
+# layers: a bare `gh` anywhere in a segment is the shadow's, because reaching
+# it means executing what PATH resolves, while a path names the real binary
+# directly and the shadow never runs. `env /usr/local/lib/dejima/forge/gh pr
+# merge 7` is both at once - a prefix word hiding the first position, and a
+# path stepping over the shadow - so without the path case it belonged to
+# neither. `echo gh pr merge 3` stays allowed, and must: it names the CLI
+# without running it, and the shadow it would run is not being bypassed.
 while IFS= read -r segment; do
     read -ra tokens <<< "$segment"
     for i in "${!tokens[@]}"; do
+        case "$i:${tokens[$i]}" in
+            0:*) ;;
+            *:*/*) ;;
+            *) continue ;;
+        esac
         self="$(basename -- "${tokens[$i]}")"
         grep -qxF -- "$self" <<< "$forge_commands" || continue
         if ! dejima_forge_verdict "$self" "${tokens[@]:$((i + 1))}"; then
