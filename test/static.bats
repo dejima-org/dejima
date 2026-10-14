@@ -4716,6 +4716,20 @@ _guard_repo() {
     run _git_guard "$repo" -c remote.origin.pushurl=git@evil.invalid:o/r.git push origin feature
     [[ "$output" == *"may only push to"* ]] \
         || { echo "$output"; return 1; }
+
+    # --config-env is the same thing with the value read from the environment,
+    # in both spellings. The separated one also takes the next word, so an
+    # option this did not know would have left `remote.origin.pushurl=PUSHURL`
+    # to be read as the subcommand - and anything that is not `push` is a
+    # command the guard has nothing to say about.
+    PUSHURL=git@evil.invalid:o/r.git run _git_guard "$repo" \
+        --config-env remote.origin.pushurl=PUSHURL push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "separated --config-env: $output"; return 1; }
+    PUSHURL=git@evil.invalid:o/r.git run _git_guard "$repo" \
+        --config-env=remote.origin.pushurl=PUSHURL push origin feature
+    [[ "$output" == *"may only push to"* ]] \
+        || { echo "attached --config-env: $output"; return 1; }
 }
 
 @test "the hook sees a push however git's own options are spelled" {
@@ -4729,6 +4743,7 @@ _guard_repo() {
     for cmd in "git --no-pager push origin main" \
                "git -c core.pager=cat push origin main" \
                "git --git-dir=$repo/.git push origin main" \
+               "git --config-env http.extraHeader=HDR push origin main" \
                "ls && git push origin main" \
                "/usr/bin/git push origin main" \
                "/opt/elsewhere/git push origin main"; do

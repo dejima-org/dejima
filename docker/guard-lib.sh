@@ -100,6 +100,20 @@ dejima_push_verdict() {  # <repo-dir> <git argv...>
             --git-dir=*|--work-tree=*)
                 repo_override=1
                 ;;
+            # `-c` with the value read from the environment instead of argv,
+            # so it sets a pushurl the same way and has to be carried into the
+            # resolution below the same way. In the separated spelling it also
+            # takes the next word, which an unrecognised option would leave to
+            # be read as the subcommand - and a subcommand that is not `push`
+            # ends this function having checked nothing.
+            --config-env)
+                i=$((i + 1))
+                [ "$i" -lt "${#argv[@]}" ] \
+                    && config_overrides+=(--config-env "${argv[$i]}")
+                ;;
+            --config-env=*)
+                config_overrides+=("${argv[$i]}")
+                ;;
             --exec-path|--namespace|--super-prefix)
                 i=$((i + 1))
                 ;;
