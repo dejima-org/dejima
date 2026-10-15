@@ -157,3 +157,15 @@ mirrored() {
     "$MIRROR" --transform "$F"
     grep -qF 'https://github.com/dejima-org/dejima-guard' "$F/-eBEGIN{exit 3}"
 }
+
+@test "a README that is a symlink stops the mirror instead of publishing its target" {
+    local B="$T/forge/linked"
+    git init -q -b main "$B"
+    printf '# Not for publishing\n' > "$T/outside"
+    ln -s "$T/outside" "$B/README.md"
+    git -C "$B" add -A
+    run "$MIRROR" --transform "$B"
+    [ "$status" -ne 0 ]
+    [ -L "$B/README.md" ]
+    [ "$(cat "$T/outside")" = '# Not for publishing' ]
+}

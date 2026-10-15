@@ -51,7 +51,8 @@ cleanup() {
 transform() {
     local dir="$1"
     local readme="$dir/README.md"
-    [ -f "$readme" ] || die "no README.md in $dir"
+    # perl -i would write a symlink's target back as the README, publishing it.
+    [ -f "$readme" ] && [ ! -L "$readme" ] || die "README.md is missing or a symlink in $dir"
 
     # Repository links and clone URLs move to the org on GitHub, in code as
     # well as docs; issue and pull request links stay on the forge, which is
