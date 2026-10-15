@@ -149,3 +149,11 @@ mirrored() {
     "$MIRROR" --transform "$B"
     grep -q '^> \*\*This is a read-only mirror' "$B/README.md"
 }
+
+@test "a file named like a perl option is rewritten, not run" {
+    local forge="https://gitbox.branderson.io"
+    printf 'See %s/dejima/dejima-guard\n' "$forge" > "$F/-eBEGIN{exit 3}"
+    git -C "$F" add -A
+    "$MIRROR" --transform "$F"
+    grep -qF 'https://github.com/dejima-org/dejima-guard' "$F/-eBEGIN{exit 3}"
+}

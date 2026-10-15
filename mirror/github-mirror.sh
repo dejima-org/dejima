@@ -57,12 +57,13 @@ transform() {
     # well as docs; issue and pull request links stay on the forge, which is
     # the only place those exist. Gitea's /src/branch/ is GitHub's /blob/, and
     # its /raw/branch/ GitHub's /raw/.
-    # Exit 1 from git grep is no match, which a repository may well have.
+    # Exit 1 from git grep is no match, which a repository may well have. The
+    # paths come from the forge, so -- keeps one from being read as a perl option.
     (cd "$dir" && { git grep -lzIF 'gitbox.branderson.io/dejima/' || [ $? -eq 1 ]; } | xargs -0r perl -pi -e '
         s{https://gitbox\.branderson\.io/dejima/([\w.-]++)(?!/(?:issues|pulls)/)}{https://github.com/$ENV{MIRROR_ORG}/$1}g;
         s{(https://github\.com/\Q$ENV{MIRROR_ORG}\E/[\w.-]+)/src/branch/}{$1/blob/}g;
         s{(https://github\.com/\Q$ENV{MIRROR_ORG}\E/[\w.-]+)/raw/branch/}{$1/raw/}g;
-    ')
+    ' --)
 
     # GitHub follows the reader's light/dark setting through <picture>, which
     # the forge cannot; see the comment above the tag in README.md.
