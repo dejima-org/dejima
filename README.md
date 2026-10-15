@@ -4,10 +4,10 @@
      browser is set - so anything conditional shows dark ink on a dark page to
      a reader whose browser prefers light, and does it silently.
      The suffix names the mode a file is FOR, not the colour of its ink:
-     -darkmode is the pale wordmark that belongs on a dark page. A mirror on a
-     light-themed host swaps the filename below for dejima-wordmark-lightmode.png,
-     which is committed alongside for exactly that. One line, on the mirror,
-     where someone can see whether it worked.
+     -darkmode is the pale wordmark that belongs on a dark page. GitHub does
+     follow its own theme setting through <picture>, so the GitHub mirror
+     replaces the tag below with one that falls back to
+     dejima-wordmark-lightmode.png; see mirror/github-mirror.sh.
      Every &nbsp; here is spacing, and it has to be a character rather than CSS
      or a presentation attribute. Gitea's sanitizer strips `style` from the tag
      and from any wrapper, `hspace`/`vspace` survive sanitizing only to be

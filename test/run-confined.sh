@@ -78,6 +78,7 @@ suites_for() {
         forges/*|workflows/*|harnesses/*|tools/*) \
             echo 'providers static audit config conversation' ;;
         install.sh)                          echo 'config audit providers remote static' ;;
+        mirror/*)                            echo 'mirror static' ;;
 
         # static.bats asserts on files it does not own, so a shipped doc or a
         # docker/ file needs it as well as whatever else the change touched -
@@ -105,13 +106,14 @@ suites_for() {
         # would otherwise answer for it. The docs themselves are asserted
         # against by more than static.bats - the README's axis lists, the
         # provider tables, the nginx example and the remote-access page each
-        # have a suite checking the code agrees with them.
+        # have a suite checking the code agrees with them, and mirror.bats runs
+        # the GitHub rewrite over them.
         #
         # So a doc-only edit runs more than static alone. That is the cost of
         # the lane answering for what reads a file, and it is the safe
         # direction: narrowing this back would report a doc change as green
         # from suites that assert against it.
-        docs/*|README.md|*.md)               echo 'static config providers remote' ;;
+        docs/*|README.md|*.md)               echo 'static config providers remote mirror' ;;
 
         *) echo ALL ;;
     esac

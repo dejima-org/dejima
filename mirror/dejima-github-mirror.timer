@@ -1,0 +1,9 @@
+[Unit]
+Description=Mirror the dejima repositories' main and release tags to GitHub, hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
