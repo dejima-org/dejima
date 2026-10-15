@@ -6,7 +6,7 @@
 CI runs.** That is the whole of it, and everything below is either why it
 cannot be gated or what to do about it instead.
 
-> **This document is the why.** For the how, [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
+> **This document is the why.** For the how, [dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener)
 > is a self-contained tool that does it, installed on the CI box, never on a
 > dejima host, and it does not assume you have read this.
 
@@ -391,7 +391,7 @@ address family with no allowlist is not a smaller hole than the one you just
 closed.
 
 **The working configuration for all of this is in
-[dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener),
+[dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener),
 with the ordering constraints and substitution notes attached.** It is
 deliberately not reproduced here: two copies of a firewall rule drift, and
 dejima-ci-hardener is the one that stays runnable.

@@ -31,7 +31,7 @@ than the thing inferred from silence.
   domains; the names asked for are a channel of their own.
 - **Anything below the container, where nothing is arranged there.** dejima's
   blast-radius table has rows beneath the container, and their controls belong
-  to [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener).
+  to [dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener).
   Run on a laptop with no VM layer, the row below the container is the
   operator's own machine, and dejima has nothing to say about it. See
   [Which deployment this describes](threat-model.md#which-deployment-this-describes),
@@ -1879,7 +1879,7 @@ token there would make HTTPS push possible independent of
   would defeat every other control described here at once. What such an
   escape then reaches is a layer dejima cannot bound, because dejima runs
   inside it:
-  [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)
+  [dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener)
   is the project for that, and [threat-model.md](threat-model.md) has the
   row-by-row account of where each layer's compromise stops.
 - Most of what this document asserts is re-checked by the `test/` suite on

@@ -169,20 +169,20 @@ nothing to report.
 
 ### Each project's own boundary
 
-**[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)**
+**[dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener)**
 covers the two VM rows: what an escape spreads to, rather than whether it can
 talk. Its
-[threat model](https://gitbox.branderson.io/dejima/dejima-devbox-hardener/src/branch/main/docs/threat-model.md#blast-radius-by-layer)
+[threat model](https://github.com/dejima-org/dejima-devbox-hardener/blob/main/docs/threat-model.md#blast-radius-by-layer)
 is explicit that it does not narrow internet egress back down, and says why.
 
-**[dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)**
+**[dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener)**
 covers the three CI rows, on the premise that CI executes attacker-controlled
 code on every pull request deliberately, because that is what CI is for.
 Nothing there tries to stop the code running. Its
-[threat model](https://gitbox.branderson.io/dejima/dejima-ci-hardener/src/branch/main/docs/threat-model.md#blast-radius-by-layer)
+[threat model](https://github.com/dejima-org/dejima-ci-hardener/blob/main/docs/threat-model.md#blast-radius-by-layer)
 has the two tiers and where each one's boundary sits.
 
-**[dejima-guard](https://gitbox.branderson.io/dejima/dejima-guard)** watches a
+**[dejima-guard](https://github.com/dejima-org/dejima-guard)** watches a
 devbox from a machine that is not the devbox and alerts on what changed. It
 enforces nothing: everything it reports has already happened. It collects over
 SSH, diffs against a baseline held on the watching machine, and alerts from
@@ -204,7 +204,7 @@ devbox, so root there can return whatever it likes, including the baseline
 unchanged. What the guard catches is accidents, non-root compromise, and
 payloads that did not think to look, which is most of them. The heartbeat
 proves the guard ran, not that it saw the truth.
-[Its own `SECURITY.md`](https://gitbox.branderson.io/dejima/dejima-guard/src/branch/main/SECURITY.md)
+[Its own `SECURITY.md`](https://github.com/dejima-org/dejima-guard/blob/main/SECURITY.md)
 has the rest, including the ways it is deliberately narrower than dejima.
 
 None of the three is required to run dejima, and the container row holds

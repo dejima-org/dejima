@@ -18,9 +18,13 @@
      inline and indents the image by one space. -->
 &nbsp;
 
-&nbsp;<img src="assets/dejima-wordmark-darkmode.png" alt="dejima" height="72">
+&nbsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/dejima-wordmark-darkmode.png"><img src="assets/dejima-wordmark-lightmode.png" alt="dejima" height="72"></picture>
 
 ---
+
+> **This is a read-only mirror.** dejima is developed on a private forge,
+> and issues and pull requests are not accepted here. See
+> [CONTRIBUTING.md](https://github.com/dejima-org/dejima/blob/main/CONTRIBUTING.md).
 
 &nbsp;
 
@@ -62,7 +66,7 @@ starts.
   commit before you've read a line of it. The container bounds what a session
   reaches directly, not what it can arrange to have run somewhere else. See
   [docs/ci.md](docs/ci.md) for what hardening a runner takes, and
-  [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)
+  [dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener)
   for a tool that does it.
 - **Guard rails inside the session.** Pushes to anywhere but the allowed
   remote, and merging a PR from inside the sandbox, are refused whichever
@@ -127,7 +131,7 @@ A note from the developer about the voice in this repository:
 > human, and no AI tools were used to create it. See
 > [ATTRIBUTION.md](ATTRIBUTION.md).
 
-[![Developed in dejima](assets/dejima-badge.svg)](https://gitbox.branderson.io/dejima/dejima)
+[![Developed in dejima](assets/dejima-badge.svg)](https://github.com/dejima-org/dejima)
 
 ## The dejima stack
 
@@ -140,9 +144,9 @@ deployment happens to use.
 | Piece | Runs on | What it adds |
 | --- | --- | --- |
 | **dejima** | a devbox | The container boundary: what a session reaches on disk, and deny-by-default egress. |
-| **[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)** | the same devbox | Cuts LAN reach to what is declared, enforced from outside the guest so root in the VM cannot flush it. |
-| **[dejima-guard](https://gitbox.branderson.io/dejima/dejima-guard)** | a different machine | Notices the devbox changed, against a baseline held off the box. Detection, not enforcement. |
-| **[dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)** | your CI runner | A runner that executes a session's pull request without that being LAN access. Hosted CI is the alternative, on someone else's network rather than yours. |
+| **[dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener)** | the same devbox | Cuts LAN reach to what is declared, enforced from outside the guest so root in the VM cannot flush it. |
+| **[dejima-guard](https://github.com/dejima-org/dejima-guard)** | a different machine | Notices the devbox changed, against a baseline held off the box. Detection, not enforcement. |
+| **[dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener)** | your CI runner | A runner that executes a session's pull request without that being LAN access. Hosted CI is the alternative, on someone else's network rather than yours. |
 | **ntfy**, or any push service | anywhere both can reach | Where "session needs input" and the guard's alerts arrive. |
 | **Uptime Kuma**, or any uptime monitor | off the devbox | The dead man's switch: what notices the guard itself stopped reporting. |
 
@@ -410,7 +414,7 @@ exist is your call.
   directly on your machine, and a determined attacker, or one with a container
   escape, defeats all of it. An escape does not leave the picture, it moves to
   the layer below, which dejima cannot bound because it runs inside it.
-  [dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)
+  [dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener)
   bounds that layer; [docs/threat-model.md](docs/threat-model.md) says where
   each layer's compromise stops.
 - **dejima's security says nothing about your software's.** Security isn't
@@ -641,7 +645,7 @@ grant and the code execution with it.
 that leaves, hardening a runner, and making CI's egress allowlist a
 version-controlled artifact read from `main`.
 
-**→ [dejima-ci-hardener](https://gitbox.branderson.io/dejima/dejima-ci-hardener)** -
+**→ [dejima-ci-hardener](https://github.com/dejima-org/dejima-ci-hardener)** -
 the *how*: a self-contained tool that hardens a CI runner, installed on the CI
 box and nowhere near a dejima host. Nothing in this repository needs to be
 copied onto a runner.

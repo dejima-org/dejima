@@ -18,7 +18,7 @@ where it can fetch its next instruction. It does not prevent either one.
 Nothing here holds against a container escape or a kernel bug. What an escape
 then reaches is bounded by the layer below, which dejima cannot reach because
 it runs inside it - that is
-[dejima-devbox-hardener](https://gitbox.branderson.io/dejima/dejima-devbox-hardener)'s
+[dejima-devbox-hardener](https://github.com/dejima-org/dejima-devbox-hardener)'s
 subject, not this project's. The in-session
 hooks are fast-fail guards, not a boundary. The exit-time audit runs after the
 session has ended and attributes nothing to it. And none of it speaks to
