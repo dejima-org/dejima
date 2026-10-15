@@ -974,7 +974,10 @@ tcb_snapshot() {
         # backends/ likewise: a backend.conf names the upstream every request
         # is forwarded to and the host path the credential is read from, so an
         # edit here redirects where a real credential is sent.
-        for dir in bin hooks docker test forges workflows harnesses tools backends; do
+        #
+        # mirror/ runs on the host from a timer, holding a key that can push
+        # to every repository in the GitHub organisation.
+        for dir in bin hooks docker test forges workflows harnesses tools backends mirror; do
             if [ -d "$ws/$dir" ]; then
                 while IFS= read -r -d '' f; do
                     stage_entry "tcb:${f#"$ws"/}" "$f"

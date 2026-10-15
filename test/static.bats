@@ -9552,6 +9552,24 @@ _provider_proxied_domain() {
     done
 }
 
+@test "the GitHub mirror is in the audit's TCB list, and is installed as a copy" {
+    # The timer runs it on the host with a key that can push to every
+    # repository in the organisation. A symlink into this checkout would run a
+    # session's edit within the hour, before any exit audit had seen it.
+    local dirs
+    dirs="$(sed -n '/^tcb_snapshot()/,/^}/p' "$REPO_ROOT/bin/dejima-audit" \
+        | sed -n 's/.*for dir in \(.*\); do/\1/p')"
+    case " $dirs " in
+        *" mirror "*) ;;
+        *) echo "mirror is not in the TCB list: $dirs"; return 1 ;;
+    esac
+    local unit="$REPO_ROOT/mirror/dejima-github-mirror.service"
+    grep -q '^#   install -m 755 mirror/github-mirror.sh ~/.local/bin/dejima-github-mirror$' "$unit" \
+        || { echo "the unit no longer installs the script as a copy"; return 1; }
+    run grep -n 'ln -s' "$unit"
+    [ "$status" -eq 1 ] || { echo "the unit links the script into the checkout: $output"; return 1; }
+}
+
 @test "the transcript format is the harness's, the store is dejima's" {
     # What a compaction looks like in a transcript is a fact about the
     # harness; where the summary is kept, that nothing mounts it, and what
