@@ -30,6 +30,7 @@ list_scripts() {
         # these the last scripts that should go unchecked, not the first -
         # and leaving them out hid a real fault in the release gate itself.
         ls test/*.sh 2>/dev/null || true
+        ls mirror/*.sh 2>/dev/null || true
     } | sort -u | while read -r f; do
         [ -f "$f" ] || continue
         # Sourced fragments are not executed, so they carry no shebang and the

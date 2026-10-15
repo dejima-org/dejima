@@ -1,0 +1,28 @@
+# User unit for the GitHub mirror (#209), on a host that can push to GitHub.
+# Never in a dejima session: a sandbox may push only to its own forge.
+#
+#   install -m 755 mirror/github-mirror.sh ~/.local/bin/dejima-github-mirror
+#   cp mirror/dejima-github-mirror.service mirror/dejima-github-mirror.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now dejima-github-mirror.timer
+#
+# A copy, not a link into the checkout: the timer holds a key that can push to
+# every repository in the organisation, and a session working in this
+# checkout can edit the script. Reinstall it after reviewing an update.
+#
+# ~/.config/dejima/github-mirror.env sets MIRROR_SOURCE, the forge
+# organisation each repository name is appended to, and whatever else
+# mirror/github-mirror.sh documents. The GitHub key belongs behind an ssh Host
+# alias named in MIRROR_TARGET, so it is not also offered to the forge. A
+# deploy key covers one repository, so this one is an account's key with push
+# access to every repository in the organisation:
+#
+#   MIRROR_SOURCE=git@forge.example.com:dejima
+#   MIRROR_TARGET=git@github-mirror:dejima-org
+[Unit]
+Description=Mirror the dejima repositories' main and release tags to GitHub
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/dejima/github-mirror.env
+ExecStart=%h/.local/bin/dejima-github-mirror

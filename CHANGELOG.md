@@ -6,7 +6,7 @@ What each release changed, newest first, for one question: **should I update,
 and what will I be getting.** `dejima --version` says which release the
 checkout you are running is on.
 
-A release is a date - `2026.10.13` - and the git tag of that name on `main` is
+A release is a date - `2026.10.14` - and the git tag of that name on `main` is
 where it lives. A date rather than a version number because the useful fact
 about a release is how old it is, and because `MAJOR.MINOR` would be a promise
 about compatibility and patch lines that this project does not make.
@@ -25,6 +25,25 @@ requests, which are linked.
 Nothing yet. The release pull request that merges `development` into `main`
 replaces this heading with the date it merges, and tags `main` with the same
 date.
+
+## 2026.10.14
+
+Nothing a session does has changed. This release is about where dejima can be
+read.
+
+### New
+
+- **Read-only mirrors on GitHub.** dejima, dejima-badge and the three sister
+  projects are published to [github.com/dejima-org](https://github.com/dejima-org):
+  `main` and its release tags, synced hourly. Development, issues and pull
+  requests stay on the forge, and the mirrors accept neither. A clone of a
+  mirror has GitHub links and clone URLs where the forge's copy has the forge's.
+  ([#406](https://gitbox.branderson.io/dejima/dejima/pulls/406))
+
+### Rollback
+
+This release adds no config key and changes nothing a session runs, so rolling
+back changes nothing an operator would notice.
 
 ## 2026.10.13
 

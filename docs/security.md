@@ -280,7 +280,9 @@ layout it is unpacked with, all consumed by the image build - so a session
 that edits one chooses what the next launch downloads and installs as root.
 `backends/*/backend.conf` names the upstream every request is forwarded to and
 the host path the credential is read from, so an edit there redirects where a
-real credential is sent.
+real credential is sent. `mirror/github-mirror.sh` runs on the host from a
+timer with a key that can push to every repository in the GitHub organisation,
+which is why its unit installs a copy rather than linking into the checkout.
 
 An ordinary edit is a diff you are about to read and is not reported; one git
 cannot see - hidden by `.gitignore`, `.git/info/exclude`, `assume-unchanged`

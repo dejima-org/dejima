@@ -8,6 +8,9 @@ anonymous issues or pull requests. So there is currently no way for you to
 file either, and that is a property of where this lives rather than a comment
 on the contribution.
 
+The repositories under [github.com/dejima-org](https://github.com/dejima-org)
+are read-only mirrors of `main`, with issues and pull requests turned off.
+
 That will change: this project will provide a way to submit issues and pull
 requests. Until it does, if you are using dejima and need it to do something
 different, **fork it and make the change in your fork**. Nothing here depends

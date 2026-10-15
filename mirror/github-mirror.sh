@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# Publishes main and its release tags of every dejima repository to a
+# read-only mirror on GitHub (#209).
+#
+#   MIRROR_SOURCE=<forge org URL> mirror/github-mirror.sh    sync every repository
+#   ... mirror/github-mirror.sh --dry-run                    build and print, push nothing
+#   mirror/github-mirror.sh --settings                       configure the GitHub repos (needs gh)
+#   mirror/github-mirror.sh --transform DIR                  rewrite a checkout in place
+#
+# Runs on the host, never in a session: a sandbox may push only to its own
+# forge, and this needs push access to GitHub.
+#
+# The GitHub copy is not byte-for-byte. Its main is one extra commit on top of
+# the forge's main, whose tree is the forge's with the rewrites in transform()
+# applied, and whose parents are the forge commit and the previous mirror
+# commit. So every forge SHA is in the mirror unchanged, and each sync is a
+# fast-forward for anyone tracking it. Tags are pushed as they are, pointing at
+# the untransformed forge commits.
+#
+# Environment:
+#   MIRROR_SOURCE  forge URL each repository name is appended to, as
+#                  $MIRROR_SOURCE/<name> (required to sync)
+#   MIRROR_ORG     GitHub organisation, default dejima-org
+#   MIRROR_TARGET  push URL prefix, default git@github.com:$MIRROR_ORG
+#   MIRROR_REPOS   repositories, by their name on both sides
+#   MIRROR_STATE   working bare repositories, default ~/.cache/dejima-github-mirror
+set -euo pipefail
+
+MIRROR_ORG="${MIRROR_ORG:-dejima-org}"
+MIRROR_TARGET="${MIRROR_TARGET:-git@github.com:$MIRROR_ORG}"
+MIRROR_REPOS="${MIRROR_REPOS:-dejima dejima-badge dejima-ci-hardener dejima-devbox-hardener dejima-guard}"
+MIRROR_STATE="${MIRROR_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/dejima-github-mirror}"
+export MIRROR_ORG
+
+NAME=""
+say() { echo "github-mirror: ${NAME:+$NAME: }$*"; }
+die() { say "$*" >&2; exit 1; }
+
+WORK=""
+STATE=""
+cleanup() {
+    [ -n "$WORK" ] || return 0
+    git -C "$STATE" worktree remove --force "$WORK" 2>/dev/null || true
+    rm -rf "$WORK"
+}
+
+# Rewrites a checkout for GitHub. Each rewrite is checked, so a README that
+# drifted away from what this expects stops the mirror instead of publishing
+# the forge's version. Running it twice changes nothing, so a clone of the
+# mirror still passes test/mirror.bats.
+transform() {
+    local dir="$1"
+    local readme="$dir/README.md"
+    # perl -i would write a symlink's target back as the README, publishing it.
+    [ -f "$readme" ] && [ ! -L "$readme" ] || die "README.md is missing or a symlink in $dir"
+
+    # Repository links and clone URLs move to the org on GitHub, in code as
+    # well as docs; issue and pull request links stay on the forge, which is
+    # the only place those exist. Gitea's /src/branch/ is GitHub's /blob/, and
+    # its /raw/branch/ GitHub's /raw/.
+    # Exit 1 from git grep is no match, which a repository may well have. The
+    # paths come from the forge, so -- keeps one from being read as a perl option.
+    (cd "$dir" && { git grep -lzIF 'gitbox.branderson.io/dejima/' || [ $? -eq 1 ]; } | xargs -0r perl -pi -e '
+        s{https://gitbox\.branderson\.io/dejima/([\w.-]++)(?!/(?:issues|pulls)/)}{https://github.com/$ENV{MIRROR_ORG}/$1}g;
+        s{(https://github\.com/\Q$ENV{MIRROR_ORG}\E/[\w.-]+)/src/branch/}{$1/blob/}g;
+        s{(https://github\.com/\Q$ENV{MIRROR_ORG}\E/[\w.-]+)/raw/branch/}{$1/raw/}g;
+    ' --)
+
+    # GitHub follows the reader's light/dark setting through <picture>, which
+    # the forge cannot; see the comment above the tag in README.md.
+    if [ -f "$dir/assets/dejima-wordmark-lightmode.png" ]; then
+        perl -0pi -e '
+            s{<img src="assets/dejima-wordmark-darkmode\.png" alt="dejima" height="72">}
+             {<picture><source media="(prefers-color-scheme: dark)" srcset="assets/dejima-wordmark-darkmode.png"><img src="assets/dejima-wordmark-lightmode.png" alt="dejima" height="72"></picture>}
+        ' "$readme"
+        grep -qF 'darkmode.png"><img src="assets/dejima-wordmark-lightmode.png"' "$readme" \
+            || die "README.md: the wordmark tag was not found"
+    fi
+
+    # The first thing a visitor to a mirror does is open a pull request. Under
+    # the rule after the wordmark, or under the title where there is none.
+    grep -q '^> \*\*This is a read-only mirror' "$readme" || perl -0pi -e '
+        s{^(---|# [^\n]*)\n}{$1\n\n> **This is a read-only mirror.** dejima is developed on a private forge,\n> and issues and pull requests are not accepted here. See\n> [CONTRIBUTING.md](https://github.com/$ENV{MIRROR_ORG}/dejima/blob/main/CONTRIBUTING.md).\n}m
+    ' "$readme"
+    grep -q '^> \*\*This is a read-only mirror' "$readme" \
+        || die "README.md: no --- line or title to put the mirror notice under"
+}
+
+# Issues, pull requests and Actions off. Settings rather than content, so a
+# sync does not reapply them; run once after creating the repositories.
+settings() {
+    command -v gh >/dev/null || die "--settings needs the gh CLI"
+    local repo
+    for repo in $MIRROR_REPOS; do
+        gh api -X PATCH "repos/$MIRROR_ORG/$repo" --silent \
+            -F has_issues=false -F has_pull_requests=false -F has_projects=false \
+            -F has_wiki=false -F has_discussions=false
+        gh api -X PUT "repos/$MIRROR_ORG/$repo/actions/permissions" --silent -F enabled=false
+    done
+}
+
+sync_repo() {
+    NAME="$1"
+    STATE="$MIRROR_STATE/$NAME.git"
+    local source="$MIRROR_SOURCE/$NAME" target="$MIRROR_TARGET/$NAME"
+    local git=(git -C "$STATE")
+    trap cleanup EXIT
+    [ -d "$STATE" ] || git init -q --bare "$STATE"
+
+    "${git[@]}" fetch -q --no-tags --prune "$source" \
+        '+refs/heads/main:refs/source/main' '+refs/tags/*:refs/source/tags/*'
+    local src prev=""
+    src="$("${git[@]}" rev-parse refs/source/main)"
+
+    # An absent main (exit 2) is a first run; anything else is a real failure.
+    local rc=0
+    git ls-remote -q --exit-code "$target" refs/heads/main >/dev/null || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        "${git[@]}" fetch -q --no-tags "$target" '+refs/heads/main:refs/mirror/main'
+        prev="$("${git[@]}" rev-parse refs/mirror/main)"
+    elif [ "$rc" -ne 2 ]; then
+        die "cannot read $target"
+    fi
+
+    WORK="$(mktemp -d)"
+    "${git[@]}" worktree add -q --detach "$WORK" "$src"
+    transform "$WORK"
+    git -C "$WORK" add -A
+    local tree
+    tree="$(git -C "$WORK" write-tree)"
+
+    if [ -n "$prev" ] && [ "$("${git[@]}" rev-parse "$prev^1")" = "$src" ] \
+        && [ "$("${git[@]}" rev-parse "$prev^{tree}")" = "$tree" ]; then
+        say "already at ${src:0:12}"
+    else
+        # The forge commit's committer and date, so the same input always
+        # makes the same commit.
+        local name email date commit
+        IFS=$'\t' read -r name email date < <("${git[@]}" log -1 --format='%cn%x09%ce%x09%cI' "$src")
+        commit="$(GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" GIT_AUTHOR_DATE="$date" \
+            GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" GIT_COMMITTER_DATE="$date" \
+            "${git[@]}" commit-tree "$tree" -p "$src" ${prev:+-p "$prev"} \
+            -m "Mirror ${src:0:12} for GitHub" \
+            -m "Forge links and the README header rewritten by dejima's mirror/github-mirror.sh.")"
+        "${git[@]}" update-ref refs/mirror/next "$commit"
+        [ -n "$DRY_RUN" ] || "${git[@]}" push -q "$target" "$commit:refs/heads/main"
+        say "main is ${src:0:12} as ${commit:0:12}"
+    fi
+
+    # Only tags on main: one on another branch would publish unreleased work.
+    local ref
+    local refspecs=()
+    while IFS= read -r ref; do
+        if "${git[@]}" merge-base --is-ancestor "$ref" "$src"; then
+            refspecs+=("$ref:refs/tags/${ref#refs/source/tags/}")
+            say "tag ${ref#refs/source/tags/}"
+        fi
+    done < <("${git[@]}" for-each-ref --format='%(refname)' refs/source/tags/)
+    [ "${#refspecs[@]}" -eq 0 ] || [ -n "$DRY_RUN" ] \
+        || "${git[@]}" push -q "$target" "${refspecs[@]}"
+}
+
+# Each repository in a subshell of its own, so one that fails does not keep
+# the rest from syncing. Not `( ... ) || ...`, which turns off set -e inside.
+sync() {
+    [ -n "${MIRROR_SOURCE:-}" ] || die "MIRROR_SOURCE is not set"
+    local repo rc failed=""
+    for repo in $MIRROR_REPOS; do
+        set +e
+        (set -e; sync_repo "$repo")
+        rc=$?
+        set -e
+        [ "$rc" -eq 0 ] || failed="$failed $repo"
+    done
+    [ -z "$failed" ] || die "failed:$failed"
+}
+
+DRY_RUN=""
+case "${1:-}" in
+    "")          sync ;;
+    --dry-run)   DRY_RUN=1; sync ;;
+    --settings)  settings ;;
+    --transform) [ -n "${2:-}" ] || die "--transform needs a directory"; transform "$2" ;;
+    *)           sed -n '5,8p' "$0" >&2; exit 2 ;;
+esac
